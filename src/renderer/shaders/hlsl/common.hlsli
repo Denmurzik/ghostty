@@ -171,14 +171,12 @@ float4 contrasted_color(float min_ratio, float4 fg, float4 bg) {
   return fg;
 }
 
-// Load a 4 byte RGBA non-premultiplied color and linearize
-// and convert it as necessary depending on the provided info.
+// Load a 4 byte RGBA non-premultiplied color and linearize it if needed.
 //
-// Returns a color in the Display P3 color space.
-//
-// If `display_p3` is true, then the provided color is assumed to
-// already be in the Display P3 color space, otherwise it's treated
-// as an sRGB color and is appropriately converted to Display P3.
+// Unlike Metal, whose layer is always Display P3, the D3D11 back buffer is
+// plain sRGB, so (like the GLSL shaders) no color space conversion happens:
+// `display_p3` is accepted to keep the Metal call shape and the uniform
+// layout, and ignored. Both color spaces use the sRGB transfer function.
 //
 // `is_linear` controls whether the returned color is linear or gamma encoded.
 float4 load_color(
@@ -189,36 +187,9 @@ float4 load_color(
   // 0 .. 255 -> 0.0 .. 1.0
   float4 color = float4(in_color) / 255.0f;
 
-  // If our color is already in Display P3 and
-  // we aren't doing linear blending, then we
-  // already have the correct color here and
-  // can premultiply and return it.
-  if (display_p3 && !is_linear) {
-    color.rgb *= color.a;
-    return color;
-  }
-
-  // The color is in either the sRGB or Display P3 color space,
-  // so in either case, it's a color space which uses the sRGB
-  // transfer function, so we can use one function in order to
-  // linearize it in either case.
-  //
-  // Even if we aren't doing linear blending, the color
-  // needs to be in linear space to convert color spaces.
-  color = linearize(color);
-
-  // If we're *NOT* using display P3 colors, then we're dealing
-  // with an sRGB color, in which case we need to convert it in
-  // to the Display P3 color space, since our output is always
-  // Display P3.
-  if (!display_p3) {
-    color.rgb = srgb_to_display_p3(color.rgb);
-  }
-
-  // If we're not doing linear blending, then we need to
-  // unlinearize after doing the color space conversion.
-  if (!is_linear) {
-    color = unlinearize(color);
+  // Linearize if necessary.
+  if (is_linear) {
+    color = linearize(color);
   }
 
   // Premultiply our color by its alpha.

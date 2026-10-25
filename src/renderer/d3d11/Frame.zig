@@ -303,9 +303,9 @@ const Fixture = struct {
         u.cursor_pos = .{ 0xffff, 0xffff };
         u.bools = .{
             .cursor_wide = false,
-            // With native blending this skips every colour conversion: the
-            // stored bytes equal the input bytes.
-            .use_display_p3 = true,
+            // The default config (`window-colorspace = srgb`). The D3D11
+            // shaders do no colour space conversion either way.
+            .use_display_p3 = false,
             .use_linear_blending = self.api.blending.isLinear(),
         };
         return u;
@@ -545,9 +545,7 @@ test "d3d11 frame: linear blending encodes through the srgb view" {
     defer fx.api.drawFrameEnd();
 
     var u = fx.uniforms(8, 4, 1, 1);
-    u.bg_color = .{ 128, 64, 200, 255 };
-    // Colours already in the output space: linearized, not converted.
-    u.bools.use_display_p3 = true;
+    u.bg_color = .{ 200, 64, 128, 255 };
     try uniforms.sync(&.{u});
 
     var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
@@ -559,7 +557,8 @@ test "d3d11 frame: linear blending encodes through the srgb view" {
         defer pass.complete();
 
         // The shader writes linear values; the view re-encodes them, so
-        // the stored bytes round-trip to the input colour.
+        // an sRGB colour round-trips unchanged with the default config
+        // (no sRGB -> Display P3 conversion on D3D11).
         pass.step(.{
             .pipeline = fx.shaders.pipelines.bg_color,
             .uniforms = uniforms.buffer,
@@ -571,8 +570,8 @@ test "d3d11 frame: linear blending encodes through the srgb view" {
     const pixels = try fx.pixels();
     defer testing.allocator.free(pixels);
     // BGRA.
-    try expectPixel(.{ 200, 64, 128, 255 }, pixelAt(pixels, 8, 0, 0), 1);
-    try expectPixel(.{ 200, 64, 128, 255 }, pixelAt(pixels, 8, 7, 3), 1);
+    try expectPixel(.{ 128, 64, 200, 255 }, pixelAt(pixels, 8, 0, 0), 1);
+    try expectPixel(.{ 128, 64, 200, 255 }, pixelAt(pixels, 8, 7, 3), 1);
 }
 
 test "d3d11 frame: dump hook writes a BMP" {
