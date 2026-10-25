@@ -497,11 +497,14 @@ pub extern "kernel32" fn MoveFileExW(
 ) callconv(.winapi) BOOL;
 
 // --- jobs (Task 19)
+// CreateFileW, ReadFile, WaitForSingleObject, TerminateProcess and CloseHandle
+// live in `exp.kernel32` above.
 
-pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 pub const JOBOBJECT_BASIC_PROCESS_ID_LIST_CLASS: c_int = 3;
-pub const JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: c_int = 9;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+pub const PROCESS_TERMINATE: DWORD = 0x0001;
+pub const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+pub const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
 
 pub const PROC_THREAD_ATTRIBUTE_JOB_LIST = ProcThreadAttributeValue(
     .ProcThreadAttributeJobList,
@@ -510,33 +513,6 @@ pub const PROC_THREAD_ATTRIBUTE_JOB_LIST = ProcThreadAttributeValue(
     false,
 );
 
-pub const IO_COUNTERS = extern struct {
-    ReadOperationCount: u64,
-    WriteOperationCount: u64,
-    OtherOperationCount: u64,
-    ReadTransferCount: u64,
-    WriteTransferCount: u64,
-    OtherTransferCount: u64,
-};
-pub const JOBOBJECT_BASIC_LIMIT_INFORMATION = extern struct {
-    PerProcessUserTimeLimit: LARGE_INTEGER,
-    PerJobUserTimeLimit: LARGE_INTEGER,
-    LimitFlags: DWORD,
-    MinimumWorkingSetSize: SIZE_T,
-    MaximumWorkingSetSize: SIZE_T,
-    ActiveProcessLimit: DWORD,
-    Affinity: ULONG_PTR,
-    PriorityClass: DWORD,
-    SchedulingClass: DWORD,
-};
-pub const JOBOBJECT_EXTENDED_LIMIT_INFORMATION = extern struct {
-    BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-    IoInfo: IO_COUNTERS,
-    ProcessMemoryLimit: SIZE_T,
-    JobMemoryLimit: SIZE_T,
-    PeakProcessMemoryUsed: SIZE_T,
-    PeakJobMemoryUsed: SIZE_T,
-};
 /// Header of the variable-length process id list; `ProcessIdList` is
 /// really `NumberOfAssignedProcesses` long at most.
 pub const JOBOBJECT_BASIC_PROCESS_ID_LIST = extern struct {
@@ -549,12 +525,6 @@ pub extern "kernel32" fn CreateJobObjectW(
     lpJobAttributes: ?*SECURITY_ATTRIBUTES,
     lpName: ?LPCWSTR,
 ) callconv(.winapi) ?HANDLE;
-pub extern "kernel32" fn SetInformationJobObject(
-    hJob: HANDLE,
-    JobObjectInformationClass: c_int,
-    lpJobObjectInformation: *const anyopaque,
-    cbJobObjectInformationLength: DWORD,
-) callconv(.winapi) BOOL;
 pub extern "kernel32" fn QueryInformationJobObject(
     hJob: ?HANDLE,
     JobObjectInformationClass: c_int,
@@ -562,12 +532,27 @@ pub extern "kernel32" fn QueryInformationJobObject(
     cbJobObjectInformationLength: DWORD,
     lpReturnLength: ?*DWORD,
 ) callconv(.winapi) BOOL;
-pub extern "kernel32" fn TerminateJobObject(
-    hJob: HANDLE,
-    uExitCode: UINT,
-) callconv(.winapi) BOOL;
 pub extern "kernel32" fn OpenProcess(
     dwDesiredAccess: DWORD,
     bInheritHandle: BOOL,
     dwProcessId: DWORD,
 ) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn QueryFullProcessImageNameW(
+    hProcess: HANDLE,
+    dwFlags: DWORD,
+    lpExeName: LPWSTR,
+    lpdwSize: *DWORD,
+) callconv(.winapi) BOOL;
+
+/// The Subsystem field of a PE image given its first bytes (null when
+/// they are not a PE header or do not reach the field). It is the same
+/// offset in the optional header of PE32 and PE32+.
+pub fn peSubsystem(image: []const u8) ?u16 {
+    if (image.len < 0x40 or !std.mem.eql(u8, image[0..2], "MZ")) return null;
+    const pe = std.mem.readInt(u32, image[0x3c..][0..4], .little);
+    // PE signature (4) + COFF header (20) + 68 into the optional header.
+    const end = std.math.add(usize, pe, 4 + 20 + 68 + 2) catch return null;
+    if (end > image.len) return null;
+    if (!std.mem.eql(u8, image[pe..][0..4], "PE\x00\x00")) return null;
+    return std.mem.readInt(u16, image[pe + 4 + 20 + 68 ..][0..2], .little);
+}

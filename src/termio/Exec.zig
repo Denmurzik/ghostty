@@ -1145,8 +1145,8 @@ const Subprocess = struct {
     /// Called to notify that we exited externally so we can unset our
     /// running state.
     pub fn externalExit(self: *Subprocess) void {
-        // The child is gone on its own, but whatever it left running
-        // goes with the job.
+        // The child is gone on its own. Whatever it left running stays,
+        // but we're done with the job.
         if (comptime is_windows) {
             if (self.process) |*p| switch (p.*) {
                 .fork_exec => |*cmd| cmd.closeJob(),
@@ -1210,8 +1210,8 @@ const Subprocess = struct {
         if (command.pid) |pid| {
             switch (builtin.target.os.tag) {
                 .windows => {
-                    // Closing the job afterwards kills anything the
-                    // terminate raced with.
+                    // Kills the child and its console descendants, not
+                    // the GUI programs it started.
                     defer command.closeJob();
                     try command.killTree();
 
@@ -2601,6 +2601,13 @@ test "windows tokenize: round trip with the Command quoting" {
     const line = try Command.windowsCreateCommandLine(testing.allocator, argv);
     defer testing.allocator.free(line);
     try expectTokens(line, argv);
+
+    // Empty arguments, and a program path with a space that ends in a
+    // backslash (the program name has no escapes).
+    const odd: []const []const u8 = &.{ "C:\\dir with space\\", "", "x", "" };
+    const odd_line = try Command.windowsCreateCommandLine(testing.allocator, odd);
+    defer testing.allocator.free(odd_line);
+    try expectTokens(odd_line, odd);
 }
 
 test "windows tokenize: execCommand splits a quoted shell value" {

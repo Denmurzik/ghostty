@@ -104,9 +104,10 @@ rt_post_fork_info: RtPostForkInfo,
 pseudo_console: if (builtin.target.os.tag == .windows) ?windows.HPCON else void =
     if (builtin.target.os.tag == .windows) null else {},
 
-/// Kill-on-close job object holding the child and everything it spawns
-/// (Windows). Set by start. Terminating or closing it takes the whole tree
-/// down, see killTree and closeJob.
+/// Job object tracking the child and everything it spawns (Windows). Set
+/// by start. It has no limits, so closing it (or crashing) kills nothing:
+/// GUI programs started from the shell outlive the terminal, as they do in
+/// Windows Terminal. killTree uses it to find the console processes.
 job: if (builtin.target.os.tag == .windows) ?windows.HANDLE else void =
     if (builtin.target.os.tag == .windows) null else {},
 
@@ -358,11 +359,12 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (null_fd) |fd| _ = windows.exp.kernel32.CloseHandle(fd);
     }
 
-    // The child, and so every process it spawns, lives in a job object that
-    // kills them all when the job is closed. The job is assigned through
+    // The child, and so every process it spawns, lives in a job object so
+    // the whole tree can be found later. The job is assigned through
     // PROC_THREAD_ATTRIBUTE_JOB_LIST so the child is never outside of it,
     // not even for an instant.
-    const job = try createKillOnCloseJob();
+    const job = windows.CreateJobObjectW(null, null) orelse
+        return windows.unexpectedError(windows.GetLastError());
     errdefer _ = windows.exp.kernel32.CloseHandle(job);
     // Must stay alive until CreateProcessW returns, hence the arena.
     const job_list = try arena.create([1]windows.HANDLE);
@@ -469,36 +471,104 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     self.pid = process_information.hProcess;
 }
 
-fn createKillOnCloseJob() !windows.HANDLE {
-    const job = windows.CreateJobObjectW(null, null) orelse
-        return windows.unexpectedError(windows.GetLastError());
-    errdefer _ = windows.exp.kernel32.CloseHandle(job);
+/// The process ids currently in the job (Windows), as many as `out` holds.
+pub fn jobProcessIds(self: Command, out: []windows.DWORD) []windows.DWORD {
+    const job = self.job orelse return out[0..0];
 
-    var info = std.mem.zeroes(windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
-    info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (windows.SetInformationJobObject(
+    // The list header is followed by the rest of the ids.
+    var buf: extern struct {
+        header: windows.JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        more: [127]windows.ULONG_PTR,
+    } = undefined;
+    @memset(std.mem.asBytes(&buf), 0);
+    if (windows.QueryInformationJobObject(
         job,
-        windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-        &info,
-        @sizeOf(windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
-    ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
+        windows.JOBOBJECT_BASIC_PROCESS_ID_LIST_CLASS,
+        &buf,
+        @sizeOf(@TypeOf(buf)),
+        null,
+    ) == windows.FALSE and windows.GetLastError() != .MORE_DATA) return out[0..0];
 
-    return job;
+    const ids: [*]const windows.ULONG_PTR = @ptrCast(&buf.header.ProcessIdList);
+    const n = @min(buf.header.NumberOfProcessIdsInList, out.len);
+    for (out[0..n], ids[0..n]) |*dst, id| dst.* = @intCast(id);
+    return out[0..n];
 }
 
-/// Terminate the child and every process it started (Windows). Does not
-/// wait; use wait afterwards to reap the child.
+/// Whether killTree should terminate this process: console programs (and
+/// ones whose image can't be inspected) yes, GUI programs no.
+fn shouldKill(proc: windows.HANDLE) bool {
+    var name: [4096]u16 = undefined;
+    var len: windows.DWORD = name.len;
+    if (windows.QueryFullProcessImageNameW(proc, 0, @ptrCast(&name), &len) == windows.FALSE or
+        len >= name.len) return true;
+    name[len] = 0;
+
+    const subsystem = fileSubsystem(name[0..len :0]) orelse return true;
+    return subsystem != windows.IMAGE_SUBSYSTEM_WINDOWS_GUI;
+}
+
+/// The PE subsystem of the executable at `path`, null if it can't be read.
+pub fn fileSubsystem(path: [:0]const u16) ?u16 {
+    const k32 = windows.exp.kernel32;
+    const file = k32.CreateFileW(
+        path.ptr,
+        windows.GENERIC_READ,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (file == windows.INVALID_HANDLE_VALUE) return null;
+    defer _ = k32.CloseHandle(file);
+
+    // The headers sit at the start, within a few hundred bytes.
+    var buf: [4096]u8 = undefined;
+    var n: windows.DWORD = 0;
+    if (k32.ReadFile(file, &buf, buf.len, &n, null) == windows.FALSE) return null;
+    return windows.peSubsystem(buf[0..n]);
+}
+
+/// Terminate the child and the console processes it left running
+/// (Windows). GUI programs started from it are left alone. Does not wait;
+/// use wait afterwards to reap the child.
 pub fn killTree(self: *Command) !void {
-    if (self.job) |job| {
-        if (windows.TerminateJobObject(job, 0) == windows.FALSE)
-            return windows.unexpectedError(windows.GetLastError());
-    } else if (self.pid) |pid| {
-        if (windows.exp.kernel32.TerminateProcess(pid, 0) == windows.FALSE)
-            return windows.unexpectedError(windows.GetLastError());
+    const pid = self.pid orelse return;
+    const k32 = windows.exp.kernel32;
+
+    // The child itself always goes.
+    if (k32.TerminateProcess(pid, 0) == windows.FALSE and
+        k32.WaitForSingleObject(pid, 0) != windows.WAIT_OBJECT_0)
+        return windows.unexpectedError(windows.GetLastError());
+
+    // Whatever the child started may have started more by the time we get
+    // to it, so go over the job again until there is nothing new to kill.
+    var killed: [256]windows.DWORD = undefined;
+    var killed_len: usize = 0;
+    for (0..4) |_| {
+        var ids: [64]windows.DWORD = undefined;
+        var found = false;
+        for (self.jobProcessIds(&ids)) |id| {
+            if (std.mem.indexOfScalar(windows.DWORD, killed[0..killed_len], id) != null) continue;
+            const proc = windows.OpenProcess(
+                windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.PROCESS_TERMINATE,
+                windows.FALSE,
+                id,
+            ) orelse continue;
+            defer _ = k32.CloseHandle(proc);
+            if (!shouldKill(proc)) continue;
+            if (k32.TerminateProcess(proc, 0) != windows.FALSE and killed_len < killed.len) {
+                killed[killed_len] = id;
+                killed_len += 1;
+                found = true;
+            }
+        }
+        if (!found) break;
     }
 }
 
-/// Close the job (Windows). Whatever is still running in it is killed.
+/// Close the job (Windows). This does not stop anything running in it.
 /// Safe to call repeatedly.
 pub fn closeJob(self: *Command) void {
     if (self.job) |job| _ = windows.exp.kernel32.CloseHandle(job);
@@ -692,11 +762,19 @@ pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const 
 
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+        if (arg.len > 0 and mem.indexOfAny(u8, arg, " \t\n\"") == null) {
             try writer.writeAll(arg);
             continue;
         }
         try writer.writeByte('"');
+        if (arg_i == 0) {
+            // The program name has no escapes: its quotes only group, and
+            // a path can't hold a quote anyway. Doubling backslashes would
+            // change the path.
+            try writer.writeAll(arg);
+            try writer.writeByte('"');
+            continue;
+        }
         var backslash_count: usize = 0;
         for (arg) |byte| {
             switch (byte) {
@@ -1116,90 +1194,227 @@ test "windows command: argv[0] with spaces is quoted" {
     );
 }
 
-/// What a windows job test does to the tree once it runs.
-const JobAction = enum { close_job, kill_tree };
+test "windows command: empty argument and argv[0] with trailing backslash" {
+    const line = try windowsCreateCommandLine(testing.allocator, &.{
+        "C:\\dir with space\\",
+        "",
+        "x y",
+    });
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("\"C:\\dir with space\\\" \"\" \"x y\"", line);
+}
 
-/// Runs `cmd.exe /C ping ...`, which leaves a grandchild behind cmd.exe,
-/// then takes the job down and checks that every process in it is signalled
-/// soon after. Everything it spawns is killed on every path out.
-fn testWindowsJob(action: JobAction) !void {
+test "windows command: PE subsystem of console and GUI programs" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+
+    try testing.expectEqual(
+        @as(?u16, windows.IMAGE_SUBSYSTEM_WINDOWS_CUI),
+        fileSubsystem(L("C:\\Windows\\System32\\cmd.exe")),
+    );
+    try testing.expectEqual(
+        @as(?u16, windows.IMAGE_SUBSYSTEM_WINDOWS_GUI),
+        fileSubsystem(L("C:\\Windows\\System32\\notepad.exe")),
+    );
+    try testing.expectEqual(
+        @as(?u16, null),
+        fileSubsystem(L("C:\\Windows\\System32\\no-such-program.exe")),
+    );
+}
+
+test "windows command: PE subsystem rejects malformed headers" {
+    try testing.expectEqual(@as(?u16, null), windows.peSubsystem(""));
+    try testing.expectEqual(@as(?u16, null), windows.peSubsystem("MZ"));
+    try testing.expectEqual(@as(?u16, null), windows.peSubsystem(&@as([0x200]u8, @splat(0))));
+
+    // A minimal header: PE signature at 0x80, subsystem 3 (console).
+    var image: [0x200]u8 = @splat(0);
+    image[0] = 'M';
+    image[1] = 'Z';
+    image[0x3c] = 0x80;
+    @memcpy(image[0x80..][0..4], "PE\x00\x00");
+    image[0x80 + 4 + 20 + 68] = 3;
+    try testing.expectEqual(@as(?u16, 3), windows.peSubsystem(&image));
+
+    // The subsystem field is past the end of what we have.
+    try testing.expectEqual(@as(?u16, null), windows.peSubsystem(image[0 .. 0x80 + 4 + 20 + 68]));
+    // The header offset points outside of the buffer.
+    image[0x3c] = 0xff;
+    image[0x3d] = 0xff;
+    try testing.expectEqual(@as(?u16, null), windows.peSubsystem(&image));
+}
+
+/// A running `cmd.exe /C <script>` and open handles to the processes of its
+/// job, for the tests below. Everything it started is torn down by deinit,
+/// on every path, so nothing is left running (or on the desktop).
+const JobTree = struct {
     const k32 = windows.exp.kernel32;
+    const max = 64;
+
+    cmd: Command,
+    ids: [max]windows.DWORD = undefined,
+    handles: [max]?windows.HANDLE = @splat(null),
+    count: usize = 0,
+
+    fn start(script: [:0]const u8) !JobTree {
+        var tree: JobTree = .{ .cmd = .{
+            .path = "C:\\Windows\\System32\\cmd.exe",
+            .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", script },
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        } };
+        try tree.cmd.start(testing.allocator);
+        return tree;
+    }
+
+    fn deinit(self: *JobTree) void {
+        // Kill whatever is left, GUI programs included, by hand.
+        var ids: [max]windows.DWORD = undefined;
+        for (self.cmd.jobProcessIds(&ids)) |id| {
+            const proc = windows.OpenProcess(
+                windows.SYNCHRONIZE | windows.PROCESS_TERMINATE,
+                windows.FALSE,
+                id,
+            ) orelse continue;
+            _ = k32.TerminateProcess(proc, 0);
+            _ = k32.WaitForSingleObject(proc, 2000);
+            _ = k32.CloseHandle(proc);
+        }
+        for (self.handles) |h| if (h) |handle| {
+            _ = k32.TerminateProcess(handle, 0);
+            _ = k32.WaitForSingleObject(handle, 2000);
+            _ = k32.CloseHandle(handle);
+        };
+        if (self.cmd.job != null) self.cmd.killTree() catch {};
+        self.cmd.closeJob();
+        _ = k32.CloseHandle(self.cmd.pid.?);
+    }
+
+    /// Wait (bounded) until the job lists processes satisfying `ready`,
+    /// then open a handle to each of them.
+    fn gather(self: *JobTree, comptime ready: fn (*JobTree) bool) !void {
+        const io = testing.io;
+        const begin: std.Io.Timestamp = .now(io, .awake);
+        while (true) {
+            self.count = self.cmd.jobProcessIds(&self.ids).len;
+            if (ready(self)) break;
+            try testing.expect(begin.untilNow(io, .awake).toMilliseconds() < 8000);
+            try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+        }
+
+        var opened: usize = 0;
+        for (self.ids[0..self.count], 0..) |id, i| {
+            self.handles[i] = windows.OpenProcess(
+                windows.SYNCHRONIZE | windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION,
+                windows.FALSE,
+                id,
+            );
+            if (self.handles[i] != null) opened += 1;
+        }
+        // A silently skipped process would turn the checks into no-ops.
+        try testing.expect(opened >= 2);
+        try testing.expectEqual(self.count, opened);
+    }
+
+    fn atLeastTwo(self: *JobTree) bool {
+        return self.count >= 2;
+    }
+
+    fn consoleAndGui(self: *JobTree) bool {
+        return self.count >= 3 and self.gui() != null;
+    }
+
+    /// The index of a GUI process in the job, if one is listed.
+    fn gui(self: *JobTree) ?usize {
+        for (self.ids[0..self.count], 0..) |id, i| {
+            const proc = windows.OpenProcess(
+                windows.PROCESS_QUERY_LIMITED_INFORMATION,
+                windows.FALSE,
+                id,
+            ) orelse continue;
+            defer _ = k32.CloseHandle(proc);
+            if (!shouldKill(proc)) return i;
+        }
+        return null;
+    }
+};
+
+test "windows command: killTree kills console grandchildren" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const io = testing.io;
 
-    var cmd: Command = .{
-        .path = "C:\\Windows\\System32\\cmd.exe",
-        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "ping -n 60 127.0.0.1 >nul" },
-        .os_pre_exec = null,
-        .rt_pre_exec = null,
-        .rt_post_fork = null,
-        .rt_pre_exec_info = undefined,
-        .rt_post_fork_info = undefined,
-    };
-    try cmd.start(testing.allocator);
-    defer {
-        // Without a job there is nothing of ours left to kill.
-        if (cmd.job != null) cmd.killTree() catch {};
-        cmd.closeJob();
-        _ = k32.CloseHandle(cmd.pid.?);
-    }
-    try testing.expect(cmd.job != null);
-
-    // The job lists the whole tree: cmd.exe and the ping it started.
-    const IdList = extern struct {
-        assigned: windows.DWORD,
-        listed: windows.DWORD,
-        ids: [64]windows.ULONG_PTR,
-    };
-    var list: IdList = undefined;
-    const begin: std.Io.Timestamp = .now(io, .awake);
-    while (true) {
-        list = std.mem.zeroes(IdList);
-        try testing.expect(windows.QueryInformationJobObject(
-            cmd.job,
-            windows.JOBOBJECT_BASIC_PROCESS_ID_LIST_CLASS,
-            &list,
-            @sizeOf(IdList),
-            null,
-        ) != windows.FALSE);
-        if (list.listed >= 2) break;
-        try testing.expect(begin.untilNow(io, .awake).toMilliseconds() < 5000);
-        try std.Io.sleep(io, .fromMilliseconds(50), .awake);
-    }
-
-    var handles: [64]?windows.HANDLE = @splat(null);
-    defer for (handles) |h| if (h) |handle| {
-        _ = k32.CloseHandle(handle);
-    };
-    for (list.ids[0..list.listed], 0..) |id, i| {
-        handles[i] = windows.OpenProcess(
-            windows.SYNCHRONIZE,
-            windows.FALSE,
-            @intCast(id),
-        );
-    }
+    // cmd.exe waits for ping.exe: two console processes in the job.
+    var tree = try JobTree.start("ping -n 60 127.0.0.1 >nul");
+    defer tree.deinit();
+    try testing.expect(tree.cmd.job != null);
+    try tree.gather(JobTree.atLeastTwo);
 
     const killed_at: std.Io.Timestamp = .now(io, .awake);
-    switch (action) {
-        .close_job => cmd.closeJob(),
-        .kill_tree => try cmd.killTree(),
-    }
-    for (handles) |h| {
+    try tree.cmd.killTree();
+    for (tree.handles) |h| {
         const handle = h orelse continue;
+        // Only a GUI helper (such as a console host) may stay.
+        if (!shouldKill(handle)) continue;
         const left: i64 = 2000 - killed_at.untilNow(io, .awake).toMilliseconds();
         try testing.expectEqual(
             @as(windows.DWORD, windows.WAIT_OBJECT_0),
-            k32.WaitForSingleObject(handle, @intCast(@max(left, 0))),
+            JobTree.k32.WaitForSingleObject(handle, @intCast(@max(left, 0))),
         );
     }
     try testing.expect(killed_at.untilNow(io, .awake).toMilliseconds() <= 2000);
 }
 
-test "windows command: closing the job kills grandchildren" {
+test "windows command: killTree leaves GUI grandchildren running" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
-    try testWindowsJob(.close_job);
+    const io = testing.io;
+    const k32 = JobTree.k32;
+
+    // winver.exe is a plain Win32 GUI program; the ping keeps cmd.exe
+    // (and the job) busy. deinit closes winver again.
+    var tree = try JobTree.start("start winver.exe & ping -n 60 127.0.0.1 >nul");
+    defer tree.deinit();
+    try tree.gather(JobTree.consoleAndGui);
+    const gui = tree.handles[tree.gui().?].?;
+
+    try tree.cmd.killTree();
+    var console_gone: usize = 0;
+    for (tree.handles) |h| {
+        const handle = h orelse continue;
+        if (handle == gui or !shouldKill(handle)) continue;
+        try testing.expectEqual(
+            @as(windows.DWORD, windows.WAIT_OBJECT_0),
+            k32.WaitForSingleObject(handle, 2000),
+        );
+        console_gone += 1;
+    }
+    try testing.expect(console_gone >= 2);
+
+    // The console tree is gone, the GUI program is still there.
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_TIMEOUT),
+        k32.WaitForSingleObject(gui, 0),
+    );
 }
 
-test "windows command: killTree kills grandchildren" {
+test "windows command: closing the job kills nothing" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
-    try testWindowsJob(.kill_tree);
+
+    var tree = try JobTree.start("ping -n 60 127.0.0.1 >nul");
+    defer tree.deinit();
+    try tree.gather(JobTree.atLeastTwo);
+
+    tree.cmd.closeJob();
+    tree.cmd.closeJob(); // idempotent
+    try testing.expect(tree.cmd.job == null);
+    for (tree.handles) |h| {
+        const handle = h orelse continue;
+        try testing.expectEqual(
+            @as(windows.DWORD, windows.WAIT_TIMEOUT),
+            JobTree.k32.WaitForSingleObject(handle, 200),
+        );
+    }
 }
