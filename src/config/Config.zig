@@ -56,6 +56,10 @@ const terminal = struct {
 
 const log = std.log.scoped(.config);
 
+/// The default for `term`. Windows has no compiled `xterm-ghostty` terminfo
+/// entry yet, so it uses the widely available `xterm-256color`.
+const default_term = if (builtin.target.os.tag == .windows) "xterm-256color" else "xterm-ghostty";
+
 /// Used on Unixes for some defaults.
 const c = @import("posix_c");
 
@@ -3932,7 +3936,10 @@ else
 /// features. An option exists in vim to modify this: `:set
 /// keyprotocol=ghostty:kitty`, however a bug in the implementation prevents it
 /// from working properly. https://github.com/vim/vim/pull/13211 fixes this.
-term: []const u8 = "xterm-ghostty",
+///
+/// On Windows the default is `xterm-256color` because no compiled terminfo
+/// entry is shipped yet.
+term: []const u8 = default_term,
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are
 /// running. Defaults to an empty string if not set.
@@ -4803,7 +4810,7 @@ pub fn finalize(self: *Config) !void {
     // Prevent setting TERM to an empty string
     if (self.term.len == 0) {
         // HACK: See comment above at definition
-        self.term = "xterm-ghostty";
+        self.term = default_term;
     }
 
     // The default for the working directory depends on the system.
@@ -4850,14 +4857,31 @@ pub fn finalize(self: *Config) !void {
 
             switch (builtin.target.os.tag) {
                 .windows => {
+                    var environ_map = try global.environMap();
+                    defer environ_map.deinit();
+
                     if (self.command == null) {
-                        log.warn("no default shell found, will default to using cmd", .{});
-                        self.command = .{ .shell = "cmd.exe" };
+                        const shell = try internal_os.windows_shell.resolve(
+                            alloc,
+                            &environ_map,
+                            internal_os.windows_shell.systemProbe(),
+                        );
+                        log.info("default shell kind={s} path={s}", .{
+                            @tagName(shell.kind),
+                            shell.argv[0],
+                        });
+                        self.command = .{ .direct = shell.argv };
+
+                        // A login msys bash changes to $HOME unless this is
+                        // set, which would lose the working directory.
+                        if (shell.kind == .git_bash and
+                            !hasEnvKeyIgnoreCase(&self.env, "CHERE_INVOKING"))
+                        {
+                            try self.env.map.put(alloc, "CHERE_INVOKING", "1");
+                        }
                     }
 
                     if (wd == .home) {
-                        var environ_map = try global.environMap();
-                        defer environ_map.deinit();
                         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                         if (try internal_os.home(global.io(), &environ_map, &buf)) |home| {
                             wd = .{ .path = try alloc.dupe(u8, home) };
@@ -5349,6 +5373,15 @@ pub const ChangeIterator = struct {
         return null;
     }
 };
+
+/// Environment variable names are case-insensitive on Windows, but the
+/// `env` config map compares keys exactly.
+fn hasEnvKeyIgnoreCase(env: *const RepeatableStringMap, name: []const u8) bool {
+    for (env.map.keys()) |key| {
+        if (std.ascii.eqlIgnoreCase(key, name)) return true;
+    }
+    return false;
+}
 
 /// This runs a heuristic to determine if we are likely running
 /// Ghostty in a CLI environment. We need this to change some behaviors.
@@ -11380,4 +11413,37 @@ test "compatibility: window new-window" {
             cfg.@"macos-dock-drop-behavior",
         );
     }
+}
+
+test "windows config: TERM defaults to xterm-256color" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const expected = if (builtin.target.os.tag == .windows)
+        "xterm-256color"
+    else
+        "xterm-ghostty";
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expectEqualStrings(expected, cfg.term);
+
+    // An empty value falls back to the platform default.
+    var it: TestIterator = .{ .data = &.{"--term="} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+    try testing.expectEqualStrings(expected, cfg.term);
+}
+
+test "windows config: CHERE_INVOKING lookup ignores case" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expect(!hasEnvKeyIgnoreCase(&cfg.env, "CHERE_INVOKING"));
+
+    var it: TestIterator = .{ .data = &.{"--env=Chere_Invoking=0"} };
+    try cfg.loadIter(alloc, &it);
+    try testing.expect(hasEnvKeyIgnoreCase(&cfg.env, "CHERE_INVOKING"));
 }

@@ -446,6 +446,30 @@ pub extern "kernel32" fn GetFileSizeEx(
 
 // --- registry (Task 13)
 
+pub const HKEY = *anyopaque;
+pub const LSTATUS = i32;
+
+/// The predefined root keys are sign-extended 32-bit values on 64-bit
+/// Windows (`(HKEY)(ULONG_PTR)(LONG)0x80000002`).
+pub const HKEY_LOCAL_MACHINE: HKEY = @ptrFromInt(@as(usize, @bitCast(@as(isize, @as(i32, @bitCast(@as(u32, 0x80000002)))))));
+pub const HKEY_CURRENT_USER: HKEY = @ptrFromInt(@as(usize, @bitCast(@as(isize, @as(i32, @bitCast(@as(u32, 0x80000001)))))));
+pub const RRF_RT_REG_SZ = 0x00000002;
+pub const INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
+pub const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+
+pub extern "kernel32" fn GetFileAttributesW(
+    lpFileName: LPCWSTR,
+) callconv(.winapi) DWORD;
+pub extern "advapi32" fn RegGetValueW(
+    hkey: HKEY,
+    lpSubKey: ?LPCWSTR,
+    lpValue: ?LPCWSTR,
+    dwFlags: DWORD,
+    pdwType: ?*DWORD,
+    pvData: ?*anyopaque,
+    pcbData: ?*DWORD,
+) callconv(.winapi) LSTATUS;
+
 // --- console (Task 16)
 
 // --- jobs (Task 19)
