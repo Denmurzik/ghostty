@@ -22,7 +22,9 @@ pub const Options = struct {
 pub fn config(io: std.Io, alloc: Allocator, environ_map: *const std.process.Environ.Map, opts: Options) ![]u8 {
     return try dir(io, alloc, environ_map, opts, .{
         .env = "XDG_CONFIG_HOME",
-        .windows_env = "LOCALAPPDATA",
+        // Windows has exactly one config location: `<home>\.config`
+        // (or `XDG_CONFIG_HOME`), never AppData.
+        .windows_env = null,
         .default_subdir = ".config",
     });
 }
@@ -47,7 +49,7 @@ pub fn state(io: std.Io, alloc: Allocator, environ_map: *const std.process.Envir
 
 const InternalOptions = struct {
     env: []const u8,
-    windows_env: []const u8,
+    windows_env: ?[]const u8,
     default_subdir: []const u8,
 };
 
@@ -68,12 +70,14 @@ fn dir(
         });
     }
 
-    // First check the env var. On Windows we treat `LOCALAPPDATA` as a
-    // fallback for `XDG_CONFIG_HOME`
-    const env = switch (builtin.target.os.tag) {
-        .windows => environ_map.get(internal_opts.env) orelse environ_map.get(internal_opts.windows_env) orelse "",
-        else => environ_map.get(internal_opts.env) orelse "",
-    };
+    // First check the env var. On Windows we treat `windows_env` (e.g.
+    // `LOCALAPPDATA`) as a fallback when the XDG variable is unset or empty.
+    var env: []const u8 = environ_map.get(internal_opts.env) orelse "";
+    if (comptime builtin.target.os.tag == .windows) {
+        if (env.len == 0) {
+            if (internal_opts.windows_env) |name| env = environ_map.get(name) orelse "";
+        }
+    }
 
     if (env.len > 0) {
         // If we have a subdir, then we use the env as-is to avoid a copy.
@@ -266,4 +270,59 @@ test parseTerminalExec {
         const actual = parseTerminalExec(&.{ "xdg-terminal-exec", "a", "-e", "b", "c" }).?;
         try testing.expectEqualSlices([*:0]const u8, actual, &.{ "a", "-e", "b", "c" });
     }
+}
+
+test "windows xdg: config base is USERPROFILE\\.config, LOCALAPPDATA ignored" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("USERPROFILE", "C:\\Users\\Анна Ли");
+    try environ_map.put("LOCALAPPDATA", "C:\\Users\\Анна Ли\\AppData\\Local");
+
+    const path = try config(testing.io, alloc, &environ_map, .{ .subdir = "ghostty" });
+    defer alloc.free(path);
+    try testing.expectEqualStrings("C:\\Users\\Анна Ли\\.config\\ghostty", path);
+
+    // An empty XDG_CONFIG_HOME counts as unset.
+    try environ_map.put("XDG_CONFIG_HOME", "");
+    const path2 = try config(testing.io, alloc, &environ_map, .{ .subdir = "ghostty" });
+    defer alloc.free(path2);
+    try testing.expectEqualStrings("C:\\Users\\Анна Ли\\.config\\ghostty", path2);
+}
+
+test "windows xdg: XDG_CONFIG_HOME replaces the base" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("USERPROFILE", "C:\\Users\\Анна Ли");
+    try environ_map.put("XDG_CONFIG_HOME", "D:\\cfg");
+
+    const path = try config(testing.io, alloc, &environ_map, .{ .subdir = "ghostty" });
+    defer alloc.free(path);
+    try testing.expectEqualStrings("D:\\cfg\\ghostty", path);
+}
+
+test "windows xdg: cache still uses LOCALAPPDATA" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("USERPROFILE", "C:\\Users\\Анна Ли");
+    try environ_map.put("LOCALAPPDATA", "C:\\Users\\Анна Ли\\AppData\\Local");
+
+    const cache_path = try cache(testing.io, alloc, &environ_map, .{ .subdir = "ghostty" });
+    defer alloc.free(cache_path);
+    try testing.expectEqualStrings("C:\\Users\\Анна Ли\\AppData\\Local\\ghostty", cache_path);
+
+    const state_path = try state(testing.io, alloc, &environ_map, .{ .subdir = "ghostty" });
+    defer alloc.free(state_path);
+    try testing.expectEqualStrings("C:\\Users\\Анна Ли\\AppData\\Local\\ghostty", state_path);
 }

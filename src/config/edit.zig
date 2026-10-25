@@ -130,7 +130,9 @@ fn configPathCandidates(alloc_arena: Allocator) ![]const []const u8 {
     }
 
     paths.appendAssumeCapacity(try file_load.defaultXdgPath(alloc_arena));
-    paths.appendAssumeCapacity(try file_load.legacyDefaultXdgPath(alloc_arena));
+    if (comptime builtin.target.os.tag != .windows) {
+        paths.appendAssumeCapacity(try file_load.legacyDefaultXdgPath(alloc_arena));
+    }
 
     return paths.items;
 }

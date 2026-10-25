@@ -78,6 +78,16 @@ fn homeUnix(io: std.Io, environ_map: *const std.process.Environ.Map, buf: []u8) 
 
 fn homeWindows(environ_map: *const std.process.Environ.Map, buf: []u8) !?[]const u8 {
     var writer: std.Io.Writer = .fixed(buf);
+
+    // USERPROFILE is what the shell and most tools treat as the home
+    // directory. HOMEDRIVE+HOMEPATH is only a fallback.
+    if (environ_map.get("USERPROFILE")) |profile| {
+        if (profile.len > 0) {
+            _ = try writer.write(profile);
+            return writer.buffered();
+        }
+    }
+
     _ = try writer.write(environ_map.get("HOMEDRIVE") orelse return null);
     _ = try writer.write(environ_map.get("HOMEPATH") orelse return null);
     return writer.buffered();
@@ -106,8 +116,7 @@ pub fn expandHome(
     return switch (builtin.target.os.tag) {
         .linux, .freebsd, .macos => try expandHomeUnix(io, environ_map, path, buf),
 
-        // `~/` is not an idiom generally used on Windows
-        .windows => return path,
+        .windows => try expandHomeWindows(io, environ_map, path, buf),
 
         // iOS doesn't have a user-writable home directory
         .ios => return path,
@@ -122,7 +131,28 @@ fn expandHomeUnix(
     path: []const u8,
     buf: []u8,
 ) ExpandError![]const u8 {
-    if (!std.mem.startsWith(u8, path, "~/")) return path;
+    return expandTilde(io, environ_map, path, buf, false);
+}
+
+/// Like expandHomeUnix but also accepts a backslash after the tilde.
+fn expandHomeWindows(
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    buf: []u8,
+) ExpandError![]const u8 {
+    return expandTilde(io, environ_map, path, buf, true);
+}
+
+fn expandTilde(
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    buf: []u8,
+    comptime backslash: bool,
+) ExpandError![]const u8 {
+    if (!std.mem.startsWith(u8, path, "~/") and
+        !(backslash and std.mem.startsWith(u8, path, "~\\"))) return path;
     const home_dir: []const u8 = if (home(io, environ_map, buf)) |home_|
         home_ orelse return error.HomeDetectionFailed
     else |_|
@@ -182,4 +212,60 @@ test {
     const result = try home(io, &environ_map, &buf);
     try testing.expect(result != null);
     try testing.expect(result.?.len > 0);
+}
+
+test "windows homedir: USERPROFILE wins over HOMEDRIVE+HOMEPATH" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var environ_map = std.process.Environ.Map.init(testing.allocator);
+    defer environ_map.deinit();
+    try environ_map.put("USERPROFILE", "C:\\Users\\Анна Ли");
+    try environ_map.put("HOMEDRIVE", "D:");
+    try environ_map.put("HOMEPATH", "\\other");
+
+    var buf: [1024]u8 = undefined;
+    try testing.expectEqualStrings(
+        "C:\\Users\\Анна Ли",
+        (try home(testing.io, &environ_map, &buf)).?,
+    );
+
+    // Empty USERPROFILE falls through to HOMEDRIVE+HOMEPATH.
+    try environ_map.put("USERPROFILE", "");
+    try testing.expectEqualStrings(
+        "D:\\other",
+        (try home(testing.io, &environ_map, &buf)).?,
+    );
+
+    // Nothing usable.
+    _ = environ_map.swapRemove("USERPROFILE");
+    _ = environ_map.swapRemove("HOMEDRIVE");
+    try testing.expect((try home(testing.io, &environ_map, &buf)) == null);
+}
+
+test "windows homedir: expandHome expands ~/ and ~\\" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var environ_map = std.process.Environ.Map.init(testing.allocator);
+    defer environ_map.deinit();
+    try environ_map.put("USERPROFILE", "C:\\Users\\Анна Ли");
+
+    var buf: [1024]u8 = undefined;
+    const io = testing.io;
+    try testing.expectEqualStrings(
+        "C:\\Users\\Анна Ли/x/y",
+        try expandHome(io, &environ_map, "~/x/y", &buf),
+    );
+    try testing.expectEqualStrings(
+        "C:\\Users\\Анна Ли\\x\\y",
+        try expandHome(io, &environ_map, "~\\x\\y", &buf),
+    );
+    try testing.expectEqualStrings("~", try expandHome(io, &environ_map, "~", &buf));
+    try testing.expectEqualStrings("~abc/", try expandHome(io, &environ_map, "~abc/", &buf));
+    try testing.expectEqualStrings("C:\\x", try expandHome(io, &environ_map, "C:\\x", &buf));
+
+    // No home at all.
+    _ = environ_map.swapRemove("USERPROFILE");
+    try testing.expectError(error.HomeDetectionFailed, expandHome(io, &environ_map, "~/x", &buf));
 }

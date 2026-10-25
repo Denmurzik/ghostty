@@ -4242,13 +4242,21 @@ fn writeConfigTemplate(path: []const u8) !void {
 ///
 /// The legacy `config` file (without extension) is first loaded,
 /// then `config.ghostty`.
+///
+/// On Windows the only file is `%USERPROFILE%\.config\ghostty\config.ghostty`
+/// (`XDG_CONFIG_HOME` replaces `%USERPROFILE%\.config` when set).
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
     // Load XDG first
-    const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
-    defer alloc.free(legacy_xdg_path);
     const xdg_path = try file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg_path);
     const xdg_loaded: bool = xdg_loaded: {
+        // Windows has exactly one config path, no legacy `config` file.
+        if (comptime builtin.target.os.tag == .windows) {
+            break :xdg_loaded self.loadOptionalFile(alloc, xdg_path) != .not_found;
+        }
+
+        const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
+        defer alloc.free(legacy_xdg_path);
         const legacy_xdg_action = self.loadOptionalFile(alloc, legacy_xdg_path);
         const xdg_action = self.loadOptionalFile(alloc, xdg_path);
         if (xdg_action != .not_found and legacy_xdg_action != .not_found) {
