@@ -3,7 +3,7 @@
 Status: draft 1 (2026-10-25), author `architect`. Authority order: `docs/windows/DECISIONS.md` (binding) > this spec > plans.
 Inputs: `docs/windows/recon/{apprt,renderer,platform,build,tmux}.md` (cited as `[apprt §n]`, `[renderer §n]`, …). This spec does
 not repeat recon facts; it records the design decisions taken on top of them. Every "Decision" below is binding for plans
-unless the owner overturns it. Open questions for the owner are collected in §18.
+unless the owner overturns it. Owner/lead rulings on former open questions are recorded in §18.
 
 ## 0. Summary of the key decisions
 
@@ -11,7 +11,7 @@ unless the owner overturns it. Open questions for the owner are collected in §1
 |---|---|---|
 | D1 | Native Zig apprt `src/apprt/win32` (R5), one **top-level HWND per window**, one **child HWND per terminal surface**. | Win32 focus, IME context, mouse capture, cursor, WM_DPICHANGED and later UI Automation all work per HWND; split layout = `SetWindowPos` of children; Chromium-proven with DComp. |
 | D2 | D3D11 backend **presents on the render thread** into a DXGI flip-model swap chain owned by the renderer. **No `ExportedFrame`**; the `render` action is a no-op. | No cross-thread frame hand-off, no copies on the UI thread, modal resize loops do not stall rendering [renderer §5.3, apprt §5]. |
-| D3 | **One app-scoped `ID3D11Device`** (shared by all surfaces) + a process-wide **context lock** held from `drawFrameStart` to `drawFrameEnd`. Frame pacing via a **frame-latency waitable object** waited *before* taking the lock. | RAM: one driver/UMD instance instead of one per surface; frames are tiny so lock hold time is ≪ 1 ms. Option A of [renderer §7.2] (device per surface) stays available as a fallback switch (§6.3). |
+| D3 | **One app-scoped `ID3D11Device`** (shared by all surfaces) + a process-wide **context lock** held from `drawFrameStart` to `drawFrameEnd`. Frame pacing via a **frame-latency waitable object** waited in `beginFrame` (only reached when a frame is really drawn), only after a previous `Present`, timeout 0 on the sync/UI-thread path. `swap_chain_count = 1`. | RAM: one driver/UMD instance instead of one per surface; frames are tiny so lock hold time is ≪ 1 ms. Option A of [renderer §7.2] (device per surface) stays available as a fallback switch (§6.3). |
 | D4 | Swap chain mode `hwnd` (CreateSwapChainForHwnd, FLIP_DISCARD, `B8G8R8A8_UNORM`) in M1–M2; mode `composition` (DirectComposition, premultiplied alpha) added in M3 for transparency/overlays. Both live behind `src/renderer/d3d11/SwapChain.zig`. | Fastest path to pixels for M1 without closing the door on opacity; the switch is local to one file plus window styles. |
 | D5 | Builtin shaders are hand-written HLSL ported from `shaders.metal` (R4); compiled at runtime with `d3dcompiler_47.dll` once per process into a global bytecode cache (warmed on `Device.warmup`). | R4. |
 | D6 | Win32/COM bindings are **hand-written Zig** in a new path package `pkg/win32` (module `win32`). No translate-c of `windows.h`, no zigwin32. Core code under `src/os/` keeps using `src/os/windows.zig` and never imports `win32`. | Small surface (~15 COM interfaces, ~150 functions); no dependency on Zig-std churn; core stays upstreamable. |
@@ -69,8 +69,11 @@ platform-neutral improvements (e.g. `SplitTree.replace`). Every core touch point
   runtime, never linked.
 - `posix_c` translate-c includes are OS-conditional (no `pwd.h`/`unistd.h` on Windows) [build §4 #1-2]. glad is compiled
   only when `renderer == .opengl`. The `tail` system command in `GhosttyResources` is skipped for non-Linux templates.
-- Exe: `subsystem = .windows`, resources from `dist/windows/ghostty.rc` (exists). Manifest gains
-  `<activeCodePage>UTF-8</activeCodePage>` and `<longPathAware>true</longPathAware>` (PerMonitorV2 already present).
+- Exe: `subsystem = .windows` with `exe.entry = .{ .symbol_name = "mainCRTStartup" }` (Zig's `start.zig` exports C `main`
+  under `link_libc`; lld would otherwise pick `WinMainCRTStartup` and fail on a missing `WinMain`; proven by a hello-GUI
+  exe in M1 Task 1). Resources from `dist/windows/ghostty.rc` (exists). Manifest gains (M1 Task 1)
+  `<activeCodePage>UTF-8</activeCodePage>` and `<longPathAware>true</longPathAware>` (PerMonitorV2 already present). The
+  test exe has no manifest, so no code path may rely on the ANSI code page being UTF-8 (fonts are opened via UTF-16, §9).
 - `tmux.exe` (M4): separate exe, console subsystem, root `src/tmux_shim/main.zig`, **no SharedDeps** (only std + `src/tmux_shim`),
   installed next to `ghostty.exe`.
 - Release recipe flags: `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true`.
@@ -122,7 +125,9 @@ platform-neutral improvements (e.g. `SplitTree.replace`). Every core touch point
 ## 6. Renderer: D3D11 backend
 
 ### 6.1 Contract
-`src/renderer/D3D11.zig` implements every decl of [renderer §1.3] (types, `swap_chain_count = 3`,
+`src/renderer/D3D11.zig` implements every decl of [renderer §1.3] (types, `swap_chain_count = 1` — generic's per-frame `FrameState`s (each a full-size `Target` plus
+atlas copies, `generic.zig:395-447`) buy nothing on D3D11 because `WRITE_DISCARD` renames buffers and
+`SetMaximumFrameLatency(1)` caps queueing; 3 would cost ~5×33 MB at 4K under WARP/iGPU —
 `custom_shader_y_is_down = true`, `custom_shader_target` (`.glsl` placeholder until M3 adds `.hlsl`; custom shaders are
 logged and skipped before M3), `ImageTextureFormat`, `init/deinit`, `threadEnter/threadExit`, `surfaceSize`,
 `setViewport`, `drawFrameStart/End`, `initShaders`, `initTarget`, `initAtlasTexture`, all `*Options`, `beginFrame`).
@@ -149,11 +154,13 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
 - Atlases: grayscale `R8_UNORM`, color `B8G8R8A8_UNORM_SRGB`; read with `Texture2D.Load` (no sampler).
 - Images: `R8G8B8A8_UNORM_SRGB`, linear-clamp sampler. `.gray`/`.bgra` image formats are unreachable → `@panic` with message.
 - Buffers by role: `fgBufferOptions`/`imageBufferOptions`/`bgImageBufferOptions` → vertex (instance) buffer;
-  `bgBufferOptions` → structured buffer + SRV (stride 4, slot `t1` in VS+PS); `uniformBufferOptions` → constant buffer
+  `bgBufferOptions` → structured buffer + SRV (stride 4, slot `t4` in VS+PS); `uniformBufferOptions` → constant buffer
   (slot `b1`, size rounded to 16). All `D3D11_USAGE_DYNAMIC` + `Map(WRITE_DISCARD)`; growth ×2 recreates the SRV.
-- Slots: uniforms `b1`; `buffers[0]` vertex slot 0; `buffers[i≥1]` SRV `t(i)`; `textures[i]` SRV `t(i)` in PS only for the
-  image pipelines (atlases: `t0` gray, `t1`… see HLSL port, keep Metal's indices), samplers `s(i)`. The HLSL port defines
-  the exact register numbers once in `common.hlsli`; `RenderPass.zig` follows it.
+- Register map (single source: `common.hlsli`, mirrored by `src/renderer/d3d11/slots.zig`, from which `RenderPass` binds
+  per stage): uniforms `b1` (VS+PS); `buffers[0]` → IA vertex slot 0; `buffers[i≥1]` → SRV `t(3+i)` in VS **and** PS
+  (so `bg_cells` = `t4`); `textures[i]` → SRV `t(i)` in PS only (`cell_text`: `t0` grayscale atlas, `t1` colour atlas;
+  image/bg_image/custom: `t0`); `samplers[i]` → `s(i)` in PS. Textures are limited to `t0..t2` per step, so buffer SRVs
+  never alias texture SRVs.
 - Blend: premultiplied `ONE / INV_SRC_ALPHA` when `blending_enabled`; no depth, no MSAA, no scissor.
 
 ### 6.3 Device, context lock, pacing, device loss
@@ -161,11 +168,18 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   (`EnumAdapterByGpuPreference(HIGH_PERFORMANCE)` is not used: default adapter 0; `Options.driver = .warp` or env
   `GHOSTTY_D3D11_DRIVER=warp` forces WARP for CI/VMs), `D3D11CreateDevice` with FL 11_0 minimum, `BGRA_SUPPORT`,
   `DEBUG` when `Options.debug_layer` (env `GHOSTTY_D3D11_DEBUG=1`, Debug builds only). Not `SINGLETHREADED`.
-- `context_lock: std.Io.Mutex` (same Io-mutex style as `generic.draw_mutex`). `drawFrameStart` = wait on the swap
-  chain's waitable object (timeout 100 ms, outside the lock) then lock; `drawFrameEnd` = unlock. Every other use of the
-  immediate context (resource destruction is free-threaded and needs no lock) must take the lock.
+- `context_lock: std.Io.Mutex` (same Io-mutex style as `generic.draw_mutex`). `drawFrameStart` = lock; `drawFrameEnd` =
+  unlock. Every other use of the immediate context (resource destruction is free-threaded and needs no lock) must take the
+  lock (debug builds assert the owner thread).
+- Pacing wait lives in `beginFrame`, NOT `drawFrameStart`: generic calls `drawFrameStart` on every `drawFrame`
+  (`generic.zig:1756`) before the 0-size check and the no-redraw early return, while holding `draw_mutex`; waiting there
+  would burn latency tokens on draws that never present and block the UI thread in `WM_SIZE`. `beginFrame` waits on the
+  waitable object only if `presented_since_wait` is set, with timeout 100 ms on the render thread and 0 on the sync
+  (UI-thread) path. The wait then happens under `draw_mutex` + context lock; it is bounded by one refresh interval.
 - Pacing: swap chain flag `FRAME_LATENCY_WAITABLE_OBJECT`, `SetMaximumFrameLatency(1)`; `Present(sync_interval, 0)` with
-  `sync_interval = 1` when config `window-vsync = true` else `0` (+`ALLOW_TEARING` if supported). Generic still draws
+  `sync_interval = 1` when config `window-vsync = true` else `0` (+`ALLOW_TEARING` only with interval 0 and only if
+  supported). `ResizeBuffers` repeats the creation flags (`FRAME_LATENCY_WAITABLE_OBJECT | ALLOW_TEARING`) after releasing
+  every cached back-buffer reference. Generic still draws
   on every wakeup (no display link); the waitable wait caps it at the display rate.
 - Fallback switch (only if measured lock contention > 2 ms/frame with ≥ 8 surfaces): `Options.per_surface_device = true`
   gives each `D3D11` instance its own device+context and no global lock. Not built in M1.
@@ -181,6 +195,14 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   `setViewport` value.
 - Swap chain resize happens inside `Frame.complete` before the copy: if backbuffer size ≠ target size →
   `ResizeBuffers(0, w, h, UNKNOWN, flags)` (backbuffer reference released first).
+- DXGI threading: `MakeWindowAssociation(hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER)` before the first
+  `Present`; `SetFullscreenState` is never called. The UI thread may block on `draw_mutex` in `WM_SIZE` while the render
+  thread is inside `Present`; M1 e2e has a live-resize-while-streaming hang watchdog. If it ever hangs, the fallback is:
+  the UI thread only stores the size and wakes the renderer; `ResizeBuffers` and all presents happen on the render thread
+  (no sync draw).
+- Teardown order: `Surface.destroy` = `core_surface.deinit()` (joins render + IO threads, releases the swap chain) →
+  `DestroyWindow(child)` → free; `Window.destroy` destroys its surfaces before its own HWND. The surface WndProc ignores
+  core callbacks until `initialized` is set (`WM_SIZE` arrives inside `CreateWindowExW`, before `core_surface.init`).
 - DPI: process is PerMonitorV2 (manifest). Surface content scale = `GetDpiForWindow(hwnd) / 96.0` for x and y.
   `WM_DPICHANGED` on the top-level: `SetWindowPos` to the suggested rect, then each surface child calls
   `core.contentScaleCallback` and the normal size path. Fractional scale (125%, 175%) is handled by core font sizing.
@@ -270,7 +292,8 @@ Mouse (`mouse.zig`): client px → `cursorPosCallback`; buttons L/R/M/X1/X2 with
 - Custom frame: `DwmExtendFrameIntoClientArea` (top inset = tab-strip height), `WM_NCCALCSIZE` removes the caption,
   `WM_NCHITTEST` returns `HTCAPTION` on empty strip area and `HTMAXBUTTON` on our maximize button (snap layouts flyout),
   `DWMWA_USE_IMMERSIVE_DARK_MODE` from `window-theme`/system theme, `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW` (Mica)
-  when `background-blur` or new Windows option allows; caption buttons drawn by us (Segoe Fluent Icons glyphs).
+  under the titlebar/tab strip only (ruling §18: terminal surfaces stay opaque unless `background-opacity` < 1, M3);
+  caption buttons drawn by us (Segoe Fluent Icons glyphs).
 - Tab strip + overlays rendered by Direct2D/DirectWrite into the top-level window (`Chrome.zig`); first M2 task is a spike
   proving Mica + child-HWND swap chains + D2D chrome coexist (risk R9).
 - M1 has no custom chrome: standard captioned window with immersive dark mode attribute only.
@@ -313,8 +336,11 @@ Spawn failure of a resolved shell is reported by core's abnormal-exit message; n
 - Read thread: out pipe becomes an overlapped named pipe (like `in_pipe`); loop = `ReadFile` overlapped +
   `WaitForMultipleObjects({read_event, quit_event})`; `threadExit` sets `quit_event` (no CancelIoEx race). Buffer 64 KiB.
 - Child tree lifetime: a Job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` per surface; process created
-  `CREATE_SUSPENDED`, assigned, resumed (nested with libxev's own job, Win8+). Closing the surface closes the job.
-- After child exit: `ClosePseudoConsole` on a helper thread, drain the out pipe to EOF before reporting exit.
+  atomically in the job via `PROC_THREAD_ATTRIBUTE_JOB_LIST` in the existing attribute list (nested with libxev's own
+  pid-filtered job). Closing the surface closes the job. On the pseudo-console path `bInheritHandles = FALSE`.
+- ConPTY handles: the pty-side ends (`in_pipe_pty`, `out_pipe_pty`) are closed right after `CreateProcessW` succeeds
+  (as in the Microsoft sample); otherwise the read loop never sees EOF after `ClosePseudoConsole`.
+- After child exit: `ClosePseudoConsole` on a helper thread, drain the out pipe to EOF (≤ 500 ms) before reporting exit.
 - `.shell` command strings are tokenized with Windows rules (double quotes, backslash-quote) instead of whitespace split.
 - ConPTY flags stay `0` in M1; passthrough/INHERIT_CURSOR evaluated in M5.
 
@@ -328,7 +354,11 @@ default back to `xterm-ghostty`), `+edit-config` on Windows.
 Fonts M1: `freetype_windows` discovery gets a one-time index (family, style name, weight, italic, ttc index per file,
 built lazily on first query, ~300 files) and style ranking for bold/italic/bold-italic; codepoint fallback tries a fixed
 list first (Segoe UI Emoji, Segoe UI Symbol, Cascadia Mono, Consolas, Yu Gothic, Malgun Gothic, Microsoft YaHei, SimSun)
-then the index. M3: DirectWrite discovery + `IDWriteFontFallback::MapCharacters` [platform §4.2]; rasterization stays
+then the index. Font files are opened through UTF-16 paths (W APIs + read-only file mapping → FreeType memory face), never
+`FT_New_Face(path)` with a narrow path, so per-user fonts under non-ASCII profiles load without a UTF-8 code page.
+Emoji: Win11 Segoe UI Emoji is COLRv1; FreeType's `FT_LOAD_COLOR` path covers COLRv0 only, so M1 verifies colour
+rendering and, if it fails, ships monochrome system emoji as a known gap (embedded Noto Color Emoji stays available) until
+M3. M3: DirectWrite discovery + `IDWriteFontFallback::MapCharacters` [platform §4.2]; rasterization stays
 FreeType + HarfBuzz.
 
 ## 10. Child environment
@@ -349,6 +379,10 @@ FreeType + HarfBuzz.
   is invalid, `AttachConsole(ATTACH_PARENT_PROCESS)` then reopen `CONOUT$`/`CONIN$` and `SetStdHandle`; if there is no
   parent console (Explorer launch), output goes to the log file only. Implemented in `src/os/windows_console.zig`, called from
   `main_ghostty.zig` only on Windows.
+- Panics (M1): a root `panic` override writes the message + stack trace to the file sink and `OutputDebugStringW` before
+  aborting (a GUI exe has no valid stderr).
+- Known limitation: a GUI-subsystem `ghostty.exe +version` started from interactive `cmd` returns the prompt before the
+  output appears; use `ghostty.exe +version | more`, `start /wait`, or a pipe (Git Bash).
 - Crash (M5): `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` into `%LOCALAPPDATA%\ghostty\crash\`.
 
 ## 12. Built-in tmux shim (M4)
@@ -410,15 +444,19 @@ apprt-level replay test that runs the exact spawn sequence of [tmux §4 notes] a
 stdout bytes, exit codes and resulting tree shape.
 ### 12.6 Single instance / `performIpc`
 M2 adds a per-user pipe `\\.\pipe\ghostty-<user SID>` served by the same IPC thread for `+new-window`/`+new-tab`/
-`+toggle-quick-terminal`. Whether a plain second launch opens a window in the running process is an owner question (§18).
+`+toggle-quick-terminal`. Single-instance is ON by default (ruling, §18): a second launch forwards `new_window` (with its
+`--working-directory`) to the running instance and exits; an opt-out config follows the GTK `gtk-single-instance` pattern.
 
 ## 13. Packaging (M6)
 - Portable zip `ghostty-<ver>-windows-<arch>.zip`: `ghostty.exe`, `tmux.exe`, `share\ghostty\…` (themes, shell-integration,
   terminfo source), `share\terminfo\…`, `LICENSE`, `README-windows.txt`. Resources found via existing `resourcesdir.zig`.
 - Inno Setup (`dist/windows/installer/ghostty.iss`): per-user install default (`{localappdata}\Programs\Ghostty`), Start
-  Menu shortcut with AUMID `com.mitchellh.ghostty.windows-unofficial` (enables toasts), optional desktop shortcut,
+  Menu shortcut with AUMID `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut,
   Explorer "Open Ghostty here" (HKCU `Directory\shell` + `Directory\Background\shell`, `ghostty.exe --working-directory="%V"`),
   uninstaller removes both. No PATH change.
+- Toasts (ruling): Ghostty itself registers the AUMID under `HKCU\Software\Classes\AppUserModelId\<AUMID>`
+  (`DisplayName`, `IconUri`) on first notification and calls `SetCurrentProcessExplicitAppUserModelID`, so the portable
+  zip gets toasts too; the uninstaller removes the key.
 - Version resource fields from `build_config.version` (generated `.rc` include), product name "Ghostty — Unofficial Windows port".
 - CI (GitHub Actions): `windows-latest` x64 build + tests; ARM64 cross-build on x64 and tests on `windows-11-arm`;
   release workflow on tag `v*` uploads zip + installer for both arches as a GitHub pre-release.
@@ -429,7 +467,9 @@ Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CON
 `Get-Process -Id <pid>` → `PrivateMemorySize64` (**Private Bytes**, the budgeted number) and `WorkingSet64` (reported),
 ghostty.exe only (conhost/OpenConsole and shells are reported separately, not budgeted). Steps for extra tabs/splits/windows
 are driven by keybind `SendInput` (M2+). Output: one CSV row per scenario appended to `docs/windows/ram-baseline.csv`
-(date, commit, adapter, scenario, private_mb, ws_mb).
+(date, commit, optimize, adapter, scenario, private_mb, ws_mb). Budgeted numbers are measured on `-Doptimize=ReleaseFast`
+builds (Debug numbers may be recorded with `optimize=Debug` but are never gated). The scrollback scenario uses
+`cmd /c "for /L %i in (1,1,200000) do @echo %i"` (there is no `seq` in cmd).
 
 | Scenario (100% DPI, default font/config, idle) | v1.0 target (Private Bytes) | M1 gate |
 |---|---|---|
@@ -457,6 +497,13 @@ Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas ini
    - `capture-window.ps1 -Hwnd <h> -Out <png>` → `PrintWindow(PW_RENDERFULLCONTENT)` (works for DXGI content) to PNG;
      `-Probe x,y` prints the BGRA at a pixel for automatic asserts (e.g. background colour from config).
    - `send-input.ps1 -Hwnd <h> -Text <s> | -Keys <chord>` → `SendInput` (unicode and VK paths).
+   - Safety on the owner's machine (shared module `test/windows/lib/Harness.psm1`): pre-check for an interactive,
+     unlocked session with a usable foreground window, else every GUI scenario reports `SKIP` (recorded, never `FAIL`);
+     foreground via `AllowSetForegroundWindow` + Alt-tap; layouts switched by posting `WM_INPUTLANGCHANGEREQUEST` to the
+     Ghostty HWND; the original keyboard layout is restored and only layouts that were not loaded before
+     (`GetKeyboardLayoutList` diff) are unloaded — also in unit tests that call `LoadKeyboardLayoutW`.
+   - Primary pixel oracle: `GHOSTTY_D3D11_DUMP=<dir>` makes the renderer write the presented target to
+     `<dir>\surface-<n>.bmp` (at most 4 per second); `PrintWindow` capture is secondary (black on locked/RDP-minimised desktops).
    - End-to-end checks use the shell itself as oracle: type `echo <token> > %TEMP%\gt-<id>.txt`, then assert the file.
    - Visual checks: after every UI/renderer task the implementer attaches a screenshot path in the report and inspects it.
 5. **RAM**: `measure-ram.ps1` per milestone (§14).
@@ -470,7 +517,7 @@ Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas ini
 ## 16. Risks and mitigations
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | COM vtable slot mistakes crash at runtime | Spike first (M1 task 3): WARP device + clear + readback + D3DCompile; slot-count tests per interface against SDK headers; methods used only through typed wrappers. |
+| R1 | COM vtable slot mistakes crash at runtime | Spike first (M1 Task 2): WARP device + clear + readback + D3DCompile; slot-count tests per interface against SDK headers; methods used only through typed wrappers. |
 | R2 | libxev IOCP backend (Async/Timer/Process/Stream) untested in Ghostty | M1 core-compile task runs termio/xev tests; M1 Exec task has a spawn/exit/close test; bugs fixed in a vendored libxev patch (path override) and offered upstream. |
 | R3 | Exec.zig Windows path bugs / read-thread hang on close | §8.4 event-based read loop; tests: close while `cmd /c type bigfile` streams; `cmd /c exit 3` exit code. |
 | R4 | Debug test exe very slow on Windows | Focused filters locally; ReleaseSafe investigation note in M1; CI timeout 90 min. |
@@ -499,8 +546,10 @@ Exit criteria: (1) `zig build -j4` produces `zig-out\bin\ghostty.exe`; (2) Windo
 `windows ` filters) pass; selected upstream filters pass (`terminal`, `config`, `input`, `font`); (3) launch → Git Bash prompt
 in `%USERPROFILE%` in ≤ 1.5 s, screenshot shows correct text/colours; (4) `echo` oracle e2e passes for US text, DE AltGr `@`,
 RU text, Ctrl+C interrupt; (5) `vim`/`less` in Git Bash usable (`TERM=xterm-256color`); (6) closing the window terminates the
-shell tree (no orphan `bash.exe`/`conhost.exe`); (7) RAM ≤ 110 MB private (1 window), baseline row recorded; (8) no
-hang on close while output streams.
+shell tree (no orphan `bash.exe`/`conhost.exe`); (7) RAM ≤ 110 MB private (1 window, `ReleaseFast`), baseline row
+recorded; (8) no hang on close while output streams or during live resize; (9) `exit` in the last shell closes the window
+and ends the process ≤ 3 s; (10) `aarch64-windows-msvc` compiles (recorded, not gating). GUI scenarios that cannot run on
+a locked/non-interactive desktop are recorded as SKIP and re-run interactively before sign-off.
 
 **M2 — tabs, splits, multi-window, Mica, titlebar, DPI, keybind actions.** Custom frame + D2D tab strip + Mica, snap
 layouts, tabs (new/close/move/goto, titles, drag reorder), splits over core `SplitTree` (divider drag, zoom, equalize,
@@ -509,7 +558,7 @@ progress, resize overlay (tooltip control), color-scheme detection, close confir
 plumbing. Exit: action-coverage test green; screenshots at 100/150/200% DPI; per-surface/window RAM rows within targets.
 
 **M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
-AUMID when installed, `Shell_NotifyIcon` balloon otherwise), URL hover/open (`ShellExecuteW`, untrusted URL validation),
+AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),
 inspector (imgui win32+dx11), config reload + config-errors dialog, custom shaders (HLSL via SPIRV-Cross), Kitty graphics
 and background image verified, transparency + blur (DComp composition swap chains), DirectWrite discovery/fallback,
 device-loss recovery, key-sequence/table indicator, prompt-title dialog, export-terminal-io save dialog, vt-smoke
@@ -529,9 +578,8 @@ Exit: each feature has a test or scripted screenshot; update check tested agains
 and `windows-11-arm`, release on tag), pre-release published, v1.0 gate of DECISIONS (feature checklist closed, RAM rows,
 Claude Code run, owner smoke). Exit: owner sign-off.
 
-## 18. Open questions for the owner
-1. Second launch of `ghostty.exe` while one runs: new process (simple, more RAM) or new window in the running instance
-   (single-instance, like `gtk-single-instance`)? Default proposed: single-instance ON for Explorer/Start-menu launches.
-2. Mica: enable by default (opaque terminal, Mica only under the tab strip) or only when `background-blur` is set?
-3. Toast notifications need a Start-Menu shortcut with AUMID; portable-zip users get balloon notifications. OK?
-4. Confirm cache/state/logs under `%LOCALAPPDATA%\ghostty\` (D9) — DECISIONS forbid AppData only for config.
+## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
+1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
+2. Mica: titlebar/tab strip only; terminal surfaces stay opaque by default (§7.5).
+3. Toasts: AUMID self-registered under HKCU; works for the installer and the portable zip (§13).
+4. Cache/state/logs/crash dumps: `%LOCALAPPDATA%\ghostty\` (D9); only config lives under `%USERPROFILE%\.config`.
