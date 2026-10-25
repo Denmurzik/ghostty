@@ -383,11 +383,16 @@ pub const ID3D11Device = extern struct {
         SetPrivateDataInterface: *const anyopaque,
         GetFeatureLevel: *const anyopaque,
         GetCreationFlags: *const anyopaque,
-        GetDeviceRemovedReason: *const anyopaque,
+        GetDeviceRemovedReason: *const fn (*ID3D11Device) callconv(.winapi) HRESULT,
         GetImmediateContext: *const fn (*ID3D11Device, *?*ID3D11DeviceContext) callconv(.winapi) void,
         SetExceptionMode: *const anyopaque,
         GetExceptionMode: *const anyopaque,
     };
+
+    /// `error.DeviceLost` once the device was removed, reset or hung.
+    pub inline fn checkDeviceRemoved(self: *ID3D11Device) Error!void {
+        try check(self.vtable.GetDeviceRemovedReason(self));
+    }
 
     pub inline fn createBuffer(self: *ID3D11Device, desc: *const BUFFER_DESC, initial: ?*const SUBRESOURCE_DATA) Error!*ID3D11Buffer {
         var out: ?*ID3D11Buffer = null;
@@ -582,7 +587,7 @@ pub const ID3D11DeviceContext = extern struct {
         CSGetSamplers: *const anyopaque,
         CSGetConstantBuffers: *const anyopaque,
         ClearState: *const anyopaque,
-        Flush: *const anyopaque,
+        Flush: *const fn (*ID3D11DeviceContext) callconv(.winapi) void,
         GetType: *const anyopaque,
         GetContextFlags: *const anyopaque,
         FinishCommandList: *const anyopaque,
@@ -652,6 +657,11 @@ pub const ID3D11DeviceContext = extern struct {
 
     pub inline fn rsSetState(self: *ID3D11DeviceContext, state: ?*ID3D11RasterizerState) void {
         self.vtable.RSSetState(self, state);
+    }
+
+    /// Submits the queued commands to the GPU without waiting for them.
+    pub inline fn flush(self: *ID3D11DeviceContext) void {
+        self.vtable.Flush(self);
     }
 
     pub inline fn clearRenderTargetView(self: *ID3D11DeviceContext, rtv: *ID3D11RenderTargetView, color: [4]f32) void {
@@ -892,6 +902,8 @@ comptime {
     if (@offsetOf(ctx, "OMSetRenderTargets") != 33 * ptr) @compileError("OMSetRenderTargets slot");
     if (@offsetOf(ctx, "OMSetBlendState") != 35 * ptr) @compileError("OMSetBlendState slot");
     if (@offsetOf(ctx, "RSSetState") != 43 * ptr) @compileError("RSSetState slot");
+    if (@offsetOf(dev, "GetDeviceRemovedReason") != 39 * ptr) @compileError("GetDeviceRemovedReason slot");
+    if (@offsetOf(ctx, "Flush") != 111 * ptr) @compileError("Flush slot");
     if (@offsetOf(ctx, "RSSetViewports") != 44 * ptr) @compileError("RSSetViewports slot");
     if (@sizeOf(INPUT_ELEMENT_DESC) != 32) @compileError("INPUT_ELEMENT_DESC size");
     if (@sizeOf(RENDER_TARGET_BLEND_DESC) != 32) @compileError("RENDER_TARGET_BLEND_DESC size");

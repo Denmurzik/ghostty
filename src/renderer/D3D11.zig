@@ -1,8 +1,8 @@
 //! Graphics API wrapper for Direct3D 11.
 //!
-//! STUB: this declares the full GraphicsAPI contract that
-//! `generic.zig` relies on (see docs/windows/SPEC.md §6.1). Later tasks
-//! replace the bodies, never the names.
+//! Implements the GraphicsAPI contract that `generic.zig` relies on (see
+//! docs/windows/SPEC.md §6.1). Renders headless into `Target`s until the
+//! apprt hands over a `PresentTarget`.
 pub const D3D11 = @This();
 
 const std = @import("std");
@@ -75,6 +75,27 @@ blending: configpkg.Config.AlphaBlending,
 /// The shared render device.
 device: *Device,
 
+/// Where the swap chain presents; null while headless. Set by
+/// `threadEnter`.
+present_target: ?PresentTarget = null,
+
+/// The size `setViewport` last reported. Headless `surfaceSize` returns it.
+viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
+
+/// The render thread, once `threadEnter` ran. Draws from any other thread
+/// are the synchronous (UI thread) kind.
+render_thread: ?std.Thread.Id = null,
+
+/// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
+dump: ?Frame.Dump = null,
+
+/// Set once a device loss was logged, so a lost device logs once rather
+/// than once per frame.
+device_lost_logged: bool = false,
+
+/// Per-process counter handing out `dump` file indices.
+var next_renderer_index: std.atomic.Value(usize) = .init(0);
+
 pub fn init(
     alloc: Allocator,
     device: *Device,
@@ -84,47 +105,72 @@ pub fn init(
         .alloc = alloc,
         .blending = opts.config.blending,
         .device = device,
+        .dump = Frame.Dump.initFromEnv(
+            alloc,
+            next_renderer_index.fetchAdd(1, .monotonic),
+        ),
     };
 }
 
 pub fn deinit(self: *D3D11) void {
+    if (self.dump) |*d| d.deinit(self.alloc);
     self.* = undefined;
 }
 
 /// Callback called by renderer.Thread when it begins. Called on the render
 /// thread.
 pub fn threadEnter(self: *D3D11, surface: *apprt.Surface) !void {
-    _ = self;
-    _ = surface;
+    self.render_thread = std.Thread.getCurrentId();
+
+    // Apprts without a window (`app_runtime = none`) render headless.
+    if (comptime @hasDecl(apprt.Surface, "d3d11PresentTarget")) {
+        self.present_target = surface.d3d11PresentTarget();
+    }
 }
 
 /// Callback called by renderer.Thread when it exits. Called on the render
 /// thread.
 pub fn threadExit(self: *D3D11) void {
-    _ = self;
+    self.present_target = null;
+    self.render_thread = null;
 }
 
 /// Get the current size of the runtime surface.
 pub fn surfaceSize(self: *const D3D11) !struct { width: u32, height: u32 } {
-    _ = self;
-    return .{ .width = 0, .height = 0 };
+    const target = self.present_target orelse return .{
+        .width = self.viewport.width,
+        .height = self.viewport.height,
+    };
+
+    const size = unpackSize(target.size.load(.acquire));
+    const max = self.device.max_texture_size;
+    return .{
+        .width = @min(size.width, max),
+        .height = @min(size.height, max),
+    };
 }
 
 /// Set the viewport to cover the given size in device pixels.
-pub fn setViewport(self: *const D3D11, width: u32, height: u32) void {
-    _ = self;
-    _ = width;
-    _ = height;
+pub fn setViewport(self: *D3D11, width: u32, height: u32) void {
+    self.viewport = .{ .width = width, .height = height };
 }
 
-/// Actions taken before doing anything in `drawFrame`.
+/// Actions taken before doing anything in `drawFrame`. The immediate
+/// context is not thread safe: it is ours until `drawFrameEnd`.
 pub fn drawFrameStart(self: *D3D11) void {
-    _ = self;
+    self.device.lockContext();
 }
 
 /// Actions taken after `drawFrame` is done.
 pub fn drawFrameEnd(self: *D3D11) void {
+    self.device.unlockContext();
+}
+
+/// Blocks until the swap chain has a free frame slot. Nothing to wait for
+/// until a swap chain exists.
+fn waitForFrameSlot(self: *D3D11, sync: bool) void {
     _ = self;
+    _ = sync;
 }
 
 pub fn initShaders(
@@ -141,8 +187,10 @@ pub fn initTarget(self: *const D3D11, width: usize, height: usize) !Target {
         .device = self.device,
         .width = width,
         .height = height,
-        // Matches `textureOptions`; Task 22 revisits this with the swap chain.
-        .srgb = true,
+        // An `*_SRGB` view makes the hardware encode the pixels written to
+        // it *after* blending, which gives linear alpha blending rather
+        // than gamma-incorrect blending.
+        .srgb = self.blending.isLinear(),
     });
 }
 
@@ -167,15 +215,19 @@ pub inline fn uniformBufferOptions(self: D3D11) bufferpkg.Options {
     return .{ .device = self.device, .role = .constant };
 }
 
-/// Returns the options to use when constructing textures.
+/// Returns the options to use when constructing textures. Custom shader
+/// ping-pong textures are rendered to, so they match the target's format.
 pub inline fn textureOptions(self: D3D11) Texture.Options {
+    const format: win32.dxgi.Format = if (self.blending.isLinear())
+        .B8G8R8A8_UNORM_SRGB
+    else
+        .B8G8R8A8_UNORM;
     return .{
         .device = self.device,
-        .format = .B8G8R8A8_UNORM_SRGB,
-        .srv_format = .B8G8R8A8_UNORM_SRGB,
-        // Custom shader ping-pong textures are rendered to.
+        .format = format,
+        .srv_format = format,
         .render_target = true,
-        .rtv_format = .B8G8R8A8_UNORM_SRGB,
+        .rtv_format = format,
     };
 }
 
@@ -200,12 +252,13 @@ pub inline fn imageTextureOptions(
     format: ImageTextureFormat,
     srgb: bool,
 ) Texture.Options {
-    const dxgi_format: win32.dxgi.Format = if (srgb) .R8G8B8A8_UNORM_SRGB else .R8G8B8A8_UNORM;
-    return switch (format) {
-        .rgba => .{ .device = self.device, .format = dxgi_format, .srv_format = dxgi_format },
-        // Generic only ever asks for `(.rgba, true)`.
-        .gray, .bgra => @panic("unsupported image texture format for D3D11"),
+    const dxgi_format: win32.dxgi.Format = switch (format) {
+        // DXGI has no sRGB variant of a single channel format.
+        .gray => .R8_UNORM,
+        .rgba => if (srgb) .R8G8B8A8_UNORM_SRGB else .R8G8B8A8_UNORM,
+        .bgra => if (srgb) .B8G8R8A8_UNORM_SRGB else .B8G8R8A8_UNORM,
     };
+    return .{ .device = self.device, .format = dxgi_format, .srv_format = dxgi_format };
 }
 
 /// Initializes a Texture suitable for the provided font atlas.
@@ -227,17 +280,19 @@ pub fn initAtlasTexture(
     );
 }
 
-/// Begin a frame.
+/// Begin a frame. The caller holds the context lock (`drawFrameStart`).
 pub inline fn beginFrame(
-    self: *const D3D11,
+    self: *D3D11,
     /// Once the frame has been completed, the `frameCompleted` method
     /// on the renderer is called with the health status of the frame.
     renderer: *Renderer,
     /// The target is presented via the provided renderer's API when completed.
     target: *Target,
 ) !Frame {
-    _ = self;
-    return try Frame.begin(.{}, renderer, target);
+    // Draws off the render thread are the synchronous UI thread ones.
+    const sync = self.render_thread != std.Thread.getCurrentId();
+    self.waitForFrameSlot(sync);
+    return try Frame.begin(.{ .api = self }, renderer, target);
 }
 
 test "d3d11 stub: size packing roundtrip" {
@@ -254,10 +309,101 @@ test "d3d11 stub: size packing roundtrip" {
     try std.testing.expectEqual(@as(u32, 0), max.height);
 }
 
+fn testApi(blending: configpkg.Config.AlphaBlending) !D3D11 {
+    const device = try Device.init(std.testing.allocator, .{ .driver = .warp });
+    return .{
+        .alloc = std.testing.allocator,
+        .blending = blending,
+        .device = device,
+    };
+}
+
+test "d3d11 api: draw frame start and end own the context lock" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    api.drawFrameStart();
+    api.device.assertContextLocked();
+    api.drawFrameEnd();
+
+    // Released: the lock can be taken again.
+    api.drawFrameStart();
+    api.drawFrameEnd();
+}
+
+test "d3d11 api: headless surface size is the viewport" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    const unset = try api.surfaceSize();
+    try std.testing.expectEqual(@as(u32, 0), unset.width);
+    try std.testing.expectEqual(@as(u32, 0), unset.height);
+
+    api.setViewport(800, 600);
+    const size = try api.surfaceSize();
+    try std.testing.expectEqual(@as(u32, 800), size.width);
+    try std.testing.expectEqual(@as(u32, 600), size.height);
+}
+
+test "d3d11 api: present target size is read and clamped" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(1024, 768));
+    api.present_target = .{ .hwnd = undefined, .size = &packed_size };
+    api.setViewport(1, 1);
+
+    const size = try api.surfaceSize();
+    try std.testing.expectEqual(@as(u32, 1024), size.width);
+    try std.testing.expectEqual(@as(u32, 768), size.height);
+
+    // A resize on the UI thread is seen by the next call.
+    packed_size.store(packSize(100_000, 0), .release);
+    const huge = try api.surfaceSize();
+    try std.testing.expectEqual(api.device.max_texture_size, huge.width);
+    try std.testing.expectEqual(@as(u32, 0), huge.height);
+}
+
+test "d3d11 api: blending selects the target and texture formats" {
+    var linear = try testApi(.linear);
+    defer linear.device.deinit(std.testing.allocator);
+    var native = try testApi(.native);
+    defer native.device.deinit(std.testing.allocator);
+
+    var linear_target = try linear.initTarget(4, 4);
+    defer linear_target.deinit();
+    var native_target = try native.initTarget(4, 4);
+    defer native_target.deinit();
+    // Both are typeless textures; the views differ.
+    try std.testing.expectEqual(win32.dxgi.Format.B8G8R8A8_TYPELESS, linear_target.texture.format);
+    try std.testing.expectEqual(win32.dxgi.Format.B8G8R8A8_TYPELESS, native_target.texture.format);
+
+    try std.testing.expectEqual(win32.dxgi.Format.B8G8R8A8_UNORM_SRGB, linear.textureOptions().rtv_format);
+    try std.testing.expectEqual(win32.dxgi.Format.B8G8R8A8_UNORM, native.textureOptions().rtv_format);
+}
+
+test "d3d11 api: image texture formats are total" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    const Format = win32.dxgi.Format;
+    try std.testing.expectEqual(Format.R8_UNORM, api.imageTextureOptions(.gray, false).format);
+    try std.testing.expectEqual(Format.R8_UNORM, api.imageTextureOptions(.gray, true).format);
+    try std.testing.expectEqual(Format.R8G8B8A8_UNORM, api.imageTextureOptions(.rgba, false).format);
+    try std.testing.expectEqual(Format.R8G8B8A8_UNORM_SRGB, api.imageTextureOptions(.rgba, true).format);
+    try std.testing.expectEqual(Format.B8G8R8A8_UNORM, api.imageTextureOptions(.bgra, false).format);
+    try std.testing.expectEqual(Format.B8G8R8A8_UNORM_SRGB, api.imageTextureOptions(.bgra, true).format);
+
+    // The views read the format the resource was created with.
+    const opts = api.imageTextureOptions(.bgra, true);
+    try std.testing.expectEqual(opts.format, opts.srv_format);
+}
+
 test {
     _ = hlsl;
     _ = slots;
     _ = Pipeline;
     _ = RenderPass;
     _ = Target;
+    _ = Frame;
 }

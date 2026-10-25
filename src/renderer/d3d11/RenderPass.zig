@@ -203,6 +203,15 @@ pub fn complete(self: *const Self) void {
 
     // Release the target so it can be sampled or copied afterwards.
     ctx.omSetRenderTargets(&.{null});
+
+    // And the resources the steps bound, so none stays bound as an input
+    // when its resource is written next: pixel textures (t0..t2) and the
+    // buffer SRVs (t4..t7) of both stages.
+    const no_views: [slots.max_textures]?*d3d11.ID3D11ShaderResourceView = @splat(null);
+    ctx.psSetShaderResources(0, &no_views);
+    const no_buffer_views: [4]?*d3d11.ID3D11ShaderResourceView = @splat(null);
+    ctx.vsSetShaderResources(slots.buffer_srv_base + 1, &no_buffer_views);
+    ctx.psSetShaderResources(slots.buffer_srv_base + 1, &no_buffer_views);
 }
 
 fn pixelAt(pixels: []const u8, width: usize, x: usize, y: usize) [4]u8 {

@@ -14,6 +14,7 @@ const com = win32.com;
 const d3d11 = win32.d3d11;
 const dxgi = win32.dxgi;
 const global = @import("../../global.zig");
+const hlsl = @import("hlsl.zig");
 
 const log = std.log.scoped(.d3d11);
 
@@ -98,6 +99,12 @@ pub fn deinit(self: *Device, alloc: Allocator) void {
     com.release(self.device);
     com.release(self.factory);
     alloc.destroy(self);
+}
+
+/// Compiles the builtin shaders ahead of the first frame. Static: the app
+/// runs it on a thread of its own at startup, before any device exists.
+pub fn warmup() void {
+    hlsl.warmup();
 }
 
 /// Take the immediate context lock. Not recursive.
