@@ -3,6 +3,7 @@
 const Binding = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const build_config = @import("../build_config.zig");
@@ -2693,8 +2694,8 @@ pub const Set = struct {
     ///
     ///   1. Physical key (event.physical_key)
     ///   2. Unshifted Unicode codepoint (event.unshifted_codepoint)
-    ///   3. If that codepoint is not ASCII (a non-Latin layout), the
-    ///      codepoint of the physical key on a US layout
+    ///   3. Windows only: for the letter keys on a layout whose codepoint
+    ///      is not ASCII, the codepoint of the physical key on a US layout
     ///
     pub fn getEvent(self: *const Set, event: KeyEvent) ?Entry {
         var trigger: Trigger = .{
@@ -2725,14 +2726,22 @@ pub const Set = struct {
             if (self.get(trigger)) |v| return v;
         }
 
-        // A non-Latin layout (Cyrillic, Greek, ...) reports a codepoint no
-        // binding is written with. Letter bindings should keep working
-        // there, so fall back to what the physical key types on a US
-        // layout. Latin layouts have ASCII codepoints and never get here.
-        if (event.unshifted_codepoint > 0x7F) physical_cp: {
-            const cp = event.key.codepoint() orelse break :physical_cp;
-            trigger.key = .{ .unicode = cp };
-            if (self.get(trigger)) |v| return v;
+        // Windows only: on a non-Latin layout (Cyrillic, Greek, ...) a
+        // letter key types a codepoint that no default binding is written
+        // with, so `ctrl+shift+c` would stop working. Fall back to the
+        // letter the physical key types on a US layout. Restricted to the
+        // letter keys: Latin layouts put non-ASCII characters on other
+        // keys (DE `ß`, FR `ç`, ...) and those must keep their own meaning.
+        if (comptime builtin.target.os.tag == .windows) {
+            if (event.unshifted_codepoint > 0x7F and
+                @backingInt(event.key) >= @backingInt(key.Key.key_a) and
+                @backingInt(event.key) <= @backingInt(key.Key.key_z))
+            {
+                if (event.key.codepoint()) |cp| {
+                    trigger.key = .{ .unicode = cp };
+                    if (self.get(trigger)) |v| return v;
+                }
+            }
         }
 
         // Fallback to catch_all with modifiers first, then without modifiers.
@@ -4409,8 +4418,8 @@ test "set: getEvent non-Latin layout falls back to the physical key codepoint" {
 
     try s.parseAndPut(alloc, "ctrl+shift+c=new_window");
 
-    // Russian layout: the physical C key types U+0441.
-    {
+    // Russian layout: the physical C key types U+0441. (Windows only.)
+    if (comptime builtin.target.os.tag == .windows) {
         const action = s.getEvent(.{
             .key = .key_c,
             .mods = .{ .ctrl = true, .shift = true },
@@ -4424,6 +4433,22 @@ test "set: getEvent non-Latin layout falls back to the physical key codepoint" {
         .key = .key_v,
         .mods = .{ .ctrl = true, .shift = true },
         .unshifted_codepoint = 0x043C,
+    }) == null);
+
+    // Non-ASCII characters on non-letter keys of Latin layouts keep their
+    // meaning: DE `ß` on the minus key is not `ctrl+-`, FR `ç` on digit 9
+    // is not `alt+9`.
+    try s.parseAndPut(alloc, "ctrl+-=decrease_font_size:1");
+    try s.parseAndPut(alloc, "alt+9=last_tab");
+    try testing.expect(s.getEvent(.{
+        .key = .minus,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0x00DF,
+    }) == null);
+    try testing.expect(s.getEvent(.{
+        .key = .digit_9,
+        .mods = .{ .alt = true },
+        .unshifted_codepoint = 0x00E7,
     }) == null);
 
     // A Latin codepoint is not second-guessed: AZERTY's physical Q types
