@@ -104,6 +104,101 @@ pub const RTV_DIMENSION = enum(i32) {
     TEXTURE3D = 8,
 };
 
+/// D3D11_SRV_DIMENSION
+pub const SRV_DIMENSION = enum(i32) {
+    UNKNOWN = 0,
+    BUFFER = 1,
+    TEXTURE1D = 2,
+    TEXTURE1DARRAY = 3,
+    TEXTURE2D = 4,
+    TEXTURE2DARRAY = 5,
+    TEXTURE2DMS = 6,
+    TEXTURE2DMSARRAY = 7,
+    TEXTURE3D = 8,
+    TEXTURECUBE = 9,
+    TEXTURECUBEARRAY = 10,
+    BUFFEREX = 11,
+};
+
+/// D3D11_FILTER; only the values we create samplers with.
+pub const FILTER = enum(i32) {
+    MIN_MAG_MIP_POINT = 0,
+    MIN_MAG_MIP_LINEAR = 0x15,
+};
+
+/// D3D11_TEXTURE_ADDRESS_MODE
+pub const TEXTURE_ADDRESS_MODE = enum(i32) {
+    WRAP = 1,
+    MIRROR = 2,
+    CLAMP = 3,
+    BORDER = 4,
+    MIRROR_ONCE = 5,
+};
+
+/// D3D11_COMPARISON_FUNC
+pub const COMPARISON_FUNC = enum(i32) {
+    NEVER = 1,
+    LESS = 2,
+    EQUAL = 3,
+    LESS_EQUAL = 4,
+    GREATER = 5,
+    NOT_EQUAL = 6,
+    GREATER_EQUAL = 7,
+    ALWAYS = 8,
+};
+
+/// D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, for `BUFFER_DESC.MiscFlags`.
+pub const RESOURCE_MISC_BUFFER_STRUCTURED: u32 = 0x40;
+
+/// D3D11_FLOAT32_MAX, the "unbounded" `SAMPLER_DESC.MaxLOD`.
+pub const FLOAT32_MAX: f32 = 3.402823466e+38;
+
+/// D3D11_BUFFER_DESC
+pub const BUFFER_DESC = extern struct {
+    ByteWidth: u32,
+    Usage: Usage,
+    BindFlags: BindFlags,
+    CPUAccessFlags: CpuAccessFlags,
+    MiscFlags: u32,
+    StructureByteStride: u32,
+};
+
+/// D3D11_BOX
+pub const BOX = extern struct {
+    left: u32,
+    top: u32,
+    front: u32,
+    right: u32,
+    bottom: u32,
+    back: u32,
+};
+
+/// D3D11_SHADER_RESOURCE_VIEW_DESC. The union is padded to the size of its
+/// largest SDK member (four u32, e.g. `Texture2DArray`).
+pub const SHADER_RESOURCE_VIEW_DESC = extern struct {
+    Format: dxgi.Format,
+    ViewDimension: SRV_DIMENSION,
+    u: extern union {
+        Buffer: extern struct { FirstElement: u32, NumElements: u32 },
+        Texture2D: extern struct { MostDetailedMip: u32, MipLevels: u32 },
+        _size: [4]u32,
+    },
+};
+
+/// D3D11_SAMPLER_DESC
+pub const SAMPLER_DESC = extern struct {
+    Filter: FILTER,
+    AddressU: TEXTURE_ADDRESS_MODE,
+    AddressV: TEXTURE_ADDRESS_MODE,
+    AddressW: TEXTURE_ADDRESS_MODE,
+    MipLODBias: f32,
+    MaxAnisotropy: u32,
+    ComparisonFunc: COMPARISON_FUNC,
+    BorderColor: [4]f32,
+    MinLOD: f32,
+    MaxLOD: f32,
+};
+
 /// D3D11_TEXTURE2D_DESC
 pub const TEXTURE2D_DESC = extern struct {
     Width: u32,
@@ -151,11 +246,11 @@ pub const ID3D11Device = extern struct {
 
     pub const VTable = extern struct {
         base: IUnknown.VTable,
-        CreateBuffer: *const anyopaque,
+        CreateBuffer: *const fn (*ID3D11Device, *const BUFFER_DESC, ?*const SUBRESOURCE_DATA, *?*ID3D11Buffer) callconv(.winapi) HRESULT,
         CreateTexture1D: *const anyopaque,
         CreateTexture2D: *const fn (*ID3D11Device, *const TEXTURE2D_DESC, ?*const SUBRESOURCE_DATA, *?*ID3D11Texture2D) callconv(.winapi) HRESULT,
         CreateTexture3D: *const anyopaque,
-        CreateShaderResourceView: *const anyopaque,
+        CreateShaderResourceView: *const fn (*ID3D11Device, *ID3D11Resource, ?*const SHADER_RESOURCE_VIEW_DESC, *?*ID3D11ShaderResourceView) callconv(.winapi) HRESULT,
         CreateUnorderedAccessView: *const anyopaque,
         CreateRenderTargetView: *const fn (*ID3D11Device, *ID3D11Resource, ?*const RENDER_TARGET_VIEW_DESC, *?*ID3D11RenderTargetView) callconv(.winapi) HRESULT,
         CreateDepthStencilView: *const anyopaque,
@@ -171,7 +266,7 @@ pub const ID3D11Device = extern struct {
         CreateBlendState: *const anyopaque,
         CreateDepthStencilState: *const anyopaque,
         CreateRasterizerState: *const anyopaque,
-        CreateSamplerState: *const anyopaque,
+        CreateSamplerState: *const fn (*ID3D11Device, *const SAMPLER_DESC, *?*ID3D11SamplerState) callconv(.winapi) HRESULT,
         CreateQuery: *const anyopaque,
         CreatePredicate: *const anyopaque,
         CreateCounter: *const anyopaque,
@@ -192,6 +287,24 @@ pub const ID3D11Device = extern struct {
         SetExceptionMode: *const anyopaque,
         GetExceptionMode: *const anyopaque,
     };
+
+    pub inline fn createBuffer(self: *ID3D11Device, desc: *const BUFFER_DESC, initial: ?*const SUBRESOURCE_DATA) Error!*ID3D11Buffer {
+        var out: ?*ID3D11Buffer = null;
+        try check(self.vtable.CreateBuffer(self, desc, initial, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createShaderResourceView(self: *ID3D11Device, resource: *ID3D11Resource, desc: ?*const SHADER_RESOURCE_VIEW_DESC) Error!*ID3D11ShaderResourceView {
+        var out: ?*ID3D11ShaderResourceView = null;
+        try check(self.vtable.CreateShaderResourceView(self, resource, desc, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createSamplerState(self: *ID3D11Device, desc: *const SAMPLER_DESC) Error!*ID3D11SamplerState {
+        var out: ?*ID3D11SamplerState = null;
+        try check(self.vtable.CreateSamplerState(self, desc, &out));
+        return out orelse error.ComFailure;
+    }
 
     pub inline fn createTexture2D(self: *ID3D11Device, desc: *const TEXTURE2D_DESC, initial: ?*const SUBRESOURCE_DATA) Error!*ID3D11Texture2D {
         var out: ?*ID3D11Texture2D = null;
@@ -275,7 +388,7 @@ pub const ID3D11DeviceContext = extern struct {
         RSSetScissorRects: *const anyopaque,
         CopySubresourceRegion: *const anyopaque,
         CopyResource: *const fn (*ID3D11DeviceContext, *ID3D11Resource, *ID3D11Resource) callconv(.winapi) void,
-        UpdateSubresource: *const anyopaque,
+        UpdateSubresource: *const fn (*ID3D11DeviceContext, *ID3D11Resource, u32, ?*const BOX, *const anyopaque, u32, u32) callconv(.winapi) void,
         CopyStructureCount: *const anyopaque,
         ClearRenderTargetView: *const fn (*ID3D11DeviceContext, *ID3D11RenderTargetView, *const [4]f32) callconv(.winapi) void,
         ClearUnorderedAccessViewUint: *const anyopaque,
@@ -352,6 +465,10 @@ pub const ID3D11DeviceContext = extern struct {
         self.vtable.CopyResource(self, dst, src);
     }
 
+    pub inline fn updateSubresource(self: *ID3D11DeviceContext, dst: *ID3D11Resource, subresource: u32, box: ?*const BOX, src: *const anyopaque, row_pitch: u32, depth_pitch: u32) void {
+        self.vtable.UpdateSubresource(self, dst, subresource, box, src, row_pitch, depth_pitch);
+    }
+
     pub inline fn map(self: *ID3D11DeviceContext, resource: *ID3D11Resource, subresource: u32, map_type: MAP, flags: u32) Error!MAPPED_SUBRESOURCE {
         var out: MAPPED_SUBRESOURCE = undefined;
         try check(self.vtable.Map(self, resource, subresource, map_type, flags, &out));
@@ -383,11 +500,17 @@ pub const ID3D11Buffer = extern struct {
 
     pub const VTable = extern struct {
         base: ID3D11Resource.VTable,
-        GetDesc: *const anyopaque,
+        GetDesc: *const fn (*ID3D11Buffer, *BUFFER_DESC) callconv(.winapi) void,
     };
 
     pub inline fn asResource(self: *ID3D11Buffer) *ID3D11Resource {
         return @ptrCast(self);
+    }
+
+    pub inline fn getDesc(self: *ID3D11Buffer) BUFFER_DESC {
+        var out: BUFFER_DESC = undefined;
+        self.vtable.GetDesc(self, &out);
+        return out;
     }
 };
 
@@ -546,4 +669,20 @@ pub fn createDevice(driver: DriverType, flags: CreateDeviceFlags) Error!CreatedD
     ));
     // Success always fills both out-pointers.
     return .{ .device = device.?, .context = context.?, .level = level };
+}
+
+// A reordered or mistyped slot silently calls the wrong method; pin the ones
+// this file types to their SDK header positions (0-based, inherited first).
+comptime {
+    const ptr = @sizeOf(usize);
+    const dev = ID3D11Device.VTable;
+    const ctx = ID3D11DeviceContext.VTable;
+    if (@offsetOf(dev, "CreateBuffer") != 3 * ptr) @compileError("CreateBuffer slot");
+    if (@offsetOf(dev, "CreateShaderResourceView") != 7 * ptr) @compileError("CreateShaderResourceView slot");
+    if (@offsetOf(dev, "CreateSamplerState") != 23 * ptr) @compileError("CreateSamplerState slot");
+    if (@offsetOf(ctx, "UpdateSubresource") != 48 * ptr) @compileError("UpdateSubresource slot");
+    if (@sizeOf(BUFFER_DESC) != 24) @compileError("BUFFER_DESC size");
+    if (@sizeOf(BOX) != 24) @compileError("BOX size");
+    if (@sizeOf(SHADER_RESOURCE_VIEW_DESC) != 24) @compileError("SHADER_RESOURCE_VIEW_DESC size");
+    if (@sizeOf(SAMPLER_DESC) != 52) @compileError("SAMPLER_DESC size");
 }

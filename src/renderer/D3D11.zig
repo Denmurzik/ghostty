@@ -6,6 +6,7 @@
 pub const D3D11 = @This();
 
 const std = @import("std");
+const win32 = @import("win32");
 const Allocator = std.mem.Allocator;
 const shadertoy = @import("shadertoy.zig");
 const apprt = @import("../apprt.zig");
@@ -70,11 +71,11 @@ alloc: std.mem.Allocator,
 blending: configpkg.Config.AlphaBlending,
 
 /// The shared render device.
-device: *const Device,
+device: *Device,
 
 pub fn init(
     alloc: Allocator,
-    device: *const Device,
+    device: *Device,
     opts: rendererpkg.Options,
 ) !D3D11 {
     return .{
@@ -145,8 +146,7 @@ pub fn initTarget(self: *const D3D11, width: usize, height: usize) !Target {
 /// Returns the options to use when constructing buffers that hold
 /// per-instance vertex data.
 pub inline fn instanceBufferOptions(self: D3D11) bufferpkg.Options {
-    _ = self;
-    return .{ .kind = .vertex };
+    return .{ .device = self.device, .role = .vertex };
 }
 
 pub const fgBufferOptions = instanceBufferOptions;
@@ -156,31 +156,29 @@ pub const bgImageBufferOptions = instanceBufferOptions;
 /// Returns the options to use when constructing the cell background
 /// buffer, which is read as a structured buffer.
 pub inline fn bgBufferOptions(self: D3D11) bufferpkg.Options {
-    _ = self;
-    return .{ .kind = .structured };
+    return .{ .device = self.device, .role = .structured };
 }
 
 /// Returns the options to use when constructing the uniform buffer.
 pub inline fn uniformBufferOptions(self: D3D11) bufferpkg.Options {
-    _ = self;
-    return .{ .kind = .uniform };
+    return .{ .device = self.device, .role = .constant };
 }
 
 /// Returns the options to use when constructing textures.
 pub inline fn textureOptions(self: D3D11) Texture.Options {
-    _ = self;
-    return .{ .format = .b8g8r8a8_unorm_srgb };
+    return .{
+        .device = self.device,
+        .format = .B8G8R8A8_UNORM_SRGB,
+        .srv_format = .B8G8R8A8_UNORM_SRGB,
+        // Custom shader ping-pong textures are rendered to.
+        .render_target = true,
+        .rtv_format = .B8G8R8A8_UNORM_SRGB,
+    };
 }
 
 /// Returns the options to use when constructing samplers.
 pub inline fn samplerOptions(self: D3D11) Sampler.Options {
-    _ = self;
-    return .{
-        .min_filter = .linear,
-        .mag_filter = .linear,
-        .wrap_s = .clamp_to_edge,
-        .wrap_t = .clamp_to_edge,
-    };
+    return .{ .device = self.device, .filter = .linear };
 }
 
 /// Pixel format for image texture options.
@@ -199,9 +197,9 @@ pub inline fn imageTextureOptions(
     format: ImageTextureFormat,
     srgb: bool,
 ) Texture.Options {
-    _ = self;
+    const dxgi_format: win32.dxgi.Format = if (srgb) .R8G8B8A8_UNORM_SRGB else .R8G8B8A8_UNORM;
     return switch (format) {
-        .rgba => .{ .format = if (srgb) .r8g8b8a8_unorm_srgb else .r8g8b8a8_unorm },
+        .rgba => .{ .device = self.device, .format = dxgi_format, .srv_format = dxgi_format },
         // Generic only ever asks for `(.rgba, true)`.
         .gray, .bgra => @panic("unsupported image texture format for D3D11"),
     };
@@ -212,15 +210,14 @@ pub fn initAtlasTexture(
     self: *const D3D11,
     atlas: *const font.Atlas,
 ) Texture.Error!Texture {
-    _ = self;
-    const format: Texture.Options.Format = switch (atlas.format) {
-        .grayscale => .r8_unorm,
-        .bgra => .b8g8r8a8_unorm_srgb,
+    const format: win32.dxgi.Format = switch (atlas.format) {
+        .grayscale => .R8_UNORM,
+        .bgra => .B8G8R8A8_UNORM_SRGB,
         else => @panic("unsupported atlas format for D3D11 texture"),
     };
 
     return try Texture.init(
-        .{ .format = format },
+        .{ .device = self.device, .format = format, .srv_format = format },
         atlas.size,
         atlas.size,
         null,
