@@ -1,0 +1,8 @@
+background = #102030
+foreground = #e0e0e0
+confirm-close-surface = false
+# Git Bash turns on bracketed paste, which Ghostty would treat as safe:
+# make every multi-line paste ask for confirmation.
+clipboard-paste-protection = true
+clipboard-paste-bracketed-safe = false
+env = LC_ALL=en_US.UTF-8

@@ -1,0 +1,7 @@
+background = #102030
+foreground = #e0e0e0
+confirm-close-surface = false
+# The default shell (Git Bash) with a UTF-8 locale, so what the keyboard
+# scenarios type arrives as UTF-8 whatever the machine's ANSI code page is.
+env = LC_ALL=en_US.UTF-8
+env = LANG=en_US.UTF-8

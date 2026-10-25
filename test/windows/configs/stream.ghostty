@@ -1,0 +1,6 @@
+background = #102030
+foreground = #e0e0e0
+confirm-close-surface = false
+# Two million numbered lines: the child streams for a long time and ends
+# the window by itself. `direct:` splits on spaces and keeps quotes literally.
+command = direct:cmd.exe /c for /L %i in (1,1,2000000) do @echo %i
