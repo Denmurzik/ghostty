@@ -138,10 +138,12 @@ pub fn initShaders(
 
 /// Initialize a new render target which can be presented by this API.
 pub fn initTarget(self: *const D3D11, width: usize, height: usize) !Target {
-    _ = self;
     return Target.init(.{
+        .device = self.device,
         .width = width,
         .height = height,
+        // Matches `textureOptions`; Task 22 revisits this with the swap chain.
+        .srgb = true,
     });
 }
 
@@ -256,4 +258,7 @@ test "d3d11 stub: size packing roundtrip" {
 test {
     _ = hlsl;
     _ = slots;
+    _ = Pipeline;
+    _ = RenderPass;
+    _ = Target;
 }

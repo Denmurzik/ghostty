@@ -11,6 +11,7 @@ const HRESULT = foundation.HRESULT;
 const HMODULE = foundation.HMODULE;
 const Error = foundation.Error;
 const check = foundation.check;
+const BOOL = foundation.BOOL;
 const IUnknown = com.IUnknown;
 
 /// D3D_FEATURE_LEVEL (d3dcommon.h).
@@ -239,6 +240,106 @@ pub const RENDER_TARGET_VIEW_DESC = extern struct {
     },
 };
 
+/// D3D11_INPUT_CLASSIFICATION
+pub const INPUT_CLASSIFICATION = enum(i32) {
+    PER_VERTEX_DATA = 0,
+    PER_INSTANCE_DATA = 1,
+};
+
+/// D3D11_BLEND; only the factors we blend with.
+pub const BLEND = enum(i32) {
+    ZERO = 1,
+    ONE = 2,
+    SRC_ALPHA = 5,
+    INV_SRC_ALPHA = 6,
+};
+
+/// D3D11_BLEND_OP
+pub const BLEND_OP = enum(i32) {
+    ADD = 1,
+    SUBTRACT = 2,
+    REV_SUBTRACT = 3,
+    MIN = 4,
+    MAX = 5,
+};
+
+/// D3D11_COLOR_WRITE_ENABLE_ALL
+pub const COLOR_WRITE_ENABLE_ALL: u8 = 0xf;
+
+/// D3D11_FILL_MODE
+pub const FILL_MODE = enum(i32) {
+    WIREFRAME = 2,
+    SOLID = 3,
+};
+
+/// D3D11_CULL_MODE
+pub const CULL_MODE = enum(i32) {
+    NONE = 1,
+    FRONT = 2,
+    BACK = 3,
+};
+
+/// D3D_PRIMITIVE_TOPOLOGY (d3dcommon.h); only the topologies we draw with.
+pub const PRIMITIVE_TOPOLOGY = enum(i32) {
+    UNDEFINED = 0,
+    TRIANGLELIST = 4,
+    TRIANGLESTRIP = 5,
+};
+
+/// D3D11_INPUT_ELEMENT_DESC
+pub const INPUT_ELEMENT_DESC = extern struct {
+    SemanticName: [*:0]const u8,
+    SemanticIndex: u32,
+    Format: dxgi.Format,
+    InputSlot: u32,
+    AlignedByteOffset: u32,
+    InputSlotClass: INPUT_CLASSIFICATION,
+    InstanceDataStepRate: u32,
+};
+
+/// D3D11_RENDER_TARGET_BLEND_DESC
+pub const RENDER_TARGET_BLEND_DESC = extern struct {
+    BlendEnable: BOOL,
+    SrcBlend: BLEND,
+    DestBlend: BLEND,
+    BlendOp: BLEND_OP,
+    SrcBlendAlpha: BLEND,
+    DestBlendAlpha: BLEND,
+    BlendOpAlpha: BLEND_OP,
+    RenderTargetWriteMask: u8,
+};
+
+/// D3D11_BLEND_DESC
+pub const BLEND_DESC = extern struct {
+    AlphaToCoverageEnable: BOOL,
+    IndependentBlendEnable: BOOL,
+    RenderTarget: [8]RENDER_TARGET_BLEND_DESC,
+};
+
+/// D3D11_RASTERIZER_DESC
+pub const RASTERIZER_DESC = extern struct {
+    FillMode: FILL_MODE,
+    CullMode: CULL_MODE,
+    FrontCounterClockwise: BOOL,
+    DepthBias: i32,
+    DepthBiasClamp: f32,
+    SlopeScaledDepthBias: f32,
+    DepthClipEnable: BOOL,
+    ScissorEnable: BOOL,
+    MultisampleEnable: BOOL,
+    AntialiasedLineEnable: BOOL,
+};
+
+/// D3D11_VIEWPORT
+pub const VIEWPORT = extern struct {
+    TopLeftX: f32,
+    TopLeftY: f32,
+    Width: f32,
+    Height: f32,
+    MinDepth: f32,
+    MaxDepth: f32,
+};
+
 pub const ID3D11Device = extern struct {
     vtable: *const VTable,
 
@@ -254,18 +355,18 @@ pub const ID3D11Device = extern struct {
         CreateUnorderedAccessView: *const anyopaque,
         CreateRenderTargetView: *const fn (*ID3D11Device, *ID3D11Resource, ?*const RENDER_TARGET_VIEW_DESC, *?*ID3D11RenderTargetView) callconv(.winapi) HRESULT,
         CreateDepthStencilView: *const anyopaque,
-        CreateInputLayout: *const anyopaque,
-        CreateVertexShader: *const anyopaque,
+        CreateInputLayout: *const fn (*ID3D11Device, [*]const INPUT_ELEMENT_DESC, u32, *const anyopaque, usize, *?*ID3D11InputLayout) callconv(.winapi) HRESULT,
+        CreateVertexShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11VertexShader) callconv(.winapi) HRESULT,
         CreateGeometryShader: *const anyopaque,
         CreateGeometryShaderWithStreamOutput: *const anyopaque,
-        CreatePixelShader: *const anyopaque,
+        CreatePixelShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11PixelShader) callconv(.winapi) HRESULT,
         CreateHullShader: *const anyopaque,
         CreateDomainShader: *const anyopaque,
         CreateComputeShader: *const anyopaque,
         CreateClassLinkage: *const anyopaque,
-        CreateBlendState: *const anyopaque,
+        CreateBlendState: *const fn (*ID3D11Device, *const BLEND_DESC, *?*ID3D11BlendState) callconv(.winapi) HRESULT,
         CreateDepthStencilState: *const anyopaque,
-        CreateRasterizerState: *const anyopaque,
+        CreateRasterizerState: *const fn (*ID3D11Device, *const RASTERIZER_DESC, *?*ID3D11RasterizerState) callconv(.winapi) HRESULT,
         CreateSamplerState: *const fn (*ID3D11Device, *const SAMPLER_DESC, *?*ID3D11SamplerState) callconv(.winapi) HRESULT,
         CreateQuery: *const anyopaque,
         CreatePredicate: *const anyopaque,
@@ -318,6 +419,36 @@ pub const ID3D11Device = extern struct {
         return out orelse error.ComFailure;
     }
 
+    pub inline fn createInputLayout(self: *ID3D11Device, elements: []const INPUT_ELEMENT_DESC, bytecode: []const u8) Error!*ID3D11InputLayout {
+        var out: ?*ID3D11InputLayout = null;
+        try check(self.vtable.CreateInputLayout(self, elements.ptr, @intCast(elements.len), bytecode.ptr, bytecode.len, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createVertexShader(self: *ID3D11Device, bytecode: []const u8) Error!*ID3D11VertexShader {
+        var out: ?*ID3D11VertexShader = null;
+        try check(self.vtable.CreateVertexShader(self, bytecode.ptr, bytecode.len, null, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createPixelShader(self: *ID3D11Device, bytecode: []const u8) Error!*ID3D11PixelShader {
+        var out: ?*ID3D11PixelShader = null;
+        try check(self.vtable.CreatePixelShader(self, bytecode.ptr, bytecode.len, null, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createBlendState(self: *ID3D11Device, desc: *const BLEND_DESC) Error!*ID3D11BlendState {
+        var out: ?*ID3D11BlendState = null;
+        try check(self.vtable.CreateBlendState(self, desc, &out));
+        return out orelse error.ComFailure;
+    }
+
+    pub inline fn createRasterizerState(self: *ID3D11Device, desc: *const RASTERIZER_DESC) Error!*ID3D11RasterizerState {
+        var out: ?*ID3D11RasterizerState = null;
+        try check(self.vtable.CreateRasterizerState(self, desc, &out));
+        return out orelse error.ComFailure;
+    }
+
     /// Returns a new reference to the immediate context; the caller releases it.
     pub inline fn getImmediateContext(self: *ID3D11Device) *ID3D11DeviceContext {
         var out: ?*ID3D11DeviceContext = null;
@@ -347,25 +478,25 @@ pub const ID3D11DeviceContext = extern struct {
 
     pub const VTable = extern struct {
         base: ID3D11DeviceChild.VTable,
-        VSSetConstantBuffers: *const anyopaque,
-        PSSetShaderResources: *const anyopaque,
-        PSSetShader: *const anyopaque,
-        PSSetSamplers: *const anyopaque,
-        VSSetShader: *const anyopaque,
+        VSSetConstantBuffers: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11Buffer) callconv(.winapi) void,
+        PSSetShaderResources: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11ShaderResourceView) callconv(.winapi) void,
+        PSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11PixelShader, ?[*]const ?*anyopaque, u32) callconv(.winapi) void,
+        PSSetSamplers: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11SamplerState) callconv(.winapi) void,
+        VSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11VertexShader, ?[*]const ?*anyopaque, u32) callconv(.winapi) void,
         DrawIndexed: *const anyopaque,
-        Draw: *const anyopaque,
+        Draw: *const fn (*ID3D11DeviceContext, u32, u32) callconv(.winapi) void,
         Map: *const fn (*ID3D11DeviceContext, *ID3D11Resource, u32, MAP, u32, *MAPPED_SUBRESOURCE) callconv(.winapi) HRESULT,
         Unmap: *const fn (*ID3D11DeviceContext, *ID3D11Resource, u32) callconv(.winapi) void,
-        PSSetConstantBuffers: *const anyopaque,
-        IASetInputLayout: *const anyopaque,
-        IASetVertexBuffers: *const anyopaque,
+        PSSetConstantBuffers: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11Buffer) callconv(.winapi) void,
+        IASetInputLayout: *const fn (*ID3D11DeviceContext, ?*ID3D11InputLayout) callconv(.winapi) void,
+        IASetVertexBuffers: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11Buffer, ?[*]const u32, ?[*]const u32) callconv(.winapi) void,
         IASetIndexBuffer: *const anyopaque,
         DrawIndexedInstanced: *const anyopaque,
-        DrawInstanced: *const anyopaque,
+        DrawInstanced: *const fn (*ID3D11DeviceContext, u32, u32, u32, u32) callconv(.winapi) void,
         GSSetConstantBuffers: *const anyopaque,
         GSSetShader: *const anyopaque,
-        IASetPrimitiveTopology: *const anyopaque,
-        VSSetShaderResources: *const anyopaque,
+        IASetPrimitiveTopology: *const fn (*ID3D11DeviceContext, PRIMITIVE_TOPOLOGY) callconv(.winapi) void,
+        VSSetShaderResources: *const fn (*ID3D11DeviceContext, u32, u32, ?[*]const ?*ID3D11ShaderResourceView) callconv(.winapi) void,
         VSSetSamplers: *const anyopaque,
         Begin: *const anyopaque,
         End: *const anyopaque,
@@ -373,9 +504,9 @@ pub const ID3D11DeviceContext = extern struct {
         SetPredication: *const anyopaque,
         GSSetShaderResources: *const anyopaque,
         GSSetSamplers: *const anyopaque,
-        OMSetRenderTargets: *const anyopaque,
+        OMSetRenderTargets: *const fn (*ID3D11DeviceContext, u32, ?[*]const ?*ID3D11RenderTargetView, ?*anyopaque) callconv(.winapi) void,
         OMSetRenderTargetsAndUnorderedAccessViews: *const anyopaque,
-        OMSetBlendState: *const anyopaque,
+        OMSetBlendState: *const fn (*ID3D11DeviceContext, ?*ID3D11BlendState, ?*const [4]f32, u32) callconv(.winapi) void,
         OMSetDepthStencilState: *const anyopaque,
         SOSetTargets: *const anyopaque,
         DrawAuto: *const anyopaque,
@@ -383,8 +514,8 @@ pub const ID3D11DeviceContext = extern struct {
         DrawInstancedIndirect: *const anyopaque,
         Dispatch: *const anyopaque,
         DispatchIndirect: *const anyopaque,
-        RSSetState: *const anyopaque,
-        RSSetViewports: *const anyopaque,
+        RSSetState: *const fn (*ID3D11DeviceContext, ?*ID3D11RasterizerState) callconv(.winapi) void,
+        RSSetViewports: *const fn (*ID3D11DeviceContext, u32, ?[*]const VIEWPORT) callconv(.winapi) void,
         RSSetScissorRects: *const anyopaque,
         CopySubresourceRegion: *const anyopaque,
         CopyResource: *const fn (*ID3D11DeviceContext, *ID3D11Resource, *ID3D11Resource) callconv(.winapi) void,
@@ -456,6 +587,72 @@ pub const ID3D11DeviceContext = extern struct {
         GetContextFlags: *const anyopaque,
         FinishCommandList: *const anyopaque,
     };
+
+    pub inline fn vsSetConstantBuffers(self: *ID3D11DeviceContext, start: u32, buffers: []const ?*ID3D11Buffer) void {
+        self.vtable.VSSetConstantBuffers(self, start, @intCast(buffers.len), buffers.ptr);
+    }
+
+    pub inline fn psSetConstantBuffers(self: *ID3D11DeviceContext, start: u32, buffers: []const ?*ID3D11Buffer) void {
+        self.vtable.PSSetConstantBuffers(self, start, @intCast(buffers.len), buffers.ptr);
+    }
+
+    pub inline fn vsSetShaderResources(self: *ID3D11DeviceContext, start: u32, views: []const ?*ID3D11ShaderResourceView) void {
+        self.vtable.VSSetShaderResources(self, start, @intCast(views.len), views.ptr);
+    }
+
+    pub inline fn psSetShaderResources(self: *ID3D11DeviceContext, start: u32, views: []const ?*ID3D11ShaderResourceView) void {
+        self.vtable.PSSetShaderResources(self, start, @intCast(views.len), views.ptr);
+    }
+
+    pub inline fn psSetSamplers(self: *ID3D11DeviceContext, start: u32, samplers: []const ?*ID3D11SamplerState) void {
+        self.vtable.PSSetSamplers(self, start, @intCast(samplers.len), samplers.ptr);
+    }
+
+    pub inline fn vsSetShader(self: *ID3D11DeviceContext, shader: ?*ID3D11VertexShader) void {
+        self.vtable.VSSetShader(self, shader, null, 0);
+    }
+
+    pub inline fn psSetShader(self: *ID3D11DeviceContext, shader: ?*ID3D11PixelShader) void {
+        self.vtable.PSSetShader(self, shader, null, 0);
+    }
+
+    pub inline fn iaSetInputLayout(self: *ID3D11DeviceContext, layout: ?*ID3D11InputLayout) void {
+        self.vtable.IASetInputLayout(self, layout);
+    }
+
+    /// Binds one vertex buffer at `slot` with a byte stride and offset.
+    pub inline fn iaSetVertexBuffer(self: *ID3D11DeviceContext, slot: u32, buffer: ?*ID3D11Buffer, stride: u32, offset: u32) void {
+        const buffers = [1]?*ID3D11Buffer{buffer};
+        self.vtable.IASetVertexBuffers(self, slot, 1, &buffers, @ptrCast(&stride), @ptrCast(&offset));
+    }
+
+    pub inline fn iaSetPrimitiveTopology(self: *ID3D11DeviceContext, topology: PRIMITIVE_TOPOLOGY) void {
+        self.vtable.IASetPrimitiveTopology(self, topology);
+    }
+
+    pub inline fn drawInstanced(self: *ID3D11DeviceContext, vertex_count: u32, instance_count: u32, start_vertex: u32, start_instance: u32) void {
+        self.vtable.DrawInstanced(self, vertex_count, instance_count, start_vertex, start_instance);
+    }
+
+    pub inline fn draw(self: *ID3D11DeviceContext, vertex_count: u32, start_vertex: u32) void {
+        self.vtable.Draw(self, vertex_count, start_vertex);
+    }
+
+    pub inline fn omSetRenderTargets(self: *ID3D11DeviceContext, views: []const ?*ID3D11RenderTargetView) void {
+        self.vtable.OMSetRenderTargets(self, @intCast(views.len), views.ptr, null);
+    }
+
+    pub inline fn omSetBlendState(self: *ID3D11DeviceContext, state: ?*ID3D11BlendState) void {
+        self.vtable.OMSetBlendState(self, state, null, 0xffffffff);
+    }
+
+    pub inline fn rsSetViewports(self: *ID3D11DeviceContext, viewports: []const VIEWPORT) void {
+        self.vtable.RSSetViewports(self, @intCast(viewports.len), viewports.ptr);
+    }
+
+    pub inline fn rsSetState(self: *ID3D11DeviceContext, state: ?*ID3D11RasterizerState) void {
+        self.vtable.RSSetState(self, state);
+    }
 
     pub inline fn clearRenderTargetView(self: *ID3D11DeviceContext, rtv: *ID3D11RenderTargetView, color: [4]f32) void {
         self.vtable.ClearRenderTargetView(self, rtv, &color);
@@ -681,6 +878,26 @@ comptime {
     if (@offsetOf(dev, "CreateShaderResourceView") != 7 * ptr) @compileError("CreateShaderResourceView slot");
     if (@offsetOf(dev, "CreateSamplerState") != 23 * ptr) @compileError("CreateSamplerState slot");
     if (@offsetOf(ctx, "UpdateSubresource") != 48 * ptr) @compileError("UpdateSubresource slot");
+    if (@offsetOf(dev, "CreateInputLayout") != 11 * ptr) @compileError("CreateInputLayout slot");
+    if (@offsetOf(dev, "CreateVertexShader") != 12 * ptr) @compileError("CreateVertexShader slot");
+    if (@offsetOf(dev, "CreatePixelShader") != 15 * ptr) @compileError("CreatePixelShader slot");
+    if (@offsetOf(dev, "CreateBlendState") != 20 * ptr) @compileError("CreateBlendState slot");
+    if (@offsetOf(dev, "CreateRasterizerState") != 22 * ptr) @compileError("CreateRasterizerState slot");
+    if (@offsetOf(ctx, "VSSetConstantBuffers") != 7 * ptr) @compileError("VSSetConstantBuffers slot");
+    if (@offsetOf(ctx, "PSSetShader") != 9 * ptr) @compileError("PSSetShader slot");
+    if (@offsetOf(ctx, "Draw") != 13 * ptr) @compileError("Draw slot");
+    if (@offsetOf(ctx, "IASetInputLayout") != 17 * ptr) @compileError("IASetInputLayout slot");
+    if (@offsetOf(ctx, "DrawInstanced") != 21 * ptr) @compileError("DrawInstanced slot");
+    if (@offsetOf(ctx, "IASetPrimitiveTopology") != 24 * ptr) @compileError("IASetPrimitiveTopology slot");
+    if (@offsetOf(ctx, "OMSetRenderTargets") != 33 * ptr) @compileError("OMSetRenderTargets slot");
+    if (@offsetOf(ctx, "OMSetBlendState") != 35 * ptr) @compileError("OMSetBlendState slot");
+    if (@offsetOf(ctx, "RSSetState") != 43 * ptr) @compileError("RSSetState slot");
+    if (@offsetOf(ctx, "RSSetViewports") != 44 * ptr) @compileError("RSSetViewports slot");
+    if (@sizeOf(INPUT_ELEMENT_DESC) != 32) @compileError("INPUT_ELEMENT_DESC size");
+    if (@sizeOf(RENDER_TARGET_BLEND_DESC) != 32) @compileError("RENDER_TARGET_BLEND_DESC size");
+    if (@sizeOf(BLEND_DESC) != 264) @compileError("BLEND_DESC size");
+    if (@sizeOf(RASTERIZER_DESC) != 40) @compileError("RASTERIZER_DESC size");
+    if (@sizeOf(VIEWPORT) != 24) @compileError("VIEWPORT size");
     if (@sizeOf(BUFFER_DESC) != 24) @compileError("BUFFER_DESC size");
     if (@sizeOf(BOX) != 24) @compileError("BOX size");
     if (@sizeOf(SHADER_RESOURCE_VIEW_DESC) != 24) @compileError("SHADER_RESOURCE_VIEW_DESC size");
