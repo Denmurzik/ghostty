@@ -80,6 +80,7 @@
         .sentry = .{ .path = "./pkg/sentry", .lazy = true },
         .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
         .wuffs = .{ .path = "./pkg/wuffs", .lazy = true },
+        .win32 = .{ .path = "./pkg/win32", .lazy = true },
         .zlib = .{ .path = "./pkg/zlib", .lazy = true },
 
         // Shader translation

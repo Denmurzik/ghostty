@@ -556,6 +556,19 @@ pub fn add(
         step.root_module.addImport("zf", dep.module("zf"));
     }
 
+    // Windows system libraries and the hand-written Win32 bindings.
+    if (target.result.os.tag == .windows) {
+        if (b.lazyDependency("win32", .{
+            .target = target,
+            .optimize = optimize,
+        })) |dep| {
+            step.root_module.addImport("win32", dep.module("win32"));
+        }
+        for ([_][]const u8{
+            "user32", "gdi32", "dwmapi", "imm32", "ole32", "advapi32", "d3d11", "dxgi",
+        }) |lib| step.root_module.linkSystemLibrary(lib, .{});
+    }
+
     // Mac Stuff
     if (step.rootModuleTarget().os.tag.isDarwin()) {
         if (b.lazyDependency("zig_objc", .{
