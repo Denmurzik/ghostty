@@ -86,6 +86,17 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 $logDir = Join-Path $runRoot '_logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+# Another session may be running GUI tests on this desktop: take turns
+# through %TEMP%\gui-e2e.lock (owner name and time), waiting up to 30 minutes.
+$lock = Join-Path $env:TEMP 'gui-e2e.lock'
+$waited = [Diagnostics.Stopwatch]::StartNew()
+while ((Test-Path $lock) -and ((Get-Item $lock).LastWriteTime -gt (Get-Date).AddHours(-2))) {
+    if ($waited.Elapsed.TotalMinutes -gt 30) { throw "$lock is still held: $(Get-Content $lock -Raw)" }
+    Write-Host "INFO waiting for $lock ($((Get-Content $lock -Raw).Trim()))"
+    Start-Sleep -Seconds 15
+}
+Set-Content -LiteralPath $lock -Value "e2e-m1.ps1 $(Get-Date -Format s)" -Encoding ASCII
+
 $env:GHOSTTY_E2E_RUNROOT = $runRoot
 if ($EvidenceDir) {
     New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
@@ -177,6 +188,7 @@ try {
             if (Test-Path $f) { Copy-Item -LiteralPath $f -Destination $EvidenceDir -Force }
         }
     }
+    Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:\GHOSTTY_E2E_RUNROOT, Env:\GHOSTTY_E2E_EVIDENCE -ErrorAction SilentlyContinue
 }
