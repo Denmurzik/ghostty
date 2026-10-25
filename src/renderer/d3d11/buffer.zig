@@ -20,9 +20,13 @@ pub const Options = struct {
     role: Role,
 };
 
-/// The raw native handle of a buffer, as passed to a render pass step.
-/// This is the `ID3D11Buffer` pointer.
-pub const Handle = *anyopaque;
+/// The native handle of a buffer, as passed to a render pass step. It is a
+/// value: the render pass binds `resource` as a vertex/constant buffer and
+/// `srv` (structured role only) as a shader resource.
+pub const Handle = struct {
+    resource: *d3d11.ID3D11Buffer,
+    srv: ?*d3d11.ID3D11ShaderResourceView,
+};
 
 /// D3D11 data storage for a certain set of equal types. This is usually
 /// used for vertex buffers, etc.
@@ -36,12 +40,9 @@ pub fn Buffer(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        /// Underlying native buffer.
-        buffer: *d3d11.ID3D11Buffer,
-
-        /// Shader resource view of the whole buffer; only for the
-        /// `structured` role.
-        srv: ?*d3d11.ID3D11ShaderResourceView,
+        /// Underlying native buffer and, for the `structured` role, the
+        /// shader resource view of the whole buffer. Replaced on growth.
+        buffer: Handle,
 
         /// Options this buffer was allocated with.
         opts: Options,
@@ -61,8 +62,8 @@ pub fn Buffer(comptime T: type) type {
         }
 
         pub fn deinit(self: Self) void {
-            com.release(self.srv);
-            com.release(self.buffer);
+            com.release(self.buffer.srv);
+            com.release(self.buffer.resource);
         }
 
         /// Sync new contents to the buffer. The data is expected to be the
@@ -75,7 +76,7 @@ pub fn Buffer(comptime T: type) type {
             try self.ensureCapacity(data.len);
 
             const dst = try self.mapDiscard();
-            defer self.opts.device.context.unmap(self.buffer.asResource(), 0);
+            defer self.opts.device.context.unmap(self.buffer.resource.asResource(), 0);
             @memcpy(dst[0..data.len], data);
         }
 
@@ -89,7 +90,7 @@ pub fn Buffer(comptime T: type) type {
             try self.ensureCapacity(total_len);
 
             const dst = try self.mapDiscard();
-            defer self.opts.device.context.unmap(self.buffer.asResource(), 0);
+            defer self.opts.device.context.unmap(self.buffer.resource.asResource(), 0);
 
             var i: usize = 0;
             for (lists) |list| {
@@ -103,7 +104,7 @@ pub fn Buffer(comptime T: type) type {
         fn mapDiscard(self: *Self) ![*]T {
             const device = self.opts.device;
             device.assertContextLocked();
-            const mapped = try device.context.map(self.buffer.asResource(), 0, .write_discard, 0);
+            const mapped = try device.context.map(self.buffer.resource.asResource(), 0, .write_discard, 0);
             return @ptrCast(@alignCast(mapped.pData.?));
         }
 
@@ -174,8 +175,7 @@ pub fn Buffer(comptime T: type) type {
                 null;
 
             return .{
-                .buffer = buffer,
-                .srv = srv,
+                .buffer = .{ .resource = buffer, .srv = srv },
                 .opts = opts,
                 .len = len,
             };
@@ -221,7 +221,7 @@ test "d3d11 buffer: sync grows and preserves contents" {
     var buf = try Buffer(u32).init(.{ .device = device, .role = .structured }, 4);
     defer buf.deinit();
     try std.testing.expectEqual(@as(usize, 4), buf.len);
-    try std.testing.expect(buf.srv != null);
+    try std.testing.expect(buf.buffer.srv != null);
 
     const input = [_]u32{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 };
 
@@ -230,9 +230,9 @@ test "d3d11 buffer: sync grows and preserves contents" {
 
     try buf.sync(&input);
     try std.testing.expect(buf.len >= input.len);
-    try std.testing.expect(buf.srv != null);
+    try std.testing.expect(buf.buffer.srv != null);
 
-    const rb = try ReadBack.begin(device, buf.buffer, @intCast(buf.len * @sizeOf(u32)));
+    const rb = try ReadBack.begin(device, buf.buffer.resource, @intCast(buf.len * @sizeOf(u32)));
     defer rb.end();
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&input), rb.data[0 .. input.len * @sizeOf(u32)]);
 }
@@ -244,7 +244,7 @@ test "d3d11 buffer: syncFromArrayLists concatenates the lists" {
 
     var buf = try Buffer(u32).init(.{ .device = device, .role = .vertex }, 2);
     defer buf.deinit();
-    try std.testing.expect(buf.srv == null);
+    try std.testing.expect(buf.buffer.srv == null);
 
     var a: std.ArrayListUnmanaged(u32) = .empty;
     defer a.deinit(alloc);
@@ -261,7 +261,7 @@ test "d3d11 buffer: syncFromArrayLists concatenates the lists" {
     const n = try buf.syncFromArrayLists(&.{ a, empty, b });
     try std.testing.expectEqual(@as(usize, 5), n);
 
-    const rb = try ReadBack.begin(device, buf.buffer, @intCast(buf.len * @sizeOf(u32)));
+    const rb = try ReadBack.begin(device, buf.buffer.resource, @intCast(buf.len * @sizeOf(u32)));
     defer rb.end();
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&[_]u32{ 1, 2, 3, 4, 5 }), rb.data[0 .. 5 * @sizeOf(u32)]);
 }
@@ -274,16 +274,16 @@ test "d3d11 buffer: constant role rounds size to 16" {
     // 4 bytes of payload become a 16 byte constant buffer.
     var buf = try Buffer(u32).initFill(.{ .device = device, .role = .constant }, &.{0xAABBCCDD});
     defer buf.deinit();
-    try std.testing.expect(buf.srv == null);
+    try std.testing.expect(buf.buffer.srv == null);
 
-    const desc = buf.buffer.getDesc();
+    const desc = buf.buffer.resource.getDesc();
     try std.testing.expectEqual(@as(u32, 16), desc.ByteWidth);
     try std.testing.expect(desc.BindFlags.constant_buffer);
 
     device.lockContext();
     defer device.unlockContext();
 
-    const rb = try ReadBack.begin(device, buf.buffer, 16);
+    const rb = try ReadBack.begin(device, buf.buffer.resource, 16);
     defer rb.end();
     try std.testing.expectEqual(@as(u32, 0xAABBCCDD), std.mem.readInt(u32, rb.data[0..4], .little));
     // The padding is zeroed.
