@@ -104,6 +104,12 @@ rt_post_fork_info: RtPostForkInfo,
 pseudo_console: if (builtin.target.os.tag == .windows) ?windows.HPCON else void =
     if (builtin.target.os.tag == .windows) null else {},
 
+/// Kill-on-close job object holding the child and everything it spawns
+/// (Windows). Set by start. Terminating or closing it takes the whole tree
+/// down, see killTree and closeJob.
+job: if (builtin.target.os.tag == .windows) ?windows.HANDLE else void =
+    if (builtin.target.os.tag == .windows) null else {},
+
 /// User data that is sent to the callback. Set with setData and getData
 /// for a more user-friendly API.
 data: ?*anyopaque = null,
@@ -352,29 +358,50 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (null_fd) |fd| _ = windows.exp.kernel32.CloseHandle(fd);
     }
 
+    // The child, and so every process it spawns, lives in a job object that
+    // kills them all when the job is closed. The job is assigned through
+    // PROC_THREAD_ATTRIBUTE_JOB_LIST so the child is never outside of it,
+    // not even for an instant.
+    const job = try createKillOnCloseJob();
+    errdefer _ = windows.exp.kernel32.CloseHandle(job);
+    // Must stay alive until CreateProcessW returns, hence the arena.
+    const job_list = try arena.create([1]windows.HANDLE);
+    job_list.* = .{job};
+
     // TODO: In the case of having FDs instead of pty, need to set up
     // attributes such that the child process only inherits these handles,
     // then set bInheritsHandles below.
 
-    const attribute_list, const stdin, const stdout, const stderr = if (self.pseudo_console) |pseudo_console| b: {
-        var attribute_list_size: usize = undefined;
-        _ = windows.exp.kernel32.InitializeProcThreadAttributeList(
-            null,
-            1,
-            0,
-            &attribute_list_size,
-        );
+    const attr_count: windows.DWORD = if (self.pseudo_console != null) 2 else 1;
+    var attribute_list_size: usize = undefined;
+    _ = windows.exp.kernel32.InitializeProcThreadAttributeList(
+        null,
+        attr_count,
+        0,
+        &attribute_list_size,
+    );
 
-        const attribute_list_buf = try arena.alloc(u8, attribute_list_size);
-        if (windows.exp.kernel32.InitializeProcThreadAttributeList(
-            attribute_list_buf.ptr,
-            1,
-            0,
-            &attribute_list_size,
-        ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
+    const attribute_list = (try arena.alloc(u8, attribute_list_size)).ptr;
+    if (windows.exp.kernel32.InitializeProcThreadAttributeList(
+        attribute_list,
+        attr_count,
+        0,
+        &attribute_list_size,
+    ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
 
+    if (windows.exp.kernel32.UpdateProcThreadAttribute(
+        attribute_list,
+        0,
+        windows.PROC_THREAD_ATTRIBUTE_JOB_LIST,
+        job_list,
+        @sizeOf([1]windows.HANDLE),
+        null,
+        null,
+    ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
+
+    const stdin, const stdout, const stderr = if (self.pseudo_console) |pseudo_console| b: {
         if (windows.exp.kernel32.UpdateProcThreadAttribute(
-            attribute_list_buf.ptr,
+            attribute_list,
             0,
             windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             pseudo_console,
@@ -383,20 +410,23 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             null,
         ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
 
-        break :b .{ attribute_list_buf.ptr, null, null, null };
+        break :b .{ null, null, null };
     } else b: {
         const stdin = if (self.stdin) |f| f.handle else null_fd.?;
         const stdout = if (self.stdout) |f| f.handle else null_fd.?;
         const stderr = if (self.stderr) |f| f.handle else null_fd.?;
-        break :b .{ null, stdin, stdout, stderr };
+        break :b .{ stdin, stdout, stderr };
     };
 
     var startup_info_ex = windows.STARTUPINFOEX{
         .StartupInfo = .{
-            .cb = if (attribute_list != null) @sizeOf(windows.STARTUPINFOEX) else @sizeOf(windows.STARTUPINFOW),
+            .cb = @sizeOf(windows.STARTUPINFOEX),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
+            // On the pseudo console path the handles stay null. Without
+            // the flag the child picks up our own std handles instead of
+            // the console's.
             .dwFlags = windows.STARTF_USESTDHANDLES,
             .lpReserved = null,
             .lpDesktop = null,
@@ -415,8 +445,8 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         .lpAttributeList = attribute_list,
     };
 
-    var flags: windows.DWORD = windows.CREATE_UNICODE_ENVIRONMENT;
-    if (attribute_list != null) flags |= windows.EXTENDED_STARTUPINFO_PRESENT;
+    const flags: windows.DWORD = windows.CREATE_UNICODE_ENVIRONMENT |
+        windows.EXTENDED_STARTUPINFO_PRESENT;
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
@@ -424,7 +454,9 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         command_line_w.ptr,
         null,
         null,
-        windows.TRUE,
+        // The pseudo console path hands the child its console through the
+        // attribute list, so it must not inherit any of our handles.
+        if (self.pseudo_console != null) windows.FALSE else windows.TRUE,
         flags,
         if (env_w) |w| w.ptr else null,
         if (cwd_w) |w| w.ptr else null,
@@ -432,7 +464,45 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         &process_information,
     ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
 
+    _ = windows.exp.kernel32.CloseHandle(process_information.hThread);
+    self.job = job;
     self.pid = process_information.hProcess;
+}
+
+fn createKillOnCloseJob() !windows.HANDLE {
+    const job = windows.CreateJobObjectW(null, null) orelse
+        return windows.unexpectedError(windows.GetLastError());
+    errdefer _ = windows.exp.kernel32.CloseHandle(job);
+
+    var info = std.mem.zeroes(windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+    info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (windows.SetInformationJobObject(
+        job,
+        windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+        &info,
+        @sizeOf(windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+    ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
+
+    return job;
+}
+
+/// Terminate the child and every process it started (Windows). Does not
+/// wait; use wait afterwards to reap the child.
+pub fn killTree(self: *Command) !void {
+    if (self.job) |job| {
+        if (windows.TerminateJobObject(job, 0) == windows.FALSE)
+            return windows.unexpectedError(windows.GetLastError());
+    } else if (self.pid) |pid| {
+        if (windows.exp.kernel32.TerminateProcess(pid, 0) == windows.FALSE)
+            return windows.unexpectedError(windows.GetLastError());
+    }
+}
+
+/// Close the job (Windows). Whatever is still running in it is killed.
+/// Safe to call repeatedly.
+pub fn closeJob(self: *Command) void {
+    if (self.job) |job| _ = windows.exp.kernel32.CloseHandle(job);
+    self.job = null;
 }
 
 fn setupFd(src: File.Handle, target: i32) !void {
@@ -615,7 +685,7 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 }
 
 /// Copied from Zig. This function could be made public in child_process.zig instead.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
@@ -1031,4 +1101,105 @@ fn testingStart(self: *Command) !void {
         }
         return err;
     };
+}
+
+test "windows command: argv[0] with spaces is quoted" {
+    const line = try windowsCreateCommandLine(testing.allocator, &.{
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "--login",
+        "-i",
+    });
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings(
+        "\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i",
+        line,
+    );
+}
+
+/// What a windows job test does to the tree once it runs.
+const JobAction = enum { close_job, kill_tree };
+
+/// Runs `cmd.exe /C ping ...`, which leaves a grandchild behind cmd.exe,
+/// then takes the job down and checks that every process in it is signalled
+/// soon after. Everything it spawns is killed on every path out.
+fn testWindowsJob(action: JobAction) !void {
+    const k32 = windows.exp.kernel32;
+    const io = testing.io;
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "ping -n 60 127.0.0.1 >nul" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+    try cmd.start(testing.allocator);
+    defer {
+        // Without a job there is nothing of ours left to kill.
+        if (cmd.job != null) cmd.killTree() catch {};
+        cmd.closeJob();
+        _ = k32.CloseHandle(cmd.pid.?);
+    }
+    try testing.expect(cmd.job != null);
+
+    // The job lists the whole tree: cmd.exe and the ping it started.
+    const IdList = extern struct {
+        assigned: windows.DWORD,
+        listed: windows.DWORD,
+        ids: [64]windows.ULONG_PTR,
+    };
+    var list: IdList = undefined;
+    const begin: std.Io.Timestamp = .now(io, .awake);
+    while (true) {
+        list = std.mem.zeroes(IdList);
+        try testing.expect(windows.QueryInformationJobObject(
+            cmd.job,
+            windows.JOBOBJECT_BASIC_PROCESS_ID_LIST_CLASS,
+            &list,
+            @sizeOf(IdList),
+            null,
+        ) != windows.FALSE);
+        if (list.listed >= 2) break;
+        try testing.expect(begin.untilNow(io, .awake).toMilliseconds() < 5000);
+        try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    }
+
+    var handles: [64]?windows.HANDLE = @splat(null);
+    defer for (handles) |h| if (h) |handle| {
+        _ = k32.CloseHandle(handle);
+    };
+    for (list.ids[0..list.listed], 0..) |id, i| {
+        handles[i] = windows.OpenProcess(
+            windows.SYNCHRONIZE,
+            windows.FALSE,
+            @intCast(id),
+        );
+    }
+
+    const killed_at: std.Io.Timestamp = .now(io, .awake);
+    switch (action) {
+        .close_job => cmd.closeJob(),
+        .kill_tree => try cmd.killTree(),
+    }
+    for (handles) |h| {
+        const handle = h orelse continue;
+        const left: i64 = 2000 - killed_at.untilNow(io, .awake).toMilliseconds();
+        try testing.expectEqual(
+            @as(windows.DWORD, windows.WAIT_OBJECT_0),
+            k32.WaitForSingleObject(handle, @intCast(@max(left, 0))),
+        );
+    }
+    try testing.expect(killed_at.untilNow(io, .awake).toMilliseconds() <= 2000);
+}
+
+test "windows command: closing the job kills grandchildren" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try testWindowsJob(.close_job);
+}
+
+test "windows command: killTree kills grandchildren" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try testWindowsJob(.kill_tree);
 }

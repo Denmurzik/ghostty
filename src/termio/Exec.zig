@@ -1145,6 +1145,14 @@ const Subprocess = struct {
     /// Called to notify that we exited externally so we can unset our
     /// running state.
     pub fn externalExit(self: *Subprocess) void {
+        // The child is gone on its own, but whatever it left running
+        // goes with the job.
+        if (comptime is_windows) {
+            if (self.process) |*p| switch (p.*) {
+                .fork_exec => |*cmd| cmd.closeJob(),
+                .flatpak => {},
+            };
+        }
         self.process = null;
     }
 
@@ -1202,9 +1210,10 @@ const Subprocess = struct {
         if (command.pid) |pid| {
             switch (builtin.target.os.tag) {
                 .windows => {
-                    if (windows.exp.kernel32.TerminateProcess(pid, 0) == windows.FALSE) {
-                        return windows.unexpectedError(windows.GetLastError());
-                    }
+                    // Closing the job afterwards kills anything the
+                    // terminate raced with.
+                    defer command.closeJob();
+                    try command.killTree();
 
                     _ = try command.wait(false);
                 },
@@ -2137,14 +2146,12 @@ fn execCommand(
                 // (extra process in the tree, per-process cmd AutoRun
                 // state not reaching the user's actual shell).
                 //
-                // Values with arguments are split on whitespace. This
-                // does not honor Windows CLI quoting rules; users who
-                // need quoted arguments should use the direct command
-                // form, which takes an argv array as-is.
+                // Values with arguments (or quotes) are split with the
+                // MS C runtime command line rules, see tokenizeWindows.
                 //
                 // Note we don't free any of the memory below since it is
                 // allocated in the arena.
-                if (std.mem.indexOfAny(u8, v, " \t") == null) {
+                if (std.mem.indexOfAny(u8, v, " \t\"") == null) {
                     // No arguments. If the shell is literally "cmd.exe"
                     // (the default), resolve via %COMSPEC% which is the
                     // documented path to the current command processor.
@@ -2157,10 +2164,7 @@ fn execCommand(
                         try alloc.dupe(u8, v);
                     try args.append(alloc, try alloc.dupeSentinel(u8, argv0, 0));
                 } else {
-                    var it = std.mem.tokenizeAny(u8, v, " \t");
-                    while (it.next()) |tok| {
-                        try args.append(alloc, try alloc.dupeSentinel(u8, tok, 0));
-                    }
+                    try args.appendSlice(alloc, try tokenizeWindows(alloc, v));
                 }
                 break :shell try args.toOwnedSlice(alloc);
             } else {
@@ -2178,6 +2182,79 @@ fn execCommand(
             break :shell try args.toOwnedSlice(alloc);
         },
     };
+}
+
+/// Split a Windows command line into arguments with the rules of the
+/// MS C runtime (`CommandLineToArgvW` agrees except for the program name):
+///
+///   - Arguments are separated by spaces and tabs outside of quotes.
+///   - A quote toggles quoting; inside quotes, `""` is a literal quote.
+///   - 2n backslashes followed by a quote are n backslashes and the quote
+///     toggles quoting; 2n+1 are n backslashes and a literal quote.
+///     Backslashes not followed by a quote are literal.
+///   - The first argument (the program name) has no escapes: quotes only
+///     toggle quoting, so a path may end in a backslash.
+///
+/// The caller owns the result: each argument and the slice itself.
+pub fn tokenizeWindows(alloc: Allocator, s: []const u8) Allocator.Error![][:0]const u8 {
+    var args: std.ArrayList([:0]const u8) = .empty;
+    errdefer {
+        for (args.items) |arg| alloc.free(arg);
+        args.deinit(alloc);
+    }
+
+    var i: usize = 0;
+    while (true) {
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
+        if (i == s.len) break;
+
+        var arg: std.ArrayList(u8) = .empty;
+        defer arg.deinit(alloc);
+
+        const is_program = args.items.len == 0;
+        var in_quotes = false;
+        while (i < s.len) {
+            const ch = s[i];
+            if (!in_quotes and (ch == ' ' or ch == '\t')) break;
+
+            if (ch == '\\' and !is_program) {
+                var n: usize = 0;
+                while (i < s.len and s[i] == '\\') : (i += 1) n += 1;
+                if (i < s.len and s[i] == '"') {
+                    try arg.appendNTimes(alloc, '\\', n / 2);
+                    if (n % 2 == 1) {
+                        try arg.append(alloc, '"');
+                        i += 1;
+                    }
+                    // Otherwise the quote is left for the next round
+                    // to toggle quoting.
+                } else {
+                    try arg.appendNTimes(alloc, '\\', n);
+                }
+                continue;
+            }
+
+            if (ch == '"') {
+                i += 1;
+                if (in_quotes and !is_program and i < s.len and s[i] == '"') {
+                    try arg.append(alloc, '"');
+                    i += 1;
+                } else {
+                    in_quotes = !in_quotes;
+                }
+                continue;
+            }
+
+            try arg.append(alloc, ch);
+            i += 1;
+        }
+
+        const owned = try alloc.dupeSentinel(u8, arg.items, 0);
+        errdefer alloc.free(owned);
+        try args.append(alloc, owned);
+    }
+
+    return try args.toOwnedSlice(alloc);
 }
 
 /// Append a value to an environment variable such as PATH.
@@ -2461,6 +2538,91 @@ test "execCommand windows: direct command is passed through unchanged" {
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);
     try testing.expectEqualStrings("arg with spaces", result[1]);
+}
+
+fn expectTokens(input: []const u8, expected: []const []const u8) !void {
+    const testing = std.testing;
+    const tokens = try tokenizeWindows(testing.allocator, input);
+    defer {
+        for (tokens) |t| testing.allocator.free(t);
+        testing.allocator.free(tokens);
+    }
+    try testing.expectEqual(expected.len, tokens.len);
+    for (expected, tokens) |want, got| try testing.expectEqualStrings(want, got);
+}
+
+test "windows tokenize: quoted path with spaces" {
+    try expectTokens(
+        "\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i",
+        &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" },
+    );
+}
+
+test "windows tokenize: escaped quote and non-ASCII" {
+    try expectTokens("say \"\\\"hi\\\"\" Ж", &.{ "say", "\"hi\"", "Ж" });
+    try expectTokens(
+        "\"C:\\Users\\Анна Ли\\bin\\sh.exe\" -c \"echo Привет\"",
+        &.{ "C:\\Users\\Анна Ли\\bin\\sh.exe", "-c", "echo Привет" },
+    );
+}
+
+test "windows tokenize: backslash and quote rules" {
+    // Backslashes not before a quote are literal.
+    try expectTokens("a C:\\dir\\file", &.{ "a", "C:\\dir\\file" });
+    // 2n backslashes then a quote: n backslashes, the quote toggles.
+    try expectTokens("a \"x\\\\\" b", &.{ "a", "x\\", "b" });
+    // 2n+1 backslashes then a quote: n backslashes and a literal quote.
+    try expectTokens("a \\\\\\\"b", &.{ "a", "\\\"b" });
+    // A doubled quote inside quotes is a literal quote.
+    try expectTokens("a \"x\"\"y\" z", &.{ "a", "x\"y", "z" });
+    // The program name has no escapes, so it may end in a backslash.
+    try expectTokens("\"C:\\dir with space\\\" arg", &.{ "C:\\dir with space\\", "arg" });
+}
+
+test "windows tokenize: whitespace and empty arguments" {
+    try expectTokens("", &.{});
+    try expectTokens(" \t ", &.{});
+    try expectTokens("  wsl \t ~  ", &.{ "wsl", "~" });
+    try expectTokens("prog \"\" x", &.{ "prog", "", "x" });
+    // Quotes join with adjacent text into one argument.
+    try expectTokens("prog a\"b c\"d", &.{ "prog", "ab cd" });
+}
+
+test "windows tokenize: round trip with the Command quoting" {
+    const testing = std.testing;
+    const argv: []const []const u8 = &.{
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "--login",
+        "a \"quoted\" arg",
+        "trailing backslash\\",
+        "tab\there",
+        "Ж ж",
+    };
+    const line = try Command.windowsCreateCommandLine(testing.allocator, argv);
+    defer testing.allocator.free(line);
+    try expectTokens(line, argv);
+}
+
+test "windows tokenize: execCommand splits a quoted shell value" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(alloc, .{
+        .shell = "\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i",
+    }, struct {
+        fn get(_: Allocator) !PasswdEntry {
+            return .{};
+        }
+    });
+
+    try testing.expectEqual(3, result.len);
+    try testing.expectEqualStrings("C:\\Program Files\\Git\\bin\\bash.exe", result[0]);
+    try testing.expectEqualStrings("--login", result[1]);
+    try testing.expectEqualStrings("-i", result[2]);
 }
 
 test "init frees the env when it fails" {

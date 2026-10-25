@@ -387,6 +387,7 @@ pub const exp = struct {
 };
 
 pub const ProcThreadAttributeNumber = enum(DWORD) {
+    ProcThreadAttributeJobList = 13,
     ProcThreadAttributePseudoConsole = 22,
     _,
 };
@@ -496,3 +497,77 @@ pub extern "kernel32" fn MoveFileExW(
 ) callconv(.winapi) BOOL;
 
 // --- jobs (Task 19)
+
+pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
+pub const JOBOBJECT_BASIC_PROCESS_ID_LIST_CLASS: c_int = 3;
+pub const JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: c_int = 9;
+pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+
+pub const PROC_THREAD_ATTRIBUTE_JOB_LIST = ProcThreadAttributeValue(
+    .ProcThreadAttributeJobList,
+    false,
+    true,
+    false,
+);
+
+pub const IO_COUNTERS = extern struct {
+    ReadOperationCount: u64,
+    WriteOperationCount: u64,
+    OtherOperationCount: u64,
+    ReadTransferCount: u64,
+    WriteTransferCount: u64,
+    OtherTransferCount: u64,
+};
+pub const JOBOBJECT_BASIC_LIMIT_INFORMATION = extern struct {
+    PerProcessUserTimeLimit: LARGE_INTEGER,
+    PerJobUserTimeLimit: LARGE_INTEGER,
+    LimitFlags: DWORD,
+    MinimumWorkingSetSize: SIZE_T,
+    MaximumWorkingSetSize: SIZE_T,
+    ActiveProcessLimit: DWORD,
+    Affinity: ULONG_PTR,
+    PriorityClass: DWORD,
+    SchedulingClass: DWORD,
+};
+pub const JOBOBJECT_EXTENDED_LIMIT_INFORMATION = extern struct {
+    BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+    IoInfo: IO_COUNTERS,
+    ProcessMemoryLimit: SIZE_T,
+    JobMemoryLimit: SIZE_T,
+    PeakProcessMemoryUsed: SIZE_T,
+    PeakJobMemoryUsed: SIZE_T,
+};
+/// Header of the variable-length process id list; `ProcessIdList` is
+/// really `NumberOfAssignedProcesses` long at most.
+pub const JOBOBJECT_BASIC_PROCESS_ID_LIST = extern struct {
+    NumberOfAssignedProcesses: DWORD,
+    NumberOfProcessIdsInList: DWORD,
+    ProcessIdList: [1]ULONG_PTR,
+};
+
+pub extern "kernel32" fn CreateJobObjectW(
+    lpJobAttributes: ?*SECURITY_ATTRIBUTES,
+    lpName: ?LPCWSTR,
+) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn SetInformationJobObject(
+    hJob: HANDLE,
+    JobObjectInformationClass: c_int,
+    lpJobObjectInformation: *const anyopaque,
+    cbJobObjectInformationLength: DWORD,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn QueryInformationJobObject(
+    hJob: ?HANDLE,
+    JobObjectInformationClass: c_int,
+    lpJobObjectInformation: *anyopaque,
+    cbJobObjectInformationLength: DWORD,
+    lpReturnLength: ?*DWORD,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn TerminateJobObject(
+    hJob: HANDLE,
+    uExitCode: UINT,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn OpenProcess(
+    dwDesiredAccess: DWORD,
+    bInheritHandle: BOOL,
+    dwProcessId: DWORD,
+) callconv(.winapi) ?HANDLE;
