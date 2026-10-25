@@ -54,6 +54,9 @@ title: ?[:0]const u8,
 /// Whether the top-level window is minimized (a WM_SIZE of 0x0).
 minimized: bool = false,
 
+/// Set by WM_NCDESTROY: the HWND is gone (for example with its parent).
+hwnd_destroyed: bool = false,
+
 keyboard_state: keyboard.State,
 mouse_state: mouse.State,
 ime_state: ime.State,
@@ -90,6 +93,12 @@ pub fn create(window: *Window) !*Surface {
         .ime_state = .{},
         .clipboard_state = .{},
     };
+
+    // Core drops surface-directed mailbox messages for surfaces it does not
+    // know about, so this must precede `core_surface.init` and stay
+    // registered until `destroy`.
+    try app.core_app.addSurface(self);
+    errdefer app.core_app.deleteSurface(self);
 
     var parent_rect: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     _ = win32.user32.GetClientRect(window.hwnd, &parent_rect);
@@ -155,7 +164,7 @@ pub fn deinit(self: *Surface) void {
     if (self.window.surface == self) self.window.surface = null;
 
     // The parent's destruction may already have taken the child with it.
-    if (win32.user32.IsWindow(self.hwnd) != 0) _ = win32.user32.DestroyWindow(self.hwnd);
+    if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
 
     if (self.title) |t| alloc.free(t);
     alloc.destroy(self);
@@ -362,6 +371,7 @@ fn wndProc(
         },
 
         win32.user32.WM_NCDESTROY => {
+            self.hwnd_destroyed = true;
             util.setUserData(hwnd, null);
             return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
