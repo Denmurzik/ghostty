@@ -38,6 +38,10 @@ const is_windows = builtin.target.os.tag == .windows;
 /// exited before moving on (Windows).
 const DRAIN_TIMEOUT_MS = 500;
 
+/// The most bytes of one read that are handed to the terminal at a time
+/// before the lock is released and the quit event is checked (Windows).
+const PROCESS_SLICE_LEN = 2048;
+
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
@@ -1837,16 +1841,24 @@ pub const ReadThread = struct {
         };
         defer crash.sentry.thread_state = null;
 
-        const end = readLoopWindows(fd, quit_event, io, struct {
-            fn onData(io_: *termio.Termio, buf: []const u8) void {
-                @call(.always_inline, termio.Termio.processOutput, .{ io_, buf });
+        const Ctx = struct {
+            io: *termio.Termio,
+            quit: windows.HANDLE,
+
+            fn process(self: @This(), slice: []const u8) void {
+                self.io.processOutput(slice);
 
                 // See threadMainPosix: hand the renderer state mutex
                 // off if the renderer is waiting, since this loop
                 // would otherwise starve it under heavy output.
-                io_.renderer_state.yieldToDemand(global.io());
+                self.io.renderer_state.yieldToDemand(global.io());
             }
-        }.onData);
+
+            fn onData(self: @This(), buf: []const u8) void {
+                processSlicedWindows(self.quit, self, buf, process);
+            }
+        };
+        const end = readLoopWindows(fd, quit_event, Ctx{ .io = io, .quit = quit_event }, Ctx.onData);
 
         switch (end) {
             .quit => log.info("read thread got quit signal", .{}),
@@ -1863,6 +1875,29 @@ pub const ReadThread = struct {
         }
     }
 };
+
+/// Hand `buf` to `process` in slices of at most `PROCESS_SLICE_LEN` bytes
+/// and stop when `quit_event` is signalled (Windows). The rest of `buf` is
+/// dropped then, since nobody is left to look at it.
+///
+/// `process` takes the terminal lock for as long as it works. In a slow
+/// build a single 64 KiB read can keep it for many seconds, and that blocks
+/// the renderer thread (and so the window teardown that waits for it)
+/// as well as this thread's own response to the quit event.
+pub fn processSlicedWindows(
+    quit_event: windows.HANDLE,
+    ctx: anytype,
+    buf: []const u8,
+    comptime process: fn (@TypeOf(ctx), []const u8) void,
+) void {
+    var rest = buf;
+    while (rest.len > 0) {
+        if (windows.exp.kernel32.WaitForSingleObject(quit_event, 0) == windows.WAIT_OBJECT_0) return;
+        const len = @min(rest.len, PROCESS_SLICE_LEN);
+        process(ctx, rest[0..len]);
+        rest = rest[len..];
+    }
+}
 
 pub const ReadLoopEnd = enum {
     /// The writing side of the pty is gone and everything was delivered.
@@ -2871,4 +2906,90 @@ test "windows exec: output before child exit is drained and EOF follows" {
     try testing.expect(testElapsedMs(start) < 1000);
     try testing.expectEqual(ReadLoopEnd.eof, loop.end);
     try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-drain-token") != null);
+}
+
+test "windows exec: quit is honoured within a bound while a large stream is processed slowly" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    // A terminal that parses slowly (a Debug build) takes seconds for one
+    // 64 KiB read. The read thread must still stop promptly on quit, and
+    // not only once it is done with the whole read.
+    const SlowSink = struct {
+        quit: windows.HANDLE,
+        started: std.atomic.Value(bool) = .init(false),
+
+        fn process(self: *@This(), slice: []const u8) void {
+            self.started.store(true, .release);
+            std.Io.sleep(global.io(), .fromMilliseconds(@intCast(slice.len / 32)), .awake) catch {};
+        }
+
+        fn onData(self: *@This(), buf: []const u8) void {
+            processSlicedWindows(self.quit, self, buf, process);
+        }
+    };
+
+    const Reader = struct {
+        fn run(
+            handle: windows.HANDLE,
+            sink: *SlowSink,
+            end: *ReadLoopEnd,
+            done: windows.HANDLE,
+        ) void {
+            end.* = readLoopWindows(handle, sink.quit, sink, SlowSink.onData);
+            _ = k32.SetEvent(done);
+        }
+    };
+
+    // The writer floods the pipe until its writes fail.
+    const Writer = struct {
+        fn run(handle: windows.HANDLE) void {
+            defer _ = k32.CloseHandle(handle);
+            const chunk: [64 * 1024]u8 = @splat('x');
+            while (true) {
+                var written: windows.DWORD = 0;
+                if (k32.WriteFile(handle, &chunk, chunk.len, &written, null) == windows.FALSE) return;
+            }
+        }
+    };
+
+    const pipe = try Pty.createOutPipe();
+    errdefer _ = k32.CloseHandle(pipe.read);
+    errdefer _ = k32.CloseHandle(pipe.write);
+
+    const quit = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(quit);
+    const done = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(done);
+
+    var sink: SlowSink = .{ .quit = quit };
+    var end: ReadLoopEnd = .err;
+
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{pipe.write});
+    // Let the pipe fill up so that the first read is a large one.
+    try std.Io.sleep(global.io(), .fromMilliseconds(100), .awake);
+    const reader = try std.Thread.spawn(.{}, Reader.run, .{ pipe.read, &sink, &end, done });
+    defer {
+        // Unblock the reader if the test failed, then close the pipe: that
+        // also fails the writer's pending write.
+        _ = k32.SetEvent(quit);
+        reader.join();
+        _ = k32.CloseHandle(pipe.read);
+        writer.join();
+    }
+
+    for (0..500) |_| {
+        if (sink.started.load(.acquire)) break;
+        try std.Io.sleep(global.io(), .fromMilliseconds(10), .awake);
+    }
+    try testing.expect(sink.started.load(.acquire));
+
+    const start: std.Io.Timestamp = .now(global.io(), .awake);
+    try testing.expect(k32.SetEvent(quit) != windows.FALSE);
+    try testing.expect(k32.WaitForSingleObject(done, 5000) == windows.WAIT_OBJECT_0);
+    try testing.expect(testElapsedMs(start) < 1000);
+    try testing.expectEqual(ReadLoopEnd.quit, end);
 }
