@@ -17,6 +17,7 @@ const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
 const global = @import("../../global.zig");
 const CoreSurface = @import("../../Surface.zig");
+const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
 const dialogs = @import("dialogs.zig");
 const util = @import("util.zig");
@@ -147,9 +148,11 @@ pub fn setClipboard(
 ) !void {
     if (!supports(t)) return error.Unsupported;
 
+    // Only text can be put on the clipboard; a write with nothing else to
+    // offer is an error core can report (kitty answers EIO).
     const text: [:0]const u8 = for (contents) |content| {
-        if (std.mem.eql(u8, content.mime, "text/plain")) break content.data;
-    } else return;
+        if (terminal.clipboard.isTextMime(content.mime)) break content.data;
+    } else return error.NoTextContent;
 
     if (!confirm) return write(surface.hwnd, text);
 
@@ -437,10 +440,40 @@ fn testWindow() !win32.foundation.HWND {
     ) orelse error.CreateWindowFailed;
 }
 
+extern "user32" fn EnumClipboardFormats(format: u32) callconv(.winapi) u32;
+
+/// Skips the calling test when the clipboard holds anything but text
+/// (images, files, HTML, app-private formats): the tests empty the
+/// clipboard, and only its text could be put back afterwards. The text
+/// formats Windows converts between on its own do not count.
+fn skipUnlessOnlyText(hwnd: win32.foundation.HWND) !void {
+    openClipboard(hwnd) catch return error.SkipZigTest;
+    defer _ = win32.user32.CloseClipboard();
+
+    const cf_oemtext = 7;
+    const cf_locale = 16;
+    var format: u32 = 0;
+    while (true) {
+        format = EnumClipboardFormats(format);
+        if (format == 0) return;
+        switch (format) {
+            win32.user32.CF_TEXT, cf_oemtext, win32.user32.CF_UNICODETEXT, cf_locale => {},
+            else => {
+                std.debug.print(
+                    "skipping: the clipboard holds a non-text format ({}) the test could not restore\n",
+                    .{format},
+                );
+                return error.SkipZigTest;
+            },
+        }
+    }
+}
+
 const SavedClipboard = struct {
     text: ?[:0]u8,
 
     fn save(hwnd: win32.foundation.HWND) !SavedClipboard {
+        try skipUnlessOnlyText(hwnd);
         return .{ .text = try read(std.testing.allocator, hwnd) };
     }
 
@@ -504,13 +537,18 @@ test "win32 clipboard: utf16 decoding normalizes CRLF and survives bad surrogate
     try std.testing.expectEqualStrings("😀", c);
 }
 
+/// Holds the clipboard open for a short while. `done_opening` is always
+/// set, whether or not the clipboard could be opened, so the waiting test
+/// never spins on a thread that has already given up.
 const Holder = struct {
-    opened: std.atomic.Value(bool) = .init(false),
+    done_opening: std.atomic.Value(bool) = .init(false),
+    opened: bool = false,
 
     fn run(self: *Holder) void {
-        if (win32.user32.OpenClipboard(null) == 0) return;
-        self.opened.store(true, .release);
-        std.Io.sleep(global.io(), .fromMilliseconds(30), .awake) catch {};
+        self.opened = win32.user32.OpenClipboard(null) != 0;
+        self.done_opening.store(true, .release);
+        if (!self.opened) return;
+        std.Io.sleep(global.io(), .fromMilliseconds(15), .awake) catch {};
         _ = win32.user32.CloseClipboard();
     }
 };
@@ -525,9 +563,14 @@ test "win32 clipboard: write succeeds while another thread holds the clipboard b
     var holder: Holder = .{};
     const thread = try std.Thread.spawn(.{}, Holder.run, .{&holder});
     defer thread.join();
-    while (!holder.opened.load(.acquire)) {
+    // A bounded wait: a stuck holder fails the test instead of hanging it.
+    var waited: usize = 0;
+    while (!holder.done_opening.load(.acquire)) : (waited += 1) {
+        if (waited >= 2000) return error.HolderTimedOut;
         std.Io.sleep(global.io(), .fromMilliseconds(1), .awake) catch {};
     }
+    // `opened` is plain data, ordered by the release/acquire pair above.
+    if (!holder.opened) return error.SkipZigTest;
 
     // The holder has it open now: the first attempts fail and are retried.
     try write(hwnd, "held ж");
