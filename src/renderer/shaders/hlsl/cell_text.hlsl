@@ -4,6 +4,10 @@
 // Cell Text Shader
 //-------------------------------------------------------------------
 
+// Glyph atlases. Read with Load (pixel coordinates, no filtering).
+Texture2D<float> atlas_grayscale : register(t0);
+Texture2D<float4> atlas_color : register(t1);
+
 static const uint ATLAS_GRAYSCALE = 0u;
 static const uint ATLAS_COLOR = 1u;
 

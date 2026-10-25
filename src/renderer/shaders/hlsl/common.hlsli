@@ -5,7 +5,8 @@
 // src/renderer/d3d11/slots.zig, which RenderPass binds from:
 //
 //   b1                  Globals, VS + PS
-//   t0, t1              glyph atlases (grayscale, color), PS only
+//   t0, t1              cell_text.hlsl: glyph atlases (grayscale, color), PS only
+//   t0                  image.hlsl, bg_image.hlsl: the image, PS only
 //   t4                  bg_cells, VS + PS (buffers[i >= 1] -> t(3 + i))
 //   s0                  linear clamp sampler, PS only
 //
@@ -70,10 +71,9 @@ bool uniform_use_linear_correction() { return (bools_packed & BOOL_USE_LINEAR_CO
 // Per-cell background colors, one RGBA8 value (R in the low byte) per cell.
 StructuredBuffer<uint> bg_cells : register(t4);
 
-// Glyph atlases. Read with Load (pixel coordinates, no filtering).
-Texture2D<float> atlas_grayscale : register(t0);
-Texture2D<float4> atlas_color : register(t1);
-
+// Linear filtering, clamp to edge, normalized coordinates. Used by the
+// image shader. Texture registers (t0..t2) are declared by each shader file
+// that uses them, since the texture bound there differs per pipeline.
 SamplerState linear_clamp : register(s0);
 
 //-------------------------------------------------------------------

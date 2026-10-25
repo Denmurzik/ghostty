@@ -38,7 +38,12 @@ test "d3d11 slots: bg_cells register matches slots.zig and does not alias textur
     // The remaining registers of the map.
     try std.testing.expect(std.mem.indexOf(u8, common, "cbuffer Globals : register(b1)") != null);
     try std.testing.expectEqual(@as(u32, 1), uniforms_cb);
-    try std.testing.expect(std.mem.indexOf(u8, common, "atlas_grayscale : register(t0);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, common, "atlas_color : register(t1);") != null);
+    const cell_text = @embedFile("../shaders/hlsl/cell_text.hlsl");
+    try std.testing.expect(std.mem.indexOf(u8, cell_text, "atlas_grayscale : register(t0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cell_text, "atlas_color : register(t1);") != null);
+    const image = @embedFile("../shaders/hlsl/image.hlsl");
+    try std.testing.expect(std.mem.indexOf(u8, image, "image : register(t0);") != null);
+    const bg_image = @embedFile("../shaders/hlsl/bg_image.hlsl");
+    try std.testing.expect(std.mem.indexOf(u8, bg_image, "image : register(t0);") != null);
     try std.testing.expect(std.mem.indexOf(u8, common, "linear_clamp : register(s0);") != null);
 }

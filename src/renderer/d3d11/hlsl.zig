@@ -23,12 +23,16 @@ pub const Entry = enum {
     cell_bg_ps,
     cell_text_vs,
     cell_text_ps,
+    image_vs,
+    image_ps,
+    bg_image_vs,
+    bg_image_ps,
 
     /// The shader model target for this entry, derived from its suffix.
     fn target(self: Entry) [:0]const u8 {
         return switch (self) {
-            .full_screen_vs, .cell_text_vs => "vs_5_0",
-            .bg_color_ps, .cell_bg_ps, .cell_text_ps => "ps_5_0",
+            .full_screen_vs, .cell_text_vs, .image_vs, .bg_image_vs => "vs_5_0",
+            .bg_color_ps, .cell_bg_ps, .cell_text_ps, .image_ps, .bg_image_ps => "ps_5_0",
         };
     }
 
@@ -38,6 +42,8 @@ pub const Entry = enum {
             .bg_color_ps => "bg_color.hlsl",
             .cell_bg_ps => "cell_bg.hlsl",
             .cell_text_vs, .cell_text_ps => "cell_text.hlsl",
+            .image_vs, .image_ps => "image.hlsl",
+            .bg_image_vs, .bg_image_ps => "bg_image.hlsl",
         };
     }
 };
@@ -52,6 +58,8 @@ pub fn source(entry: Entry) []const u8 {
         .bg_color_ps => @embedFile("../shaders/hlsl/bg_color.hlsl"),
         .cell_bg_ps => @embedFile("../shaders/hlsl/cell_bg.hlsl"),
         .cell_text_vs, .cell_text_ps => @embedFile("../shaders/hlsl/cell_text.hlsl"),
+        .image_vs, .image_ps => @embedFile("../shaders/hlsl/image.hlsl"),
+        .bg_image_vs, .bg_image_ps => @embedFile("../shaders/hlsl/bg_image.hlsl"),
     };
 }
 
