@@ -155,6 +155,13 @@ fn windowForSurface(self: *App, surface: *CoreSurface) ?*Window {
     return null;
 }
 
+fn windowForTarget(self: *App, target: apprt.Target) ?*Window {
+    return switch (target) {
+        .app => null,
+        .surface => |s| self.windowForSurface(s),
+    };
+}
+
 fn createMessageWindow(self: *App) !void {
     try util.registerClass(&.{
         .lpfnWndProc = msgWndProc,
@@ -239,7 +246,7 @@ pub fn performAction(
                 .surface => |s| s,
             };
             const window = self.windowForSurface(surface) orelse return false;
-            window.requestClose();
+            window.requestCloseWithConfirm();
             return true;
         },
 
@@ -257,9 +264,50 @@ pub fn performAction(
                 .surface => |s| s,
             };
             const window = self.windowForSurface(surface) orelse return false;
+            // The surface keeps the copy that core reads back with getTitle.
+            if (window.surface) |s| s.setTitle(value.title) catch |err| {
+                log.warn("unable to store title err={}", .{err});
+                return false;
+            };
             window.setTitle(value.title);
             return true;
         },
+
+        .initial_size => {
+            const window = self.windowForTarget(target) orelse return false;
+            window.setInitialSize(value.width, value.height);
+            return true;
+        },
+
+        .size_limit => {
+            const window = self.windowForTarget(target) orelse return false;
+            window.size_limit = value;
+            return true;
+        },
+
+        .cell_size => {
+            const window = self.windowForTarget(target) orelse return false;
+            window.cell_size = value;
+            return true;
+        },
+
+        .mouse_shape => {
+            const window = self.windowForTarget(target) orelse return false;
+            const s = window.surface orelse return false;
+            s.mouse_state.shape = value;
+            return true;
+        },
+
+        .mouse_visibility => {
+            const window = self.windowForTarget(target) orelse return false;
+            const s = window.surface orelse return false;
+            s.mouse_state.hidden = value == .hidden;
+            return true;
+        },
+
+        // A false return makes core handle the exit itself, per
+        // `wait-after-command`.
+        .show_child_exited => return false,
 
         // Drawing is driven by the renderer thread; nothing to do here.
         .render => return true,

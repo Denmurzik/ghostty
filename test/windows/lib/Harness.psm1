@@ -1,0 +1,193 @@
+# Safety harness for the Windows GUI/e2e scripts. Everything that sends
+# input, switches keyboard layouts or touches windows goes through here so
+# that a run on an owner's real desktop:
+#   - SKIPs (never FAILs) when the session is locked or non-interactive,
+#   - restores the keyboard layouts it changed,
+#   - kills only the Ghostty processes it started.
+
+Set-StrictMode -Version Latest
+
+if (-not ('GhosttyHarness.Native' -as [type])) {
+    Add-Type -Namespace GhosttyHarness -Name Native -MemberDefinition @"
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(uint dwProcessId);
+[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+[DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+[DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr hDesktop);
+[DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int nBuff, [Out] IntPtr[] lpList);
+[DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint idThread);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadKeyboardLayoutW(string pwszKLID, uint Flags);
+[DllImport("user32.dll")] public static extern bool UnloadKeyboardLayout(IntPtr hkl);
+[DllImport("user32.dll")] public static extern IntPtr ActivateKeyboardLayout(IntPtr hkl, uint Flags);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+"@
+}
+
+$script:ASFW_ANY = [uint32]::MaxValue
+$script:VK_MENU = 0x12
+$script:KEYEVENTF_KEYUP = 0x2
+$script:DESKTOP_SWITCHDESKTOP = 0x100
+$script:WM_INPUTLANGCHANGEREQUEST = 0x50
+$script:KLF_NOTELLSHELL = 0x80
+
+$script:SkipReason = ''
+$script:SavedLayouts = $null
+$script:SavedActive = [IntPtr]::Zero
+$script:OwnPids = [System.Collections.Generic.List[int]]::new()
+
+function Get-ResultsPath {
+    $dir = Join-Path $env:TEMP 'ghostty-e2e'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Join-Path $dir 'results.txt'
+}
+
+<#
+.SYNOPSIS
+True when the desktop is unlocked, the session is interactive and a
+foreground window exists. Otherwise false, with the reason available from
+Get-SkipReason.
+#>
+function Test-InteractiveSession {
+    if (-not [Environment]::UserInteractive) {
+        $script:SkipReason = 'non-interactive session'
+        return $false
+    }
+
+    # The input desktop cannot be opened while the secure (lock/UAC)
+    # desktop is active.
+    $desktop = [GhosttyHarness.Native]::OpenInputDesktop(0, $false, $script:DESKTOP_SWITCHDESKTOP)
+    if ($desktop -eq [IntPtr]::Zero) {
+        $script:SkipReason = 'desktop is locked'
+        return $false
+    }
+    [void][GhosttyHarness.Native]::CloseDesktop($desktop)
+
+    if ([GhosttyHarness.Native]::GetForegroundWindow() -eq [IntPtr]::Zero) {
+        $script:SkipReason = 'no foreground window'
+        return $false
+    }
+
+    $script:SkipReason = ''
+    $true
+}
+
+function Get-SkipReason { $script:SkipReason }
+
+<#
+.SYNOPSIS
+Runs a GUI scenario and records PASS, FAIL or SKIP. Layouts are restored
+and own Ghostty processes are killed afterwards, whatever the outcome.
+#>
+function Invoke-GuiScenario {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+    )
+
+    $line = $null
+    if (-not (Test-InteractiveSession)) {
+        $line = "SKIP ${Name}: $($script:SkipReason)"
+    } else {
+        Save-KeyboardLayouts
+        try {
+            & $ScriptBlock | Out-Null
+            $line = "PASS $Name"
+        } catch {
+            $line = "FAIL ${Name}: $($_.Exception.Message)"
+        } finally {
+            Stop-OwnGhostty
+            Restore-KeyboardLayouts
+        }
+    }
+
+    Write-Output $line
+    Add-Content -Path (Get-ResultsPath) -Value $line -Encoding UTF8
+}
+
+<#
+.SYNOPSIS
+Brings a window to the foreground even though Windows normally refuses
+(foreground lock). Returns whether the window is now in the foreground.
+#>
+function Set-ForegroundSafe {
+    param([Parameter(Mandatory)][IntPtr]$Hwnd)
+
+    [void][GhosttyHarness.Native]::AllowSetForegroundWindow($script:ASFW_ANY)
+    # A lone Alt tap lifts the foreground lock for the next call.
+    [GhosttyHarness.Native]::keybd_event($script:VK_MENU, 0, 0, [UIntPtr]::Zero)
+    [GhosttyHarness.Native]::keybd_event($script:VK_MENU, 0, $script:KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+    [void][GhosttyHarness.Native]::SetForegroundWindow($Hwnd)
+    [GhosttyHarness.Native]::GetForegroundWindow() -eq $Hwnd
+}
+
+function Get-LayoutList {
+    $count = [GhosttyHarness.Native]::GetKeyboardLayoutList(0, $null)
+    $list = New-Object 'IntPtr[]' $count
+    [void][GhosttyHarness.Native]::GetKeyboardLayoutList($count, $list)
+    , $list
+}
+
+<# Remember the installed layouts and the active one. #>
+function Save-KeyboardLayouts {
+    $script:SavedLayouts = Get-LayoutList
+    $script:SavedActive = [GhosttyHarness.Native]::GetKeyboardLayout(0)
+}
+
+<#
+.SYNOPSIS
+Unloads the layouts added since Save-KeyboardLayouts (and only those) and
+re-activates the original one.
+#>
+function Restore-KeyboardLayouts {
+    if ($null -eq $script:SavedLayouts) { return }
+
+    $original = @($script:SavedLayouts)
+    foreach ($hkl in (Get-LayoutList)) {
+        if ($original -notcontains $hkl) {
+            [void][GhosttyHarness.Native]::UnloadKeyboardLayout($hkl)
+        }
+    }
+    if ($script:SavedActive -ne [IntPtr]::Zero) {
+        [void][GhosttyHarness.Native]::ActivateKeyboardLayout($script:SavedActive, 0)
+    }
+    $script:SavedLayouts = $null
+}
+
+<#
+.SYNOPSIS
+Loads a keyboard layout (a KLID such as 00000407) and asks the window to
+switch to it. Returns the layout handle.
+#>
+function Switch-GhosttyLayout {
+    param(
+        [Parameter(Mandatory)][IntPtr]$Hwnd,
+        [Parameter(Mandatory)][string]$Klid
+    )
+
+    $hkl = [GhosttyHarness.Native]::LoadKeyboardLayoutW($Klid, $script:KLF_NOTELLSHELL)
+    if ($hkl -eq [IntPtr]::Zero) { throw "LoadKeyboardLayoutW($Klid) failed" }
+    [void][GhosttyHarness.Native]::PostMessageW(
+        $Hwnd, $script:WM_INPUTLANGCHANGEREQUEST, [IntPtr]::Zero, $hkl)
+    $hkl
+}
+
+<# Record a Ghostty process started by this run, so Stop-OwnGhostty kills it. #>
+function Register-OwnGhostty {
+    param([Parameter(Mandatory)][int]$ProcessId)
+    $script:OwnPids.Add($ProcessId)
+}
+
+<# Kill the Ghostty processes (and their children) this run started. Nothing else. #>
+function Stop-OwnGhostty {
+    foreach ($id in $script:OwnPids) {
+        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if ($null -eq $p -or $p.ProcessName -notlike 'ghostty*') { continue }
+        & taskkill.exe /PID $id /T /F 2>&1 | Out-Null
+    }
+    $script:OwnPids.Clear()
+}
+
+Export-ModuleMember -Function Test-InteractiveSession, Get-SkipReason, Invoke-GuiScenario,
+    Set-ForegroundSafe, Save-KeyboardLayouts, Restore-KeyboardLayouts, Switch-GhosttyLayout,
+    Register-OwnGhostty, Stop-OwnGhostty

@@ -192,7 +192,7 @@ pub fn getTitle(self: *Surface) ?[:0]const u8 {
 /// Remember the title core asked for. The window caption is set separately.
 pub fn setTitle(self: *Surface, title: []const u8) Allocator.Error!void {
     const alloc = self.window.app.core_app.alloc;
-    const copy = try alloc.dupeZ(u8, title);
+    const copy = try alloc.dupeSentinel(u8, title, 0);
     if (self.title) |old| alloc.free(old);
     self.title = copy;
 }

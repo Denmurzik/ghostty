@@ -1,0 +1,1 @@
+command = direct:cmd.exe /k chcp 65001
