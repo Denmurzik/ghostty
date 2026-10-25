@@ -183,10 +183,11 @@ pub fn logFmt(
     var msg_buf: [3072]u8 = undefined;
     var mw: std.Io.Writer = .fixed(&msg_buf);
     mw.print(format, args) catch {}; // truncated on overflow
+    const msg = trimPartialUtf8(mw.buffered());
 
     // Keep one byte for the newline.
     var line_buf: [4096]u8 = undefined;
-    const line = formatLine(line_buf[0 .. line_buf.len - 1], nowMs(), level, @tagName(scope), mw.buffered());
+    const line = formatLine(line_buf[0 .. line_buf.len - 1], nowMs(), level, @tagName(scope), msg);
     line_buf[line.len] = '\n';
     const out = line_buf[0 .. line.len + 1];
 
@@ -194,18 +195,47 @@ pub fn logFmt(
     if (sinks.debugger) outputDebug(out);
 }
 
+/// Set once a panic is being recorded. The root panic hook runs outside
+/// std's own panic-count protection, so without this a panic raised while
+/// writing the trace would re-enter the hook until the stack overflows.
+var in_panic: std.atomic.Value(bool) = .init(false);
+
+/// Claim the right to record a panic. True for the first caller; every
+/// later (nested or concurrent) panic gets false and must go straight to
+/// the default handler.
+pub fn beginPanic() bool {
+    return in_panic.cmpxchgStrong(false, true, .acq_rel, .acquire) == null;
+}
+
+/// Reset the guard. Only for tests, a real panic never returns.
+fn resetPanicGuard() void {
+    in_panic.store(false, .release);
+}
+
 /// Record a panic: the message and a stack trace go to the log file and the
-/// debugger. Called from the root panic handler before the default panic
-/// (which prints to stderr, if there is one, and aborts). Does nothing to
-/// the file if the sink was never initialized.
+/// debugger. Called from the root panic handler (after `beginPanic`) before
+/// the default panic (which prints to stderr, if there is one, and aborts).
+/// Does nothing to the file if the sink was never initialized.
+///
+/// The message line is written before the trace is built, so a fault while
+/// formatting the trace still leaves the message in the log.
 pub fn writePanic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) void {
     if (comptime builtin.os.tag != .windows) return;
 
+    var head_buf: [4096]u8 = undefined;
+    var hw: std.Io.Writer = .fixed(&head_buf);
+    writeTimestamp(&hw, nowMs()) catch {};
+    hw.print(" panic: {s}", .{msg}) catch {};
+    var head_len = hw.buffered().len;
+    if (head_len == head_buf.len) head_len -= 1; // room for the newline
+    head_len = trimPartialUtf8(head_buf[0..head_len]).len;
+    head_buf[head_len] = '\n';
+    emit(head_buf[0 .. head_len + 1]);
+
+    if (trace == null and ret_addr == null) return;
+
     var buf: [16 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    writeTimestamp(&w, nowMs()) catch {};
-    w.print(" panic: {s}\n", .{msg}) catch {};
-
     const term: std.Io.Terminal = .{ .writer = &w, .mode = .no_color };
     if (trace) |t| {
         std.debug.writeErrorReturnTrace(t, term) catch {};
@@ -213,15 +243,36 @@ pub fn writePanic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?u
         std.debug.writeCurrentStackTrace(.{ .first_address = addr }, term) catch {};
     }
 
-    var text = w.buffered();
-    if (text.len == 0 or text[text.len - 1] != '\n') {
+    var len = w.buffered().len;
+    if (len == 0) return;
+    if (buf[len - 1] != '\n') {
         // Truncated by a full buffer; keep the line framing intact.
-        if (text.len == buf.len) text.len -= 1;
-        buf[text.len] = '\n';
-        text = buf[0 .. text.len + 1];
+        if (len == buf.len) len -= 1;
+        len = trimPartialUtf8(buf[0..len]).len;
+        buf[len] = '\n';
+        len += 1;
     }
+    emit(buf[0..len]);
+}
+
+fn emit(text: []const u8) void {
     writeRaw(text);
     outputDebug(text);
+}
+
+/// Drop a trailing, incomplete UTF-8 sequence (what a truncating writer
+/// leaves behind when it fills up mid-codepoint).
+fn trimPartialUtf8(s: []const u8) []const u8 {
+    var i = s.len;
+    var back: usize = 0;
+    while (i > 0 and back < 4) : (back += 1) {
+        i -= 1;
+        const c = s[i];
+        if (c & 0xC0 == 0x80) continue; // continuation byte, keep looking
+        const need: usize = if (c >= 0xF0) 4 else if (c >= 0xE0) 3 else if (c >= 0xC0) 2 else 1;
+        return if (s.len - i < need) s[0..i] else s;
+    }
+    return s;
 }
 
 /// Send `text` to the debugger in chunks small enough for a stack buffer.
@@ -360,4 +411,57 @@ test "windows log: formatted entries reach the file sink" {
     defer alloc.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, " warning(config): value=42 name=Анна\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "skipped") == null);
+}
+
+test "windows log: panic guard admits only the first panic" {
+    resetPanicGuard();
+    defer resetPanicGuard();
+    try std.testing.expect(beginPanic());
+    try std.testing.expect(!beginPanic());
+    try std.testing.expect(!beginPanic());
+    resetPanicGuard();
+    try std.testing.expect(beginPanic());
+}
+
+test "windows log: truncation never leaves a partial UTF-8 sequence" {
+    try std.testing.expectEqualStrings("ab", trimPartialUtf8("ab"));
+    try std.testing.expectEqualStrings("", trimPartialUtf8(""));
+    // Complete 2/3/4-byte sequences stay.
+    try std.testing.expectEqualStrings("aя", trimPartialUtf8("aя"));
+    try std.testing.expectEqualStrings("a€", trimPartialUtf8("a€"));
+    try std.testing.expectEqualStrings("a😀", trimPartialUtf8("a😀"));
+    // Cut sequences go.
+    try std.testing.expectEqualStrings("a", trimPartialUtf8("aя"[0..2]));
+    try std.testing.expectEqualStrings("a", trimPartialUtf8("a€"[0..2]));
+    try std.testing.expectEqualStrings("a", trimPartialUtf8("a€"[0..3]));
+    try std.testing.expectEqualStrings("a", trimPartialUtf8("a😀"[0..4]));
+    try std.testing.expectEqualStrings("a", trimPartialUtf8("a😀"[0..2]));
+}
+
+test "windows log: long messages are cut on a codepoint boundary" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try testBase(&tmp);
+    defer alloc.free(base);
+
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    try env.put("LOCALAPPDATA", base);
+
+    init(alloc, &env);
+    defer deinit();
+    // 3-byte codepoints: 3072 is divisible by 3, so use an odd prefix to
+    // force a cut in the middle of one.
+    const filler = try alloc.alloc(u8, 3300);
+    defer alloc.free(filler);
+    for (0..1100) |i| @memcpy(filler[i * 3 ..][0..3], "€");
+    logFmt(.info, .default, "x{s}", .{filler}, .{ .file = true, .debugger = false });
+
+    const text = try readLog(&tmp, "ghostty/logs/ghostty.log");
+    defer alloc.free(text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    try std.testing.expect(text[text.len - 1] == '\n');
 }

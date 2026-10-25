@@ -26,7 +26,12 @@ else
 
 fn windowsPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     @branchHint(.cold);
-    @import("os/windows_log.zig").writePanic(msg, null, first_trace_addr orelse @returnAddress());
+    const windows_log = @import("os/windows_log.zig");
+    // Only the first panic is recorded; a panic raised while recording it
+    // (or on another thread meanwhile) goes straight to the default handler.
+    if (windows_log.beginPanic()) {
+        windows_log.writePanic(msg, null, first_trace_addr orelse @returnAddress());
+    }
     std.debug.defaultPanic(msg, first_trace_addr);
 }
 
