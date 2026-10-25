@@ -71,14 +71,28 @@ fn composition(surface: *Surface, flags: u32) void {
 
         surface.core_surface.preeditCallback(null) catch |err|
             log.warn("clearing preedit failed err={}", .{err});
-        if (text.len > 0) surface.core_surface.textCallback(text) catch |err|
+        // Sent as a keyless press carrying the text, like the GTK commit:
+        // textCallback would turn it into a bracketed paste.
+        if (text.len > 0) _ = surface.core_surface.keyCallback(.{
+            .action = .press,
+            .key = .unidentified,
+            .mods = .{},
+            .consumed_mods = .{},
+            .composing = false,
+            .utf8 = text,
+        }) catch |err| {
             log.warn("sending ime result failed err={}", .{err});
+        };
     }
 
     // Either a composition string, or no flags at all, which is how a
     // cancelled composition shows up.
     if (flags & imm32.GCS_COMPSTR != 0 or flags == 0) preedit: {
-        const text = compositionString(surface, himc, imm32.GCS_COMPSTR) orelse break :preedit;
+        const text = compositionString(surface, himc, imm32.GCS_COMPSTR) orelse {
+            surface.core_surface.preeditCallback(null) catch |err|
+                log.warn("clearing preedit failed err={}", .{err});
+            break :preedit;
+        };
         defer surface.window.app.core_app.alloc.free(text);
 
         surface.core_surface.preeditCallback(if (text.len > 0) text else null) catch |err|
@@ -120,8 +134,8 @@ fn updateWindows(surface: *Surface) void {
     defer _ = imm32.ImmReleaseContext(surface.hwnd, himc);
 
     const pos = surface.core_surface.imePoint();
-    const scale = surface.content_scale.x;
-    const point = candidatePos(pos, scale);
+    const scale = surface.content_scale;
+    const point = candidatePosXY(pos, scale.x, scale.y);
 
     const comp: imm32.COMPOSITIONFORM = .{
         .dwStyle = imm32.CFS_POINT,
@@ -134,7 +148,7 @@ fn updateWindows(surface: *Surface) void {
         .dwIndex = 0,
         .dwStyle = imm32.CFS_EXCLUDE,
         .ptCurrentPos = point,
-        .rcArea = excludeRect(pos, scale),
+        .rcArea = excludeRectXY(pos, scale.x, scale.y),
     };
     _ = imm32.ImmSetCandidateWindow(himc, &cand);
 }
@@ -142,20 +156,28 @@ fn updateWindows(surface: *Surface) void {
 /// Client-pixel position for the candidate window. `p.y` from core is
 /// already the bottom of the cursor cell.
 pub fn candidatePos(p: apprt.IMEPos, scale: f32) win32.foundation.POINT {
-    return .{
-        .x = scaled(p.x, scale),
-        .y = scaled(p.y, scale),
-    };
+    return candidatePosXY(p, scale, scale);
 }
 
 /// Client-pixel rectangle the candidate window must not cover: the cursor
 /// cell, from `p.y - p.height` to `p.y`.
 pub fn excludeRect(p: apprt.IMEPos, scale: f32) win32.foundation.RECT {
+    return excludeRectXY(p, scale, scale);
+}
+
+fn candidatePosXY(p: apprt.IMEPos, sx: f32, sy: f32) win32.foundation.POINT {
     return .{
-        .left = scaled(p.x, scale),
-        .top = scaled(p.y - p.height, scale),
-        .right = scaled(p.x + p.width, scale),
-        .bottom = scaled(p.y, scale),
+        .x = scaled(p.x, sx),
+        .y = scaled(p.y, sy),
+    };
+}
+
+fn excludeRectXY(p: apprt.IMEPos, sx: f32, sy: f32) win32.foundation.RECT {
+    return .{
+        .left = scaled(p.x, sx),
+        .top = scaled(p.y - p.height, sy),
+        .right = scaled(p.x + p.width, sx),
+        .bottom = scaled(p.y, sy),
     };
 }
 
