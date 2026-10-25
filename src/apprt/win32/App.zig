@@ -13,6 +13,7 @@ const global = @import("../../global.zig");
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Window = @import("Window.zig");
+const mouse = @import("mouse.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
 
@@ -295,6 +296,7 @@ pub fn performAction(
             const window = self.windowForTarget(target) orelse return false;
             const s = window.surface orelse return false;
             s.mouse_state.shape = value;
+            mouse.refreshCursor(s);
             return true;
         },
 
@@ -302,6 +304,7 @@ pub fn performAction(
             const window = self.windowForTarget(target) orelse return false;
             const s = window.surface orelse return false;
             s.mouse_state.hidden = value == .hidden;
+            mouse.refreshCursor(s);
             return true;
         },
 
