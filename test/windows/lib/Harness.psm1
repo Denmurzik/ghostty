@@ -42,6 +42,126 @@ function Get-ResultsPath {
     Join-Path $dir 'results.txt'
 }
 
+# --- desktop lock -------------------------------------------------------------
+# Only one GUI test run may use the desktop at a time (Ghostty windows steal
+# the foreground from every other run). The lock is the file
+# %TEMP%\gui-e2e.lock, taken atomically (CreateNew); see test/windows/README.md
+# for the protocol other sessions follow.
+
+$script:LockStaleMinutes = 20
+
+function Get-GuiLockPath { Join-Path $env:TEMP 'gui-e2e.lock' }
+
+# The lock file as { Id; Pid; Owner; Time }, or $null when it is absent or
+# unreadable (it may vanish between the check and the read).
+function Read-GuiLock {
+    try {
+        $text = [IO.File]::ReadAllText((Get-GuiLockPath))
+    } catch {
+        return $null
+    }
+    $r = [pscustomobject]@{ Id = ''; Pid = 0; Owner = ''; Time = ''; Raw = $text.Trim() }
+    foreach ($l in ($text -split "`r?`n")) {
+        if ($l -match '^id=(.+)$') { $r.Id = $Matches[1].Trim() }
+        elseif ($l -match '^pid=(\d+)$') { $r.Pid = [int]$Matches[1] }
+        elseif ($l -match '^owner=(.*)$') { $r.Owner = $Matches[1].Trim() }
+        elseif ($l -match '^time=(.*)$') { $r.Time = $Matches[1].Trim() }
+    }
+    $r
+}
+
+# Stale: not touched for $LockStaleMinutes, or written by a process that is
+# gone. A file that cannot be read is treated as held (a writer is mid-way).
+function Test-GuiLockStale {
+    $path = Get-GuiLockPath
+    try {
+        $age = (Get-Date) - (Get-Item -LiteralPath $path -ErrorAction Stop).LastWriteTime
+    } catch {
+        return $false
+    }
+    if ($age.TotalMinutes -gt $script:LockStaleMinutes) { return $true }
+    $l = Read-GuiLock
+    if ($l -and $l.Pid -gt 0 -and -not (Get-Process -Id $l.Pid -ErrorAction SilentlyContinue)) { return $true }
+    $false
+}
+
+function Write-GuiLockContent([string]$Id, [string]$Owner) {
+    "id=$Id`r`npid=$PID`r`nowner=$Owner`r`ntime=$((Get-Date).ToString('s'))`r`n"
+}
+
+<#
+.SYNOPSIS
+Takes the desktop lock (waiting up to TimeoutMinutes) and returns a token for
+Exit-GuiLock / Update-GuiLock. A run started by the e2e runner inherits the
+runner's lock through GHOSTTY_E2E_LOCK_ID instead of taking another.
+#>
+function Enter-GuiLock {
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [double]$TimeoutMinutes = 30
+    )
+
+    $path = Get-GuiLockPath
+    $inherited = $env:GHOSTTY_E2E_LOCK_ID
+    if ($inherited) {
+        $l = Read-GuiLock
+        if ($l -and $l.Id -eq $inherited) {
+            $token = [pscustomobject]@{ Id = $inherited; Own = $false; Owner = $Owner }
+            Update-GuiLock $token
+            return $token
+        }
+    }
+
+    $id = [guid]::NewGuid().ToString()
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $bytes = [Text.Encoding]::ASCII.GetBytes((Write-GuiLockContent $id $Owner))
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Dispose()
+            return [pscustomobject]@{ Id = $id; Own = $true; Owner = $Owner }
+        } catch [IO.IOException], [UnauthorizedAccessException] {
+            if ($stream) { $stream.Dispose(); Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+        }
+
+        if (Test-GuiLockStale) {
+            # Deleting is the stale rule; whoever wins the next CreateNew
+            # owns the lock.
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        if ($sw.Elapsed.TotalMinutes -gt $TimeoutMinutes) {
+            $l = Read-GuiLock
+            $who = if ($l) { $l.Raw -replace '\s+', ' ' } else { 'unreadable' }
+            throw "GUI lock $path still held after $TimeoutMinutes min: $who"
+        }
+        Start-Sleep -Seconds 5
+    }
+}
+
+# Rewrites the time (and so LastWriteTime) of a lock this run holds, so a
+# long run is never stale. Does nothing when the lock is somebody else's.
+function Update-GuiLock {
+    param([Parameter(Mandatory)]$Token)
+    if ($null -eq $Token) { return }
+    $l = Read-GuiLock
+    if ($l -and $l.Id -eq $Token.Id) {
+        try { [IO.File]::WriteAllText((Get-GuiLockPath), (Write-GuiLockContent $Token.Id $Token.Owner)) } catch { }
+    }
+}
+
+# Releases the lock when this run took it and the file still holds its id.
+function Exit-GuiLock {
+    param($Token)
+    if ($null -eq $Token -or -not $Token.Own) { return }
+    $l = Read-GuiLock
+    if ($l -and $l.Id -eq $Token.Id) {
+        Remove-Item -LiteralPath (Get-GuiLockPath) -Force -ErrorAction SilentlyContinue
+    }
+}
+
 <#
 .SYNOPSIS
 True when the desktop is unlocked, the session is interactive and a
@@ -86,18 +206,30 @@ function Invoke-GuiScenario {
     )
 
     $line = $null
-    if (-not (Test-InteractiveSession)) {
-        $line = "SKIP ${Name}: $($script:SkipReason)"
-    } else {
-        Save-KeyboardLayouts
+    $token = $null
+    try {
+        $token = Enter-GuiLock -Owner "scenario $Name"
+    } catch {
+        $line = "SKIP ${Name}: $($_.Exception.Message)"
+    }
+    if ($token) {
         try {
-            & $ScriptBlock | Out-Null
-            $line = "PASS $Name"
-        } catch {
-            $line = "FAIL ${Name}: $($_.Exception.Message)"
+            if (-not (Test-InteractiveSession)) {
+                $line = "SKIP ${Name}: $($script:SkipReason)"
+            } else {
+                Save-KeyboardLayouts
+                try {
+                    & $ScriptBlock | Out-Null
+                    $line = "PASS $Name"
+                } catch {
+                    $line = "FAIL ${Name}: $($_.Exception.Message)"
+                } finally {
+                    Stop-OwnGhostty
+                    Restore-KeyboardLayouts
+                }
+            }
         } finally {
-            Stop-OwnGhostty
-            Restore-KeyboardLayouts
+            Exit-GuiLock $token
         }
     }
 
@@ -188,6 +320,6 @@ function Stop-OwnGhostty {
     $script:OwnPids.Clear()
 }
 
-Export-ModuleMember -Function Test-InteractiveSession, Get-SkipReason, Invoke-GuiScenario,
+Export-ModuleMember -Function Enter-GuiLock, Exit-GuiLock, Update-GuiLock, Test-InteractiveSession, Get-SkipReason, Invoke-GuiScenario,
     Set-ForegroundSafe, Save-KeyboardLayouts, Restore-KeyboardLayouts, Switch-GhosttyLayout,
     Register-OwnGhostty, Stop-OwnGhostty

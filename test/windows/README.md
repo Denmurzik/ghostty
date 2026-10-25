@@ -53,6 +53,31 @@ windows run on a real desktop, so they all import `lib/Harness.psm1`:
 - `Set-ForegroundSafe -Hwnd` and `Switch-GhosttyLayout -Hwnd -Klid` are the
   only sanctioned ways to take focus and change layouts.
 
+### The desktop lock (one GUI run at a time)
+
+Ghostty windows take the foreground and the keyboard layout, which breaks any
+other GUI test running on the same desktop. Every GUI run therefore holds
+`%TEMP%\gui-e2e.lock` while it uses the desktop. Any session (Claude or
+human) that starts windows or sends input must follow this protocol:
+
+- **Acquire** atomically: create the file with `CreateNew` and no sharing
+  (`[IO.File]::Open($path, 'CreateNew', 'Write', 'None')`). If that throws an
+  `IOException`, someone holds it: wait (poll every few seconds) and try
+  again; give up after about 30 minutes.
+- **Format**: text lines `id=<GUID>`, `pid=<pid of the holder>`,
+  `owner=<free text>`, `time=<ISO time>`.
+- **Stale rule**: the lock is stale, and may be deleted by a waiter, when the
+  file has not been written for 20 minutes or the `pid` process is gone.
+  Holders running longer than a few minutes rewrite the file (new `time`)
+  between steps. The test runner does this between scenarios.
+- **Release**: delete the file only if it still contains your own `id`.
+- Acquire immediately before the `try` whose `finally` releases it.
+
+`Enter-GuiLock`, `Update-GuiLock` and `Exit-GuiLock` in `lib/Harness.psm1`
+implement this; `Invoke-GuiScenario` takes the lock itself (a held lock is a
+SKIP after the wait). `e2e-m1.ps1` takes it once for the whole run and hands
+its id to the scenarios in `GHOSTTY_E2E_LOCK_ID`, so they do not wait on it.
+
 ### launch.ps1
 
 ```
