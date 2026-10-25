@@ -570,6 +570,13 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
+        // The pseudo console handle is gone once it was closed (the child
+        // exited but the surface may stay open), so only remember the size.
+        if (self.console_closed.load(.acquire)) {
+            self.size = size;
+            return;
+        }
+
         const result = windows.exp.kernel32.ResizePseudoConsole(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
@@ -613,4 +620,21 @@ test {
         .macos => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),
         else => try testing.expect(pty.getProcessInfo(.tty_name) == null),
     }
+}
+
+test "windows pty: setSize after closeConsoleAsync is a no-op" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var ws: winsize = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    var pty = try Pty.open(ws);
+    defer pty.deinit();
+
+    pty.closeConsoleAsync();
+
+    // The handle is no longer valid, but the size is still tracked.
+    ws.ws_row = 40;
+    ws.ws_col = 100;
+    try pty.setSize(ws);
+    try testing.expectEqual(ws, try pty.getSize());
 }

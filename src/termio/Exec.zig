@@ -2619,7 +2619,15 @@ test "windows exec: read loop delivers all bytes before EOF" {
     const chunk_len = 4096;
 
     const pipe = try Pty.createOutPipe();
+    // Until the writer thread owns the write end and the cleanup defer
+    // below is armed, setup failures clean up here.
+    var armed = false;
+    errdefer if (!armed) {
+        _ = windows.exp.kernel32.CloseHandle(pipe.read);
+        _ = windows.exp.kernel32.CloseHandle(pipe.write);
+    };
     var loop = try TestReadLoop.init(pipe.read);
+    errdefer if (!armed) loop.deinit();
     try loop.start();
 
     // Write 1 MiB (more than the pipe buffers, so the writer has to wait
@@ -2638,6 +2646,7 @@ test "windows exec: read loop delivers all bytes before EOF" {
         }
     };
     const writer = try std.Thread.spawn(.{}, Writer.run, .{pipe.write});
+    armed = true;
     defer {
         // Stop the reader first, then close its pipe: that also fails the
         // writer's pending write if the reader stopped early.
