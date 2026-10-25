@@ -184,6 +184,41 @@ pub fn applyAltGr(
     return .{ .mods = out, .consumed = .{ .ctrl = true, .alt = true } };
 }
 
+/// A key message as far as `isSyntheticAltGrCtrl` cares.
+pub const KeyMessage = struct {
+    /// WM_KEYDOWN or WM_SYSKEYDOWN, as opposed to a release.
+    is_down: bool,
+    /// The generic virtual key: key messages never carry the left/right
+    /// variants (VK_LCONTROL, VK_RMENU), which exist only in key state.
+    vk: u16,
+    lparam: win32.foundation.LPARAM,
+    /// `GetMessageTime` of the message.
+    time: i32,
+};
+
+fn isExtended(lparam: win32.foundation.LPARAM) bool {
+    const bits: usize = @bitCast(lparam);
+    return bits & (1 << 24) != 0;
+}
+
+/// Whether the key-down `ctrl` is the left Ctrl Windows injects before the
+/// right Alt of an AltGr press: a left (non-extended) Ctrl immediately
+/// followed by a right (extended) Alt key-down with the same timestamp.
+/// `next` is the next queued key message, if any.
+pub fn isSyntheticAltGrCtrl(ctrl: KeyMessage, next: ?KeyMessage) bool {
+    if (!ctrl.is_down or ctrl.vk != user32.VK_CONTROL or isExtended(ctrl.lparam)) return false;
+    const n = next orelse return false;
+    return n.is_down and
+        n.vk == user32.VK_MENU and
+        isExtended(n.lparam) and
+        n.time == ctrl.time;
+}
+
+/// Whether a left Ctrl release closes a swallowed synthetic AltGr Ctrl.
+pub fn isSyntheticAltGrCtrlRelease(vk: u16, lparam: win32.foundation.LPARAM, swallowed: bool) bool {
+    return swallowed and vk == user32.VK_CONTROL and !isExtended(lparam);
+}
+
 /// Copy `text` into `buf` without C0 controls and DEL. Core encodes those
 /// from the key and modifiers; the text must stay out of its way. UTF-8
 /// continuation bytes are all >= 0x80, so filtering bytes is safe. Output
@@ -440,6 +475,58 @@ test "win32 key: only Alt+F4 and Alt+Space pass to the system" {
     try testing.expect(!passToSystem(user32.VK_F4, false, false));
     try testing.expect(!passToSystem(user32.VK_SPACE, false, false));
     try testing.expect(!passToSystem(user32.VK_F4, true, false));
+}
+
+test "win32 key: synthetic AltGr left Ctrl is told from a real one" {
+    const ctrl_down: KeyMessage = .{
+        .is_down = true,
+        .vk = user32.VK_CONTROL,
+        .lparam = lparamOf(0x1D, false),
+        .time = 1000,
+    };
+    const ralt_down: KeyMessage = .{
+        .is_down = true,
+        .vk = user32.VK_MENU,
+        .lparam = lparamOf(0x38, true),
+        .time = 1000,
+    };
+
+    // Left Ctrl followed by right Alt at the same time: AltGr.
+    try testing.expect(isSyntheticAltGrCtrl(ctrl_down, ralt_down));
+
+    // A real left Ctrl followed by an ordinary key.
+    var key_a = ralt_down;
+    key_a.vk = 'A';
+    key_a.lparam = lparamOf(0x1E, false);
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_down, key_a));
+    // Nothing queued.
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_down, null));
+
+    // A real Ctrl then a left Alt, or a right Alt a moment later.
+    var lalt = ralt_down;
+    lalt.lparam = lparamOf(0x38, false);
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_down, lalt));
+    var later = ralt_down;
+    later.time = 1001;
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_down, later));
+    // The next message is a release.
+    var ralt_up = ralt_down;
+    ralt_up.is_down = false;
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_down, ralt_up));
+
+    // Right Ctrl and releases are never the synthetic press.
+    var rctrl = ctrl_down;
+    rctrl.lparam = lparamOf(0x1D, true);
+    try testing.expect(!isSyntheticAltGrCtrl(rctrl, ralt_down));
+    var ctrl_up = ctrl_down;
+    ctrl_up.is_down = false;
+    try testing.expect(!isSyntheticAltGrCtrl(ctrl_up, ralt_down));
+
+    // The matching release: only a left Ctrl, only after a swallowed press.
+    try testing.expect(isSyntheticAltGrCtrlRelease(user32.VK_CONTROL, lparamOf(0x1D, false), true));
+    try testing.expect(!isSyntheticAltGrCtrlRelease(user32.VK_CONTROL, lparamOf(0x1D, false), false));
+    try testing.expect(!isSyntheticAltGrCtrlRelease(user32.VK_CONTROL, lparamOf(0x1D, true), true));
+    try testing.expect(!isSyntheticAltGrCtrlRelease(user32.VK_MENU, lparamOf(0x38, true), true));
 }
 
 test "win32 key: layouts loaded by tests are unloaded afterwards" {

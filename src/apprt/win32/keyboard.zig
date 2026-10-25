@@ -87,7 +87,8 @@ fn handleKey(
         // Synthesized input: the text arrives as a lone WM_CHAR.
         user32.VK_PACKET => return 0,
 
-        user32.VK_LCONTROL => if (swallowAltGrCtrl(state, is_down)) return 0,
+        // Key messages carry the generic VK; the side is lparam's extended bit.
+        user32.VK_CONTROL => if (swallowAltGrCtrl(state, is_down, vk, lparam)) return 0,
 
         else => {},
     }
@@ -176,25 +177,32 @@ fn withScancode(
 /// AltGr presses send a left Ctrl key-down and a right Alt key-down with
 /// the same timestamp. The Ctrl half is not a key the user pressed, so it
 /// never reaches core, nor does its release. True when swallowed.
-fn swallowAltGrCtrl(state: *State, is_down: bool) bool {
+fn swallowAltGrCtrl(
+    state: *State,
+    is_down: bool,
+    vk: u16,
+    lparam: win32.foundation.LPARAM,
+) bool {
     if (!is_down) {
-        if (state.last_lctrl_time == null) return false;
+        if (!key.isSyntheticAltGrCtrlRelease(vk, lparam, state.last_lctrl_time != null)) return false;
         state.last_lctrl_time = null;
         return true;
     }
 
     const time = user32.GetMessageTime();
     var next: user32.MSG = .{};
-    if (user32.PeekMessageW(&next, null, WM_KEYFIRST, WM_KEYLAST, user32.PM_NOREMOVE) == 0) {
-        state.last_lctrl_time = null;
-        return false;
-    }
-
-    const is_ralt = (next.message == user32.WM_KEYDOWN or next.message == user32.WM_SYSKEYDOWN) and
-        next.wParam == user32.VK_RMENU and
-        @as(i32, @bitCast(next.time)) == time;
-    state.last_lctrl_time = if (is_ralt) time else null;
-    return is_ralt;
+    const queued = user32.PeekMessageW(&next, null, WM_KEYFIRST, WM_KEYLAST, user32.PM_NOREMOVE) != 0;
+    const synthetic = key.isSyntheticAltGrCtrl(
+        .{ .is_down = true, .vk = vk, .lparam = lparam, .time = time },
+        if (queued) .{
+            .is_down = next.message == user32.WM_KEYDOWN or next.message == user32.WM_SYSKEYDOWN,
+            .vk = @truncate(next.wParam),
+            .lparam = next.lParam,
+            .time = @bitCast(next.time),
+        } else null,
+    );
+    state.last_lctrl_time = if (synthetic) time else null;
+    return synthetic;
 }
 
 fn hasAltGr(state: *State, hkl: ?user32.HKL) bool {

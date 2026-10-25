@@ -93,12 +93,28 @@ $EXTENDED = 'delete', 'insert', 'home', 'end', 'pageup', 'pagedown', 'left', 'up
 
 $target = [IntPtr][Convert]::ToInt64($Hwnd, $(if ($Hwnd -like '0x*') { 16 } else { 10 }))
 
-function Send-Events([object[]]$events) {
-    $vk = [uint16[]]@($events | ForEach-Object { $_.Vk })
-    $scan = [uint16[]]@($events | ForEach-Object { $_.Scan })
-    $flags = [uint32[]]@($events | ForEach-Object { $_.Flags })
-    $sent = [GhosttySendInput.Native]::Send($vk, $scan, $flags)
-    if ($sent -ne $events.Count) { throw "SendInput sent $sent of $($events.Count) events" }
+# Sends `$events` in one SendInput call. Should that fail part-way, a key
+# may be left pressed on the user's machine, so `$release` (the matching
+# key-ups) is sent before the error propagates.
+function Send-Events([object[]]$events, [object[]]$release = @()) {
+    $ok = $false
+    try {
+        $vk = [uint16[]]@($events | ForEach-Object { $_.Vk })
+        $scan = [uint16[]]@($events | ForEach-Object { $_.Scan })
+        $flags = [uint32[]]@($events | ForEach-Object { $_.Flags })
+        $sent = [GhosttySendInput.Native]::Send($vk, $scan, $flags)
+        if ($sent -ne $events.Count) { throw "SendInput sent $sent of $($events.Count) events" }
+        $ok = $true
+    } finally {
+        if (-not $ok -and $release.Count -gt 0) {
+            try {
+                [void][GhosttySendInput.Native]::Send(
+                    [uint16[]]@($release | ForEach-Object { $_.Vk }),
+                    [uint16[]]@($release | ForEach-Object { $_.Scan }),
+                    [uint32[]]@($release | ForEach-Object { $_.Flags }))
+            } catch { }
+        }
+    }
 }
 
 # Refuse to type anywhere but the target window.
@@ -162,11 +178,12 @@ function Send-Chord([string]$spec, [IntPtr]$hkl) {
     $events = @()
     foreach ($h in $held) { $events += $h }
     $events += New-Event $k.Vk $k.Scan $k.Flags
-    $events += New-Event $k.Vk $k.Scan ($k.Flags -bor $KEYEVENTF_KEYUP)
+    $release = @()
+    $release += New-Event $k.Vk $k.Scan ($k.Flags -bor $KEYEVENTF_KEYUP)
     for ($i = $held.Count - 1; $i -ge 0; $i--) {
-        $events += New-Event $held[$i].Vk $held[$i].Scan ($held[$i].Flags -bor $KEYEVENTF_KEYUP)
+        $release += New-Event $held[$i].Vk $held[$i].Scan ($held[$i].Flags -bor $KEYEVENTF_KEYUP)
     }
-    Send-Events $events
+    Send-Events ($events + $release) -Release $release
 }
 
 if (-not (Set-ForegroundSafe -Hwnd $target)) {
@@ -180,10 +197,8 @@ if ($Text) {
     # or the touch keyboard sends them.
     foreach ($unit in $Text.ToCharArray()) {
         Assert-Foreground
-        Send-Events @(
-            (New-Event 0 ([int]$unit) $KEYEVENTF_UNICODE),
-            (New-Event 0 ([int]$unit) ($KEYEVENTF_UNICODE -bor $KEYEVENTF_KEYUP))
-        )
+        $up = New-Event 0 ([int]$unit) ($KEYEVENTF_UNICODE -bor $KEYEVENTF_KEYUP)
+        Send-Events @((New-Event 0 ([int]$unit) $KEYEVENTF_UNICODE), $up) -Release @($up)
         Start-Sleep -Milliseconds $DelayMs
     }
 } elseif ($Keys) {
@@ -198,10 +213,8 @@ if ($Text) {
         $flags = $KEYEVENTF_SCANCODE
         if (($code -band 0xFF00) -eq 0xE000) { $flags = $flags -bor $KEYEVENTF_EXTENDEDKEY }
         Assert-Foreground
-        Send-Events @(
-            (New-Event 0 ($code -band 0xFF) $flags),
-            (New-Event 0 ($code -band 0xFF) ($flags -bor $KEYEVENTF_KEYUP))
-        )
+        $up = New-Event 0 ($code -band 0xFF) ($flags -bor $KEYEVENTF_KEYUP)
+        Send-Events @((New-Event 0 ($code -band 0xFF) $flags), $up) -Release @($up)
         Start-Sleep -Milliseconds $DelayMs
     }
 }

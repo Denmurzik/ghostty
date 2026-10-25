@@ -2693,6 +2693,8 @@ pub const Set = struct {
     ///
     ///   1. Physical key (event.physical_key)
     ///   2. Unshifted Unicode codepoint (event.unshifted_codepoint)
+    ///   3. If that codepoint is not ASCII (a non-Latin layout), the
+    ///      codepoint of the physical key on a US layout
     ///
     pub fn getEvent(self: *const Set, event: KeyEvent) ?Entry {
         var trigger: Trigger = .{
@@ -2720,6 +2722,16 @@ pub const Set = struct {
         // to verify this.
         if (event.unshifted_codepoint > 0) {
             trigger.key = .{ .unicode = event.unshifted_codepoint };
+            if (self.get(trigger)) |v| return v;
+        }
+
+        // A non-Latin layout (Cyrillic, Greek, ...) reports a codepoint no
+        // binding is written with. Letter bindings should keep working
+        // there, so fall back to what the physical key types on a US
+        // layout. Latin layouts have ASCII codepoints and never get here.
+        if (event.unshifted_codepoint > 0x7F) physical_cp: {
+            const cp = event.key.codepoint() orelse break :physical_cp;
+            trigger.key = .{ .unicode = cp };
             if (self.get(trigger)) |v| return v;
         }
 
@@ -4386,6 +4398,42 @@ test "set: getEvent codepoint" {
         });
         try testing.expect(action == null);
     }
+}
+
+test "set: getEvent non-Latin layout falls back to the physical key codepoint" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+shift+c=new_window");
+
+    // Russian layout: the physical C key types U+0441.
+    {
+        const action = s.getEvent(.{
+            .key = .key_c,
+            .mods = .{ .ctrl = true, .shift = true },
+            .unshifted_codepoint = 0x0441,
+        }).?.value_ptr.*.leaf;
+        try testing.expect(action.action == .new_window);
+    }
+
+    // The fallback is for the physical key: another key still misses.
+    try testing.expect(s.getEvent(.{
+        .key = .key_v,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = 0x043C,
+    }) == null);
+
+    // A Latin codepoint is not second-guessed: AZERTY's physical Q types
+    // 'a', which must not trigger a binding on 'q'.
+    try s.parseAndPut(alloc, "ctrl+shift+q=close_window");
+    try testing.expect(s.getEvent(.{
+        .key = .key_q,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = 'a',
+    }) == null);
 }
 
 test "set: getEvent codepoint case folding" {
