@@ -338,17 +338,72 @@ const WindowsPty = struct {
     pseudo_console: windows.HPCON,
     size: winsize,
 
+    /// Set once the pseudo console has been (or is being) closed, so that
+    /// `closeConsoleAsync` is idempotent and `deinit` doesn't close it twice.
+    console_closed: std.atomic.Value(bool),
+
     pub const OpenError = error{Unexpected};
 
-    /// Open a new PTY with the given initial size.
-    pub fn open(size: winsize) OpenError!Pty {
-        var pty: Pty = undefined;
+    /// The read side of the output pipe is a server end of a named pipe
+    /// opened for overlapped I/O (anonymous pipes can't do overlapped I/O),
+    /// which lets the read thread wait on the read and on a quit event at the
+    /// same time. The write side is the end handed to the pseudo console.
+    pub const OutPipe = struct {
+        read: windows.HANDLE,
+        write: windows.HANDLE,
+    };
 
-        var pipe_path_buf: [128]u8 = undefined;
-        var pipe_path_buf_w: [128]u16 = undefined;
-        const pipe_path = std.mem.printSentinel(
-            &pipe_path_buf,
-            "\\\\.\\pipe\\LOCAL\\ghostty-pty-{d}-{d}",
+    /// Create the pty output pipe pair, see `OutPipe`.
+    pub fn createOutPipe() OpenError!OutPipe {
+        var path_buf_w: [128]u16 = undefined;
+        const path_w = pipePathW(&path_buf_w, "ghostty-pty-out-");
+
+        const security_attributes = windows.SECURITY_ATTRIBUTES{
+            .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+            .bInheritHandle = windows.FALSE,
+            .lpSecurityDescriptor = null,
+        };
+
+        const read = windows.exp.kernel32.CreateNamedPipeW(
+            path_w.ptr,
+            windows.PIPE_ACCESS_INBOUND |
+                windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
+                windows.FILE_FLAG_OVERLAPPED,
+            windows.PIPE_TYPE_BYTE,
+            1,
+            0,
+            64 * 1024,
+            0,
+            &security_attributes,
+        );
+        if (read == windows.INVALID_HANDLE_VALUE) {
+            return windows.unexpectedError(windows.GetLastError());
+        }
+        errdefer _ = windows.exp.kernel32.CloseHandle(read);
+
+        var security_attributes_write = security_attributes;
+        const write = windows.exp.kernel32.CreateFileW(
+            path_w.ptr,
+            windows.GENERIC_WRITE,
+            0,
+            &security_attributes_write,
+            windows.OPEN_EXISTING,
+            windows.FILE_ATTRIBUTE_NORMAL,
+            null,
+        );
+        if (write == windows.INVALID_HANDLE_VALUE) {
+            return windows.unexpectedError(windows.GetLastError());
+        }
+
+        return .{ .read = read, .write = write };
+    }
+
+    /// Build a unique `\\.\pipe\LOCAL\<prefix><pid>-<n>` name as UTF-16.
+    fn pipePathW(buf_w: *[128]u16, comptime prefix: []const u8) [:0]const u16 {
+        var buf: [128]u8 = undefined;
+        const path = std.mem.printSentinel(
+            &buf,
+            "\\\\.\\pipe\\LOCAL\\" ++ prefix ++ "{d}-{d}",
             .{
                 windows.GetCurrentProcessId(),
                 pipe_name_counter.fetchAdd(1, .monotonic),
@@ -356,12 +411,17 @@ const WindowsPty = struct {
             0,
         ) catch unreachable;
 
-        const pipe_path_w_len = std.unicode.utf8ToUtf16Le(
-            &pipe_path_buf_w,
-            pipe_path,
-        ) catch unreachable;
-        pipe_path_buf_w[pipe_path_w_len] = 0;
-        const pipe_path_w = pipe_path_buf_w[0..pipe_path_w_len :0];
+        const len = std.unicode.utf8ToUtf16Le(buf_w, path) catch unreachable;
+        buf_w[len] = 0;
+        return buf_w[0..len :0];
+    }
+
+    /// Open a new PTY with the given initial size.
+    pub fn open(size: winsize) OpenError!Pty {
+        var pty: Pty = undefined;
+
+        var pipe_path_buf_w: [128]u16 = undefined;
+        const pipe_path_w = pipePathW(&pipe_path_buf_w, "ghostty-pty-");
 
         const security_attributes = windows.SECURITY_ATTRIBUTES{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
@@ -416,9 +476,9 @@ const WindowsPty = struct {
         //     _ = windows.CloseHandle(pty.in_pipe);
         // }
 
-        if (windows.exp.kernel32.CreatePipe(&pty.out_pipe, &pty.out_pipe_pty, null, 0) == windows.FALSE) {
-            return windows.unexpectedError(windows.GetLastError());
-        }
+        const out = try createOutPipe();
+        pty.out_pipe = out.read;
+        pty.out_pipe_pty = out.write;
         errdefer {
             _ = windows.exp.kernel32.CloseHandle(pty.out_pipe);
             _ = windows.exp.kernel32.CloseHandle(pty.out_pipe_pty);
@@ -451,16 +511,52 @@ const WindowsPty = struct {
         if (result != windows.S_OK) return error.Unexpected;
 
         pty.size = size;
+        pty.console_closed = .init(false);
         return pty;
     }
 
     pub fn deinit(self: *Pty) void {
-        _ = windows.exp.kernel32.CloseHandle(self.in_pipe_pty);
+        self.closeChildSide();
         _ = windows.exp.kernel32.CloseHandle(self.in_pipe);
-        _ = windows.exp.kernel32.CloseHandle(self.out_pipe_pty);
         _ = windows.exp.kernel32.CloseHandle(self.out_pipe);
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        if (!self.console_closed.load(.acquire)) {
+            windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        }
         self.* = undefined;
+    }
+
+    /// Close the handles that the pseudo console duplicated for itself
+    /// (the input read end and the output write end). Call this once the
+    /// child has been spawned. Without it our copy of the output write
+    /// end keeps the output pipe alive forever, so the read side never
+    /// sees EOF after the pseudo console closes. Safe to call repeatedly.
+    pub fn closeChildSide(self: *Pty) void {
+        inline for (.{ &self.in_pipe_pty, &self.out_pipe_pty }) |handle| {
+            if (handle.* != windows.INVALID_HANDLE_VALUE) {
+                _ = windows.exp.kernel32.CloseHandle(handle.*);
+                handle.* = windows.INVALID_HANDLE_VALUE;
+            }
+        }
+    }
+
+    /// Close the pseudo console from a helper thread. ClosePseudoConsole
+    /// can block until the output pipe has been drained, so it must not run
+    /// on a thread that is also responsible for reading that pipe.
+    /// Idempotent; `deinit` skips closing the console if this already ran.
+    pub fn closeConsoleAsync(self: *Pty) void {
+        if (self.console_closed.swap(true, .acq_rel)) return;
+
+        const hpc = self.pseudo_console;
+        const thread = std.Thread.spawn(.{}, closeConsole, .{hpc}) catch |err| {
+            log.warn("error spawning pseudo console close thread err={}, closing inline", .{err});
+            closeConsole(hpc);
+            return;
+        };
+        thread.detach();
+    }
+
+    fn closeConsole(hpc: windows.HPCON) void {
+        windows.exp.kernel32.ClosePseudoConsole(hpc);
     }
 
     pub const GetSizeError = error{};

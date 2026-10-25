@@ -32,6 +32,12 @@ const compat_fd = @import("../lib/compat/fd.zig");
 
 const log = std.log.scoped(.io_exec);
 
+const is_windows = builtin.target.os.tag == .windows;
+
+/// How long to wait for the read thread to drain the pty after the child
+/// exited before moving on (Windows).
+const DRAIN_TIMEOUT_MS = 500;
+
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
@@ -120,11 +126,15 @@ pub fn threadEnter(
     // Track our process start time for abnormal exits
     const process_start: std.Io.Timestamp = .now(global.io(), .awake);
 
-    // Create our pipe that we'll use to kill our read thread.
-    // pipe[0] is the read end, pipe[1] is the write end.
-    const pipe = try internal_os.pipe();
-    errdefer closeFd(pipe[0]);
-    errdefer closeFd(pipe[1]);
+    // Create what we'll use to kill our read thread. On POSIX that is a
+    // pipe: pipe[0] is the read end, pipe[1] is the write end. On Windows
+    // it is a quit event (plus an event the read thread signals once it
+    // has seen the end of the pty stream).
+    const events: WindowsEvents = if (comptime is_windows) try WindowsEvents.init() else {};
+    errdefer if (comptime is_windows) events.deinit();
+    const pipe: [2]posix.fd_t = if (comptime is_windows) undefined else try internal_os.pipe();
+    errdefer if (comptime !is_windows) closeFd(pipe[0]);
+    errdefer if (comptime !is_windows) closeFd(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -137,9 +147,13 @@ pub fn threadEnter(
     errdefer termios_timer.deinit();
 
     // Start our read thread
-    const read_thread = try std.Thread.spawn(
+    const read_thread = if (comptime is_windows) try std.Thread.spawn(
         .{},
-        if (builtin.target.os.tag == .windows) ReadThread.threadMainWindows else ReadThread.threadMainPosix,
+        ReadThread.threadMainWindows,
+        .{ pty_fds.read, io, events.quit, events.drained },
+    ) else try std.Thread.spawn(
+        .{},
+        ReadThread.threadMainPosix,
         .{ pty_fds.read, io, pipe[0] },
     );
     read_thread.setName(global.io(), "io-reader") catch {};
@@ -150,8 +164,10 @@ pub fn threadEnter(
         .write_stream = stream,
         .process = process,
         .read_thread = read_thread,
-        .read_thread_pipe = pipe[1],
+        .read_thread_pipe = if (comptime is_windows) {} else pipe[1],
+        .read_thread_events = events,
         .read_thread_fd = pty_fds.read,
+        .pty = if (comptime is_windows) &self.subprocess.pty.? else {},
         .termios_timer = termios_timer,
     } };
 
@@ -203,25 +219,9 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    if (comptime builtin.target.os.tag == .windows) {
-        var written: windows.DWORD = 0;
-        if (windows.exp.kernel32.WriteFile(
-            exec.read_thread_pipe,
-            "x",
-            1,
-            &written,
-            null,
-        ) == windows.FALSE) {
-            switch (windows.GetLastError()) {
-                // The read thread closed its end already, which is
-                // completely fine since that is what we wanted.
-                .BROKEN_PIPE, .NO_DATA => {},
-
-                else => |err| log.warn(
-                    "error writing to read thread quit pipe err={}",
-                    .{err},
-                ),
-            }
+    if (comptime is_windows) {
+        if (windows.exp.kernel32.SetEvent(exec.read_thread_events.quit) == windows.FALSE) {
+            log.warn("error signalling read thread quit event err={}", .{windows.GetLastError()});
         }
     } else switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
         .SUCCESS => {},
@@ -236,17 +236,12 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
         ),
     }
 
-    if (comptime builtin.target.os.tag == .windows) {
-        // Interrupt the blocking read so the thread can see the quit message
-        if (windows.exp.kernel32.CancelIoEx(exec.read_thread_fd, null) == windows.FALSE) {
-            switch (windows.GetLastError()) {
-                .NOT_FOUND => {},
-                else => |err| log.warn("error interrupting read thread err={}", .{err}),
-            }
-        }
-    }
-
     exec.read_thread.join();
+
+    // Nothing reads the pty anymore, and closing the pseudo console
+    // can block until its output is drained, so make sure it is closed
+    // from a helper thread before the pty is torn down.
+    if (comptime is_windows) exec.pty.closeConsoleAsync();
 }
 
 pub fn focusGained(
@@ -302,6 +297,22 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
         execdata.start.untilNow(global.io(), .awake).toMilliseconds(),
     );
     log.debug("child process exited status={} runtime={}ms", .{ exit_code, runtime_ms });
+
+    // The child is gone, so close the pseudo console. That flushes its
+    // last output and then ends the output pipe, which the read thread
+    // sees as EOF. Give it a moment to hand everything to the terminal
+    // before we tell the surface, which may close right away.
+    if (comptime is_windows) {
+        execdata.pty.closeConsoleAsync();
+        const wait = windows.exp.kernel32.WaitForSingleObject(
+            execdata.read_thread_events.drained,
+            DRAIN_TIMEOUT_MS,
+        );
+        if (wait != windows.WAIT_OBJECT_0) log.warn(
+            "read thread did not drain within {}ms after child exit result={}",
+            .{ DRAIN_TIMEOUT_MS, wait },
+        );
+    }
 
     // We always notify the surface immediately that the child has
     // exited and some metadata about the exit.
@@ -554,8 +565,12 @@ pub const ThreadData = struct {
 
     /// Reader thread state
     read_thread: std.Thread,
-    read_thread_pipe: posix.fd_t,
+    read_thread_pipe: if (is_windows) void else posix.fd_t,
+    read_thread_events: WindowsEvents,
     read_thread_fd: posix.fd_t,
+
+    /// The pty, so the child exit path can close the pseudo console (Windows).
+    pty: if (is_windows) *Pty else void,
 
     /// The timer to detect termios state changes.
     termios_timer: xev.Timer,
@@ -567,7 +582,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        closeFd(self.read_thread_pipe);
+        if (comptime is_windows) self.read_thread_events.deinit() else closeFd(self.read_thread_pipe);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -951,6 +966,11 @@ const Subprocess = struct {
                 // side. This prevents the slave fd from being leaked to
                 // future children.
                 _ = posix.system.close(pty.slave);
+            } else {
+                // The pseudo console holds its own copies of the child
+                // side handles. Closing ours is what lets the output pipe
+                // report EOF once the pseudo console closes.
+                self.pty.?.closeChildSide();
             }
 
             // Successful start we can clear out some memory.
@@ -1795,10 +1815,12 @@ pub const ReadThread = struct {
         return true;
     }
 
-    fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
-        // Always close our end of the pipe when we exit.
-        defer closeFd(quit);
-
+    fn threadMainWindows(
+        fd: posix.fd_t,
+        io: *termio.Termio,
+        quit_event: windows.HANDLE,
+        drained_event: windows.HANDLE,
+    ) void {
         // Setup our crash metadata
         crash.sentry.thread_state = .{
             .type = .io,
@@ -1806,45 +1828,149 @@ pub const ReadThread = struct {
         };
         defer crash.sentry.thread_state = null;
 
-        var buf: [1024]u8 = undefined;
-        while (true) {
-            while (true) {
-                var n: windows.DWORD = 0;
-                if (windows.exp.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
-                    const err = windows.GetLastError();
-                    switch (err) {
-                        // Check for a quit signal
-                        .OPERATION_ABORTED => break,
-
-                        else => {
-                            log.err("io reader error err={}", .{err});
-                            unreachable;
-                        },
-                    }
-                }
-
-                @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
+        const end = readLoopWindows(fd, quit_event, io, struct {
+            fn onData(io_: *termio.Termio, buf: []const u8) void {
+                @call(.always_inline, termio.Termio.processOutput, .{ io_, buf });
 
                 // See threadMainPosix: hand the renderer state mutex
                 // off if the renderer is waiting, since this loop
                 // would otherwise starve it under heavy output.
-                io.renderer_state.yieldToDemand(global.io());
+                io_.renderer_state.yieldToDemand(global.io());
             }
+        }.onData);
 
-            var quit_bytes: windows.DWORD = 0;
-            if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == windows.FALSE) {
-                const err = windows.GetLastError();
-                log.err("quit pipe reader error err={}", .{err});
-                unreachable;
-            }
+        switch (end) {
+            .quit => log.info("read thread got quit signal", .{}),
+            .eof => log.info("pty closed, read thread exiting", .{}),
+            .err => log.warn("pty read failed, read thread exiting", .{}),
+        }
 
-            if (quit_bytes > 0) {
-                log.info("read thread got quit signal", .{});
-                return;
+        // Tell the child exit path that nothing more will be read. A read
+        // error also counts: nothing will be drained after it either.
+        if (end != .quit) {
+            if (windows.exp.kernel32.SetEvent(drained_event) == windows.FALSE) {
+                log.warn("error signalling drained event err={}", .{windows.GetLastError()});
             }
         }
     }
 };
+
+pub const ReadLoopEnd = enum {
+    /// The writing side of the pty is gone and everything was delivered.
+    eof,
+
+    /// The quit event was signalled.
+    quit,
+
+    /// An unexpected read error.
+    err,
+};
+
+/// Read `handle` (a pipe opened for overlapped I/O) and hand every chunk to
+/// `onData` until the stream ends or `quit_event` is signalled. Windows only.
+///
+/// The read is overlapped so we can wait for data and for the quit event at
+/// the same time, instead of cancelling a blocking read from another thread.
+pub fn readLoopWindows(
+    handle: windows.HANDLE,
+    quit_event: windows.HANDLE,
+    ctx: anytype,
+    comptime onData: fn (@TypeOf(ctx), []const u8) void,
+) ReadLoopEnd {
+    var buf: [64 * 1024]u8 = undefined;
+
+    const read_event = windows.exp.kernel32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse {
+        log.err("error creating read event err={}", .{windows.GetLastError()});
+        return .err;
+    };
+    defer _ = windows.exp.kernel32.CloseHandle(read_event);
+
+    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    overlapped.hEvent = read_event;
+
+    while (true) {
+        // Check for quit before every read. If the pty is busy a read is
+        // always ready, and the wait below would keep picking it over the
+        // quit event.
+        if (windows.exp.kernel32.WaitForSingleObject(quit_event, 0) == windows.WAIT_OBJECT_0) {
+            return .quit;
+        }
+
+        var n: windows.DWORD = 0;
+        if (windows.exp.kernel32.ReadFile(handle, &buf, buf.len, &n, &overlapped) == windows.FALSE) {
+            switch (windows.GetLastError()) {
+                .IO_PENDING => {},
+                .BROKEN_PIPE => return .eof,
+                else => |err| {
+                    log.err("io reader error err={}", .{err});
+                    return .err;
+                },
+            }
+
+            const handles = [2]windows.HANDLE{ read_event, quit_event };
+            const wait = windows.exp.kernel32.WaitForMultipleObjects(
+                handles.len,
+                &handles,
+                windows.FALSE,
+                windows.INFINITE,
+            );
+            if (wait != windows.WAIT_OBJECT_0) {
+                // Cancel the read and wait until the kernel is done with
+                // our buffer and OVERLAPPED before they go out of scope.
+                _ = windows.exp.kernel32.CancelIoEx(handle, &overlapped);
+                if (windows.exp.kernel32.GetOverlappedResult(handle, &overlapped, &n, windows.TRUE) != windows.FALSE and n > 0) {
+                    onData(ctx, buf[0..n]);
+                }
+
+                if (wait == windows.WAIT_OBJECT_0 + 1) return .quit;
+                log.err("io reader wait error result={} err={}", .{ wait, windows.GetLastError() });
+                return .err;
+            }
+
+            if (windows.exp.kernel32.GetOverlappedResult(handle, &overlapped, &n, windows.FALSE) == windows.FALSE) {
+                switch (windows.GetLastError()) {
+                    .BROKEN_PIPE => return .eof,
+
+                    // Somebody cancelled our read, which only happens
+                    // when we are being shut down.
+                    .OPERATION_ABORTED => return .quit,
+
+                    else => |err| {
+                        log.err("io reader error err={}", .{err});
+                        return .err;
+                    },
+                }
+            }
+        }
+
+        if (n > 0) onData(ctx, buf[0..n]);
+    }
+}
+
+/// The events used to coordinate the Windows read thread with the rest
+/// of the backend (void elsewhere, where a pipe is used instead).
+const WindowsEvents = if (is_windows) struct {
+    /// Set by threadExit to stop the read loop.
+    quit: windows.HANDLE,
+
+    /// Set by the read thread when the pty stream ended and everything
+    /// that was read has been handed to the terminal.
+    drained: windows.HANDLE,
+
+    fn init() !WindowsEvents {
+        const quit = windows.exp.kernel32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+            return windows.unexpectedError(windows.GetLastError());
+        errdefer _ = windows.exp.kernel32.CloseHandle(quit);
+        const drained = windows.exp.kernel32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+            return windows.unexpectedError(windows.GetLastError());
+        return .{ .quit = quit, .drained = drained };
+    }
+
+    fn deinit(self: WindowsEvents) void {
+        _ = windows.exp.kernel32.CloseHandle(self.quit);
+        _ = windows.exp.kernel32.CloseHandle(self.drained);
+    }
+} else void;
 
 /// Closes a pipe/file descriptor, which is a HANDLE on Windows.
 fn closeFd(fd: posix.fd_t) void {
@@ -2385,4 +2511,186 @@ test "init frees the env when it fails" {
         };
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+}
+
+/// Runs `readLoopWindows` on its own thread and collects what it reads, so a
+/// test can wait for it with a bound instead of risking a hang.
+const TestReadLoop = struct {
+    const k32 = windows.exp.kernel32;
+
+    handle: windows.HANDLE,
+    quit: windows.HANDLE,
+    done: windows.HANDLE,
+    collected: std.ArrayList(u8) = .empty,
+    end: ReadLoopEnd = .err,
+    thread: ?std.Thread = null,
+
+    fn init(handle: windows.HANDLE) !TestReadLoop {
+        const quit = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+            return error.CreateEventFailed;
+        errdefer _ = k32.CloseHandle(quit);
+        const done = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+            return error.CreateEventFailed;
+        return .{ .handle = handle, .quit = quit, .done = done };
+    }
+
+    /// Unblocks and joins the thread (if it still runs) and frees everything.
+    fn deinit(self: *TestReadLoop) void {
+        _ = k32.SetEvent(self.quit);
+        if (self.thread) |t| t.join();
+        self.collected.deinit(std.testing.allocator);
+        _ = k32.CloseHandle(self.quit);
+        _ = k32.CloseHandle(self.done);
+    }
+
+    fn start(self: *TestReadLoop) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *TestReadLoop) void {
+        self.end = readLoopWindows(self.handle, self.quit, self, onData);
+        _ = k32.SetEvent(self.done);
+    }
+
+    fn onData(self: *TestReadLoop, buf: []const u8) void {
+        self.collected.appendSlice(std.testing.allocator, buf) catch @panic("oom");
+    }
+
+    /// Wait up to `ms` for the loop to return.
+    fn waitDone(self: *TestReadLoop, ms: u32) bool {
+        return k32.WaitForSingleObject(self.done, ms) == windows.WAIT_OBJECT_0;
+    }
+};
+
+fn testElapsedMs(start: std.Io.Timestamp) i64 {
+    return start.untilNow(global.io(), .awake).toMilliseconds();
+}
+
+test "windows exec: read loop returns promptly when quit is signalled while blocked" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const pipe = try Pty.createOutPipe();
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.read);
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.write);
+
+    var loop = try TestReadLoop.init(pipe.read);
+    defer loop.deinit();
+    try loop.start();
+
+    // Nothing is ever written, so the loop is blocked in its wait.
+    try std.Io.sleep(global.io(), .fromMilliseconds(50), .awake);
+    try testing.expect(!loop.waitDone(0));
+
+    const start: std.Io.Timestamp = .now(global.io(), .awake);
+    try testing.expect(windows.exp.kernel32.SetEvent(loop.quit) != windows.FALSE);
+    try testing.expect(loop.waitDone(1000));
+    try testing.expect(testElapsedMs(start) < 1000);
+    try testing.expectEqual(ReadLoopEnd.quit, loop.end);
+    try testing.expectEqual(@as(usize, 0), loop.collected.items.len);
+}
+
+test "windows exec: read loop notices quit even when data is always ready" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const pipe = try Pty.createOutPipe();
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.read);
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.write);
+
+    var loop = try TestReadLoop.init(pipe.read);
+    defer loop.deinit();
+
+    // Data is waiting and so is the quit signal: quit must win.
+    var written: windows.DWORD = 0;
+    try testing.expect(windows.exp.kernel32.WriteFile(pipe.write, "ghostty", 7, &written, null) != windows.FALSE);
+    try testing.expect(windows.exp.kernel32.SetEvent(loop.quit) != windows.FALSE);
+
+    try loop.start();
+    try testing.expect(loop.waitDone(1000));
+    try testing.expectEqual(ReadLoopEnd.quit, loop.end);
+}
+
+test "windows exec: read loop delivers all bytes before EOF" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const total = 1024 * 1024;
+    const chunk_len = 4096;
+
+    const pipe = try Pty.createOutPipe();
+    var loop = try TestReadLoop.init(pipe.read);
+    try loop.start();
+
+    // Write 1 MiB (more than the pipe buffers, so the writer has to wait
+    // for the reader), then close the writing end to produce EOF.
+    const Writer = struct {
+        fn run(handle: windows.HANDLE) void {
+            defer _ = windows.exp.kernel32.CloseHandle(handle);
+            var chunk: [chunk_len]u8 = undefined;
+            var offset: usize = 0;
+            while (offset < total) : (offset += chunk_len) {
+                for (&chunk, 0..) |*b, i| b.* = @intCast((offset + i) % 251);
+                var written: windows.DWORD = 0;
+                if (windows.exp.kernel32.WriteFile(handle, &chunk, chunk_len, &written, null) == windows.FALSE) return;
+                if (written != chunk_len) return;
+            }
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{pipe.write});
+    defer {
+        // Stop the reader first, then close its pipe: that also fails the
+        // writer's pending write if the reader stopped early.
+        loop.deinit();
+        _ = windows.exp.kernel32.CloseHandle(pipe.read);
+        writer.join();
+    }
+
+    try testing.expect(loop.waitDone(10_000));
+    try testing.expectEqual(ReadLoopEnd.eof, loop.end);
+    try testing.expectEqual(@as(usize, total), loop.collected.items.len);
+    for (loop.collected.items, 0..) |b, i| {
+        if (b != i % 251) return error.TestUnexpectedResult;
+    }
+}
+
+test "windows exec: output before child exit is drained and EOF follows" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 });
+    defer pty.deinit();
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/c", "echo ghostty-drain-token" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(testing.allocator);
+    defer _ = k32.CloseHandle(cmd.pid.?);
+    pty.closeChildSide();
+
+    var loop = try TestReadLoop.init(pty.out_pipe);
+    defer loop.deinit();
+    try loop.start();
+
+    // The child prints its token and exits well within this bound.
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(cmd.pid.?, 10_000),
+    );
+
+    // The read side must see EOF shortly after the console is closed.
+    const start: std.Io.Timestamp = .now(global.io(), .awake);
+    pty.closeConsoleAsync();
+    try testing.expect(loop.waitDone(1000));
+    try testing.expect(testElapsedMs(start) < 1000);
+    try testing.expectEqual(ReadLoopEnd.eof, loop.end);
+    try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-drain-token") != null);
 }

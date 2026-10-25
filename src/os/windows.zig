@@ -260,6 +260,26 @@ pub const exp = struct {
             hFile: HANDLE,
             lpOverlapped: ?*OVERLAPPED,
         ) callconv(.winapi) BOOL;
+        /// https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
+        pub extern "kernel32" fn CreateEventW(
+            lpEventAttributes: ?*SECURITY_ATTRIBUTES,
+            bManualReset: BOOL,
+            bInitialState: BOOL,
+            lpName: ?LPCWSTR,
+        ) callconv(.winapi) ?HANDLE;
+        pub extern "kernel32" fn SetEvent(hEvent: HANDLE) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn WaitForMultipleObjects(
+            nCount: DWORD,
+            lpHandles: [*]const HANDLE,
+            bWaitAll: BOOL,
+            dwMilliseconds: DWORD,
+        ) callconv(.winapi) DWORD;
+        pub extern "kernel32" fn GetOverlappedResult(
+            hFile: HANDLE,
+            lpOverlapped: *OVERLAPPED,
+            lpNumberOfBytesTransferred: *DWORD,
+            bWait: BOOL,
+        ) callconv(.winapi) BOOL;
         pub extern "kernel32" fn WriteFile(
             hFile: HANDLE,
             lpBuffer: *const anyopaque,
@@ -385,6 +405,15 @@ pub fn ProcThreadAttributeValue(
 }
 
 // --- events (Task 9)
+// The event externs (CreateEventW, SetEvent, WaitForMultipleObjects,
+// GetOverlappedResult) live in `exp.kernel32` above.
+
+pub const ERROR_BROKEN_PIPE = 109;
+pub const ERROR_IO_PENDING = 997;
+pub const GENERIC_WRITE = 0x40000000;
+pub const PIPE_ACCESS_INBOUND = 0x00000001;
+pub const WAIT_OBJECT_0 = 0x00000000;
+pub const WAIT_TIMEOUT = 0x00000102;
 
 // --- font files (Task 12)
 
