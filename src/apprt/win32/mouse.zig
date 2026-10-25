@@ -20,6 +20,22 @@ extern "user32" fn GetClassNameW(
     max: i32,
 ) callconv(.winapi) i32;
 
+extern "user32" fn SystemParametersInfoW(
+    action: u32,
+    param: u32,
+    pv: ?*anyopaque,
+    win_ini: u32,
+) callconv(.winapi) i32;
+
+const SPI_GETWHEELSCROLLLINES = 0x0068;
+const SPI_GETWHEELSCROLLCHARS = 0x006C;
+
+/// The "scroll one page" setting, reported as UINT_MAX.
+const WHEEL_PAGESCROLL = 0xFFFFFFFF;
+
+/// Lines (or characters) per wheel notch when the system says nothing usable.
+const default_scroll_amount = 3;
+
 /// Per-surface mouse state.
 pub const State = struct {
     /// The cursor shape core last asked for.
@@ -222,6 +238,20 @@ fn handleButton(
 
     _ = surface.core_surface.mouseButtonCallback(state, button, mods) catch |err|
         log.warn("mouse button callback failed err={}", .{err});
+
+    // Releasing a drag outside the window: no WM_MOUSELEAVE is coming for
+    // a pointer that was already out, so clear the stale hover here.
+    if (state == .release and ms.captured_buttons == 0 and !insideClient(surface, lparam)) {
+        cursorPos(surface, .{ .x = -1, .y = -1 }, mods);
+    }
+}
+
+fn insideClient(surface: *Surface, lparam: win32.foundation.LPARAM) bool {
+    var rc: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    if (win32.user32.GetClientRect(surface.hwnd, &rc) == 0) return true;
+    const x = win32.user32.getXLparam(lparam);
+    const y = win32.user32.getYLparam(lparam);
+    return x >= rc.left and x < rc.right and y >= rc.top and y < rc.bottom;
 }
 
 /// Report a release for every button still held, after capture was lost.
@@ -265,22 +295,46 @@ fn handleWheel(
         }
     }
 
-    const w = wheelOffset(user32.getWheelDelta(wparam));
+    const delta = user32.getWheelDelta(wparam);
+    const w = wheelOffset(delta);
+    const horizontal = msg == user32.WM_MOUSEHWHEEL;
+
+    // Core takes precision scrolls in pixels and discrete ones in notches
+    // (applying its own lines-per-notch). A precision delta is turned into
+    // the pixels the system's lines-per-notch setting would scroll, so it
+    // matches the notch wheel.
     var offset = w.offset;
     if (w.precision) {
-        // Core takes precision scrolls in pixels and discrete ones in
-        // notches; a notch is a line.
-        offset *= @floatFromInt(surface.core_surface.size.cell.height);
+        const cell = surface.core_surface.size.cell;
+        offset = precisionPixels(
+            delta,
+            wheelScrollAmount(if (horizontal) SPI_GETWHEELSCROLLCHARS else SPI_GETWHEELSCROLLLINES),
+            if (horizontal) cell.width else cell.height,
+        );
     }
 
     // Core's positive y is up, as for the wheel. Its x is inverted: the
     // wheel reports right as positive (GTK makes the same flip).
-    const horizontal = msg == user32.WM_MOUSEHWHEEL;
     surface.core_surface.scrollCallback(
         if (horizontal) -offset else 0,
         if (horizontal) 0 else offset,
         .{ .precision = w.precision },
     ) catch |err| log.warn("scroll callback failed err={}", .{err});
+}
+
+/// The pixels a precision wheel delta scrolls: `WHEEL_DELTA` units are one
+/// notch, which is `amount` cells of `cell_size` pixels.
+fn precisionPixels(delta: i16, amount: u32, cell_size: u32) f64 {
+    const notches = @as(f64, @floatFromInt(delta)) / @as(f64, win32.user32.WHEEL_DELTA);
+    return notches * @as(f64, @floatFromInt(amount)) * @as(f64, @floatFromInt(cell_size));
+}
+
+/// The system's lines (or characters) per wheel notch.
+fn wheelScrollAmount(action: u32) u32 {
+    var amount: u32 = default_scroll_amount;
+    if (SystemParametersInfoW(action, 0, &amount, 0) == 0) return default_scroll_amount;
+    if (amount == WHEEL_PAGESCROLL) return default_scroll_amount;
+    return amount;
 }
 
 fn isSurfaceWindow(hwnd: win32.foundation.HWND) bool {
@@ -368,6 +422,21 @@ test "win32 mouse: wheel offsets" {
     const none = wheelOffset(0);
     try testing.expectEqual(@as(f64, 0), none.offset);
     try testing.expect(!none.precision);
+}
+
+test "win32 mouse: precision pixels" {
+    const testing = std.testing;
+
+    // Four 30-unit touchpad deltas are one notch: 3 lines of 20 px.
+    var total: f64 = 0;
+    for (0..4) |_| total += precisionPixels(30, 3, 20);
+    try testing.expectEqual(@as(f64, 60), total);
+    try testing.expectEqual(precisionPixels(120, 3, 20), total);
+
+    try testing.expectEqual(@as(f64, -15), precisionPixels(-60, 3, 10));
+    // The per-notch amount and cell size both scale it.
+    try testing.expectEqual(@as(f64, 100), precisionPixels(120, 5, 20));
+    try testing.expectEqual(@as(f64, 0), precisionPixels(0, 3, 20));
 }
 
 test "win32 mouse: cursor map" {
