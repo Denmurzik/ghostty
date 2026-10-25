@@ -28,6 +28,7 @@ pub const passwd = @import("passwd.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
 pub const windows_shell = @import("windows_shell.zig");
+pub const windows_cmdline = @import("windows_cmdline.zig");
 pub const macos = @import("macos.zig");
 pub const shell = @import("shell.zig");
 pub const stderr = @import("stderr.zig");

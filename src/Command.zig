@@ -754,49 +754,7 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
     return try allocator.realloc(result, i);
 }
 
-/// Copied from Zig. This function could be made public in child_process.zig instead.
-pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
-    var buf: std.Io.Writer.Allocating = .init(allocator);
-    defer buf.deinit();
-    const writer = &buf.writer;
-
-    for (argv, 0..) |arg, arg_i| {
-        if (arg_i != 0) try writer.writeByte(' ');
-        if (arg.len > 0 and mem.indexOfAny(u8, arg, " \t\n\"") == null) {
-            try writer.writeAll(arg);
-            continue;
-        }
-        try writer.writeByte('"');
-        if (arg_i == 0) {
-            // The program name has no escapes: its quotes only group, and
-            // a path can't hold a quote anyway. Doubling backslashes would
-            // change the path.
-            try writer.writeAll(arg);
-            try writer.writeByte('"');
-            continue;
-        }
-        var backslash_count: usize = 0;
-        for (arg) |byte| {
-            switch (byte) {
-                '\\' => backslash_count += 1,
-                '"' => {
-                    try writer.splatByteAll('\\', backslash_count * 2 + 1);
-                    try writer.writeByte('"');
-                    backslash_count = 0;
-                },
-                else => {
-                    try writer.splatByteAll('\\', backslash_count);
-                    try writer.writeByte(byte);
-                    backslash_count = 0;
-                },
-            }
-        }
-        try writer.splatByteAll('\\', backslash_count * 2);
-        try writer.writeByte('"');
-    }
-
-    return buf.toOwnedSliceSentinel(0);
-}
+pub const windowsCreateCommandLine = internal_os.windows_cmdline.createCommandLine;
 
 test "createNullDelimitedEnvMap" {
     const allocator = testing.allocator;

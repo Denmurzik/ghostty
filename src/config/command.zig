@@ -1,7 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const formatterpkg = @import("formatter.zig");
+const windows_cmdline = @import("../os/windows_cmdline.zig");
 
 /// A command to execute (argv0 and args).
 ///
@@ -16,6 +18,11 @@ const formatterpkg = @import("formatter.zig");
 ///
 /// The whitespace before or around the prefix is ignored. For example,
 /// `  direct:nvim a b c` and `direct: nvim a b c` are equivalent.
+///
+/// On Windows the `direct:` form is split into arguments with the rules of
+/// the MS C runtime: quotes group an argument (`direct:cmd /c "echo a b"`),
+/// `\"` is a literal quote, and the program name may be a quoted path with
+/// spaces (`direct:"C:\Program Files\Git\bin\bash.exe" --login`).
 ///
 /// If the command is not absolute, it'll be looked up via the PATH.
 /// For the shell-expansion case, we let the shell do this. For the
@@ -71,6 +78,21 @@ pub const Command = union(enum) {
             },
 
             .direct => {
+                if (comptime builtin.target.os.tag == .windows) {
+                    // A Windows process receives one command line string,
+                    // so quotes are honoured with the MS C runtime rules.
+                    const tokens = try windows_cmdline.tokenizeWindows(
+                        alloc,
+                        std.mem.trim(u8, str, " "),
+                    );
+                    if (tokens.len == 0) {
+                        alloc.free(tokens);
+                        return error.ValueRequired;
+                    }
+                    self.* = .{ .direct = tokens };
+                    return;
+                }
+
                 // We're not shell expanding, so the arguments are naively
                 // split on spaces.
                 var builder: std.ArrayListUnmanaged([:0]const u8) = .empty;
@@ -180,6 +202,23 @@ pub const Command = union(enum) {
             .shell => |v| try formatter.formatEntry([]const u8, v),
 
             .direct => |v| {
+                if (comptime builtin.target.os.tag == .windows) {
+                    // Quote the arguments back so that parseCLI reads the
+                    // same arguments again.
+                    var line_buf: [4096]u8 = undefined;
+                    var fba: std.heap.FixedBufferAllocator = .init(&line_buf);
+                    const line = windows_cmdline.createCommandLine(
+                        fba.allocator(),
+                        v,
+                    ) catch return error.OutOfMemory;
+
+                    var buf: [4096 + "direct:".len]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&buf);
+                    writer.print("direct:{s}", .{line}) catch return error.OutOfMemory;
+                    try formatter.formatEntry([]const u8, writer.buffered());
+                    return;
+                }
+
                 var buf: [4096]u8 = undefined;
                 var writer: std.Io.Writer = .fixed(&buf);
                 writer.writeAll("direct:") catch return error.OutOfMemory;
@@ -322,6 +361,87 @@ pub const Command = union(enum) {
         try v.parseCLI(alloc, "direct: echo hello");
         try v.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
         try std.testing.expectEqualSlices(u8, "a = direct:echo hello\n", buf.written());
+    }
+
+    fn expectDirect(input: []const u8, expected: []const []const u8) !void {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var v: Self = undefined;
+        try v.parseCLI(alloc, input);
+        try testing.expect(v == .direct);
+        try testing.expectEqual(expected.len, v.direct.len);
+        for (expected, v.direct) |want, got| try testing.expectEqualStrings(want, got);
+    }
+
+    test "windows command-config direct: quoted argument" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        try expectDirect(
+            "direct:powershell.exe -File \"C:/x y/read.ps1\"",
+            &.{ "powershell.exe", "-File", "C:/x y/read.ps1" },
+        );
+    }
+
+    test "windows command-config direct: quoted program path" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        try expectDirect(
+            "direct:\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i",
+            &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" },
+        );
+        // Non-ASCII path with spaces.
+        try expectDirect(
+            " direct: \"C:\\Users\\Анна Ли\\bin\\sh.exe\" -c x",
+            &.{ "C:\\Users\\Анна Ли\\bin\\sh.exe", "-c", "x" },
+        );
+    }
+
+    test "windows command-config direct: argument with spaces" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        try expectDirect(
+            "direct:cmd /c \"for /l %i in (1,1,3) do @echo %i\"",
+            &.{ "cmd", "/c", "for /l %i in (1,1,3) do @echo %i" },
+        );
+    }
+
+    test "windows command-config direct: empty argument and escaped quote" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        try expectDirect("direct:prog \"\" x", &.{ "prog", "", "x" });
+        try expectDirect("direct:say \"\\\"hi\\\"\"", &.{ "say", "\"hi\"" });
+    }
+
+    test "windows command-config direct: no program" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        var arena = ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+
+        var v: Self = undefined;
+        try std.testing.expectError(error.ValueRequired, v.parseCLI(arena.allocator(), "direct:  "));
+    }
+
+    test "windows command-config direct: format round trips" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var buf: std.Io.Writer.Allocating = .init(alloc);
+        defer buf.deinit();
+
+        const input = "direct:\"C:\\Program Files\\x.exe\" -f \"a b\" \"\" \"q\\\"r\" plain";
+        var v: Self = undefined;
+        try v.parseCLI(alloc, input);
+        try v.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try testing.expectEqualStrings("a = " ++ input ++ "\n", buf.written());
+
+        // Reading the formatted value back gives the same arguments.
+        const value = std.mem.trimEnd(u8, buf.written()["a = ".len..], "\n");
+        var back: Self = undefined;
+        try back.parseCLI(alloc, value);
+        try testing.expectEqual(v.direct.len, back.direct.len);
+        for (v.direct, back.direct) |want, got| try testing.expectEqualStrings(want, got);
     }
 };
 
