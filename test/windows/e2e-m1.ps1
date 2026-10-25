@@ -97,29 +97,47 @@ $failed = 0
 $lines = @()
 
 # paste-confirm backs the clipboard text up in two files before it changes
-# the clipboard and deletes them after restoring. When they are left behind
-# (the scenario was killed), put the text back from an STA process.
+# the clipboard and deletes them after restoring. A backup left by a crashed
+# run is put back once, at the start of a run (before anything of this run
+# touches the clipboard), so it never overwrites what the owner copied since.
+# During a run it is restored only after paste-confirm was killed, and only
+# while the clipboard still holds the scenario's test text. When SetText
+# fails the backup is kept and reported.
 $clipText = Join-Path $temp 'clipboard-backup.txt'
 $clipMeta = Join-Path $temp 'clipboard-backup.meta'
-function Restore-ClipboardBackup {
+function Restore-ClipboardBackup([string]$OnlyIfContains = '') {
     if (-not (Test-Path $clipMeta)) { return }
     $code = @'
 Add-Type -AssemblyName System.Windows.Forms
 $meta = (Get-Content -LiteralPath $env:E2E_CLIP_META -Raw).Trim()
+$guard = $env:E2E_CLIP_GUARD
 for ($i = 0; $i -lt 20; $i++) {
     try {
+        if ($guard -and -not ([System.Windows.Forms.Clipboard]::ContainsText() -and [System.Windows.Forms.Clipboard]::GetText().Contains($guard))) { exit 2 }
         if ($meta -eq 'text') { [System.Windows.Forms.Clipboard]::SetText([IO.File]::ReadAllText($env:E2E_CLIP_TEXT, [Text.Encoding]::UTF8)) }
         else { [System.Windows.Forms.Clipboard]::Clear() }
-        break
+        exit 0
     } catch { Start-Sleep -Milliseconds 100 }
 }
+exit 1
 '@
     $env:E2E_CLIP_TEXT = $clipText
     $env:E2E_CLIP_META = $clipMeta
+    $env:E2E_CLIP_GUARD = $OnlyIfContains
     & $powershell -NoProfile -STA -ExecutionPolicy Bypass -Command $code 2>&1 | Out-Null
-    Remove-Item Env:\E2E_CLIP_TEXT, Env:\E2E_CLIP_META -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
-    Write-Host 'INFO clipboard text restored from the backup of a killed scenario'
+    $rc = $LASTEXITCODE
+    Remove-Item Env:\E2E_CLIP_TEXT, Env:\E2E_CLIP_META, Env:\E2E_CLIP_GUARD -ErrorAction SilentlyContinue
+    if ($rc -eq 0) {
+        Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
+        Write-Host 'INFO clipboard text restored from a backup'
+    } elseif ($rc -eq 2) {
+        # The clipboard no longer holds our test text: the owner copied
+        # something since. Leave it alone.
+        Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
+        Write-Host 'INFO clipboard changed since the backup; backup dropped, clipboard left alone'
+    } else {
+        Write-Host "WARN could not restore the clipboard; the backup is kept in $clipText"
+    }
 }
 
 # Another session may be running GUI tests on this desktop: take turns through
@@ -130,6 +148,8 @@ try {
     $env:GHOSTTY_E2E_LOCK_ID = $lockToken.Id
     # Whatever a killed scenario left behind in the keyboard layout list.
     Save-KeyboardLayouts
+    # A backup from a crashed earlier run, before any scenario of this one.
+    Restore-ClipboardBackup
     foreach ($s in $all) {
         $name = $s.Name
         Update-GuiLock $lockToken
@@ -170,7 +190,7 @@ try {
                 $line = "FAIL ${name}: no result (exit code $($p.ExitCode)): $("$err".Trim() -replace '\s+', ' ')"
             }
             # A killed scenario never ran its clipboard restore.
-            if ($timedOut) { Restore-ClipboardBackup }
+            if ($timedOut -and $name -eq 'paste-confirm') { Restore-ClipboardBackup 'gt-pa.txt' }
 
             $noFocus = $line -like 'SKIP*could not take the foreground*'
             $interfered = ($line -like 'FAIL*' -and $line -match $interference) -or $noFocus
@@ -188,8 +208,6 @@ try {
             Write-Host "INFO $note"
             Add-Content -Path $info -Value "INFO $note" -Encoding UTF8
         }
-        # A scenario that died before its own clipboard restore.
-        Restore-ClipboardBackup
         Write-Output $line
         $lines += $line
         if ($line -like 'FAIL*') { $failed++ }

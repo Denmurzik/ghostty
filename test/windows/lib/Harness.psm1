@@ -71,22 +71,25 @@ function Read-GuiLock {
 }
 
 # Stale: not touched for $LockStaleMinutes, or written by a process that is
-# gone. A file that cannot be read is treated as held (a writer is mid-way).
-function Test-GuiLockStale {
+# gone. Returns the lock's content as judged (so the deleter can check it is
+# still the same lock), or $null when the lock is absent or alive. A file that
+# cannot be read is treated as held (a writer is mid-way).
+function Get-StaleGuiLock {
     $path = Get-GuiLockPath
     try {
         $age = (Get-Date) - (Get-Item -LiteralPath $path -ErrorAction Stop).LastWriteTime
     } catch {
-        return $false
+        return $null
     }
-    if ($age.TotalMinutes -gt $script:LockStaleMinutes) { return $true }
     $l = Read-GuiLock
-    if ($l -and $l.Pid -gt 0 -and -not (Get-Process -Id $l.Pid -ErrorAction SilentlyContinue)) { return $true }
-    $false
+    if ($null -eq $l) { return $null }
+    if ($age.TotalMinutes -gt $script:LockStaleMinutes) { return $l }
+    if ($l.Pid -gt 0 -and -not (Get-Process -Id $l.Pid -ErrorAction SilentlyContinue)) { return $l }
+    $null
 }
 
-function Write-GuiLockContent([string]$Id, [string]$Owner) {
-    "id=$Id`r`npid=$PID`r`nowner=$Owner`r`ntime=$((Get-Date).ToString('s'))`r`n"
+function Write-GuiLockContent([string]$Id, [int]$OwnerPid, [string]$Owner) {
+    "id=$Id`r`npid=$OwnerPid`r`nowner=$Owner`r`ntime=$((Get-Date).ToString('s'))`r`n"
 }
 
 <#
@@ -106,9 +109,9 @@ function Enter-GuiLock {
     if ($inherited) {
         $l = Read-GuiLock
         if ($l -and $l.Id -eq $inherited) {
-            $token = [pscustomobject]@{ Id = $inherited; Own = $false; Owner = $Owner }
-            Update-GuiLock $token
-            return $token
+            # The runner's lock: never rewritten from here, its pid stays the
+            # runner's, so it is not stale between two scenarios.
+            return [pscustomobject]@{ Id = $inherited; Own = $false; Owner = $Owner }
         }
     }
 
@@ -118,7 +121,7 @@ function Enter-GuiLock {
         $stream = $null
         try {
             $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            $bytes = [Text.Encoding]::ASCII.GetBytes((Write-GuiLockContent $id $Owner))
+            $bytes = [Text.Encoding]::ASCII.GetBytes((Write-GuiLockContent $id $PID $Owner))
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Dispose()
             return [pscustomobject]@{ Id = $id; Own = $true; Owner = $Owner }
@@ -126,10 +129,16 @@ function Enter-GuiLock {
             if ($stream) { $stream.Dispose(); Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
         }
 
-        if (Test-GuiLockStale) {
+        $stale = Get-StaleGuiLock
+        if ($stale) {
             # Deleting is the stale rule; whoever wins the next CreateNew
-            # owns the lock.
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            # owns the lock. Delete only the lock that was judged: if it
+            # changed meanwhile (touched, or replaced by a new holder) it is
+            # not ours to remove.
+            $now = Read-GuiLock
+            if ($now -and $now.Raw -ceq $stale.Raw) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
             continue
         }
         if ($sw.Elapsed.TotalMinutes -gt $TimeoutMinutes) {
@@ -141,14 +150,16 @@ function Enter-GuiLock {
     }
 }
 
-# Rewrites the time (and so LastWriteTime) of a lock this run holds, so a
-# long run is never stale. Does nothing when the lock is somebody else's.
+# Refreshes `time=` (and so LastWriteTime) of a lock this process took, so a
+# long run is never stale. The id and pid in the file are kept; nothing is
+# written unless the file holds our id AND our pid. An inherited lock (the
+# runner's) is never rewritten here.
 function Update-GuiLock {
-    param([Parameter(Mandatory)]$Token)
-    if ($null -eq $Token) { return }
+    param($Token)
+    if ($null -eq $Token -or -not $Token.Own) { return }
     $l = Read-GuiLock
-    if ($l -and $l.Id -eq $Token.Id) {
-        try { [IO.File]::WriteAllText((Get-GuiLockPath), (Write-GuiLockContent $Token.Id $Token.Owner)) } catch { }
+    if ($l -and $l.Id -eq $Token.Id -and $l.Pid -eq $PID) {
+        try { [IO.File]::WriteAllText((Get-GuiLockPath), (Write-GuiLockContent $l.Id $l.Pid $l.Owner)) } catch { }
     }
 }
 
