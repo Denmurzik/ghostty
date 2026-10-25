@@ -15,6 +15,7 @@ const options = @import("main.zig").options;
 const Library = @import("main.zig").Library;
 const Face = @import("main.zig").Face;
 const Presentation = @import("main.zig").Presentation;
+const WindowsFontFile = @import("WindowsFontFile.zig");
 
 const log = std.log.scoped(.deferred_face);
 
@@ -245,7 +246,12 @@ fn loadWindows(
 ) !Face {
     const w = self.win.?;
 
-    var face = try Face.initFile(lib, w.path, w.face_index, opts);
+    // Mapped through a UTF-16 path; the face owns the mapping.
+    const file = WindowsFontFile.open(w.path) catch |err| {
+        log.warn("cannot map font file path={s} err={}", .{ w.path, err });
+        return error.CannotOpenResource;
+    };
+    var face = try Face.initMapped(lib, file, w.face_index, opts);
     errdefer face.deinit();
     try face.setVariations(w.variations, opts);
     return face;

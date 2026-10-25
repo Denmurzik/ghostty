@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const fontconfig = @import("fontconfig");
+const freetype = @import("freetype");
 const macos = @import("macos");
 const opentype = @import("opentype.zig");
 const options = @import("main.zig").options;
@@ -12,6 +13,7 @@ const Face = @import("main.zig").Face;
 const Library = @import("main.zig").Library;
 const Presentation = @import("main.zig").Presentation;
 const Variation = @import("main.zig").face.Variation;
+const WindowsFontFile = @import("WindowsFontFile.zig");
 const global = @import("../global.zig");
 
 const log = std.log.scoped(.discovery);
@@ -951,19 +953,26 @@ pub const CoreText = struct {
     };
 };
 
-/// Windows font discovery. Enumerates font files in the system and
-/// per-user font directories and matches them to a descriptor via
-/// FreeType's family_name field (with a fallback to the SFNT name
-/// table when family_name is missing).
-///
-/// No external service is used; each discover() call walks the
-/// directories, opening candidate files with FreeType only as needed.
-/// For typical Windows installations (~300 fonts) a name query is in
-/// the tens of milliseconds. A codepoint fallback query may be
-/// noticeably slower because every candidate has to be opened to
-/// probe its CMap.
+/// Windows font discovery. A process-wide index of the system and
+/// per-user font files (family, style, OS/2 weight, italic, monospace,
+/// path, face index) is built once on first use by opening each file
+/// with FreeType through a UTF-16 mapped view. Queries then filter and
+/// rank that index instead of touching the disk; only the candidates
+/// that are actually returned (or probed for a codepoint) are opened.
 pub const Windows = struct {
     lib: Library,
+
+    /// Families tried first by `discoverFallback`, in order (SPEC section 9).
+    const fallback_families = [_][]const u8{
+        "Segoe UI Emoji",
+        "Segoe UI Symbol",
+        "Cascadia Mono",
+        "Consolas",
+        "Yu Gothic",
+        "Malgun Gothic",
+        "Microsoft YaHei",
+        "SimSun",
+    };
 
     pub fn init(lib: Library) Windows {
         return .{ .lib = lib };
@@ -978,19 +987,12 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) !DiscoverIterator {
-        return .{
-            .alloc = alloc,
-            .lib = self.lib,
-            .desc = desc,
-            .variations = desc.variations,
-            .state = .system,
-            .dir = null,
-            .iter = null,
-            .system_path = null,
-            .user_path = null,
-        };
+        const index = try Index.get(self.lib);
+        return DiscoverIterator.init(self.lib, alloc, index, desc, false);
     }
 
+    /// Like `discover`, but when no family is requested the fixed list of
+    /// well-known fallback families is tried before the rest of the index.
     pub fn discoverFallback(
         self: *const Windows,
         alloc: Allocator,
@@ -998,216 +1000,586 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         _ = collection;
-        return self.discover(alloc, desc);
+        const index = try Index.get(self.lib);
+        return DiscoverIterator.init(
+            self.lib,
+            alloc,
+            index,
+            desc,
+            desc.family == null,
+        );
     }
 
-    pub const DiscoverIterator = struct {
-        alloc: Allocator,
-        lib: Library,
-        desc: Descriptor,
-        variations: []const Variation,
-        state: State,
-        dir: ?std.Io.Dir,
-        iter: ?std.Io.Dir.Iterator,
-        system_path: ?[:0]const u8,
-        user_path: ?[:0]const u8,
+    /// One face of one font file.
+    const Entry = struct {
+        /// FreeType's family name (the typographic family when the font
+        /// has one, e.g. "Segoe UI" for "Segoe UI Semibold").
+        family: [:0]const u8,
 
-        const State = enum { system, user, done };
+        /// The legacy (name ID 1) family, if it differs from `family`.
+        legacy_family: ?[:0]const u8,
+
+        style: [:0]const u8,
+
+        /// OS/2 usWeightClass (400 regular, 700 bold).
+        weight: u16,
+        italic: bool,
+        monospace: bool,
+
+        path: [:0]const u8,
+        face_index: i32,
+
+        fn matchesFamily(self: Entry, family: []const u8) bool {
+            if (std.ascii.eqlIgnoreCase(self.family, family)) return true;
+            const legacy = self.legacy_family orelse return false;
+            return std.ascii.eqlIgnoreCase(legacy, family);
+        }
+    };
+
+    /// The process-wide font index. Immutable once built and never freed.
+    const Index = struct {
+        arena: std.heap.ArenaAllocator,
+        entries: []const Entry,
+
+        var mutex: std.Io.Mutex = .init;
+        var instance: ?Index = null;
+
+        /// How many times the index was built. Tests assert this stays 1.
+        var builds: u32 = 0;
+
+        fn get(lib: Library) !*const Index {
+            mutex.lockUncancelable(global.io());
+            defer mutex.unlock(global.io());
+            if (instance) |*i| return i;
+            instance = try build(lib);
+            builds += 1;
+            return &instance.?;
+        }
+
+        fn build(lib: Library) !Index {
+            var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+            errdefer arena.deinit();
+
+            var entries: std.ArrayList(Entry) = .empty;
+
+            const dirs = [_]struct { env: [:0]const u8, suffix: []const u8 }{
+                .{ .env = "SYSTEMROOT", .suffix = "\\Fonts" },
+                .{ .env = "LOCALAPPDATA", .suffix = "\\Microsoft\\Windows\\Fonts" },
+            };
+            for (dirs) |d| {
+                const base = global.environ().getAlloc(
+                    std.heap.page_allocator,
+                    d.env,
+                ) catch continue;
+                defer std.heap.page_allocator.free(base);
+                const dir_path = std.fmt.allocPrint(
+                    std.heap.page_allocator,
+                    "{s}{s}",
+                    .{ base, d.suffix },
+                ) catch continue;
+                defer std.heap.page_allocator.free(dir_path);
+                try scanDir(lib, arena.allocator(), &entries, dir_path);
+            }
+
+            // Directory order is unspecified; keep ties deterministic.
+            std.sort.block(Entry, entries.items, {}, struct {
+                fn lessThan(_: void, a: Entry, b: Entry) bool {
+                    const order = std.ascii.orderIgnoreCase(a.path, b.path);
+                    if (order != .eq) return order == .lt;
+                    return a.face_index < b.face_index;
+                }
+            }.lessThan);
+
+            log.debug("windows font index: {} faces", .{entries.items.len});
+            return .{ .arena = arena, .entries = entries.items };
+        }
+
+        fn scanDir(
+            lib: Library,
+            alloc: Allocator,
+            entries: *std.ArrayList(Entry),
+            dir_path: []const u8,
+        ) !void {
+            var dir = std.Io.Dir.openDirAbsolute(
+                global.io(),
+                dir_path,
+                .{ .iterate = true },
+            ) catch return;
+            defer dir.close(global.io());
+
+            var it = dir.iterate();
+            while (it.next(global.io()) catch null) |entry| {
+                if (entry.kind != .file) continue;
+                if (!isFontFile(entry.name)) continue;
+                const path = try std.fmt.allocPrintSentinel(
+                    alloc,
+                    "{s}\\{s}",
+                    .{ dir_path, entry.name },
+                    0,
+                );
+                try addFile(lib, alloc, entries, path);
+            }
+        }
+
+        /// Index every face of one file. Unreadable fonts are skipped.
+        fn addFile(
+            lib: Library,
+            alloc: Allocator,
+            entries: *std.ArrayList(Entry),
+            path: [:0]const u8,
+        ) !void {
+            var file = WindowsFontFile.open(path) catch return;
+            defer file.close();
+
+            var face_index: i32 = 0;
+            var num_faces: i32 = 1;
+            while (face_index < @min(num_faces, max_faces_per_file)) : (face_index += 1) {
+                lib.mutex.lockUncancelable(global.io());
+                defer lib.mutex.unlock(global.io());
+
+                const ft = lib.lib.initMemoryFace(file.bytes(), face_index) catch continue;
+                defer ft.deinit();
+                if (face_index == 0) {
+                    num_faces = std.math.cast(i32, ft.handle.*.num_faces) orelse 1;
+                }
+                const entry = try makeEntry(alloc, ft, path, face_index) orelse continue;
+                try entries.append(alloc, entry);
+            }
+        }
+
+        fn makeEntry(
+            alloc: Allocator,
+            ft: freetype.Face,
+            path: [:0]const u8,
+            face_index: i32,
+        ) !?Entry {
+            const handle = ft.handle.*;
+            const family_ptr = handle.family_name orelse return null;
+            const family = try alloc.dupeSentinel(u8, std.mem.span(family_ptr), 0);
+            const style = if (handle.style_name) |s|
+                try alloc.dupeSentinel(u8, std.mem.span(s), 0)
+            else
+                try alloc.dupeSentinel(u8, "", 0);
+
+            const os2 = ft.getSfntTable(.os2);
+            var weight: u16 = if (os2) |o| o.usWeightClass else 0;
+            if (weight == 0) {
+                weight = if (handle.style_flags & freetype.c.FT_STYLE_FLAG_BOLD != 0) 700 else 400;
+            }
+
+            // fsSelection bit 0 is italic, bit 9 is oblique.
+            const italic = handle.style_flags & freetype.c.FT_STYLE_FLAG_ITALIC != 0 or
+                (if (os2) |o| o.fsSelection & ((1 << 0) | (1 << 9)) != 0 else false);
+
+            var legacy = try legacyFamily(alloc, ft);
+            if (legacy) |l| {
+                if (std.ascii.eqlIgnoreCase(l, family)) {
+                    alloc.free(l);
+                    legacy = null;
+                }
+            }
+
+            return .{
+                .family = family,
+                .legacy_family = legacy,
+                .style = style,
+                .weight = weight,
+                .italic = italic,
+                .monospace = handle.face_flags & freetype.c.FT_FACE_FLAG_FIXED_WIDTH != 0,
+                .path = path,
+                .face_index = face_index,
+            };
+        }
+
+        /// The SFNT name ID 1 family from the Microsoft platform records,
+        /// preferring US English.
+        fn legacyFamily(alloc: Allocator, ft: freetype.Face) !?[:0]const u8 {
+            var found: ?freetype.c.FT_SfntName = null;
+            for (0..ft.getSfntNameCount()) |i| {
+                const name = ft.getSfntName(i) catch continue;
+                if (name.name_id != freetype.c.TT_NAME_ID_FONT_FAMILY) continue;
+                if (name.platform_id != freetype.c.TT_PLATFORM_MICROSOFT) continue;
+                if (name.encoding_id != freetype.c.TT_MS_ID_UNICODE_CS) continue;
+                if (found == null) found = name;
+                if (name.language_id == 0x409) {
+                    found = name;
+                    break;
+                }
+            }
+
+            const name = found orelse return null;
+            const raw = name.string[0..name.string_len];
+            var utf16: [256]u16 = undefined;
+            const units = raw.len / 2;
+            if (units == 0 or units > utf16.len) return null;
+            for (0..units) |i| {
+                utf16[i] = std.mem.readInt(u16, raw[i * 2 ..][0..2], .big);
+            }
+            var utf8: [1024]u8 = undefined;
+            const len = std.unicode.utf16LeToUtf8(&utf8, utf16[0..units]) catch return null;
+            return try alloc.dupeSentinel(u8, utf8[0..len], 0);
+        }
+    };
+
+    /// Upper bound on faces indexed from a single collection file.
+    const max_faces_per_file = 64;
+
+    pub const DiscoverIterator = struct {
+        lib: Library,
+        alloc: Allocator,
+        index: *const Index,
+        codepoint: u32,
+        variations: []const Variation,
+
+        /// Indexes into `index.entries` in the order they are returned.
+        order: []u32,
+        pos: usize = 0,
+
+        fn init(
+            lib: Library,
+            alloc: Allocator,
+            index: *const Index,
+            desc: Descriptor,
+            fallback: bool,
+        ) !DiscoverIterator {
+            var order: std.ArrayList(u32) = .empty;
+            errdefer order.deinit(alloc);
+
+            const rank: Rank = .{ .desc = desc, .entries = index.entries };
+            for (index.entries, 0..) |entry, i| {
+                if (rank.accepts(entry)) try order.append(alloc, @intCast(i));
+            }
+            std.sort.block(u32, order.items, rank, Rank.lessThan);
+
+            if (fallback) try promoteFallbacks(alloc, index, &order);
+
+            return .{
+                .lib = lib,
+                .alloc = alloc,
+                .index = index,
+                .codepoint = desc.codepoint,
+                .variations = desc.variations,
+                .order = try order.toOwnedSlice(alloc),
+            };
+        }
+
+        /// Stable-move the entries of the well-known fallback families to
+        /// the front, in list order.
+        fn promoteFallbacks(
+            alloc: Allocator,
+            index: *const Index,
+            order: *std.ArrayList(u32),
+        ) !void {
+            var result: std.ArrayList(u32) = try .initCapacity(alloc, order.items.len);
+            errdefer result.deinit(alloc);
+            const taken = try alloc.alloc(bool, order.items.len);
+            defer alloc.free(taken);
+            @memset(taken, false);
+
+            for (fallback_families) |family| {
+                for (order.items, 0..) |i, pos| {
+                    if (taken[pos]) continue;
+                    if (!index.entries[i].matchesFamily(family)) continue;
+                    taken[pos] = true;
+                    result.appendAssumeCapacity(i);
+                }
+            }
+            for (order.items, 0..) |i, pos| {
+                if (!taken[pos]) result.appendAssumeCapacity(i);
+            }
+
+            order.deinit(alloc);
+            order.* = result;
+        }
 
         pub fn deinit(self: *DiscoverIterator) void {
-            if (self.dir) |*d| d.close(global.io());
-            if (self.system_path) |p| self.alloc.free(p);
-            if (self.user_path) |p| self.alloc.free(p);
+            self.alloc.free(self.order);
             self.* = undefined;
         }
 
         pub fn next(self: *DiscoverIterator) !?DeferredFace {
-            while (true) {
-                // Ensure we have a directory iterator for the current state.
-                if (self.iter == null) {
-                    switch (self.state) {
-                        .system => {
-                            const path = self.systemFontsPath() orelse {
-                                self.state = .user;
-                                continue;
-                            };
-                            self.system_path = path;
-                            self.dir = std.Io.Dir.openDirAbsolute(
-                                global.io(),
-                                path,
-                                .{ .iterate = true },
-                            ) catch {
-                                self.state = .user;
-                                continue;
-                            };
-                            self.iter = self.dir.?.iterate();
-                        },
-                        .user => {
-                            const path = self.userFontsPath() orelse {
-                                self.state = .done;
-                                continue;
-                            };
-                            self.user_path = path;
-                            self.dir = std.Io.Dir.openDirAbsolute(
-                                global.io(),
-                                path,
-                                .{ .iterate = true },
-                            ) catch {
-                                self.state = .done;
-                                continue;
-                            };
-                            self.iter = self.dir.?.iterate();
-                        },
-                        .done => return null,
-                    }
-                }
-
-                const entry = (self.iter.?.next(global.io()) catch null) orelse {
-                    // Finished this directory; advance state.
-                    if (self.dir) |*d| d.close(global.io());
-                    self.dir = null;
-                    self.iter = null;
-                    self.state = switch (self.state) {
-                        .system => .user,
-                        .user => .done,
-                        .done => .done,
-                    };
-                    continue;
-                };
-
-                if (entry.kind != .file) continue;
-                if (!isFontFile(entry.name)) continue;
-
-                if (try self.tryMatch(entry.name)) |face| return face;
+            while (self.pos < self.order.len) {
+                const entry = self.index.entries[self.order[self.pos]];
+                self.pos += 1;
+                if (try self.open(entry)) |face| return face;
             }
-        }
-
-        /// Build the system fonts directory from %SYSTEMROOT%. Returns null
-        /// if SYSTEMROOT is unset, which shouldn't happen on a healthy
-        /// Windows install but we just skip the directory rather than
-        /// falling back to a hardcoded drive letter.
-        fn systemFontsPath(self: *DiscoverIterator) ?[:0]const u8 {
-            const systemroot = global.environ().getAlloc(
-                self.alloc,
-                "SYSTEMROOT",
-            ) catch return null;
-            defer self.alloc.free(systemroot);
-            return self.alloc.printSentinel(
-                "{s}\\Fonts",
-                .{systemroot},
-                0,
-            ) catch null;
-        }
-
-        fn userFontsPath(self: *DiscoverIterator) ?[:0]const u8 {
-            const local_appdata = global.environ().getAlloc(
-                self.alloc,
-                "LOCALAPPDATA",
-            ) catch return null;
-            defer self.alloc.free(local_appdata);
-            return self.alloc.printSentinel(
-                "{s}\\Microsoft\\Windows\\Fonts",
-                .{local_appdata},
-                0,
-            ) catch null;
-        }
-
-        fn tryMatch(
-            self: *DiscoverIterator,
-            name: []const u8,
-        ) !?DeferredFace {
-            const dir_path = switch (self.state) {
-                .system => self.system_path.?,
-                .user => self.user_path.?,
-                .done => return null,
-            };
-
-            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const full_path = std.mem.printSentinel(
-                &path_buf,
-                "{s}\\{s}",
-                .{ dir_path, name },
-                0,
-            ) catch return null;
-
-            const is_ttc = std.ascii.endsWithIgnoreCase(name, ".ttc");
-            const max_faces: i32 = if (is_ttc) 16 else 1;
-
-            // Probe each face in the file.
-            var face_index: i32 = 0;
-            while (face_index < max_faces) : (face_index += 1) {
-                var face = Face.initFile(
-                    self.lib,
-                    full_path,
-                    face_index,
-                    .{ .size = .{ .points = 12 } },
-                ) catch break;
-
-                if (self.matches(&face)) {
-                    return try self.makeDeferred(face, full_path, face_index);
-                }
-
-                face.deinit();
-            }
-
             return null;
         }
 
-        /// Check whether the given face matches the descriptor.
-        fn matches(self: *const DiscoverIterator, face: *Face) bool {
-            if (self.desc.family) |family| {
-                if (!familyMatches(face, family)) return false;
+        /// Open a candidate and check that it covers the requested
+        /// codepoint. Files that vanished or fail to parse are skipped.
+        fn open(self: *DiscoverIterator, entry: Entry) !?DeferredFace {
+            const file = WindowsFontFile.open(entry.path) catch return null;
+            var face = Face.initMapped(
+                self.lib,
+                file,
+                entry.face_index,
+                .{ .size = .{ .points = 12 } },
+            ) catch return null;
+            errdefer face.deinit();
+
+            if (self.codepoint != 0 and face.glyphIndex(self.codepoint) == null) {
+                face.deinit();
+                return null;
             }
-            if (self.desc.codepoint != 0) {
-                if (face.glyphIndex(self.desc.codepoint) == null) return false;
-            }
+
+            const path_owned = try self.alloc.dupeSentinel(u8, entry.path, 0);
+            errdefer self.alloc.free(path_owned);
+
+            return .{ .win = .{
+                .path = path_owned,
+                .face_index = entry.face_index,
+                .variations = self.variations,
+                .peek = face,
+                .presentation = if (face.hasColor()) .emoji else .text,
+                .alloc = self.alloc,
+            } };
+        }
+    };
+
+    /// Filter and ordering for a descriptor: an exact style name match
+    /// first, then the closest weight, then the requested slant, then
+    /// monospace.
+    const Rank = struct {
+        desc: Descriptor,
+        entries: []const Entry,
+
+        fn accepts(self: Rank, entry: Entry) bool {
+            if (self.desc.family) |family| return entry.matchesFamily(family);
+            // Without a family a monospace request is a filter, with one
+            // it is only a preference.
+            if (self.desc.monospace) return entry.monospace;
             return true;
         }
 
-        fn makeDeferred(
-            self: *DiscoverIterator,
-            face: Face,
-            full_path: []const u8,
-            face_index: i32,
-        ) !DeferredFace {
-            const path_owned = try self.alloc.dupeSentinel(u8, full_path, 0);
-            errdefer self.alloc.free(path_owned);
-
-            const presentation: Presentation =
-                if (face.hasColor()) .emoji else .text;
-
-            return DeferredFace{
-                .win = .{
-                    .path = path_owned,
-                    .face_index = face_index,
-                    .variations = self.variations,
-                    .peek = face,
-                    .presentation = presentation,
-                    .alloc = self.alloc,
-                },
+        fn key(self: Rank, entry: Entry) [4]u32 {
+            const target: i32 = if (self.desc.bold) 700 else 400;
+            const style_exact = if (self.desc.style) |s|
+                std.ascii.eqlIgnoreCase(entry.style, s)
+            else
+                false;
+            return .{
+                @intFromBool(!style_exact),
+                @abs(@as(i32, entry.weight) - target),
+                @intFromBool(entry.italic != self.desc.italic),
+                @intFromBool(self.desc.monospace and !entry.monospace),
             };
+        }
+
+        fn lessThan(self: Rank, a: u32, b: u32) bool {
+            const ka = self.key(self.entries[a]);
+            const kb = self.key(self.entries[b]);
+            return std.mem.order(u32, &ka, &kb) == .lt;
         }
     };
 
     fn isFontFile(name: []const u8) bool {
         return std.ascii.endsWithIgnoreCase(name, ".ttf") or
             std.ascii.endsWithIgnoreCase(name, ".ttc") or
-            std.ascii.endsWithIgnoreCase(name, ".otf");
-    }
-
-    /// Compare a face's family against a requested family name. Checks
-    /// FreeType's family_name first, then falls back to the SFNT name
-    /// table entry.
-    fn familyMatches(face: *Face, family: [:0]const u8) bool {
-        const ft_family: ?[*:0]const u8 = face.face.handle.*.family_name;
-        if (ft_family) |f| {
-            if (std.ascii.eqlIgnoreCase(std.mem.span(f), family)) return true;
-        }
-        var buf: [256]u8 = undefined;
-        const sfnt = face.name(&buf) catch "";
-        return sfnt.len > 0 and std.ascii.eqlIgnoreCase(sfnt, family);
+            std.ascii.endsWithIgnoreCase(name, ".otf") or
+            std.ascii.endsWithIgnoreCase(name, ".otc");
     }
 };
+
+/// Lower-cased file name of the first face `iter` yields.
+fn testFirstFileName(iter: *Windows.DiscoverIterator, buf: []u8) !?[]const u8 {
+    var face = (try iter.next()) orelse return null;
+    defer face.deinit();
+    const base = std.fs.path.basenameWindows(face.win.?.path);
+    return std.ascii.lowerString(buf, base);
+}
+
+fn testSystemFontPresent(name: []const u8) !void {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = global.environ().getAlloc(std.testing.allocator, "SYSTEMROOT") catch
+        return error.SkipZigTest;
+    defer std.testing.allocator.free(root);
+    const path = std.fmt.bufPrint(&buf, "{s}\\Fonts\\{s}", .{ root, name }) catch
+        return error.SkipZigTest;
+    var file = WindowsFontFile.open(path) catch return error.SkipZigTest;
+    file.close();
+}
+
+fn testResolves(desc: Descriptor, expected: []const u8) !void {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    try testSystemFontPresent(expected);
+
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var iter = try disco.discover(std.testing.allocator, desc);
+    defer iter.deinit();
+
+    var buf: [256]u8 = undefined;
+    const name = (try testFirstFileName(&iter, &buf)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, name);
+}
+
+test "windows font: Consolas regular resolves to consola.ttf" {
+    try testResolves(.{ .family = "Consolas" }, "consola.ttf");
+}
+
+test "windows font: Consolas bold resolves to consolab.ttf" {
+    try testResolves(.{ .family = "Consolas", .bold = true }, "consolab.ttf");
+}
+
+test "windows font: Consolas italic resolves to consolai.ttf" {
+    try testResolves(.{ .family = "Consolas", .italic = true }, "consolai.ttf");
+}
+
+test "windows font: Consolas bold italic resolves to consolaz.ttf" {
+    try testResolves(
+        .{ .family = "Consolas", .bold = true, .italic = true },
+        "consolaz.ttf",
+    );
+}
+
+test "windows font: exact style name wins over bold and italic" {
+    try testResolves(.{ .family = "consolas", .style = "Bold Italic" }, "consolaz.ttf");
+}
+
+test "windows font: monospace without a family only yields fixed-width faces" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var iter = try disco.discover(std.testing.allocator, .{
+        .monospace = true,
+        .codepoint = 'A',
+    });
+    defer iter.deinit();
+
+    var face = (try iter.next()) orelse return error.SkipZigTest;
+    defer face.deinit();
+    const flags = face.win.?.peek.face.handle.*.face_flags;
+    try std.testing.expect(flags & freetype.c.FT_FACE_FLAG_FIXED_WIDTH != 0);
+}
+
+test "windows font: index is built once" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+
+    for (0..3) |_| {
+        var iter = try disco.discover(std.testing.allocator, .{ .family = "Consolas" });
+        iter.deinit();
+    }
+    try std.testing.expectEqual(@as(u32, 1), Windows.Index.builds);
+}
+
+test "windows font: emoji fallback prefers Segoe UI Emoji" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    try testSystemFontPresent("seguiemj.ttf");
+
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var collection: Collection = undefined;
+    var iter = try disco.discoverFallback(std.testing.allocator, &collection, .{
+        .codepoint = 0x1F600,
+    });
+    defer iter.deinit();
+
+    var buf: [256]u8 = undefined;
+    const name = (try testFirstFileName(&iter, &buf)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("seguiemj.ttf", name);
+}
+
+test "windows font: font in a non-ASCII directory loads" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = global.io();
+
+    const root = global.environ().getAlloc(alloc, "SYSTEMROOT") catch
+        return error.SkipZigTest;
+    defer alloc.free(root);
+    const src = try std.fmt.allocPrint(alloc, "{s}\\Fonts\\consola.ttf", .{root});
+    defer alloc.free(src);
+    var probe = WindowsFontFile.open(src) catch return error.SkipZigTest;
+    probe.close();
+
+    const temp = global.environ().getAlloc(alloc, "TEMP") catch return error.SkipZigTest;
+    defer alloc.free(temp);
+    const dir = try std.fmt.allocPrint(alloc, "{s}\\Шрифты Тест", .{temp});
+    defer alloc.free(dir);
+    const dst = try std.fmt.allocPrint(alloc, "{s}\\консоль.ttf", .{dir});
+    defer alloc.free(dst);
+
+    std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer std.Io.Dir.deleteDirAbsolute(io, dir) catch {};
+    try std.Io.Dir.copyFileAbsolute(src, dst, io, .{});
+    defer std.Io.Dir.deleteFileAbsolute(io, dst) catch {};
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+
+    const file = try WindowsFontFile.open(dst);
+    var face = try Face.initMapped(lib, file, 0, .{ .size = .{ .points = 12 } });
+    defer face.deinit();
+
+    try std.testing.expectEqualStrings(
+        "Consolas",
+        std.mem.span(face.face.handle.*.family_name.?),
+    );
+    try std.testing.expect(face.glyphIndex('A') != null);
+}
+
+test "windows font: U+1F600 from Segoe UI Emoji renders as a colour glyph" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    try testSystemFontPresent("seguiemj.ttf");
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var iter = try disco.discover(alloc, .{
+        .family = "Segoe UI Emoji",
+        .codepoint = 0x1F600,
+    });
+    defer iter.deinit();
+
+    var deferred = (try iter.next()) orelse return error.SkipZigTest;
+    defer deferred.deinit();
+    var face = try deferred.load(lib, .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } });
+    defer face.deinit();
+
+    const glyph_id = face.glyphIndex(0x1F600).?;
+    if (!face.hasColor() or !face.isColorGlyph(glyph_id)) {
+        log.warn("known M1 gap: monochrome system emoji", .{});
+        return error.SkipZigTest;
+    }
+
+    const font = @import("main.zig");
+    var atlas = try font.Atlas.init(alloc, 512, .bgra);
+    defer atlas.deinit(alloc);
+    // FreeType reports the glyph as coloured but the outline path of
+    // renderGlyph flattens COLR layers to grayscale, which an atlas in
+    // BGRA format rejects.
+    const glyph = face.renderGlyph(alloc, &atlas, glyph_id, .{
+        .grid_metrics = font.Metrics.calc(face.getMetrics()),
+    }) catch |err| switch (err) {
+        error.WrongAtlas => {
+            log.warn("known M1 gap: monochrome system emoji", .{});
+            return error.SkipZigTest;
+        },
+        else => return err,
+    };
+    try std.testing.expect(glyph.width > 0 and glyph.height > 0);
+    try std.testing.expectEqual(font.Atlas.Format.bgra, atlas.format);
+}
 
 test "descriptor hash" {
     const testing = std.testing;

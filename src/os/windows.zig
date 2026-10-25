@@ -416,6 +416,33 @@ pub const WAIT_OBJECT_0 = 0x00000000;
 pub const WAIT_TIMEOUT = 0x00000102;
 
 // --- font files (Task 12)
+// CreateFileW and CloseHandle live in `exp.kernel32` above.
+
+pub const FILE_MAP_READ = 0x0004;
+pub const PAGE_READONLY = 0x02;
+
+pub extern "kernel32" fn CreateFileMappingW(
+    hFile: HANDLE,
+    lpFileMappingAttributes: ?*SECURITY_ATTRIBUTES,
+    flProtect: DWORD,
+    dwMaximumSizeHigh: DWORD,
+    dwMaximumSizeLow: DWORD,
+    lpName: ?LPCWSTR,
+) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn MapViewOfFile(
+    hFileMappingObject: HANDLE,
+    dwDesiredAccess: DWORD,
+    dwFileOffsetHigh: DWORD,
+    dwFileOffsetLow: DWORD,
+    dwNumberOfBytesToMap: SIZE_T,
+) callconv(.winapi) ?LPVOID;
+pub extern "kernel32" fn UnmapViewOfFile(
+    lpBaseAddress: *const anyopaque,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetFileSizeEx(
+    hFile: HANDLE,
+    lpFileSize: *LARGE_INTEGER,
+) callconv(.winapi) BOOL;
 
 // --- registry (Task 13)
 

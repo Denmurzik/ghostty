@@ -16,6 +16,7 @@ const font = @import("../main.zig");
 const Glyph = font.Glyph;
 const Library = font.Library;
 const opentype = @import("../opentype.zig");
+const WindowsFontFile = @import("../WindowsFontFile.zig");
 const quirks = @import("../../quirks.zig");
 const config = @import("../../config.zig");
 const global = @import("../../global.zig");
@@ -74,6 +75,43 @@ pub const Face = struct {
         const face = try lib.lib.initFace(path, index);
         errdefer face.deinit();
         return try initFace(lib, face, opts);
+    }
+
+    /// Initialize a new font face from a mapped font file (Windows). The
+    /// FreeType face takes ownership of the mapping and unmaps it when the
+    /// last reference to the face goes away, which also covers the faces
+    /// that share this FT_Face (synthetic bold/italic). On error the
+    /// mapping is closed here, so the caller must not touch `file` again.
+    pub fn initMapped(
+        lib: Library,
+        file: WindowsFontFile,
+        index: i32,
+        opts: font.face.Options,
+    ) !Face {
+        var mapped = file;
+        lib.mutex.lockUncancelable(global.io());
+        defer lib.mutex.unlock(global.io());
+        const face = lib.lib.initMemoryFace(mapped.bytes(), index) catch |err| {
+            mapped.close();
+            return err;
+        };
+        face.handle.*.generic = .{
+            .data = @constCast(@ptrCast(mapped.view)),
+            .finalizer = unmapFinalizer,
+        };
+        errdefer face.deinit();
+        return try initFace(lib, face, opts);
+    }
+
+    /// FT_Generic finalizer of faces created by `initMapped`; `data` is
+    /// the start of the mapped view.
+    fn unmapFinalizer(object: ?*anyopaque) callconv(.c) void {
+        const handle: freetype.c.FT_Face = @ptrCast(@alignCast(object.?));
+        var mapped: WindowsFontFile = .{
+            .view = @ptrCast(handle.*.generic.data.?),
+            .len = 0,
+        };
+        mapped.close();
     }
 
     /// Initialize a new font face with the given source in-memory.
