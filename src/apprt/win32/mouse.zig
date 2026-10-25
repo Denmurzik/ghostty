@@ -14,19 +14,6 @@ const log = std.log.scoped(.win32_mouse);
 /// when routing wheel messages.
 const surface_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
 
-extern "user32" fn GetClassNameW(
-    hwnd: win32.foundation.HWND,
-    buf: [*]u16,
-    max: i32,
-) callconv(.winapi) i32;
-
-extern "user32" fn SystemParametersInfoW(
-    action: u32,
-    param: u32,
-    pv: ?*anyopaque,
-    win_ini: u32,
-) callconv(.winapi) i32;
-
 const SPI_GETWHEELSCROLLLINES = 0x0068;
 const SPI_GETWHEELSCROLLCHARS = 0x006C;
 
@@ -205,7 +192,7 @@ fn buttonEvent(msg: u32, wparam: win32.foundation.WPARAM) ?struct {
 }
 
 fn buttonBit(button: input.MouseButton) u16 {
-    const n: u4 = @intCast(@intFromEnum(button));
+    const n: u4 = @intCast(@backingInt(button));
     return @as(u16, 1) << n;
 }
 
@@ -267,7 +254,7 @@ fn releaseHeld(surface: *Surface) void {
         const bit = @as(u16, 1) << n;
         if (held & bit != 0) {
             held &= ~bit;
-            const button: input.MouseButton = @enumFromInt(n);
+            const button: input.MouseButton = @fromBackingInt(@intCast(n));
             _ = surface.core_surface.mouseButtonCallback(.release, button, mods) catch |err|
                 log.warn("mouse button callback failed err={}", .{err});
         }
@@ -332,14 +319,14 @@ fn precisionPixels(delta: i16, amount: u32, cell_size: u32) f64 {
 /// The system's lines (or characters) per wheel notch.
 fn wheelScrollAmount(action: u32) u32 {
     var amount: u32 = default_scroll_amount;
-    if (SystemParametersInfoW(action, 0, &amount, 0) == 0) return default_scroll_amount;
+    if (win32.user32.SystemParametersInfoW(action, 0, &amount, 0) == 0) return default_scroll_amount;
     if (amount == WHEEL_PAGESCROLL) return default_scroll_amount;
     return amount;
 }
 
 fn isSurfaceWindow(hwnd: win32.foundation.HWND) bool {
     var buf: [surface_class_name.len + 1]u16 = undefined;
-    const len = GetClassNameW(hwnd, &buf, buf.len);
+    const len = win32.user32.GetClassNameW(hwnd, &buf, buf.len);
     if (len <= 0) return false;
     return std.mem.eql(u16, buf[0..@intCast(len)], surface_class_name);
 }

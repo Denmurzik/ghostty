@@ -99,11 +99,10 @@ $lines = @()
 
 # paste-confirm backs the clipboard text up in two files before it changes
 # the clipboard and deletes them after restoring. A backup left by a crashed
-# run is put back once, at the start of a run (before anything of this run
-# touches the clipboard), so it never overwrites what the owner copied since.
-# During a run it is restored only after paste-confirm was killed, and only
-# while the clipboard still holds the scenario's test text. When SetText
-# fails the backup is kept and reported.
+# run is looked at once, at the start of a run, and an after-kill restore
+# happens during a run; both put it back only while the clipboard still holds
+# the scenario's test text ('gt-pa.txt'), so neither overwrites what the owner
+# copied since. When SetText fails the backup is kept and reported.
 $clipText = Join-Path $temp 'clipboard-backup.txt'
 $clipMeta = Join-Path $temp 'clipboard-backup.meta'
 function Restore-ClipboardBackup([string]$OnlyIfContains = '') {
@@ -150,7 +149,7 @@ try {
     # Whatever a killed scenario left behind in the keyboard layout list.
     Save-KeyboardLayouts
     # A backup from a crashed earlier run, before any scenario of this one.
-    Restore-ClipboardBackup
+    Restore-ClipboardBackup 'gt-pa.txt'
     foreach ($s in $all) {
         $name = $s.Name
         Update-GuiLock $lockToken

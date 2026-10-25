@@ -306,7 +306,7 @@ fn handleUniChar(surface: *Surface, wparam: win32.foundation.WPARAM) ?win32.foun
     const cp = std.math.cast(u21, wparam) orelse return 0;
     const n = std.unicode.utf8Encode(cp, &out) catch return 0;
     sendText(surface, out[0..n]);
-    return 0;
+    return 1;
 }
 
 /// Deliver text that no key of ours produced, as a keyless press (see

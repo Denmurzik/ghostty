@@ -557,6 +557,10 @@ pub fn killTree(self: *Command) !void {
                 id,
             ) orelse continue;
             defer _ = k32.CloseHandle(proc);
+            // The id may have been reused since it was listed.
+            var in_job: windows.BOOL = windows.FALSE;
+            if (windows.IsProcessInJob(proc, self.job, &in_job) == windows.FALSE or
+                in_job == windows.FALSE) continue;
             if (!shouldKill(proc)) continue;
             if (k32.TerminateProcess(proc, 0) != windows.FALSE and killed_len < killed.len) {
                 killed[killed_len] = id;

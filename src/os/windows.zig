@@ -532,6 +532,11 @@ pub extern "kernel32" fn QueryInformationJobObject(
     cbJobObjectInformationLength: DWORD,
     lpReturnLength: ?*DWORD,
 ) callconv(.winapi) BOOL;
+pub extern "kernel32" fn IsProcessInJob(
+    ProcessHandle: HANDLE,
+    JobHandle: ?HANDLE,
+    Result: *BOOL,
+) callconv(.winapi) BOOL;
 pub extern "kernel32" fn OpenProcess(
     dwDesiredAccess: DWORD,
     bInheritHandle: BOOL,

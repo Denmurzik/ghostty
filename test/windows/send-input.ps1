@@ -15,10 +15,10 @@ non-interactive session prints "SKIP send-input: <reason>" and exits 0.
               the foreground window's keyboard layout. Each item is either a
               single character ("a", "%", "\", or any character the layout
               can type, such as a Cyrillic letter on the Russian layout), a
-              name (enter, tab, space, esc, backspace, delete, insert, home, end, pageup, pagedown,
-              up, down, left, right, f1..f12, plus) or a chord of
-              modifiers and one of those joined by "+": "ctrl+shift+c",
-              "alt+f4". "+" itself is spelled "plus".
+              name (enter, tab, space, esc, backspace, delete, insert, home,
+              end, pageup, pagedown, up, down, left, right, f1..f12, plus) or
+              a chord of modifiers and one of those joined by "+":
+              "ctrl+shift+c", "alt+f4". "+" itself is spelled "plus".
   -Scancodes  Hardware scancodes ("0x1E", or "0xE048" for an extended key),
               sent with KEYEVENTF_SCANCODE: the layout still decides the
               character.

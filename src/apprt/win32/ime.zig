@@ -5,6 +5,7 @@ const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
 const Surface = @import("Surface.zig");
+const key = @import("key.zig");
 
 const log = std.log.scoped(.win32_ime);
 
@@ -73,14 +74,7 @@ fn composition(surface: *Surface, flags: u32) void {
             log.warn("clearing preedit failed err={}", .{err});
         // Sent as a keyless press carrying the text, like the GTK commit:
         // textCallback would turn it into a bracketed paste.
-        if (text.len > 0) _ = surface.core_surface.keyCallback(.{
-            .action = .press,
-            .key = .unidentified,
-            .mods = .{},
-            .consumed_mods = .{},
-            .composing = false,
-            .utf8 = text,
-        }) catch |err| {
+        if (text.len > 0) _ = surface.core_surface.keyCallback(key.textEvent(text)) catch |err| {
             log.warn("sending ime result failed err={}", .{err});
         };
     }

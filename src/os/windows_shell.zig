@@ -224,6 +224,8 @@ fn systemExists(_: ?*anyopaque, path: []const u8) bool {
     if (comptime builtin.os.tag != .windows) return false;
 
     var buf: [2048]u16 = undefined;
+    // UTF-16 units never outnumber UTF-8 bytes, so this bounds the conversion.
+    if (path.len >= buf.len) return false;
     const len = std.unicode.wtf8ToWtf16Le(buf[0 .. buf.len - 1], path) catch return false;
     buf[len] = 0;
     const attrs = windows.GetFileAttributesW(@ptrCast(&buf));
@@ -479,4 +481,15 @@ test "windows shell: systemProbe sees real files and directories" {
         try std.testing.expect(path.len > 2);
         try std.testing.expect(path[1] == ':');
     }
+}
+
+test "windows shell: systemProbe rejects a path too long for its buffer" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A PATH entry of 3000 bytes must be reported missing, not overflow.
+    var long: [3000]u8 = undefined;
+    @memset(&long, 'a');
+    @memcpy(long[0..3], "C:\\");
+    const probe = systemProbe();
+    try std.testing.expect(!probe.exists(probe.ctx, &long));
 }
