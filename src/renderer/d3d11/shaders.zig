@@ -1,12 +1,14 @@
 //! Shader set and CPU-side vertex/uniform types for the D3D11 renderer.
 //!
-//! STUB: the pipelines are created lazily from HLSL in a later task, so
-//! `Shaders.init` fails for now. The extern structs below are the CPU/GPU
-//! ABI and must stay identical to `opengl/shaders.zig`.
+//! The extern structs below are the CPU/GPU ABI and must stay identical to
+//! `opengl/shaders.zig`. Their layout is mirrored by `shaders/hlsl`.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const Device = @import("Device.zig");
 const Pipeline = @import("Pipeline.zig");
+
+const log = std.log.scoped(.d3d11);
 
 /// This contains the state for the shaders used by the D3D11 renderer.
 pub const Shaders = struct {
@@ -22,6 +24,9 @@ pub const Shaders = struct {
     /// Custom shaders to run against the final drawable texture. This
     /// can be used to apply a lot of effects. Each shader is run in sequence
     /// against the output of the previous shader.
+    ///
+    /// Always empty for now: the D3D11 backend cannot compile custom
+    /// shaders yet.
     post_pipelines: []const Pipeline,
 
     /// Set to true when deinited, if you try to deinit a defunct set
@@ -36,23 +41,105 @@ pub const Shaders = struct {
 
     /// Initialize our shader set.
     ///
-    /// "post_shaders" is an optional list of postprocess shaders to run
-    /// against the final drawable texture. This is an array of shader source
-    /// code, not file paths.
+    /// "custom_shaders" is an optional list of postprocess shaders to run
+    /// against the final drawable texture. Custom shaders are not supported
+    /// by the D3D11 backend yet: a non-empty list logs a warning and is
+    /// ignored so Ghostty still works.
     pub fn init(
         alloc: Allocator,
-        post_shaders: []const [:0]const u8,
+        device: *Device,
+        custom_shaders: []const [:0]const u8,
     ) !Shaders {
         _ = alloc;
-        _ = post_shaders;
-        return error.Unimplemented;
+
+        if (custom_shaders.len > 0) {
+            log.warn(
+                "custom shaders are not supported by the d3d11 renderer yet, ignoring {d}",
+                .{custom_shaders.len},
+            );
+        }
+
+        const bg_color: Pipeline = try .init(null, .{
+            .device = device,
+            .vertex = .full_screen_vs,
+            .pixel = .bg_color_ps,
+            .blending_enabled = false,
+        });
+        errdefer bg_color.deinit();
+
+        const cell_bg: Pipeline = try .init(null, .{
+            .device = device,
+            .vertex = .full_screen_vs,
+            .pixel = .cell_bg_ps,
+            .blending_enabled = true,
+        });
+        errdefer cell_bg.deinit();
+
+        const cell_text: Pipeline = try .init(CellText, .{
+            .device = device,
+            .vertex = .cell_text_vs,
+            .pixel = .cell_text_ps,
+            .step_fn = .per_instance,
+            .blending_enabled = true,
+        });
+        errdefer cell_text.deinit();
+
+        const image: Pipeline = try .init(Image, .{
+            .device = device,
+            .vertex = .image_vs,
+            .pixel = .image_ps,
+            .step_fn = .per_instance,
+            .blending_enabled = true,
+        });
+        errdefer image.deinit();
+
+        const bg_image: Pipeline = try .init(BgImage, .{
+            .device = device,
+            .vertex = .bg_image_vs,
+            .pixel = .bg_image_ps,
+            .step_fn = .per_instance,
+            .blending_enabled = true,
+        });
+        errdefer bg_image.deinit();
+
+        return .{
+            .pipelines = .{
+                .bg_color = bg_color,
+                .cell_bg = cell_bg,
+                .cell_text = cell_text,
+                .image = image,
+                .bg_image = bg_image,
+            },
+            .post_pipelines = &.{},
+        };
     }
 
     pub fn deinit(self: *Shaders, alloc: Allocator) void {
         _ = alloc;
         if (self.defunct) return;
         self.defunct = true;
+
+        inline for (@typeInfo(@TypeOf(self.pipelines)).@"struct".field_names) |name| {
+            @field(self.pipelines, name).deinit();
+        }
     }
+};
+
+/// Byte offset of every `Uniforms` field in the HLSL `Globals` cbuffer, as
+/// given by the `packoffset`s in `shaders/hlsl/common.hlsli` (register
+/// `c<n>` starts at byte 16 * n, `.x/.y/.z/.w` add 0/4/8/12).
+pub const hlsl_uniform_offsets = [_]struct { []const u8, usize }{
+    .{ "projection_matrix", 0 }, // c0
+    .{ "screen_size", 64 }, // c4.x
+    .{ "cell_size", 72 }, // c4.z
+    .{ "grid_size", 80 }, // c5.x
+    .{ "grid_padding", 96 }, // c6
+    .{ "padding_extend", 112 }, // c7.x
+    .{ "min_contrast", 116 }, // c7.y
+    .{ "cursor_pos", 120 }, // c7.z
+    .{ "cursor_color", 124 }, // c7.w
+    .{ "bg_color", 128 }, // c8.x
+    .{ "bools", 132 }, // c8.y
 };
 
 /// The uniforms that are passed to our shaders.
@@ -194,3 +281,75 @@ pub const BgImage = extern struct {
         };
     };
 };
+
+test "d3d11 shaders: Uniforms offsets match the HLSL cbuffer" {
+    const fields = @typeInfo(Uniforms).@"struct".field_names;
+    try std.testing.expectEqual(fields.len, hlsl_uniform_offsets.len);
+
+    inline for (fields) |name| {
+        const found = for (hlsl_uniform_offsets) |entry| {
+            if (std.mem.eql(u8, entry[0], name)) break entry[1];
+        } else return error.MissingHlslOffset;
+        try std.testing.expectEqual(@offsetOf(Uniforms, name), found);
+    }
+
+    // The cbuffer is 9 registers.
+    try std.testing.expectEqual(@as(usize, 144), @sizeOf(Uniforms));
+}
+
+test "d3d11 shaders: vertex layouts match the HLSL inputs" {
+    const dxgi = @import("win32").dxgi;
+    const Expected = struct { fmt: dxgi.Format, offset: u32 };
+
+    const image = comptime Pipeline.inputElements(Image, .per_instance);
+    const image_want = [_]Expected{
+        .{ .fmt = .R32G32_FLOAT, .offset = 0 },
+        .{ .fmt = .R32G32_FLOAT, .offset = 8 },
+        .{ .fmt = .R32G32B32A32_FLOAT, .offset = 16 },
+        .{ .fmt = .R32G32_FLOAT, .offset = 32 },
+    };
+    try std.testing.expectEqual(image_want.len, image.len);
+    for (image, image_want, 0..) |e, want, i| {
+        try std.testing.expectEqual(@as(u32, @intCast(i)), e.SemanticIndex);
+        try std.testing.expectEqual(want.fmt, e.Format);
+        try std.testing.expectEqual(want.offset, e.AlignedByteOffset);
+    }
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(Image));
+
+    // `info` is a packed u8 and must reflect as R8_UINT (DXGI_FORMAT 62).
+    const bg_image = comptime Pipeline.inputElements(BgImage, .per_instance);
+    try std.testing.expectEqual(@as(usize, 2), bg_image.len);
+    try std.testing.expectEqual(dxgi.Format.R32_FLOAT, bg_image[0].Format);
+    try std.testing.expectEqual(@as(u32, 0), bg_image[0].AlignedByteOffset);
+    try std.testing.expectEqual(@as(u32, 62), @intFromEnum(bg_image[1].Format));
+    try std.testing.expectEqual(@as(u32, 4), bg_image[1].AlignedByteOffset);
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(BgImage));
+}
+
+test "d3d11 shaders: all builtin pipelines initialise on WARP" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    var shaders: Shaders = try .init(alloc, device, &.{});
+    defer shaders.deinit(alloc);
+
+    try std.testing.expect(shaders.pipelines.bg_color.input_layout == null);
+    try std.testing.expect(!shaders.pipelines.bg_color.blending_enabled);
+    try std.testing.expect(shaders.pipelines.cell_bg.input_layout == null);
+    try std.testing.expect(shaders.pipelines.cell_bg.blending_enabled);
+    try std.testing.expectEqual(@as(usize, 32), shaders.pipelines.cell_text.stride);
+    try std.testing.expectEqual(@as(usize, 48), shaders.pipelines.image.stride);
+    try std.testing.expectEqual(@as(usize, 8), shaders.pipelines.bg_image.stride);
+    try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
+}
+
+test "d3d11 shaders: custom shaders are ignored" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    var shaders: Shaders = try .init(alloc, device, &.{"void main() {}"});
+    defer shaders.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
+}

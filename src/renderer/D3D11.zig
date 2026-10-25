@@ -132,8 +132,7 @@ pub fn initShaders(
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
-    _ = self;
-    return try shaders.Shaders.init(alloc, custom_shaders);
+    return try shaders.Shaders.init(alloc, self.device, custom_shaders);
 }
 
 /// Initialize a new render target which can be presented by this API.
