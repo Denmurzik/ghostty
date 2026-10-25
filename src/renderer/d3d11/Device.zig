@@ -56,6 +56,10 @@ level: d3d11.FeatureLevel,
 /// The maximum 2D texture width and height supported by the device.
 max_texture_size: u32,
 
+/// Whether swap chains may be created with `ALLOW_TEARING` and present
+/// with `PRESENT_ALLOW_TEARING` (variable refresh rate support).
+tearing_supported: bool,
+
 /// Guards `context`.
 context_mutex: std.Io.Mutex = .init,
 
@@ -84,12 +88,14 @@ pub fn init(alloc: Allocator, options: Options) !*Device {
         .level = created.level,
         // 16384 is guaranteed from feature level 11_0 up, 8192 below.
         .max_texture_size = if (@backingInt(created.level) >= @backingInt(d3d11.FeatureLevel.@"11_0")) 16384 else 8192,
+        .tearing_supported = queryTearingSupport(factory),
     };
 
-    log.info("d3d11 device created driver={t} level={t} debug_layer={}", .{
+    log.info("d3d11 device created driver={t} level={t} debug_layer={} tearing={}", .{
         opts.driver,
         created.level,
         opts.debug_layer,
+        self.tearing_supported,
     });
     return self;
 }
@@ -128,6 +134,14 @@ pub fn assertContextLocked(self: *const Device) void {
     if (comptime track_owner) {
         std.debug.assert(self.context_owner.load(.monotonic) == std.Thread.getCurrentId());
     }
+}
+
+/// Whether DXGI reports tearing support. `IDXGIFactory5` is Windows 10+,
+/// so a failing query just means no tearing.
+fn queryTearingSupport(factory: *dxgi.IDXGIFactory2) bool {
+    const factory5 = com.queryInterface(factory, dxgi.IDXGIFactory5) catch return false;
+    defer com.release(factory5);
+    return factory5.supportsTearing();
 }
 
 /// Apply the `GHOSTTY_D3D11_DRIVER` / `GHOSTTY_D3D11_DEBUG` overrides.

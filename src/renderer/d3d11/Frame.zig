@@ -2,7 +2,8 @@
 //!
 //! A frame draws into a `Target` between `begin` and `complete`, all under
 //! the device context lock (`drawFrameStart`/`drawFrameEnd`). Completing it
-//! submits the work and, with `GHOSTTY_D3D11_DUMP` set, dumps the target.
+//! copies the target into the swap chain and presents it (when the API has a
+//! present target) and, with `GHOSTTY_D3D11_DUMP` set, dumps the target.
 const Self = @This();
 
 const std = @import("std");
@@ -15,6 +16,7 @@ const D3D11 = @import("../D3D11.zig");
 const Device = @import("Device.zig");
 const Target = @import("Target.zig");
 const RenderPass = @import("RenderPass.zig");
+const SwapChain = @import("SwapChain.zig");
 
 const log = std.log.scoped(.d3d11);
 
@@ -73,9 +75,10 @@ pub inline fn renderPass(
 
 /// Complete this frame and present the target.
 ///
-/// If `sync` is true, this will block until the frame is presented.
+/// `sync` frames (UI thread) present like any other: the present call
+/// returns once the frame is queued, which is as presented as D3D11 lets
+/// us observe.
 pub fn complete(self: *const Self, sync: bool) void {
-    // Presenting arrives with the swap chain.
     _ = sync;
 
     const api = self.api;
@@ -95,14 +98,34 @@ pub fn complete(self: *const Self, sync: bool) void {
     self.sink.completed(self.sink.ptr, health);
 }
 
-/// Submits the queued commands, then dumps the target if requested.
+/// Presents the target, submits the queued commands, then dumps the target
+/// if requested.
 fn submit(self: *const Self) error{DeviceLost}!void {
     const api = self.api;
+
+    if (api.present_target != null) self.present() catch |err| switch (err) {
+        error.DeviceLost => return error.DeviceLost,
+        // The frame itself was drawn; a swap chain that cannot show it
+        // is not a lost device. Logged once, retried by the next frame.
+        else => api.logSwapChainFailure("present", err),
+    };
+
     api.device.context.flush();
     // Any failing reason code means the device is gone.
     api.device.device.checkDeviceRemoved() catch return error.DeviceLost;
 
     if (api.dump) |*dump| try dump.maybeWrite(api.alloc, self.target);
+}
+
+/// Copies the target into the swap chain's back buffer and presents it.
+fn present(self: *const Self) !void {
+    const api = self.api;
+    const sc = try api.swapChain(
+        @intCast(self.target.width),
+        @intCast(self.target.height),
+    );
+    try sc.copyToBackbuffer(api.device.context, self.target);
+    try sc.present(api.vsync);
 }
 
 /// The frame dump hook: with env `GHOSTTY_D3D11_DUMP=<dir>` every renderer
@@ -645,6 +668,37 @@ test "d3d11 frame: a failing dump does not fail the frame" {
     frame.complete(false);
     try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
     try testing.expect(fx.api.dump.?.failed_logged);
+}
+
+test "d3d11 frame: complete presents into a lazily created swap chain" {
+    var fx: Fixture = try .init(.native, 16, 8);
+    defer fx.deinit();
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(D3D11.packSize(16, 8));
+    fx.api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer fx.api.threadExit();
+
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+    try testing.expect(fx.api.swap_chain == null);
+
+    var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+    {
+        var pass = frame.renderPass(&.{.{
+            .target = .{ .target = fx.target },
+            .clear_color = .{ 1, 0, 0, 1 },
+        }});
+        pass.complete();
+    }
+    frame.complete(false);
+
+    const sc = fx.api.swap_chain orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u32, 16), sc.width);
+    try testing.expectEqual(@as(u32, 8), sc.height);
+    try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
+    try testing.expectEqual(@as(usize, 1), fx.recorder.count);
 }
 
 test "d3d11 frame: bmp header" {

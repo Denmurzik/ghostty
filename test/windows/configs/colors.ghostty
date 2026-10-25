@@ -1,0 +1,3 @@
+background = #102030
+foreground = #e0e0e0
+command = direct:cmd.exe /k echo GHOSTTY-M1

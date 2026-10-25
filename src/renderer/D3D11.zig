@@ -25,6 +25,7 @@ const bufferpkg = @import("d3d11/buffer.zig");
 pub const Buffer = bufferpkg.Buffer;
 pub const Sampler = @import("d3d11/Sampler.zig");
 pub const Texture = @import("d3d11/Texture.zig");
+pub const SwapChain = @import("d3d11/SwapChain.zig");
 pub const shaders = @import("d3d11/shaders.zig");
 pub const hlsl = @import("d3d11/hlsl.zig");
 pub const slots = @import("d3d11/slots.zig");
@@ -41,6 +42,14 @@ pub const custom_shader_y_is_down = true;
 pub const swap_chain_count = 1;
 
 const log = std.log.scoped(.d3d11);
+
+/// How long the render thread waits for a free frame slot. The wait is
+/// bounded so a swap chain that never signals (occluded, minimized) cannot
+/// stall the thread, which also has to notice that it should exit.
+const frame_slot_wait_ms = 100;
+
+/// `render_thread` outside the render thread's life; no real thread has id 0.
+const no_thread: std.Thread.Id = 0;
 
 /// Where the swap chain presents. Provided by the apprt through an optional
 /// `d3d11PresentTarget` decl on its Surface; null means headless.
@@ -79,12 +88,25 @@ device: *Device,
 /// `threadEnter`.
 present_target: ?PresentTarget = null,
 
+/// The swap chain of `present_target`. Created by `threadEnter` or, if the
+/// window had no size yet, by the first frame; released by `threadExit`.
+/// Only touched under the device context lock.
+swap_chain: ?SwapChain = null,
+
+/// Whether presents wait for the vertical blank (config `window-vsync`).
+vsync: bool = true,
+
+/// Set once a swap chain failure was logged, so a broken swap chain logs
+/// once rather than once per frame.
+swap_chain_failure_logged: bool = false,
+
 /// The size `setViewport` last reported. Headless `surfaceSize` returns it.
 viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
 
-/// The render thread, once `threadEnter` ran. Draws from any other thread
-/// are the synchronous (UI thread) kind.
-render_thread: ?std.Thread.Id = null,
+/// The render thread, once `threadEnter` ran (`no_thread` before and after).
+/// Draws from any other thread are the synchronous (UI thread) kind.
+render_thread: std.atomic.Value(std.Thread.Id) = .init(no_thread),
+
 
 /// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
 dump: ?Frame.Dump = null,
@@ -104,6 +126,7 @@ pub fn init(
     return .{
         .alloc = alloc,
         .blending = opts.config.blending,
+        .vsync = opts.config.vsync,
         .device = device,
         .dump = Frame.Dump.initFromEnv(
             alloc,
@@ -120,19 +143,59 @@ pub fn deinit(self: *D3D11) void {
 /// Callback called by renderer.Thread when it begins. Called on the render
 /// thread.
 pub fn threadEnter(self: *D3D11, surface: *apprt.Surface) !void {
-    self.render_thread = std.Thread.getCurrentId();
+    self.render_thread.store(std.Thread.getCurrentId(), .release);
 
     // Apprts without a window (`app_runtime = none`) render headless.
     if (comptime @hasDecl(apprt.Surface, "d3d11PresentTarget")) {
         self.present_target = surface.d3d11PresentTarget();
     }
+
+    // A window without a size yet (or a minimized one) gets its swap chain
+    // from the first frame that has one.
+    if (self.present_target != null) {
+        const size = try self.surfaceSize();
+        if (size.width > 0 and size.height > 0) {
+            self.device.lockContext();
+            defer self.device.unlockContext();
+            _ = self.swapChain(size.width, size.height) catch {};
+        }
+    }
 }
 
 /// Callback called by renderer.Thread when it exits. Called on the render
-/// thread.
+/// thread. Releases the swap chain before the window can go away: the
+/// apprt destroys the window only after the render thread was joined.
 pub fn threadExit(self: *D3D11) void {
+    if (self.swap_chain != null) {
+        self.device.lockContext();
+        defer self.device.unlockContext();
+        self.swap_chain.?.deinit();
+        self.swap_chain = null;
+    }
+
     self.present_target = null;
-    self.render_thread = null;
+    self.render_thread.store(no_thread, .release);
+}
+
+/// The swap chain of the present target, created at the given size if it
+/// does not exist yet. Failure is logged once and returned. The caller
+/// holds the context lock.
+pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
+    if (self.swap_chain) |*sc| return sc;
+
+    const target = self.present_target orelse return error.InvalidArgument;
+    self.swap_chain = SwapChain.init(self.device, target.hwnd, width, height, .hwnd) catch |err| {
+        self.logSwapChainFailure("create", err);
+        return err;
+    };
+    return &self.swap_chain.?;
+}
+
+/// Logs a swap chain failure the first time only.
+pub fn logSwapChainFailure(self: *D3D11, what: []const u8, err: anyerror) void {
+    if (self.swap_chain_failure_logged) return;
+    self.swap_chain_failure_logged = true;
+    log.err("d3d11 swap chain {s} failed err={}, the surface may not show frames", .{ what, err });
 }
 
 /// Get the current size of the runtime surface.
@@ -167,10 +230,23 @@ pub fn drawFrameEnd(self: *D3D11) void {
 }
 
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for
-/// until a swap chain exists.
+/// until a swap chain exists and a frame was presented.
+///
+/// The render thread waits without the context lock, so one surface
+/// pacing itself does not hold up the others. A synchronous draw (UI
+/// thread, e.g. during resize) never waits: it must not stall the window.
 fn waitForFrameSlot(self: *D3D11, sync: bool) void {
-    _ = self;
-    _ = sync;
+    const sc = if (self.swap_chain) |*sc| sc else return;
+    if (!sc.presented_since_wait) return;
+
+    if (sync) {
+        sc.waitForSlot(0);
+        return;
+    }
+
+    self.device.unlockContext();
+    defer self.device.lockContext();
+    sc.waitForSlot(frame_slot_wait_ms);
 }
 
 pub fn initShaders(
@@ -290,7 +366,7 @@ pub inline fn beginFrame(
     target: *Target,
 ) !Frame {
     // Draws off the render thread are the synchronous UI thread ones.
-    const sync = self.render_thread != std.Thread.getCurrentId();
+    const sync = self.render_thread.load(.acquire) != std.Thread.getCurrentId();
     self.waitForFrameSlot(sync);
     return try Frame.begin(.{ .api = self }, renderer, target);
 }
@@ -364,6 +440,109 @@ test "d3d11 api: present target size is read and clamped" {
     try std.testing.expectEqual(@as(u32, 0), huge.height);
 }
 
+test "d3d11: surfaceSize 0x0 skips drawing" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    // A minimized window stores 0x0, which generic's `drawFrame` turns
+    // into an early return before any frame, swap chain or wait.
+    var packed_size: std.atomic.Value(u64) = .init(packSize(0, 0));
+    api.present_target = .{ .hwnd = undefined, .size = &packed_size };
+
+    const size = try api.surfaceSize();
+    try std.testing.expectEqual(@as(u32, 0), size.width);
+    try std.testing.expectEqual(@as(u32, 0), size.height);
+    try std.testing.expect(api.swap_chain == null);
+
+    // Restoring brings the size back.
+    packed_size.store(packSize(640, 480), .release);
+    const restored = try api.surfaceSize();
+    try std.testing.expectEqual(@as(u32, 640), restored.width);
+    try std.testing.expectEqual(@as(u32, 480), restored.height);
+}
+
+test "d3d11 pacing: no-op draws do not consume the latency slot" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    // The test thread plays the render thread.
+    api.render_thread.store(std.Thread.getCurrentId(), .release);
+    defer api.threadExit();
+
+    var target = try api.initTarget(32, 32);
+    defer target.deinit();
+
+    const io = @import("../global.zig").io();
+    const Recorder = struct {
+        fn completed(_: *anyopaque, _: rendererpkg.Health) void {}
+    };
+    var unused: u8 = 0;
+
+    api.drawFrameStart();
+    {
+        var frame = try Frame.beginWithSink(
+            .{ .api = &api },
+            .{ .ptr = &unused, .completed = Recorder.completed },
+            &target,
+        );
+        frame.complete(false);
+    }
+    api.drawFrameEnd();
+
+    const sc = &api.swap_chain.?;
+    // A hidden window may be reported occluded, which queues nothing.
+    // Model a queued frame either way.
+    sc.presented_since_wait = true;
+
+    // Draws that return before `beginFrame` (zero size, nothing changed)
+    // only take and release the lock: they must not wait or touch the slot.
+    const start = std.Io.Timestamp.now(io, .awake);
+    for (0..10) |_| {
+        api.drawFrameStart();
+        api.drawFrameEnd();
+    }
+    try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 20);
+    try std.testing.expect(sc.presented_since_wait);
+
+    // The first real frame takes the slot, on the render thread (waits at
+    // most `frame_slot_wait_ms`) and holds the lock again afterwards.
+    api.drawFrameStart();
+    defer api.drawFrameEnd();
+    api.waitForFrameSlot(false);
+    api.device.assertContextLocked();
+    try std.testing.expect(!sc.presented_since_wait);
+}
+
+test "d3d11 pacing: sync draws never block on the slot" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(16, 16));
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer api.threadExit();
+
+    // Before `threadEnter` no thread is the render thread: every draw is
+    // a sync one.
+    try std.testing.expect(api.render_thread.load(.acquire) != std.Thread.getCurrentId());
+
+    api.drawFrameStart();
+    defer api.drawFrameEnd();
+    const sc = try api.swapChain(16, 16);
+    sc.presented_since_wait = true;
+
+    const io = @import("../global.zig").io();
+    const start = std.Io.Timestamp.now(io, .awake);
+    api.waitForFrameSlot(true);
+    try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < frame_slot_wait_ms);
+    try std.testing.expect(!sc.presented_since_wait);
+}
+
 test "d3d11 api: blending selects the target and texture formats" {
     var linear = try testApi(.linear);
     defer linear.device.deinit(std.testing.allocator);
@@ -406,4 +585,5 @@ test {
     _ = RenderPass;
     _ = Target;
     _ = Frame;
+    _ = SwapChain;
 }
