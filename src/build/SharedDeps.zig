@@ -216,13 +216,23 @@ pub fn add(
     // POSIX C imports that are used throughout Ghostty on a general basis.
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
+    //
+    // Windows has no pwd.h or unistd.h, so only the headers that exist in
+    // the MSVC CRT are translated there. The module name stays the same.
     try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
-        .source = .{ .includes = .{ .files = &.{
-            .{ .path = "errno.h" },
-            .{ .path = "pwd.h" },
-            .{ .path = "signal.h" },
-            .{ .path = "sys/types.h" },
-            .{ .path = "unistd.h" },
+        .source = .{ .includes = .{ .files = switch (target.result.os.tag) {
+            .windows => &.{
+                .{ .path = "errno.h" },
+                .{ .path = "signal.h" },
+                .{ .path = "sys/types.h" },
+            },
+            else => &.{
+                .{ .path = "errno.h" },
+                .{ .path = "pwd.h" },
+                .{ .path = "signal.h" },
+                .{ .path = "sys/types.h" },
+                .{ .path = "unistd.h" },
+            },
         } } },
         .target = target,
         .optimize = optimize,
@@ -655,12 +665,14 @@ pub fn add(
 
     // If we're building an exe then we have additional dependencies.
     if (step.kind != .lib) {
-        // We always statically compile glad
-        step.root_module.addIncludePath(b.path("vendor/glad/include/"));
-        step.root_module.addCSourceFile(.{
-            .file = b.path("vendor/glad/src/gl.c"),
-            .flags = &.{},
-        });
+        // We statically compile glad, but only the OpenGL renderer uses it.
+        if (self.config.renderer == .opengl) {
+            step.root_module.addIncludePath(b.path("vendor/glad/include/"));
+            step.root_module.addCSourceFile(.{
+                .file = b.path("vendor/glad/src/gl.c"),
+                .flags = &.{},
+            });
+        }
 
         // Link EGL for GTK.
         if (self.config.app_runtime == .gtk) {

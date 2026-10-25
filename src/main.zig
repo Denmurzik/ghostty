@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_config = @import("build_config.zig");
 
 /// See build_config.ExeEntrypoint for why we do this.
@@ -23,8 +24,12 @@ else
 
 comptime {
     // Force-reference our memset override so its export is emitted.
-    // See quirks_memset.zig for details on why this exists.
-    _ = @import("quirks_memset.zig");
+    // See quirks_memset.zig for details on why this exists. Skipped on
+    // Windows/MSVC, where the CRT already provides memset and ours would
+    // collide with it at link time.
+    if (!(builtin.os.tag == .windows and builtin.abi == .msvc)) {
+        _ = @import("quirks_memset.zig");
+    }
 }
 
 test {
@@ -34,5 +39,7 @@ test {
     // log spam in general), we bump the default testing log level to error.
     std.testing.log_level = std.log.Level.err;
     _ = entrypoint;
-    _ = @import("quirks_memset.zig");
+    if (!(builtin.os.tag == .windows and builtin.abi == .msvc)) {
+        _ = @import("quirks_memset.zig");
+    }
 }

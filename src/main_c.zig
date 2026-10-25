@@ -46,8 +46,11 @@ comptime {
     _ = @import("benchmark/main.zig").CApi;
 
     // Force-reference our memset override so its export is emitted.
-    // See quirks_memset.zig for details on why this exists.
-    _ = @import("quirks_memset.zig");
+    // See quirks_memset.zig for details on why this exists. Skipped on
+    // Windows/MSVC, where the CRT already provides memset.
+    if (!(builtin.os.tag == .windows and builtin.abi == .msvc)) {
+        _ = @import("quirks_memset.zig");
+    }
 }
 
 /// ghostty_info_s
