@@ -1557,27 +1557,27 @@ test "windows font: U+1F600 from Segoe UI Emoji renders as a colour glyph" {
     defer face.deinit();
 
     const glyph_id = face.glyphIndex(0x1F600).?;
-    if (!face.hasColor() or !face.isColorGlyph(glyph_id)) {
-        log.warn("known M1 gap: monochrome system emoji", .{});
-        return error.SkipZigTest;
-    }
+    try std.testing.expect(face.hasColor());
+    try std.testing.expect(face.isColorGlyph(glyph_id));
 
     const font = @import("main.zig");
     var atlas = try font.Atlas.init(alloc, 512, .bgra);
     defer atlas.deinit(alloc);
-    // FreeType reports the glyph as coloured but the outline path of
-    // renderGlyph flattens COLR layers to grayscale, which an atlas in
-    // BGRA format rejects.
-    const glyph = face.renderGlyph(alloc, &atlas, glyph_id, .{
+    const glyph = try face.renderGlyph(alloc, &atlas, glyph_id, .{
         .grid_metrics = font.Metrics.calc(face.getMetrics()),
-    }) catch |err| switch (err) {
-        error.WrongAtlas => {
-            log.warn("known M1 gap: monochrome system emoji", .{});
-            return error.SkipZigTest;
-        },
-        else => return err,
-    };
+    });
     try std.testing.expect(glyph.width > 0 and glyph.height > 0);
+
+    // At least one visible pixel must be non-gray (BGRA byte order).
+    var coloured = false;
+    for (0..glyph.height) |y| {
+        for (0..glyph.width) |x| {
+            const i = ((glyph.atlas_y + y) * atlas.size + glyph.atlas_x + x) * 4;
+            const px = atlas.data[i..][0..4];
+            if (px[3] > 0 and (px[0] != px[1] or px[1] != px[2])) coloured = true;
+        }
+    }
+    try std.testing.expect(coloured);
     try std.testing.expectEqual(font.Atlas.Format.bgra, atlas.format);
 }
 

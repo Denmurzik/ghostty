@@ -472,11 +472,35 @@ pub const Face = struct {
         defer self.ft_mutex.unlock(global.io());
 
         // Load the glyph.
-        try self.face.loadGlyph(glyph_index, self.glyphLoadFlags(opts.constraint.doesAnything()));
+        const load_flags = self.glyphLoadFlags(opts.constraint.doesAnything());
+        try self.face.loadGlyph(glyph_index, load_flags);
         const glyph = self.face.handle.*.glyph;
 
-        // For synthetic bold, we embolden the glyph.
-        if (self.synthetic.bold) {
+        // Colour outline glyphs (COLR/CPAL) are only coloured when
+        // FreeType renders them itself, since it composites the layers
+        // during the render. Rendering our own transformed outline would
+        // flatten them to gray, so let FreeType produce a BGRA bitmap and
+        // continue down the bitmap path, which handles scaling. If the
+        // glyph turns out to have no colour layers, reload it as a plain
+        // outline.
+        if (self.face.hasColor() and
+            glyph.*.format == freetype.c.FT_GLYPH_FORMAT_OUTLINE)
+        color: {
+            var color_flags = load_flags;
+            color_flags.render = true;
+            self.face.loadGlyph(glyph_index, color_flags) catch {};
+            if (glyph.*.format == freetype.c.FT_GLYPH_FORMAT_BITMAP and
+                glyph.*.bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA)
+                break :color;
+
+            try self.face.loadGlyph(glyph_index, load_flags);
+        }
+
+        // For synthetic bold, we embolden the glyph. Bitmap glyphs have no
+        // outline to embolden.
+        if (self.synthetic.bold and
+            glyph.*.format == freetype.c.FT_GLYPH_FORMAT_OUTLINE)
+        {
             // We need to scale the embolden amount based on the font size.
             // This is a heuristic I found worked well across a variety of
             // founts: 1 pixel per 64 units of height.
