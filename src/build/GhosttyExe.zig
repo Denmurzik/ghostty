@@ -43,6 +43,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     switch (cfg.target.result.os.tag) {
         .windows => {
             exe.subsystem = .windows;
+            // With the windows subsystem the linker wants WinMain; pointing
+            // the entry at the CRT startup calls Zig's `main` instead
+            // (proof: test/windows/gui-entry).
+            exe.entry = .{ .symbol_name = "mainCRTStartup" };
             exe.root_module.addWin32ResourceFile(.{
                 .file = b.path("dist/windows/ghostty.rc"),
             });
