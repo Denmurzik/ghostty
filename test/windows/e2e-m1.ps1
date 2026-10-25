@@ -51,6 +51,7 @@ $all = @(
     @{ Name = 'typing-de-altgr'; Timeout = 150 }
     @{ Name = 'typing-de-deadkey'; Timeout = 150 }
     @{ Name = 'typing-ru'; Timeout = 150 }
+    @{ Name = 'typing-ru-ctrl-shift-c'; Timeout = 150 }
     @{ Name = 'typing-unicode'; Timeout = 120 }
     @{ Name = 'typing-unicode-vim'; Timeout = 150 }
     @{ Name = 'ctrl-c'; Timeout = 150 }

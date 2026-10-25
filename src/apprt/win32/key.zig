@@ -274,6 +274,23 @@ pub const Utf16Joiner = struct {
     }
 };
 
+/// The key event for text that no key of ours produced: `SendInput`
+/// unicode (VK_PACKET), WM_UNICHAR, a character without a handled
+/// key-down, Alt+numpad. A keyless press carrying the text, like the GTK
+/// commit and our IME result. `Surface.textCallback` would turn it into a
+/// bracketed paste, which a program that enabled that mode inserts as
+/// pasted text instead of typed keys.
+pub fn textEvent(text: []const u8) input.KeyEvent {
+    return .{
+        .action = .press,
+        .key = .unidentified,
+        .mods = .{},
+        .consumed_mods = .{},
+        .composing = false,
+        .utf8 = text,
+    };
+}
+
 /// Whether a system-key message goes to `DefWindowProc` instead of core:
 /// only Alt+F4 (close) and Alt+Space (system menu). Everything else with
 /// Alt, and F10, is the terminal's.
@@ -437,6 +454,17 @@ test "win32 key: stripControl removes C0" {
     try testing.expectEqualStrings("Жж😀", stripControl("Жж\x01😀", &buf));
     var tiny: [2]u8 = undefined;
     try testing.expectEqualStrings("ab", stripControl("abc", &tiny));
+}
+
+test "win32 key: typed text is a keyless press, not a paste" {
+    const ev = textEvent("Ж😀");
+    try testing.expectEqual(input.Action.press, ev.action);
+    try testing.expectEqual(input.Key.unidentified, ev.key);
+    try testing.expect(ev.mods.empty());
+    try testing.expect(ev.consumed_mods.empty());
+    try testing.expect(!ev.composing);
+    try testing.expectEqualStrings("Ж😀", ev.utf8);
+    try testing.expectEqual(@as(u21, 0), ev.unshifted_codepoint);
 }
 
 test "win32 key: surrogate pair joined across two WM_CHAR units" {

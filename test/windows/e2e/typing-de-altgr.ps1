@@ -5,10 +5,9 @@
 
 Invoke-E2eScenario 'typing-de-altgr' {
     $g = Start-BashE2e
-    # @ (AltGr+Q), [ ] { } \ ~ |. The euro sign (AltGr+E) is left out:
-    # send-input.ps1 declares VkKeyScanExW with an ANSI char and cannot look
-    # up characters outside the ANSI code page.
-    $payload = '@[]{}\~|'
+    # @ (AltGr+Q), [ ] { } \ ~ | and the euro sign (AltGr+E), which is
+    # outside the ANSI code page and needs the Unicode VkKeyScanExW lookup.
+    $payload = '@[]{}\~|' + (ConvertFrom-CodePoints 0x20AC)
     $path = Invoke-PayloadCase $g 'gt-altgr.txt' {
         Set-WindowLayout $g.Hwnd '00000407'
         Invoke-SendInput -Hwnd $g.Hwnd -Keys ($payload.ToCharArray() | ForEach-Object { [string]$_ })

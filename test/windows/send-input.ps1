@@ -13,8 +13,9 @@ non-interactive session prints "SKIP send-input: <reason>" and exits 0.
               character, no layout involved.
   -Keys       The real typing path: virtual key plus scancode, translated by
               the foreground window's keyboard layout. Each item is either a
-              single character ("a", "%", "\"), a name (enter, tab, space,
-              esc, backspace, delete, insert, home, end, pageup, pagedown,
+              single character ("a", "%", "\", or any character the layout
+              can type, such as a Cyrillic letter on the Russian layout), a
+              name (enter, tab, space, esc, backspace, delete, insert, home, end, pageup, pagedown,
               up, down, left, right, f1..f12, plus) or a chord of
               modifiers and one of those joined by "+": "ctrl+shift+c",
               "alt+f4". "+" itself is spelled "plus".
@@ -71,7 +72,8 @@ public static uint Send(ushort[] vk, ushort[] scan, uint[] flags) {
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint thread);
-[DllImport("user32.dll")] public static extern short VkKeyScanExW(char ch, IntPtr hkl);
+// CharSet.Unicode: the char is marshalled as UTF-16, so characters outside the ANSI code page (Cyrillic, the euro sign) resolve too.
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern short VkKeyScanExW(char ch, IntPtr hkl);
 [DllImport("user32.dll")] public static extern uint MapVirtualKeyExW(uint code, uint type, IntPtr hkl);
 "@
 }

@@ -54,6 +54,7 @@ pub fn handle(
         => handleKey(surface, msg, wparam, lparam),
 
         user32.WM_CHAR, user32.WM_SYSCHAR => handleChar(surface, msg, wparam),
+        user32.WM_UNICHAR => handleUniChar(surface, wparam),
         user32.WM_DEADCHAR, user32.WM_SYSDEADCHAR => handleDeadChar(surface, wparam),
 
         user32.WM_INPUTLANGCHANGE => {
@@ -276,8 +277,8 @@ fn appendCapped(dest: []u8, src: []const u8) usize {
     return n;
 }
 
-/// A character without a key-down we handled: IME commits, `SendInput`
-/// unicode (VK_PACKET), Alt+numpad.
+/// A character without a key-down we handled: `SendInput` unicode
+/// (VK_PACKET), Alt+numpad, characters posted by other programs.
 fn handleChar(
     surface: *Surface,
     msg: u32,
@@ -292,13 +293,32 @@ fn handleChar(
     if (msg == user32.WM_SYSCHAR) return 0;
 
     const text = state.joiner.feed(@truncate(wparam), &out) orelse return 0;
+    sendText(surface, text);
+    return 0;
+}
+
+/// A code point sent as WM_UNICHAR (UTF-32). `UNICODE_NOCHAR` asks whether
+/// we handle the message, which we do.
+fn handleUniChar(surface: *Surface, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESULT {
+    if (wparam == user32.UNICODE_NOCHAR) return 1;
+
+    var out: [key.Utf16Joiner.max_out]u8 = undefined;
+    const cp = std.math.cast(u21, wparam) orelse return 0;
+    const n = std.unicode.utf8Encode(cp, &out) catch return 0;
+    sendText(surface, out[0..n]);
+    return 0;
+}
+
+/// Deliver text that no key of ours produced, as a keyless press (see
+/// `key.textEvent`), never as a paste.
+fn sendText(surface: *Surface, text: []const u8) void {
+    const state = &surface.keyboard_state;
     if (state.dead_pending) {
         state.dead_pending = false;
         sendPreedit(surface, null);
     }
-    surface.core_surface.textCallback(text) catch |err|
-        log.warn("text callback failed err={}", .{err});
-    return 0;
+    _ = surface.core_surface.keyCallback(key.textEvent(text)) catch |err|
+        log.warn("text key callback failed err={}", .{err});
 }
 
 /// A dead key whose key-down we did not drain.
