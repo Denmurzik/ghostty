@@ -14,6 +14,8 @@ const apprt = @import("apprt.zig");
 const App = @import("App.zig");
 const Ghostty = @import("main_c.zig").Ghostty;
 const global = @import("global.zig");
+const windows_console = @import("os/windows_console.zig");
+const windows_log = @import("os/windows_log.zig");
 
 /// The return type for main() depends on the build artifact. The lib build
 /// also calls "main" in order to run the CLI actions, but it calls it as
@@ -29,6 +31,8 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // a global is because the C API needs to be able to access this state;
     // no other Zig code should EVER access the global state.
     global.init(.{ .main = minimal }) catch |err| {
+        // The GUI-subsystem exe has no stderr unless we attach one.
+        windows_console.ensureConsoleForCli();
         var buffer: [1024]u8 = undefined;
         var stderr_writer = std.Io.File.stderr().writer(
             std.Io.Threaded.global_single_threaded.io(),
@@ -66,6 +70,8 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
 
     // Execute our action if we have one
     if (global.action()) |action| {
+        // CLI actions print to the console that launched us.
+        windows_console.ensureConsoleForCli();
         std.log.info("executing CLI action={}", .{action});
         std.process.exit(action.run(alloc) catch |err| err: {
             std.log.err("CLI action failed error={}", .{err});
@@ -75,6 +81,7 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     }
 
     if (comptime build_config.app_runtime == .none) {
+        windows_console.ensureConsoleForCli();
         var buffer: [1024]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writer(
             std.Io.Threaded.global_single_threaded.io(),
@@ -154,12 +161,25 @@ fn logFn(
         );
     }
 
+    windows: {
+        if (comptime builtin.target.os.tag != .windows) break :windows;
+        const sinks = global.logging();
+        if (!sinks.file and !sinks.debugger) break :windows;
+        windows_log.logFmt(level, scope, format, args, .{
+            .file = sinks.file,
+            .debugger = sinks.debugger,
+        });
+    }
+
     stderr: {
         // don't log debug messages to stderr unless we are a debug build
         if (comptime builtin.mode != .debug and level == .debug) break :stderr;
 
         // skip if we are not logging to stderr
         if (!global.logging().stderr) break :stderr;
+
+        // A GUI-subsystem process on Windows may have no stderr at all.
+        if (!windows_console.stderrValid()) break :stderr;
 
         // Lock so we are thread-safe
         var buf: [64]u8 = undefined;
@@ -238,6 +258,8 @@ pub const std_options: std.Options = .{
 };
 
 test {
+    _ = windows_console;
+    _ = windows_log;
     _ = @import("pty.zig");
     _ = @import("Command.zig");
     _ = @import("font/main.zig");

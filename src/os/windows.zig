@@ -471,5 +471,28 @@ pub extern "advapi32" fn RegGetValueW(
 ) callconv(.winapi) LSTATUS;
 
 // --- console (Task 16)
+// CreateFileW, WriteFile, CloseHandle and GetFileSizeEx are declared above.
+
+pub const ATTACH_PARENT_PROCESS: DWORD = 0xFFFFFFFF;
+pub const STD_INPUT_HANDLE: DWORD = 0xFFFFFFF6; // (DWORD)-10
+pub const STD_OUTPUT_HANDLE: DWORD = 0xFFFFFFF5; // (DWORD)-11
+pub const STD_ERROR_HANDLE: DWORD = 0xFFFFFFF4; // (DWORD)-12
+pub const FILE_APPEND_DATA = 0x00000004;
+pub const OPEN_ALWAYS = 4;
+pub const MOVEFILE_REPLACE_EXISTING = 0x00000001;
+pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
+
+pub extern "kernel32" fn AttachConsole(dwProcessId: DWORD) callconv(.winapi) BOOL;
+/// Null when the process has no such handle, INVALID_HANDLE_VALUE on error.
+pub extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn SetStdHandle(nStdHandle: DWORD, hHandle: ?HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(.winapi) BOOL;
+pub extern "kernel32" fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) callconv(.winapi) BOOL;
+pub extern "kernel32" fn OutputDebugStringW(lpOutputString: LPCWSTR) callconv(.winapi) void;
+pub extern "kernel32" fn MoveFileExW(
+    lpExistingFileName: LPCWSTR,
+    lpNewFileName: LPCWSTR,
+    dwFlags: DWORD,
+) callconv(.winapi) BOOL;
 
 // --- jobs (Task 19)

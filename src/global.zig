@@ -14,6 +14,7 @@ const apprt = @import("apprt.zig");
 const assert = @import("quirks.zig").inlineAssert;
 const allocTmpDir = @import("os/file.zig").allocTmpDir;
 const freeTmpDir = @import("os/file.zig").freeTmpDir;
+const windows_log = @import("os/windows_log.zig");
 
 // This file should only be imported for certain platforms.
 comptime {
@@ -138,7 +139,11 @@ pub fn init(opts: InitOpts) !void {
     // If we have an action executing, we disable logging by default
     // since we write to stderr we don't want logs messing up our
     // output.
-    if (self.action != null) self.logging.stderr = false;
+    if (self.action != null) {
+        self.logging.stderr = false;
+        self.logging.file = false;
+        self.logging.debugger = false;
+    }
 
     // I don't love the env var name but I don't have it in my heart
     // to parse CLI args 3 times (once for actions, once for config,
@@ -152,6 +157,14 @@ pub fn init(opts: InitOpts) !void {
         };
         defer self.alloc.free(v);
         self.logging = cli.args.parsePackedStruct(GlobalState.Logging, v) catch .{};
+    }
+
+    // Open the Windows log file before the first log line below.
+    if (comptime builtin.os.tag == .windows) file: {
+        if (!self.logging.file) break :file;
+        var environ_map = try self.environ.createMap(self.alloc);
+        defer environ_map.deinit();
+        windows_log.init(self.alloc, &environ_map);
     }
 
     // Setup our signal handlers before logging
@@ -233,6 +246,8 @@ pub fn deinit() void {
     const self = &state.?;
 
     self.resources_dir.deinit(self.alloc);
+
+    windows_log.deinit();
 
     // Flush our crash logs
     crash.deinit();
@@ -399,6 +414,13 @@ pub const GlobalState = struct {
         /// Whether to log to macOS's unified logging. Enabled by default
         /// on macOS.
         macos: bool = builtin.target.os.tag.isDarwin(),
+        /// Whether to log to %LOCALAPPDATA%\ghostty\logs\ghostty.log.
+        /// Enabled by default on Windows, where a GUI-subsystem process
+        /// has no stderr.
+        file: bool = builtin.target.os.tag == .windows,
+        /// Whether to log to the debugger (OutputDebugString). Enabled by
+        /// default on Windows debug builds.
+        debugger: bool = builtin.target.os.tag == .windows and builtin.mode == .debug,
     };
 
     /// Asserts that `self.io_impl` has been initialized.

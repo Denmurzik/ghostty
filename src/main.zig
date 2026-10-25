@@ -16,6 +16,20 @@ const entrypoint = switch (build_config.exe_entrypoint) {
 /// The main entrypoint for the program.
 pub const main = entrypoint.main;
 
+/// On Windows the panic message and trace are also written to the log file
+/// and the debugger, because the GUI-subsystem exe usually has no stderr.
+/// Everything else uses the default panic handler.
+pub const panic = if (builtin.os.tag == .windows)
+    std.debug.FullPanic(windowsPanic)
+else
+    std.debug.FullPanic(std.debug.defaultPanic);
+
+fn windowsPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    @import("os/windows_log.zig").writePanic(msg, null, first_trace_addr orelse @returnAddress());
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
 /// Standard options such as logger overrides.
 pub const std_options: std.Options = if (@hasDecl(entrypoint, "std_options"))
     entrypoint.std_options
