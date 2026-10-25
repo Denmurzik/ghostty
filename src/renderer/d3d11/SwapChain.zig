@@ -31,6 +31,9 @@ extern "kernel32" fn WaitForSingleObjectEx(
 ) callconv(.winapi) u32;
 extern "kernel32" fn CloseHandle(handle: foundation.HANDLE) callconv(.winapi) foundation.BOOL;
 
+const wait_object_0 = 0;
+const wait_timeout = 0x102;
+
 pub const Mode = enum {
     /// A swap chain on a window handle.
     hwnd,
@@ -64,6 +67,9 @@ flags: u32,
 /// consumed by a present, so a wait without one would block for nothing.
 presented_since_wait: bool = false,
 
+/// Set once a failing wait was logged.
+wait_failed_logged: bool = false,
+
 pub fn init(
     device: *Device,
     hwnd: *anyopaque,
@@ -81,13 +87,6 @@ pub fn init(
     var flags: u32 = dxgi.SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     if (device.tearing_supported) flags |= dxgi.SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
-    // Before the first `Present`: DXGI must neither watch the window for
-    // Alt+Enter and size changes nor subclass it.
-    try device.factory.asFactory().makeWindowAssociation(
-        window,
-        dxgi.MWA_NO_WINDOW_CHANGES | dxgi.MWA_NO_ALT_ENTER,
-    );
-
     const chain1 = try device.factory.createSwapChainForHwnd(device.device, window, &.{
         .Width = width,
         .Height = height,
@@ -100,6 +99,14 @@ pub fn init(
         .Flags = flags,
     });
     defer com.release(chain1);
+
+    // After creation, which registers the window association itself, and
+    // before the first `Present`: DXGI must neither watch the window for
+    // Alt+Enter and size changes nor subclass it.
+    try device.factory.asFactory().makeWindowAssociation(
+        window,
+        dxgi.MWA_NO_WINDOW_CHANGES | dxgi.MWA_NO_ALT_ENTER,
+    );
 
     const chain = try com.queryInterface(chain1, dxgi.IDXGISwapChain2);
     errdefer com.release(chain);
@@ -137,14 +144,33 @@ pub fn deinit(self: *Self) void {
 
 /// Blocks until the swap chain can take another frame, for at most
 /// `timeout_ms`. Does nothing unless a frame was presented since the last
-/// wait. Does not touch the context: the caller may have released the
-/// context lock for it.
-pub fn waitForSlot(self: *Self, timeout_ms: u32) void {
-    if (!self.presented_since_wait) return;
-    self.presented_since_wait = false;
+/// wait. Returns whether a slot is free. A timed out wait leaves the slot
+/// pending (the next wait still has to consume it), so the waitable's
+/// count does not drift. Does not touch the context: the caller may have
+/// released the context lock for it.
+pub fn waitForSlot(self: *Self, timeout_ms: u32) bool {
+    if (!self.presented_since_wait) return true;
 
-    const handle = self.waitable orelse return;
-    _ = WaitForSingleObjectEx(handle, timeout_ms, 0);
+    const handle = self.waitable orelse {
+        self.presented_since_wait = false;
+        return true;
+    };
+    switch (WaitForSingleObjectEx(handle, timeout_ms, 0)) {
+        wait_object_0 => {
+            self.presented_since_wait = false;
+            return true;
+        },
+        wait_timeout => return false,
+        else => {
+            // A broken handle would fail every frame: give up on pacing.
+            if (!self.wait_failed_logged) {
+                self.wait_failed_logged = true;
+                log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
+            }
+            self.presented_since_wait = false;
+            return true;
+        },
+    }
 }
 
 /// Copies `target` into the back buffer, resizing the swap chain first if
@@ -340,13 +366,14 @@ test "d3d11 swapchain: waitForSlot only waits after a present" {
     // Nothing presented: returns at once whatever the timeout.
     const io = @import("../../global.zig").io();
     const start = std.Io.Timestamp.now(io, .awake);
-    chain.waitForSlot(5000);
+    try testing.expect(chain.waitForSlot(5000));
     try testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 1000);
 
     // A present arms the wait, and the wait disarms it.
     chain.presented_since_wait = true;
-    chain.waitForSlot(0);
-    try testing.expect(!chain.presented_since_wait);
+    const acquired = chain.waitForSlot(0);
+    // Only a consumed slot disarms the wait; a timeout leaves it pending.
+    try testing.expectEqual(!acquired, chain.presented_since_wait);
 }
 
 test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
