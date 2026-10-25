@@ -260,6 +260,13 @@ pub const exp = struct {
             hFile: HANDLE,
             lpOverlapped: ?*OVERLAPPED,
         ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn WriteFile(
+            hFile: HANDLE,
+            lpBuffer: *const anyopaque,
+            nNumberOfBytesToWrite: DWORD,
+            lpNumberOfBytesWritten: ?*DWORD,
+            lpOverlapped: ?*OVERLAPPED,
+        ) callconv(.winapi) BOOL;
         pub extern "kernel32" fn ReadFile(
             hFile: HANDLE,
             lpBuffer: LPVOID,
@@ -376,3 +383,13 @@ pub fn ProcThreadAttributeValue(
         (if (input) PROC_THREAD_ATTRIBUTE_INPUT else 0) |
         (if (additive) PROC_THREAD_ATTRIBUTE_ADDITIVE else 0);
 }
+
+// --- events (Task 9)
+
+// --- font files (Task 12)
+
+// --- registry (Task 13)
+
+// --- console (Task 16)
+
+// --- jobs (Task 19)

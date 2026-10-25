@@ -75,7 +75,12 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     }
 
     if (comptime build_config.app_runtime == .none) {
-        const stdout = std.io.getStdOut().writer();
+        var buffer: [1024]u8 = undefined;
+        var stdout_writer = std.Io.File.stdout().writer(
+            std.Io.Threaded.global_single_threaded.io(),
+            &buffer,
+        );
+        const stdout = &stdout_writer.interface;
         try stdout.print("Usage: ghostty +<action> [flags]\n\n", .{});
         try stdout.print(
             \\This is the Ghostty helper CLI that accompanies the graphical Ghostty app.
@@ -92,6 +97,7 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
         ,
             .{},
         );
+        try stdout.flush();
 
         std.process.exit(0);
     }
