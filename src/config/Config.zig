@@ -1148,6 +1148,10 @@ palette: Palette = .{},
 /// not support any shell parsing such as arguments with spaces, filepaths with
 /// `~`, globs, etc. (Available since: 1.2.0)
 ///
+/// On Windows, `direct:` follows the MS command-line quoting rules instead:
+/// quotes group an argument and `\"` is a literal quote, so arguments with
+/// spaces work, e.g. `direct:powershell.exe -File "C:/x y/read.ps1"`.
+///
 /// You can also explicitly prefix the command with `shell:` to always wrap the
 /// command in a shell. This can be used to ensure our heuristics to choose the
 /// right mode are not used in case they are wrong. (Available since: 1.2.0)
