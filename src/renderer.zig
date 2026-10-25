@@ -15,6 +15,7 @@ const size = @import("renderer/size.zig");
 pub const shadertoy = @import("renderer/shadertoy.zig");
 pub const Backend = @import("renderer/backend.zig").Backend;
 pub const GenericRenderer = @import("renderer/generic.zig").Renderer;
+pub const D3D11 = @import("renderer/D3D11.zig");
 pub const Metal = @import("renderer/Metal.zig");
 pub const OpenGL = @import("renderer/OpenGL.zig");
 pub const Options = @import("renderer/Options.zig");
@@ -37,6 +38,7 @@ pub const lib = @import("lib/main.zig");
 pub const Renderer = GenericRenderer(GraphicsAPI);
 
 const GraphicsAPI = switch (build_config.renderer) {
+    .d3d11 => D3D11,
     .metal => Metal,
     .opengl => OpenGL,
 };

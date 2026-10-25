@@ -1795,7 +1795,7 @@ pub const Surface = extern struct {
                 }
                 return .{};
             },
-            .metal => comptime unreachable,
+            .metal, .d3d11 => comptime unreachable,
         }
     }
 

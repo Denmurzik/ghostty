@@ -211,6 +211,16 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "The app runtime to use. Not all values supported on all platforms.",
     ) orelse RendererBackend.default(target.result, wasm_target);
 
+    // Direct3D 11 is the only renderer that exists for Windows.
+    if (target.result.os.tag == .windows and config.renderer != .d3d11) {
+        std.log.err(
+            "-Drenderer={t} is not supported on Windows; " ++
+                "only -Drenderer=d3d11 is available",
+            .{config.renderer},
+        );
+        return error.UnsupportedRenderer;
+    }
+
     //---------------------------------------------------------------
     // Feature Flags
 
