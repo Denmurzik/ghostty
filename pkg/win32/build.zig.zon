@@ -1,0 +1,6 @@
+.{
+    .name = .win32,
+    .version = "0.0.0",
+    .fingerprint = 0xb50ba1d118780680,
+    .paths = .{""},
+}
