@@ -26,6 +26,8 @@ pub const Buffer = bufferpkg.Buffer;
 pub const Sampler = @import("d3d11/Sampler.zig");
 pub const Texture = @import("d3d11/Texture.zig");
 pub const shaders = @import("d3d11/shaders.zig");
+pub const hlsl = @import("d3d11/hlsl.zig");
+pub const slots = @import("d3d11/slots.zig");
 
 // Custom shaders are GLSL-sourced until a later milestone adds HLSL
 // output; until then they are logged and skipped.
@@ -249,4 +251,9 @@ test "d3d11 stub: size packing roundtrip" {
     const max = unpackSize(packSize(std.math.maxInt(u32), 0));
     try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), max.width);
     try std.testing.expectEqual(@as(u32, 0), max.height);
+}
+
+test {
+    _ = hlsl;
+    _ = slots;
 }
