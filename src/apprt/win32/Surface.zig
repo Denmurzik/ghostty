@@ -178,11 +178,16 @@ pub fn rtApp(self: *const Surface) *App {
     return self.window.app;
 }
 
-/// Close the surface, asking first when `process_active`. The close itself
-/// is deferred through the window's message queue.
+/// Close the surface, asking first when `process_active`. Both the
+/// question and the close are deferred through the window's message queue:
+/// core calls this from inside a key callback or a mailbox tick, and the
+/// dialog's message loop must not run in there.
 pub fn close(self: *Surface, process_active: bool) void {
-    if (process_active and !dialogs.confirmClose(self.window.hwnd)) return;
-    self.window.requestClose();
+    if (process_active) {
+        self.window.requestCloseWithConfirm();
+    } else {
+        self.window.requestClose();
+    }
 }
 
 pub fn getTitle(self: *Surface) ?[:0]const u8 {
@@ -236,7 +241,7 @@ pub fn setClipboard(
     contents: []const apprt.ClipboardContent,
     confirm: bool,
 ) !void {
-    return clipboard.write(self, clipboard_type, contents, confirm);
+    return clipboard.setClipboard(self, clipboard_type, contents, confirm);
 }
 
 pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
