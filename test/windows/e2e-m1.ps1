@@ -107,6 +107,32 @@ $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powersh
 $failed = 0
 $lines = @()
 
+# paste-confirm backs the clipboard text up in two files before it changes
+# the clipboard and deletes them after restoring. When they are left behind
+# (the scenario was killed), put the text back from an STA process.
+$clipText = Join-Path $temp 'clipboard-backup.txt'
+$clipMeta = Join-Path $temp 'clipboard-backup.meta'
+function Restore-ClipboardBackup {
+    if (-not (Test-Path $clipMeta)) { return }
+    $code = @'
+Add-Type -AssemblyName System.Windows.Forms
+$meta = (Get-Content -LiteralPath $env:E2E_CLIP_META -Raw).Trim()
+for ($i = 0; $i -lt 20; $i++) {
+    try {
+        if ($meta -eq 'text') { [System.Windows.Forms.Clipboard]::SetText([IO.File]::ReadAllText($env:E2E_CLIP_TEXT, [Text.Encoding]::UTF8)) }
+        else { [System.Windows.Forms.Clipboard]::Clear() }
+        break
+    } catch { Start-Sleep -Milliseconds 100 }
+}
+'@
+    $env:E2E_CLIP_TEXT = $clipText
+    $env:E2E_CLIP_META = $clipMeta
+    & $powershell -NoProfile -STA -ExecutionPolicy Bypass -Command $code 2>&1 | Out-Null
+    Remove-Item Env:\E2E_CLIP_TEXT, Env:\E2E_CLIP_META -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
+    Write-Host 'INFO clipboard text restored from the backup of a killed scenario'
+}
+
 # Whatever a killed scenario left behind in the keyboard layout list.
 Save-KeyboardLayouts
 try {
@@ -118,13 +144,11 @@ try {
         $stdout = Join-Path $logDir "$name.out.txt"
         $stderr = Join-Path $logDir "$name.err.txt"
 
-        # A scenario that fails is started once more: input-driven checks
-        # share the desktop with the owner, who can take the foreground or
-        # the keyboard layout at any moment. A bug fails twice; one that
-        # passes the second time is reported as flaky, not hidden (info.txt).
-        # Interference is retried up to twice. The long streaming scenarios
-        # are not repeated.
-        $once = @('close-while-streaming', 'resize-while-streaming') -contains $name
+        # Only interference from the desktop (the owner or another session
+        # taking the foreground or the keyboard layout) is retried, up to
+        # twice. Any other FAIL is final on the first attempt: an
+        # intermittent product failure must not turn into a PASS. A scenario
+        # that passes after interference is reported as FLAKY.
         $interference = 'lost the foreground|not typeable on the foreground layout|keyboard layout did not change|could not take the foreground'
         $earlier = @()
         $line = $null
@@ -150,27 +174,27 @@ try {
                 $err = if (Test-Path $stderr) { (Get-Content -LiteralPath $stderr -Raw -Encoding UTF8) } else { '' }
                 $line = "FAIL ${name}: no result (exit code $($p.ExitCode)): $("$err".Trim() -replace '\s+', ' ')"
             }
-            # Another window kept the foreground: a SKIP, but worth another go.
+            # A killed scenario never ran its clipboard restore.
+            if ($timedOut) { Restore-ClipboardBackup }
+
             $noFocus = $line -like 'SKIP*could not take the foreground*'
-            if (($line -notlike 'FAIL*' -and -not $noFocus) -or $timedOut) { break }
+            $interfered = ($line -like 'FAIL*' -and $line -match $interference) -or $noFocus
+            if (-not $interfered -or $timedOut) { break }
             $earlier += $line
-            $maxAttempts = if ($noFocus -or $line -match $interference) { 3 } elseif ($once) { 1 } else { 2 }
-            if ($attempt -ge $maxAttempts) { break }
-            Write-Host "INFO ${name}: attempt $attempt did not complete, trying again: $line"
-            if ($noFocus) { Start-Sleep -Seconds 10 }
-        }
-        # A genuine failure is not erased by a later attempt that could not
-        # even start for lack of the foreground.
-        if ($line -like 'SKIP*') {
-            $real = @($earlier | Where-Object { $_ -like 'FAIL*' -and $_ -notmatch $interference })
-            if ($real.Count -gt 0) { $line = $real[-1] }
+            if ($attempt -ge 3) { break }
+            Write-Host "INFO ${name}: attempt $attempt hit desktop interference, trying again: $line"
+            Start-Sleep -Seconds 10
         }
         if ($earlier.Count -gt 0) {
-            $note = if ($line -like 'PASS*') { "FLAKY ${name}: passed after $($earlier.Count) failed attempt(s): $($earlier -join ' | ')" }
-                    else { "NOTE ${name}: failed on $($earlier.Count) attempt(s): $($earlier -join ' | ')" }
+            $note = "${name}: interference on $($earlier.Count) attempt(s): $($earlier -join ' | ')"
+            if ($line -like 'PASS*') {
+                $line = "FLAKY ${name}: passed after desktop interference: $($earlier -join ' | ')"
+            }
             Write-Host "INFO $note"
             Add-Content -Path $info -Value "INFO $note" -Encoding UTF8
         }
+        # A scenario that died before its own clipboard restore.
+        Restore-ClipboardBackup
         Write-Output $line
         $lines += $line
         if ($line -like 'FAIL*') { $failed++ }
@@ -195,6 +219,7 @@ try {
 
 $pass = @($lines | Where-Object { $_ -like 'PASS*' }).Count
 $skip = @($lines | Where-Object { $_ -like 'SKIP*' }).Count
-Write-Output ("e2e-m1: {0} passed, {1} failed, {2} skipped of {3}" -f $pass, $failed, $skip, $lines.Count)
+$flaky = @($lines | Where-Object { $_ -like 'FLAKY*' }).Count
+Write-Output ("e2e-m1: PASS {0}, FAIL {1}, SKIP {2}, FLAKY {3} (of {4}; FLAKY = passed after desktop interference)" -f $pass, $failed, $skip, $flaky, $lines.Count)
 if ($failed -gt 0) { exit 1 }
 exit 0

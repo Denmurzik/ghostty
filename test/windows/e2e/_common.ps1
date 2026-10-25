@@ -551,12 +551,45 @@ function Get-ShellProcess($G) {
     Wait-ChildNamed $G @('bash.exe', 'pwsh.exe', 'cmd.exe', 'powershell.exe') 15
 }
 
+# Git Bash the way src/os/windows_shell.zig finds it: Git\bin\bash.exe under
+# %ProgramFiles%, %ProgramW6432%, %ProgramFiles(x86)%, %LOCALAPPDATA%\Programs;
+# the registry InstallPath (HKLM, HKCU); git.exe on PATH (bash.exe one or two
+# levels up, in bin). The WSL launcher in System32 does not count.
+function Find-GitBash {
+    $cands = @()
+    foreach ($v in 'ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)') {
+        $d = [Environment]::GetEnvironmentVariable($v)
+        if ($d) { $cands += (Join-Path $d 'Git\bin\bash.exe') }
+    }
+    if ($env:LOCALAPPDATA) { $cands += (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe') }
+    foreach ($hive in 'HKLM:', 'HKCU:') {
+        $k = Get-ItemProperty -Path "$hive\SOFTWARE\GitForWindows" -Name InstallPath -ErrorAction SilentlyContinue
+        if ($k -and $k.InstallPath) { $cands += (Join-Path $k.InstallPath 'bin\bash.exe') }
+    }
+    foreach ($dir in ($env:PATH -split ';')) {
+        if (-not $dir) { continue }
+        if (Test-Path -LiteralPath (Join-Path $dir 'git.exe')) {
+            $parent = Split-Path -Parent $dir
+            if ($parent) {
+                $cands += (Join-Path $parent 'bin\bash.exe')
+                $grand = Split-Path -Parent $parent
+                if ($grand) { $cands += (Join-Path $grand 'bin\bash.exe') }
+            }
+        }
+    }
+    $cands | Where-Object { $_ -notlike '*\System32\*' -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
 # Scenarios that script the shell speak bash. Types ahead (the pty buffers
 # input) until a marker file proves the shell executes our lines.
 function Wait-BashReady($G, [double]$TimeoutSec = 40) {
     $shell = Get-ShellProcess $G
     if (-not $shell) { throw 'no shell process under ghostty within 15 s' }
-    if ($shell.Name -ne 'bash.exe') { throw "E2E-SKIP: default shell is $($shell.Name), this scenario needs Git Bash" }
+    if ($shell.Name -ne 'bash.exe') {
+        $bash = Find-GitBash
+        if ($bash) { throw "Git Bash installed ($bash) but default shell is $($shell.Name)" }
+        throw 'E2E-SKIP: Git Bash is not installed, this scenario needs it'
+    }
 
     # -Keys types through the window's layout; the owner may be on any layout.
     Set-WindowLayout $G.Hwnd '00000409'
@@ -709,6 +742,12 @@ function Save-ClipboardText {
     if ($other.Count -gt 0) { throw "E2E-SKIP: clipboard holds non-text data ($($other -join ', ')) that would be lost" }
     $hasText = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::ContainsText() }
     $text = if ($hasText) { Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() } } else { $null }
+    # A copy on disk for the runner, which puts it back if this scenario is
+    # killed before Restore-ClipboardText.
+    $root = Get-E2eTempRoot
+    $utf8 = New-Object Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $root 'clipboard-backup.txt'), [string]$text, $utf8)
+    [IO.File]::WriteAllText((Join-Path $root 'clipboard-backup.meta'), $(if ($hasText) { 'text' } else { 'empty' }), $utf8)
     [pscustomobject]@{ HasText = [bool]$hasText; Text = $text }
 }
 
@@ -719,7 +758,10 @@ function Restore-ClipboardText($Saved) {
         else { Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::Clear() } }
     } catch {
         Write-Host "WARN could not restore the clipboard: $($_.Exception.Message)"
+        return
     }
+    $root = Get-E2eTempRoot
+    Remove-Item -LiteralPath (Join-Path $root 'clipboard-backup.txt'), (Join-Path $root 'clipboard-backup.meta') -ErrorAction SilentlyContinue
 }
 
 function Set-ClipboardText([string]$Text) {
