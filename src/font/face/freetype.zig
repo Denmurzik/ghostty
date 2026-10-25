@@ -488,10 +488,21 @@ pub const Face = struct {
         color: {
             var color_flags = load_flags;
             color_flags.render = true;
+            // A failure here just means "not a colour glyph": the plain
+            // outline is reloaded below.
             self.face.loadGlyph(glyph_index, color_flags) catch {};
             if (glyph.*.format == freetype.c.FT_GLYPH_FORMAT_BITMAP and
                 glyph.*.bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA)
+            {
+                // Compositing the layers only fills in the bitmap; the
+                // slot metrics still describe the base outline, which
+                // getGlyphSize reads for bitmap glyphs.
+                glyph.*.metrics.horiBearingX = @as(freetype.c.FT_Pos, glyph.*.bitmap_left) * 64;
+                glyph.*.metrics.horiBearingY = @as(freetype.c.FT_Pos, glyph.*.bitmap_top) * 64;
+                glyph.*.metrics.width = @as(freetype.c.FT_Pos, @intCast(glyph.*.bitmap.width)) * 64;
+                glyph.*.metrics.height = @as(freetype.c.FT_Pos, @intCast(glyph.*.bitmap.rows)) * 64;
                 break :color;
+            }
 
             try self.face.loadGlyph(glyph_index, load_flags);
         }

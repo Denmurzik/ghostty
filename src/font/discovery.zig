@@ -1568,17 +1568,49 @@ test "windows font: U+1F600 from Segoe UI Emoji renders as a colour glyph" {
     });
     try std.testing.expect(glyph.width > 0 and glyph.height > 0);
 
-    // At least one visible pixel must be non-gray (BGRA byte order).
+    // With no constraint the glyph keeps the size FreeType composited, it
+    // is not stretched into the metrics of the base outline.
+    {
+        face.ft_mutex.lockUncancelable(global.io());
+        defer face.ft_mutex.unlock(global.io());
+        try face.face.loadGlyph(glyph_id, .{ .color = true, .render = true, .no_svg = true });
+        const bitmap = face.face.handle.*.glyph.*.bitmap;
+        try std.testing.expectEqual(bitmap.width, glyph.width);
+        try std.testing.expectEqual(bitmap.rows, glyph.height);
+    }
+
+    // At least one visible pixel must be non-gray (BGRA byte order), and
+    // the visible pixels must span most of the glyph rect rather than a
+    // sliver of it (a distorted or shifted glyph fails this).
     var coloured = false;
+    var min_x: usize = std.math.maxInt(usize);
+    var max_x: usize = 0;
+    var min_y: usize = std.math.maxInt(usize);
+    var max_y: usize = 0;
     for (0..glyph.height) |y| {
         for (0..glyph.width) |x| {
             const i = ((glyph.atlas_y + y) * atlas.size + glyph.atlas_x + x) * 4;
             const px = atlas.data[i..][0..4];
-            if (px[3] > 0 and (px[0] != px[1] or px[1] != px[2])) coloured = true;
+            if (px[3] == 0) continue;
+            if (px[0] != px[1] or px[1] != px[2]) coloured = true;
+            min_x = @min(min_x, x);
+            max_x = @max(max_x, x);
+            min_y = @min(min_y, y);
+            max_y = @max(max_y, y);
         }
     }
     try std.testing.expect(coloured);
-    try std.testing.expectEqual(font.Atlas.Format.bgra, atlas.format);
+    try std.testing.expect((max_x - min_x + 1) * 2 >= glyph.width);
+    try std.testing.expect((max_y - min_y + 1) * 2 >= glyph.height);
+
+    // The glyph has to sit inside its cell vertically: offset_y is the
+    // distance from the cell bottom to the glyph top.
+    const metrics = font.Metrics.calc(face.getMetrics());
+    const cell_h: i32 = @intCast(metrics.cell_height);
+    const margin = @divTrunc(cell_h, 4);
+    try std.testing.expect(glyph.offset_y > 0);
+    try std.testing.expect(glyph.offset_y <= cell_h + margin);
+    try std.testing.expect(glyph.offset_y - @as(i32, @intCast(glyph.height)) >= -margin);
 }
 
 test "descriptor hash" {
