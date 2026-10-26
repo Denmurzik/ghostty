@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `ghostty.exe` on Windows 11 hosts many top-level windows, each with a custom DWM titlebar (Mica, own caption buttons, snap layouts) that doubles as a Direct2D/DirectWrite tab strip; every tab holds a core `SplitTree` of terminal surfaces; a second launch opens a window in the running instance over a named pipe; every apprt action is implemented or explicitly deferred.
+**Goal:** `ghostty.exe` on Windows 11 hosts many top-level windows, each with a custom DWM titlebar (Mica, own caption buttons, snap layouts) that doubles as a Direct2D/DirectWrite tab strip; every tab holds a core `SplitTree` of terminal surfaces; a second launch opens a window in the running instance over a named pipe; every apprt action is implemented or explicitly deferred; with the last window closed Ghostty keeps running in the notification area, and closing a tab ends only that tab's shell and its console clients, and tabs can be dragged out into new windows or onto other windows with their processes intact (owner decisions 2026-10-26).
 
 **Architecture:** `App` → `Window` (top-level HWND, custom frame, strip painted with D2D into the extended-frame client area) → `Tab` (one container child HWND per tab, holds `SplitTree(Surface)`) → `Surface` (child HWND + flip-model swap chain, unchanged from M1). Window procedures dispatch to small feature modules (`frame`, `strip_input`, `theme`, `taskbar`, `Chrome`) through hooks wired once in Task 6; action handling moves from `App.performAction` to `actions.zig` plus per-area handler files. A per-user/session/class named pipe served by one IPC thread carries single-instance requests now and the tmux shim in M4.
 
 **Tech Stack:** Zig 0.17.0, MSVC ABI, Win32 (user32/dwmapi/uxtheme/comctl32/shell32/advapi32/winmm), Direct2D 1.0 + DirectWrite (COM, hand-written in `pkg/win32`), core `src/datastruct/split_tree.zig`, named pipes (overlapped), PowerShell e2e harness.
 
-**Spec:** `docs/windows/SPEC.md` (authority with `docs/windows/DECISIONS.md`; M2 rulings in SPEC §18 items 5–13). Inputs: `docs/windows/recon/apprt.md` §2 (action table), §3 (GTK structure); M1 plan and ledger `.superpowers/sdd/M1-core-and-window/progress.md` (carry-overs, table at the end).
+**Spec:** `docs/windows/SPEC.md` (authority with `docs/windows/DECISIONS.md` incl. "Owner decisions (2026-10-26)"; M2 rulings in SPEC §18 items 5–15). Inputs: `docs/windows/recon/apprt.md` §2 (action table), §3 (GTK structure); M1 plan and ledger `.superpowers/sdd/M1-core-and-window/progress.md` (carry-overs, table at the end).
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@ Carried from M1 (every task implicitly includes these):
 
 - Zig 0.17.0 at `C:\tools\zig-x86_64-windows-0.17.0\zig.exe` (always the full path). Shell: Git Bash. Target ABI MSVC (R3). Minimum OS Windows 11 22H2.
 - Pure Win32 + DWM apprt in `src/apprt/win32`; no WinUI, no GTK, no .NET (R5). Chrome = Direct2D + DirectWrite; text inputs = native `EDIT` controls (SPEC D7).
-- Code stays upstreamable: Windows code in its own dirs; core edits platform-gated and listed. **M2 core touch points (complete list):** `src/config/Config.zig` (new `windows-single-instance` option; Windows default of `quit-after-last-window-closed`), Task 20 only.
+- Code stays upstreamable: Windows code in its own dirs; core edits platform-gated and listed. **M2 core touch points (complete list):** `src/config/Config.zig` (new `windows-single-instance` option — Task 20; Windows default `quit-after-last-window-closed = false` — Task 28); `src/Command.zig` + `src/termio/Exec.zig` Windows-only process teardown (Task 29).
 - Config path, default shell, cache/log locations exactly as M1 (DECISIONS, SPEC §18.4).
 - Commits: no `Co-Authored-By` or similar trailers.
 - Bindings: hand-written in `pkg/win32` (D6), append-only, W-variants, nullable returns as optionals, `callconv(.winapi)`; COM interfaces list ALL vtable slots with a slot-count test against SDK 10.0.26100 headers. Core (`src/os`, `src/termio`, `src/config`, `src/font`) never imports `win32`.
@@ -42,7 +42,7 @@ Command abbreviations (expand literally; shell state does not persist):
 
 ## Review Focus
 
-1. **Closing things in every order:** last split of a tab, last tab of a window, last window; a shell `exit` while its close-confirm dialog is open; closing a tab whose surfaces stream output; closing from a keybind, the strip, Alt+F4 and the IPC. Expected: no use-after-free, focus lands on a live surface, the process ends only when the last window goes (and `quit-after-last-window-closed` allows it) → tests in Task 6 (`focusAfterRemove`, close decision), Task 14 (`split-close` e2e), Task 21 (`windows-multi` e2e), Task 27 (`close-confirm` e2e incl. shell exit behind the dialog).
+1. **Closing things in every order:** last split of a tab, last tab of a window, last window; a shell `exit` while its close-confirm dialog is open; closing a tab whose surfaces stream output; closing from a keybind, the strip, Alt+F4 and the IPC. Expected: no use-after-free, focus lands on a live surface, the process ends only when the last window goes (and `quit-after-last-window-closed` allows it) → tests in Task 6 (`focusAfterRemove`, close decision), Task 14 (`split-close` e2e), Task 21 (`windows-multi` e2e), Task 27 (`close-confirm` e2e incl. shell exit behind the dialog), Task 28 (`tray` e2e: last window closed → process stays, New Window / Quit from the tray), Task 29 (`close-tree`, `tab-close-tree`: the tab's console clients end, `start cmd` windows and GUI apps survive), Task 32 (`tab-drag`: drag out, drag back, Esc; the source window closes when emptied, process pids unchanged).
 2. **Many and tiny:** 30 tabs (strip overflow), 16 panes, a 200×150 window, a split dragged to its minimum. Expected: no negative/zero-width rects except hidden leaves, the active tab always visible, no zero-size swap chain draw, no crash → Task 9 (`tiny bounds`, `rounding sums`), Task 10 (`overflow keeps active visible`), Task 14 (`split-many` e2e), Task 16 (drag clamp test).
 3. **Single instance in the wild:** no server, a stale pipe, a server blocked in a modal dialog, two launches at once, a `--working-directory` with spaces and Cyrillic, an owner instance of another build/class. Expected: the second launch either forwards and exits 0 within 2 s or runs standalone; never hangs, never reaches another class/session → Task 5 (pipe name, sanitize), Task 8 (busy/timeout/no-server tests), Task 20 (`single-instance` e2e with `C:\…\Рабочая папка`).
 4. **DPI with hidden state:** a DPI change while a tab is hidden, a split zoomed, the window maximized or fullscreen. Expected: every surface (hidden ones too) and the strip use the new scale; maximize stays within the new monitor's work area → Task 23 (unit + `dpi-sim` e2e with a hidden tab and a zoomed split).
@@ -60,16 +60,18 @@ Command abbreviations (expand literally; shell state does not persist):
 | W4 | 10 TabStrip model · 11 IPC ops + test oracle · 12 chrome spike | 2 (10); 4+5+6+8 (11); 7 (12) |
 | W5 | 13 tabs · 14 splits · 15 theme + config reload | 6+11 (13, 15); 6+9+11 (14) |
 | W6 | 16 divider drag + focus-follows-mouse · 17 custom frame · 18 chrome painter | 14 (16); 10+12 (17); 7+10+12+15 (18) |
-| W7 | 19 strip input + inline rename · 20 single-instance + lifecycle · 21 multi-window | 13+17+18 (19); 8+11 (20); 13 (21) |
+| W7 | 19 strip input + inline rename · 20 single-instance + performIpc · 21 multi-window | 13+17+18 (19); 8+11 (20); 13 (21) |
 | W8 | 22 placement toggles · 23 per-monitor DPI · 24 resize overlay | 17 (22); 17+18 (23); 18 (24) |
 | W9 | 25 scrollbar · 26 bell + taskbar progress · 27 TaskDialog confirmations | 6 (25); 18 (26); 1 (27) |
-| W10 | 28 M2 e2e full run (alone) | all above |
-| W11 | 29.n integration fixes (≤ 3 at a time, disjoint) | 28 |
-| W12 | 30 RAM rows, screenshots, M2 acceptance (alone) | 29.* |
+| W10 | 28 tray + last-window lifecycle · 30 re-parent-safe present target · 31 tab drag state machine + ghost | 20+21 (28); 6 (30); 18 (31) |
+| W11 | 29 tab-close process semantics · 32 tab tear-off and re-dock | 11+13 (29); 19+21+30+31 (32) |
+| W12 | 33 M2 e2e full run (alone) | all above |
+| W13 | 34.n integration fixes (≤ 3 at a time, disjoint) | 33 |
+| W14 | 35 RAM rows, screenshots, M2 acceptance (alone) | 34.* |
 
-Hot-file ownership by wave (any file not listed has a single owner): `src/apprt/win32/App.zig` 3→6→11→18→20; `Window.zig` 6→13→21→23; `Tab.zig` 6→14→16; `Surface.zig` 2→6→23→25; `mouse.zig` 1→16; `actions/app_actions.zig` 3→15→21; `actions/window_actions.zig` 3→6→13→19→22→26; `actions/tab_actions.zig` 3→13→21; `actions/split_actions.zig` 3→14; `actions/surface_actions.zig` 3→6→25; `dialogs.zig` 2→27; `instance.zig` 8→20; `pkg/win32/main.zig`+`build.zig` 1→7; `src/renderer/D3D11.zig` 2→4; `test/windows/e2e/_common.ps1`, `lib/Harness.psm1`, `measure-ram.ps1`, `README.md` 4→30; `test/windows/lib/GhosttyIpc.psm1` 11 only; `src/apprt/win32.zig` 2 only. A task that needs one more `pkg/win32` declaration after W3 appends it at the end of the right file's section; a rebase conflict there is resolved by the second lander.
+Hot-file ownership by wave (any file not listed has a single owner): `src/apprt/win32/App.zig` 3→6→11→18→20→28; `src/config/Config.zig` 20→28; `ipc/ops.zig` 11→28; `Window.zig` 6→13→21→23→32; `Tab.zig` 6→14→16→32; `Surface.zig` 2→6→23→25→30; `Chrome.zig` 2→18; `strip_input.zig` 2→19→32; `mouse.zig` 1→16; `actions/app_actions.zig` 3→15→21→28; `actions/window_actions.zig` 3→6→13→19→22→26; `actions/tab_actions.zig` 3→13→21; `actions/split_actions.zig` 3→14; `actions/surface_actions.zig` 3→6→25; `dialogs.zig` 2→27; `instance.zig` 8→20; `pkg/win32/main.zig`+`build.zig` 1→7; `src/renderer/D3D11.zig` 2→4→30; `test/windows/e2e/_common.ps1` 4→29→35; `e2e/close-tree.ps1` 4→29; `lib/Harness.psm1`, `measure-ram.ps1`, `README.md` 4→35; `test/windows/lib/GhosttyIpc.psm1` 11 only; `src/apprt/win32.zig` 2 only. A task that needs one more `pkg/win32` declaration after W3 appends it at the end of the right file's section; a rebase conflict there is resolved by the second lander.
 
-Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard read, `+3` quit timer (M1, unchanged); `+4` `WM_GHOSTTY_IPC` (msg window), `+5` `WM_GHOSTTY_CLOSE_SURFACE` (top-level), `+6` `WM_GHOSTTY_CLOSE_TAB` (top-level), `+7` `WM_GHOSTTY_QUIT_CONFIRM` (msg window), `+8` `WM_GHOSTTY_TITLE_EDIT_DONE` (top-level), `+9..+15` reserved M3.
+Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard read, `+3` quit timer (M1, unchanged); `+4` `WM_GHOSTTY_IPC` (msg window), `+5` `WM_GHOSTTY_CLOSE_SURFACE` (top-level), `+6` `WM_GHOSTTY_CLOSE_TAB` (top-level), `+7` `WM_GHOSTTY_QUIT_CONFIRM` (top-level), `+8` `WM_GHOSTTY_TITLE_EDIT_DONE` (top-level), `+9` `WM_GHOSTTY_TRAY` (tray window callback), `+10..+15` reserved M3.
 
 ---
 
@@ -86,7 +88,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   - `user32`: `SetParent GetParent GetAncestor IsZoomed IsIconic IsWindowVisible GetWindowPlacement SetWindowPlacement MonitorFromWindow MonitorFromPoint GetMonitorInfoW BeginDeferWindowPos DeferWindowPos EndDeferWindowPos SetScrollInfo GetScrollInfo ShowScrollBar FlashWindowEx RegisterWindowMessageW GetClassNameW SystemParametersInfoW SystemParametersInfoForDpi EnumClipboardFormats MapWindowPoints GetDC ReleaseDC GetWindowTextW GetWindowTextLengthW RedrawWindow SetForegroundWindow ShowWindowAsync TrackMouseEvent(TME_NONCLIENT) GetSystemMetrics`; types `WINDOWPLACEMENT MONITORINFO SCROLLINFO FLASHWINFO NCCALCSIZE_PARAMS`; constants `WM_NCCALCSIZE WM_NCHITTEST WM_NCMOUSEMOVE WM_NCMOUSELEAVE WM_NCLBUTTONDOWN WM_NCLBUTTONUP WM_NCLBUTTONDBLCLK WM_NCRBUTTONUP WM_NCACTIVATE WM_ACTIVATE WM_SETTINGCHANGE WM_THEMECHANGED WM_VSCROLL WM_MBUTTONUP WM_LBUTTONDBLCLK WM_CONTEXTMENU WM_SYSCOMMAND WM_WINDOWPOSCHANGED WM_ENTERSIZEMOVE`, all `HT*` codes, `SC_MINIMIZE SC_MAXIMIZE SC_RESTORE SC_CLOSE`, `SB_* SIF_* ESB_*`, `FLASHW_*`, `MONITOR_DEFAULTTONEAREST`, `SWP_FRAMECHANGED SWP_SHOWWINDOW SWP_HIDEWINDOW`, `HWND_TOPMOST HWND_NOTOPMOST`, `WS_POPUP WS_CLIPCHILDREN WS_VSCROLL WS_EX_TOOLWINDOW WS_EX_NOACTIVATE WS_EX_TOPMOST`, `ES_AUTOHSCROLL`, `SM_CXFRAME SM_CYFRAME SM_CXPADDEDBORDER`, `SPI_GETWHEELSCROLLLINES`.
   - `kernel32`: `CreateNamedPipeW ConnectNamedPipe DisconnectNamedPipe CreateFileW WaitNamedPipeW ReadFile WriteFile FlushFileBuffers GetOverlappedResult CancelIoEx CreateEventW SetEvent ResetEvent WaitForSingleObjectEx WaitForMultipleObjects CloseHandle GetCurrentProcessId ProcessIdToSessionId GetNamedPipeServerProcessId LocalFree`; `OVERLAPPED SECURITY_ATTRIBUTES`; `PIPE_ACCESS_DUPLEX FILE_FLAG_OVERLAPPED FILE_FLAG_FIRST_PIPE_INSTANCE PIPE_TYPE_BYTE PIPE_READMODE_BYTE PIPE_WAIT PIPE_REJECT_REMOTE_CLIENTS PIPE_UNLIMITED_INSTANCES ERROR_PIPE_BUSY ERROR_PIPE_CONNECTED ERROR_IO_PENDING ERROR_FILE_NOT_FOUND ERROR_ACCESS_DENIED ERROR_BROKEN_PIPE ERROR_SEM_TIMEOUT WAIT_OBJECT_0 WAIT_TIMEOUT INFINITE GENERIC_READ GENERIC_WRITE OPEN_EXISTING`.
   - `advapi32`: `RegGetValueW OpenProcessToken GetTokenInformation ConvertSidToStringSidW ConvertStringSecurityDescriptorToSecurityDescriptorW`, `TOKEN_QUERY`, `TokenUser`, `TOKEN_USER`, `SDDL_REVISION_1`, `HKEY_CURRENT_USER`, `RRF_RT_REG_DWORD`.
-  - `shell32`: `ShellExecuteW`, `ITaskbarList3` (full slot list; typed `HrInit SetProgressValue SetProgressState`), `CLSID_TaskbarList`, `TBPF_NOPROGRESS TBPF_INDETERMINATE TBPF_NORMAL TBPF_ERROR TBPF_PAUSED`. `ole32`: `CoCreateInstance`, `CLSCTX_INPROC_SERVER`.
+  - `shell32`: `ShellExecuteW`, `ITaskbarList3` (full slot list; typed `HrInit SetProgressValue SetProgressState`), `CLSID_TaskbarList`, `TBPF_NOPROGRESS TBPF_INDETERMINATE TBPF_NORMAL TBPF_ERROR TBPF_PAUSED`; `Shell_NotifyIconW`, `NOTIFYICONDATAW`, `NIM_ADD NIM_MODIFY NIM_DELETE NIM_SETVERSION`, `NIF_MESSAGE NIF_ICON NIF_TIP NIF_SHOWTIP`, `NOTIFYICON_VERSION_4`, `NIN_SELECT NIN_KEYSELECT`; user32 also `CreatePopupMenu AppendMenuW TrackPopupMenuEx DestroyMenu LoadImageW DestroyIcon`, `MF_STRING MF_SEPARATOR TPM_RETURNCMD TPM_RIGHTBUTTON TPM_BOTTOMALIGN IMAGE_ICON LR_DEFAULTCOLOR SM_CXSMICON WM_COMMAND`; for the drag ghost `UpdateLayeredWindow GetCapture BLENDFUNCTION ULW_ALPHA AC_SRC_ALPHA WS_EX_LAYERED WS_EX_TRANSPARENT GA_ROOT WM_CAPTURECHANGED VK_ESCAPE`. `ole32`: `CoCreateInstance`, `CLSCTX_INPROC_SERVER`.
   - `comctl32`: `TaskDialogIndirect`, `TASKDIALOGCONFIG` (`extern struct` with `align(1)` fields — the SDK declares it under `pshpack1.h`), `TASKDIALOG_BUTTON`, `TDF_*`, `TDCBF_*`, `IDOK IDCANCEL`, `InitCommonControlsEx`, `SetWindowSubclass DefSubclassProc RemoveWindowSubclass`, `SUBCLASSPROC`.
   - `uxtheme`: `BufferedPaintInit BufferedPaintUnInit BeginBufferedPaint EndBufferedPaint BufferedPaintClear SetWindowTheme`, `BP_PAINTPARAMS`, `BPBF_TOPDOWNDIB`.
   - `dwmapi`: `DwmExtendFrameIntoClientArea DwmDefWindowProc DwmGetWindowAttribute`, `MARGINS`, `DWMSBT_AUTO=0 DWMSBT_NONE=1 DWMSBT_MAINWINDOW=2 DWMSBT_TRANSIENTWINDOW=3 DWMSBT_TABBEDWINDOW=4`, `DWMWA_CAPTION_COLOR`, `DWMWCP_*`.
@@ -98,6 +100,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   test "win32 advapi32: current user SID string starts with S-1-5-" {}
   test "win32 kernel32: named pipe loopback" { // CreateNamedPipeW(\\.\pipe\ghostty-test-<pid>, OVERLAPPED) + CreateFileW client; write 5 bytes, read 5 bytes }
   test "win32 dwmapi: MARGINS size" { // 16 }
+  test "win32 shell32: NOTIFYICONDATAW size" { // value printed by a throwaway `zig cc` program including shellapi.h (x64), with that provenance comment }
   ```
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 --build-file pkg/win32/build.zig` → FAIL (missing declarations).
 - [ ] **Step 3: Implement** the declarations; replace the five local externs in apprt/renderer files with the package ones (no behaviour change).
@@ -107,7 +110,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 ### Task 2: M2 skeleton — feature-module stubs, message ids, dump-id seam, close kinds
 
 **Files:**
-- Create (stubs, exact contents per Interfaces): `src/apprt/win32/{geom,messages,Overrides,instance,SplitLayout,TabStrip,frame,Chrome,strip_input,title_edit,theme,placement,scrollbar,bell,taskbar,resize_overlay}.zig`, `src/apprt/win32/ipc/{protocol,Server,client,ops}.zig`
+- Create (stubs, exact contents per Interfaces): `src/apprt/win32/{geom,messages,Overrides,instance,SplitLayout,TabStrip,frame,Chrome,strip_input,title_edit,theme,placement,scrollbar,bell,taskbar,resize_overlay,tab_drag,drag_ghost}.zig`, `src/apprt/win32/ipc/{protocol,Server,client,ops}.zig`
 - Modify: `src/apprt/win32.zig` (test block imports every new file), `src/apprt/win32/dialogs.zig` (add `CloseKind`, `confirmCloseKind`), `src/apprt/win32/Surface.zig` (`d3d11PresentTarget` sets `id`), `src/renderer/D3D11.zig` (`PresentTarget.id: u32`)
 
 **Interfaces:**
@@ -151,7 +154,8 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   pub fn invalidate(window: *Window) void;                          // stub: InvalidateRect(window.hwnd, null, FALSE); Task 18: strip bounds only
   pub fn deinitShared() void;                                       // stub: no-op
   // strip_input.zig (Task 19)
-  pub const State = struct { drag: ?TabStrip.Drag = null, hover: TabStrip.Part = .nowhere, tracking: bool = false };
+  pub const State = struct { drag: ?TabStrip.Drag = null, hover: TabStrip.Part = .nowhere, tracking: bool = false,
+      drop_index: ?usize = null };   // drop_index: insertion marker drawn while another window's tab is dragged over this strip (Task 32)
   pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT;  // stub: null
   // theme.zig (Task 15)
   pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
@@ -181,7 +185,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   pub fn confirmCloseKind(owner: HWND, kind: CloseKind) bool;   // M1 MessageBoxW with a kind-specific sentence
   // D3D11.zig: PresentTarget gains `id: u32` (apprt Surface.id); Surface.d3d11PresentTarget fills it.
   ```
-  `instance.zig`, `SplitLayout.zig`, `title_edit.zig`, `bell.zig`, `ipc/*.zig`: doc comment only (owners create their API).
+  `instance.zig`, `SplitLayout.zig`, `title_edit.zig`, `bell.zig`, `tab_drag.zig`, `drag_ghost.zig`, `ipc/*.zig`: doc comment only (owners create their API).
 - [ ] **Step 1: Failing tests** `"win32 skeleton: private message ids are unique and above M1's"` (all `messages.*` distinct, each > `WM_APP + 3`, < `WM_APP + 16`); `"win32 geom: rect contains and scale"` (`{10,10,20,20}` contains (10,10) not (30,30); `scale(40, 144) == 60`, `scale(1, 120) == 1`).
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 skeleton"` and `"win32 geom"` → FAIL.
 - [ ] **Step 3: Implement** stubs exactly as listed.
@@ -237,7 +241,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 - Produces:
   - Scenario header (first comment line of each `e2e/*.ps1`, `_*.ps1` excluded): `# e2e: milestone=M1 timeout=150 order=30`. The 18 M1 scripts get `milestone=M1` and orders 10…180 in the current `e2e-m1.ps1` order.
   - `e2e.ps1 [-Milestone M1|M2|all] [-Only a,b] [-EvidenceDir d]`: discovers scripts, sorts by `order`, keeps every M1 runner behaviour (GUI lock held for the run and handed down in `GHOSTTY_E2E_LOCK_ID`, clipboard backup/restore, per-scenario timeout kill, `results.txt`/`info.txt`); exit code `0` = no FAIL and ≥ 1 PASS, `1` = any FAIL, `2` = every scenario SKIPped (M1 Task 28 minor).
-  - `_common.ps1`: `Start-E2eGhostty` appends `class = ghostty-e2e-<8 hex>` (fresh per scenario, stored in `$G.Class`) to the config text and sets `GHOSTTY_WIN32_TEST_IPC=1`; `$G.Dump` = `surface-1.bmp`; `Get-DumpPath($G, [int]$SurfaceId)`; `-ExtraArgs [string[]]` passed to the exe; `-NoTestIpc` leaves `GHOSTTY_WIN32_TEST_IPC` unset.
+  - `_common.ps1`: `Start-E2eGhostty` appends `class = ghostty-e2e-<8 hex>` (fresh per scenario, stored in `$G.Class`) and `quit-after-last-window-closed = true` (scenarios that expect the process to end keep their meaning after Task 28 flips the Windows default; `-KeepDefaultQuit` omits it) to the config text and sets `GHOSTTY_WIN32_TEST_IPC=1`; `$G.Dump` = `surface-1.bmp`; `Get-DumpPath($G, [int]$SurfaceId)`; `-ExtraArgs [string[]]` passed to the exe; `-NoTestIpc` leaves `GHOSTTY_WIN32_TEST_IPC` unset.
   - `measure-ram.ps1`: same class isolation (`class = ghostty-ram-<hex>`); CSV `commit` = `git rev-parse --short HEAD` at measure time plus `-dirty` when the tree is dirty (M1 Task 30 minor); LF output.
 - [ ] **Step 1: Failing test** `"d3d11 frame: dump is written after the context lock is released"` — fixture with a dump dir: a second thread blocks on `device.lockContext()` while frame 1 completes; assert it acquires the lock before the BMP file exists (the file appears after `drawFrameEnd`), and the file is `surface-7.bmp` when `PresentTarget.id = 7`.
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="d3d11 frame"` → FAIL.
@@ -510,7 +514,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
                    "scale":1.0,"scrollbar":{"total":0,"offset":0,"len":0}}]}]}]}
   ```
   (rects in window client coordinates; `client`/`window` in screen coordinates; `core_id` as a string because it is a u64).
-  `GhosttyIpc.psm1`: `Get-GhosttyPipeName -Class` (SID from `WindowsIdentity`, session from `Get-Process -Id $PID`), `Invoke-GhosttyIpc -Class -Request <hashtable> [-TimeoutMs 5000]` → parsed response, `Get-GhosttyState -Class`, `Invoke-GhosttyAction -Class -Action <s> [-Surface <id>]`, `Wait-GhosttyState -Class -Predicate {…} [-TimeoutSec]`, `Send-MouseClick/Send-MouseDrag -Hwnd -X -Y [-Button left|middle] [-Double]` (client coordinates, `SendInput` absolute; only inside a scenario).
+  `GhosttyIpc.psm1`: `Get-GhosttyPipeName -Class` (SID from `WindowsIdentity`, session from `Get-Process -Id $PID`), `Invoke-GhosttyIpc -Class -Request <hashtable> [-TimeoutMs 5000]` → parsed response, `Get-GhosttyState -Class`, `Invoke-GhosttyAction -Class -Action <s> [-Surface <id>]`, `Wait-GhosttyState -Class -Predicate {…} [-TimeoutSec]`, `Send-MouseClick -Hwnd -X -Y [-Button left|middle] [-Double]`, `Send-MouseDrag -Hwnd -X -Y (-ToX -ToY | -ToScreenX -ToScreenY) [-Steps 1] [-HoldMs 0] [-EscapeBeforeRelease]` (start in client coordinates of `-Hwnd`, `SendInput` absolute moves in `Steps` increments; only inside a scenario).
 - [ ] **Step 1: Failing test** `"win32 ipc ops: unknown and test ops are refused without the env flag"` (`pub var test_ops_override: ?bool = null` in ops.zig, set to false by the test; `handle` with an `undefined` app pointer must not touch it for these requests → `state` and `action` answer code 2; malformed JSON → code 2; `v:2` → code 3).
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 ipc ops"` → FAIL.
 - [ ] **Step 3: Implement** ops, server start, the PowerShell module, scenario `ipc-state` (`milestone=M2 order=200`): start Ghostty, `Get-GhosttyState` → 1 window, 1 tab, 1 surface whose `hwnd` equals the child of `$G.Hwnd`; `Invoke-GhosttyAction 'text:echo ipc-ok> %TEMP%\gt-ipc.txt\r'` → file contains `ipc-ok`; a second start with `Start-E2eGhostty -NoTestIpc` → `state` answers code 2.
@@ -653,6 +657,8 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   pub fn shared() !*Shared;            // lazy, UI thread
   pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void;  // never fails visibly: on error FillRect with palette.strip_bg and log once
   pub fn drawCaption(target, palette, layout, frame_state)  // internal
+  pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme.Palette, dpi: u32) void; // one active-style tab into a premultiplied DIB (drag ghost, Task 31)
+  // drop marker: when window.strip_input.drop_index is set, a 2-px bar in palette.text at that insertion slot
   ```
   Drawing: clear strip to `palette.strip_bg` (transparent with Mica); inactive tabs text `text_inactive`, hovered tab fill `tab_hover_bg`; active tab rounded-top rect (radius `geom.scale(6)`) filled `tab_active_bg` merging into the content; titles DWrite `Segoe UI Variable Text` (fallback `Segoe UI`) 12 DIP, ellipsis trimming, grayscale AA over transparent areas; bell glyph U+EA8F before the title when `tab.bellRinging()` and `bell-features.title`; close glyph U+E8BB on active/hovered tabs; new-tab U+E710; caption buttons min U+E921, max U+E922 / restore U+E923 (`IsZoomed`), close U+E8BB in `Segoe Fluent Icons` (fallback `Segoe MDL2 Assets`) 10 DIP; hover/pressed fills from `frame.hover/pressed`, close hover `close_hover_bg` + `close_hover_text`; dragged tab drawn at `TabStrip.dragOffset`; `title` rect (tabs hidden) shows `window.title_override orelse active tab title`. Format cache keyed by DPI; brushes created per paint (one solid brush, `SetColor`).
 - [ ] **Step 1: Failing test** `"win32 chrome: paints a strip into a DIB"` (headless: a fake 600×40 `TabStrip.Layout` with 2 tabs, dark palette with mica, paint into a 32bpp DIB through the same code path as `paint` (`paintInto(hdc, size, inputs)` internal fn): active tab pixel ≈ `tab_active_bg`, a pixel left of tab 0 has alpha 0, close button area of the active tab contains non-transparent pixels).
@@ -687,37 +693,35 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 - [ ] **Step 4: Verify** unit PASS; `E2E -Only tab-strip-mouse,tab-rename` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "feat(win32): tab strip mouse interaction and inline title editing"`
 
-### Task 20: Single instance and process lifecycle
+### Task 20: Single instance and `performIpc`
 
 **Files:**
-- Modify: `src/apprt/win32/instance.zig` (decision + forward), `src/apprt/win32/App.zig` (`init` forwards before any window; `run`/`terminate` honour `forwarded`; `performIpc`; `windowDestroyed` → `startQuitTimer`; `startQuitTimer` doc fixed — M1 Task 14 minor), `src/config/Config.zig` (core touch point)
-- Create: `test/windows/e2e/single-instance.ps1`, `test/windows/e2e/ipc-cli.ps1`, `test/windows/e2e/quit-after-last.ps1`
+- Modify: `src/apprt/win32/instance.zig` (decision + forward), `src/apprt/win32/App.zig` (`init` forwards before any window; `run`/`terminate` honour `forwarded`; `performIpc`), `src/config/Config.zig` (core touch point: the new option only)
+- Create: `test/windows/e2e/single-instance.ps1`, `test/windows/e2e/ipc-cli.ps1`
 
 **Interfaces:**
 - Consumes: Tasks 5, 8, 11.
 - Produces:
   ```zig
   // Config.zig: `@"windows-single-instance": WindowsSingleInstance = .detect,` (enum { detect, true, false }; doc: Windows only, see SPEC §18.6)
-  //            `@"quit-after-last-window-closed"` default true on Linux AND Windows (doc sentence for Windows)
   // instance.zig
   pub fn shouldForward(mode: configpkg.Config.WindowsSingleInstance, args: []const []const u8, initial_command: bool) bool;
   //   false → false; true → !initial_command; detect → !initial_command and Overrides.forwardable(args)
   pub fn forwardNewWindow(alloc: Allocator, name: [:0]const u16, args: []const []const u8) bool; // client.request new-window, timeout 1000 ms, code ok → true
   // App: forwarded: bool; performIpc: new_window/new_tab/toggle_quick_terminal → client.request on pipeNameFor(target.class or default);
   //      NoServer → stderr "ghostty: no running Ghostty instance (class <c>)" + error.IPCFailed
-  // quit: last window gone → quit-after-last-window-closed ? (delay ? SetTimer : PostQuitMessage) : (serving ? stay : PostQuitMessage with a log line)
   ```
   The args forwarded are `global.args()` minus argv[0]; the second process's cwd is not forwarded (SPEC §18.6).
-- [ ] **Step 1: Failing tests** `"win32 instance: forward decision"` (detect + `{}` → true; detect + `{"--working-directory=C:\\x"}` → true; detect + `{"--font-size=20"}` → false; any + initial_command → false; false → false), `"win32 app: last window policy"` (pure `lastWindowAction(quit_after: bool, delay_ms: ?u32, serving: bool) enum { quit_now, quit_timer, stay }`).
-- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 instance"` and `"win32 app"` → FAIL.
-- [ ] **Step 3: Implement**; scenarios: `single-instance` (order 330: A started; B = same exe, same sandbox and class, `--working-directory=<sandbox>\Рабочая папка` → B exits 0 ≤ 2 s, A has 2 windows, the new shell's cwd is that dir (echo oracle via `text:cd > %TEMP%\gt-si.txt\r`); B with `--font-size=20` → B keeps running as a separate process (killed at the end); config `windows-single-instance = false` → separate process), `ipc-cli` (order 340: `ghostty.exe +new-window --class=<class>` exits 0 and A gains a window; unknown class → exit ≠ 0 and stderr names the class), `quit-after-last` (order 350: default → closing the last window ends the process ≤ 3 s; `quit-after-last-window-closed = false` → process stays windowless, a second launch forwards and a window appears, then `close_all_windows` keeps it alive; kill at the end).
-- [ ] **Step 4: Verify** unit PASS; `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="config"` PASS; `E2E -Only single-instance,ipc-cli,quit-after-last,shell-exit` → PASS.
-- [ ] **Step 5: Commit** `git commit -m "feat(win32): single-instance forwarding, performIpc and quit-after-last-window-closed"`
+- [ ] **Step 1: Failing tests** `"win32 instance: forward decision"` (detect + `{}` → true; detect + `{"--working-directory=C:\\x"}` → true; detect + `{"--font-size=20"}` → false; any + initial_command → false; false → false).
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 instance"` → FAIL.
+- [ ] **Step 3: Implement**; scenarios: `single-instance` (order 330: A started; B = same exe, same sandbox and class, `--working-directory=<sandbox>\Рабочая папка` → B exits 0 ≤ 2 s, A has 2 windows, the new shell's cwd is that dir (echo oracle via `text:cd > %TEMP%\gt-si.txt\r`); B with `--font-size=20` → B keeps running as a separate process (killed at the end); config `windows-single-instance = false` → separate process), `ipc-cli` (order 340: `ghostty.exe +new-window --class=<class>` exits 0 and A gains a window; unknown class → exit ≠ 0 and stderr names the class).
+- [ ] **Step 4: Verify** unit PASS; `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="config"` PASS; `E2E -Only single-instance,ipc-cli,shell-exit` → PASS.
+- [ ] **Step 5: Commit** `git commit -m "feat(win32): single-instance forwarding and performIpc over the named pipe"`
 
 ### Task 21: Multiple windows
 
 **Files:**
-- Modify: `src/apprt/win32/actions/app_actions.zig` (`new_window`, `close_all_windows`, `goto_window`, `present_terminal`, `quit` posts `WM_GHOSTTY_QUIT_CONFIRM`), `src/apprt/win32/actions/tab_actions.zig` (`move_tab_to_new_window`), `src/apprt/win32/Window.zig` (`placeInitial`, `create` with `first_tab = false`, `detachTab`)
+- Modify: `src/apprt/win32/actions/app_actions.zig` (`new_window`, `close_all_windows`, `goto_window`, `present_terminal`, `quit` posts `WM_GHOSTTY_QUIT_CONFIRM` to `app.last_active` or the first window; no window → `PostQuitMessage` at once), `src/apprt/win32/actions/tab_actions.zig` (`move_tab_to_new_window`), `src/apprt/win32/Window.zig` (`placeInitial`, `create` with `first_tab = false`, `detachTab`)
 - Create: `test/windows/e2e/windows-multi.ps1`
 
 **Interfaces:**
@@ -728,7 +732,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
   pub fn placeInitial(self: *Window, parent: ?*Window) void;  // window-position-x/y on the first window; later windows cascade by the caption height from the parent (or last active)
   pub fn detachTab(self: *Window, tab: *Tab) void;           // remove from list without destroying
   ```
-  Handlers: `new_window` (surface target → parent = target, context `.window`; app target → no parent), `close_all_windows` (one `CloseKind.all_windows` confirm if any window needs it, then close all confirmed), `goto_window` (`previous/next` over `app.windows` order, wraps, `SetForegroundWindow`; false with one window), `present_terminal` (restore if iconic, `SetForegroundWindow`, select the surface's tab, focus it), `move_tab_to_new_window` (false when the window has one tab; new window `first_tab = false`, `detachTab` + `tab.setWindow(new)` (SetParent of the container), select, show), `quit` (`WM_GHOSTTY_QUIT_CONFIRM` → `CloseKind.app` confirm when `core_app.needsConfirmQuit()` → `PostQuitMessage`).
+  Handlers: `new_window` (surface target → parent = target, context `.window`; app target → no parent), `close_all_windows` (one `CloseKind.all_windows` confirm if any window needs it, then close all confirmed), `goto_window` (`previous/next` over `app.windows` order, wraps, `SetForegroundWindow`; false with one window), `present_terminal` (restore if iconic, `SetForegroundWindow`, select the surface's tab, focus it), `move_tab_to_new_window` (false when the window has one tab; new window `first_tab = false`, `detachTab` + `tab.setWindow(new)` (SetParent of the container), select, show), `quit` (`WM_GHOSTTY_QUIT_CONFIRM`, handled in `Window.zig` → `CloseKind.app` confirm when `core_app.needsConfirmQuit()` → `PostQuitMessage`).
 - [ ] **Step 1: Failing test** `"win32 window: cascade wraps inside the work area"`.
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 window"` → FAIL.
 - [ ] **Step 3: Implement**; scenario `windows-multi` (order 360: `new_window` → 2 windows, second window origin = first + step; `goto_window:next` → `GetForegroundWindow` changes (interactive only); two tabs in window 1, `move_tab_to_new_window` → 3 windows, the moved surface's `hwnd` unchanged and its shell alive (echo oracle); `close_window` → 2; `close_all_windows` → process exits ≤ 3 s).
@@ -772,7 +776,7 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 - Produces: `pub fn scaledWindowRect(rect: geom.Rect, old_dpi: u32, new_dpi: u32) geom.Rect` in `dpi.zig` (pure: keeps the top-left, scales size; used when `suggested == null`).
 - [ ] **Step 1: Failing tests** `"win32 dpi: scaled window rect"` (`{100,100,800,600}` 96→144 → `{100,100,1200,900}`), `"win32 dpi: content scale for 120/144/192"`.
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 dpi"` → FAIL.
-- [ ] **Step 3: Implement**; scenario `dpi-sim` (order 380: 2 tabs (second hidden) and a zoomed split in tab 1; `dpi` op 144 → every surface `scale = 1.5` (hidden ones included), strip `bounds.h = 60`, window `cell` height ≈ 1.5× ±1; dump of the visible surface saved; 192 → 2.0; back to 96 → original cell size; screenshots at 96/144/192 saved for Task 30).
+- [ ] **Step 3: Implement**; scenario `dpi-sim` (order 380: 2 tabs (second hidden) and a zoomed split in tab 1; `dpi` op 144 → every surface `scale = 1.5` (hidden ones included), strip `bounds.h = 60`, window `cell` height ≈ 1.5× ±1; dump of the visible surface saved; 192 → 2.0; back to 96 → original cell size; screenshots at 96/144/192 saved for Task 35).
 - [ ] **Step 4: Verify** unit PASS; `E2E -Only dpi-sim,resize` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "fix(win32): per-monitor DPI updates every surface and the chrome before resizing"`
 
@@ -843,15 +847,178 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 - [ ] **Step 4: Verify** unit PASS; `E2E -Only close-confirm,paste-confirm` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "feat(win32): TaskDialog close and clipboard confirmations"`
 
-### Task 28: M2 end-to-end run
+### Task 28: Notification-area icon and last-window lifecycle
 
-**Files:** none planned; bug notes only (the lead files 29.n).
+**Files:**
+- Create: `src/apprt/win32/tray.zig`, `test/windows/e2e/tray.ps1`, `test/windows/e2e/quit-after-last.ps1`
+- Modify: `src/apprt/win32/App.zig` (`tray: tray.State`, created after the first window, destroyed in `terminate`; `windowDestroyed` → `lastWindowAction`; `startQuitTimer` doc fixed — M1 Task 14 minor; `test { _ = tray; }`), `src/config/Config.zig` (core touch point: `quit-after-last-window-closed` default `false` on Windows, Linux unchanged; doc sentence for Windows), `src/apprt/win32/actions/app_actions.zig` (`config_change` → `tray.sync`), `src/apprt/win32/ipc/ops.zig` (state gains `"tray":{"visible":bool}`; a state with no window answers `"windows":[]`)
+
+**Interfaces:**
+- Consumes: Task 1 (tray and menu bindings), Task 20 (pipe server, forwarding), Task 21 (`new_window`, `present_terminal`, quit flow), core `quit_timer` start/stop.
+- Produces:
+  ```zig
+  // tray.zig
+  pub const State = struct { hwnd: ?HWND = null, visible: bool = false, taskbar_created: u32 = 0, icon: ?HICON = null };
+  pub fn init(app: *App) !void;   // hidden top-level tool window, class GhosttyTray (never shown; receives "TaskbarCreated"), icon from the exe resources, tip "Ghostty"
+  pub fn sync(app: *App) void;    // visible ⇔ !config.@"quit-after-last-window-closed": NIM_ADD + NIM_SETVERSION(NOTIFYICON_VERSION_4) / NIM_DELETE
+  pub fn deinit(app: *App) void;  // NIM_DELETE, DestroyIcon, DestroyWindow
+  pub const menu_new_window: u32 = 1;
+  pub const menu_quit: u32 = 2;
+  pub fn clickAction(windows: usize) enum { present_last, new_window };  // pure; left click = NIN_SELECT / NIN_KEYSELECT
+  // WM_GHOSTTY_TRAY (LOWORD(lParam) = event): NIN_SELECT|NIN_KEYSELECT → clickAction; WM_CONTEXTMENU → SetForegroundWindow(tray hwnd),
+  //   TrackPopupMenuEx(TPM_RETURNCMD|TPM_RIGHTBUTTON) with "New Window", separator, "Quit"; WM_COMMAND with the menu ids does the same (e2e posts it);
+  //   "TaskbarCreated" → NIM_ADD again. Quit: no window → PostQuitMessage; else the Task 21 quit flow (confirms when needed)
+  // App.zig
+  pub fn lastWindowAction(quit_after: bool, delay_ms: ?u32) enum { quit_now, quit_timer, stay };  // pure
+  //   windowDestroyed with no window left: quit_now → PostQuitMessage; quit_timer → the M1 timer (core's quit_timer start/stop still honoured);
+  //   stay → nothing (tray icon + pipe keep the process reachable)
+  ```
+- [ ] **Step 1: Failing tests** `"win32 app: last window policy"` (`(true, null)` → quit_now; `(true, 1000)` → quit_timer; `(false, null)` and `(false, 1000)` → stay), `"win32 tray: click action"` (0 windows → new_window; 2 → present_last).
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 app"` and `"win32 tray"` → FAIL.
+- [ ] **Step 3: Implement**; scenarios (`milestone=M2`): `tray` (order 430, `Start-E2eGhostty -KeepDefaultQuit`: state `tray.visible = true`; close the only window → process alive after 3 s and state `windows = []`; `PostMessage(<GhosttyTray window of the pid>, WM_GHOSTTY_TRAY, 0, NIN_SELECT)` → a window appears ≤ 2 s; close it; `PostMessage(WM_COMMAND, menu_new_window)` → a window; a second launch of the same class forwards → 2 windows; `PostMessage(WM_COMMAND, menu_quit)` with idle shells → process exits ≤ 3 s), `quit-after-last` (order 440: `quit-after-last-window-closed = true` → `tray.visible = false` and closing the last window ends the process ≤ 3 s; with `quit-after-last-window-closed-delay = 2s` the process is alive at 1 s and gone by 4 s; a `new-window` IPC inside the delay keeps it running).
+- [ ] **Step 4: Verify** unit PASS; `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="config"` PASS; `E2E -Only tray,quit-after-last,single-instance,shell-exit` → PASS.
+- [ ] **Step 5: Commit** `git commit -m "feat(win32): notification-area icon; keep running after the last window by default on Windows"`
+
+### Task 29: Tab-close process semantics (Windows Terminal behaviour)
+
+**Files:**
+- Modify: `src/Command.zig` (Windows: `killTree` → `killChild`: terminate the direct child only; drop the job walk and `shouldKill`; keep the job object and `jobProcessIds` for process listing (M4 pane queries); keep `fileSubsystem` only if still used), `src/termio/Exec.zig` (`killCommand` calls `killChild`, then closes the pseudo console right away so `ClosePseudoConsole` sends `CTRL_CLOSE_EVENT` to the console clients attached to that surface; the M1 drain-to-EOF bound is unchanged)
+- Modify: `test/windows/e2e/close-tree.ps1`, `test/windows/e2e/_common.ps1` (`Assert-NoSurvivors -Except [int[]]`; `Start-SurvivorConsole($G)` types `cmd //c start "gt-survivor-<hex>" cmd /k` into Git Bash and returns the new `cmd.exe` pid, found by its command line; `Stop-Survivor` kills it and its `conhost.exe`, always called from `finally`)
+- Create: `test/windows/e2e/tab-close-tree.ps1`
+
+**Interfaces:**
+- Consumes: M1 `Command` job and ConPTY close path (`src/pty.zig`), Task 11 oracle, Task 13 tabs.
+- Produces: `pub fn killChild(self: *Command) !void` (Windows) and the behaviour of SPEC §18.14: closing a surface (split, tab or window) ends its shell and every console client attached to its pseudo console; programs with their own console (`start cmd`, `start python x.py`), detached processes and GUI programs keep running.
+- [ ] **Step 1: Failing tests** (`-Dapp-runtime=none`)
+  ```zig
+  test "windows command: killChild ends only the direct child" { // cmd /c "start /min cmd /k & ping -n 30 127.0.0.1" without a pseudo console: after killChild the child is gone, the started cmd.exe (own console) is alive; the test terminates it }
+  test "windows exec: closing the pseudo console ends attached console clients" { // pty + cmd /k ping -n 60 127.0.0.1; ping pid from jobProcessIds; killChild + close the pseudo console → ping.exe gone within 6 s }
+  ```
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="windows command"` and `"windows exec"` → FAIL.
+- [ ] **Step 3: Implement**; scenarios: `close-tree` (stays `milestone=M1`, rewritten: ping in Git Bash plus `Start-SurvivorConsole`; close the window → `bash.exe`, `ping.exe` and the surface's `OpenConsole.exe`/`conhost.exe` gone ≤ 6 s; the survivor `cmd.exe` alive; `Assert-NoSurvivors -Except <survivor, its conhost>`; survivor stopped in `finally`), `tab-close-tree` (order 450, M2, scenario config `confirm-close-surface = false`: two tabs; ping and a survivor started in tab 1; `close_tab:this` on tab 1 → its shell and ping gone ≤ 6 s, tab 0's shell alive (echo oracle), survivor alive, then stopped).
+- [ ] **Step 4: Verify** unit PASS; `E2E -Only close-tree,tab-close-tree,close-while-streaming,shell-exit` → PASS.
+- [ ] **Step 5: Commit** `git commit -m "fix(windows): closing a tab ends its shell and pseudo-console clients only (Windows Terminal semantics)"`
+
+### Task 30: Re-parent-safe present target (swap chain recreated after a move)
+
+**Files:** Modify `src/renderer/D3D11.zig` (`PresentTarget.generation`; the render thread recreates its swap chain when the generation changed), `src/apprt/win32/Surface.zig` (`present_generation` field, `bumpPresentTarget`).
+
+**Interfaces:**
+- Consumes: M1 `SwapChain.init/deinit`, `PresentTarget`, core `Surface.refreshCallback`.
+- Produces:
+  ```zig
+  // D3D11.zig
+  pub const PresentTarget = struct { hwnd: *anyopaque, size: *const std.atomic.Value(u64), id: u32,
+      generation: *const std.atomic.Value(u32) };  // bumped by the apprt after the HWND changed parents
+  // swap chain getter (render thread): generation != swap_chain_generation → deinit the swap chain (all back-buffer refs
+  // released first) and create a new one for the same hwnd before the frame uses it; MakeWindowAssociation again
+  // Surface.zig
+  present_generation: std.atomic.Value(u32) = .init(0),
+  pub fn bumpPresentTarget(self: *Surface) void;  // UI thread: fetchAdd(1, .release), then core_surface.refreshCallback() so a frame follows
+  ```
+  Re-parenting never touches DXGI on the UI thread (SPEC §5); the render thread does the recreation (SPEC §18.16).
+- [ ] **Step 1: Failing tests** (WARP, hidden test HWNDs)
+  ```zig
+  test "d3d11 swapchain: generation bump recreates the swap chain after SetParent" { // child of parent A presents; SetParent(child, B); bump; next frame: new swap chain object, present OK, back-buffer readback == target }
+  test "d3d11 swapchain: no recreation without a bump" { // 5 frames, same swap chain object }
+  ```
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="d3d11 swapchain"` → FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Verify** PASS; `LOCK ZIG build -j2`; `E2E -Only windows-multi,render` → PASS (`move_tab_to_new_window` still renders).
+- [ ] **Step 5: Commit** `git commit -m "feat(d3d11): recreate the swap chain on the render thread after the surface window is re-parented"`
+
+### Task 31: Tab drag state machine and drag ghost
+
+**Files:** Modify (replace stubs) `src/apprt/win32/tab_drag.zig`, `src/apprt/win32/drag_ghost.zig`.
+
+**Interfaces:**
+- Consumes: `TabStrip.Metrics` (`drag_threshold`), `Chrome.paintTabChip` (Task 18), Task 1 layered-window bindings.
+- Produces:
+  ```zig
+  // tab_drag.zig (pure; all coordinates in screen pixels)
+  pub const Point = struct { x: i32, y: i32 };
+  pub const Hit = union(enum) { none, strip: struct { window: u32, index: usize } };  // index = insertion slot under the cursor
+  pub const Event = union(enum) { move: struct { pt: Point, hit: Hit }, release, cancel };  // cancel = Esc or capture lost
+  pub const Outcome = union(enum) { click, reorder: struct { from: usize, to: usize }, move_to: struct { window: u32, index: usize },
+      tear_off: Point /* new window origin */, move_window: Point /* single-tab source */, cancelled: struct { restore_index: usize } };
+  pub const Feedback = struct { live_reorder: ?struct { from: usize, to: usize } = null, ghost: ?Point = null,
+      marker: ?struct { window: u32, index: usize } = null, done: ?Outcome = null };
+  pub const Machine = struct {
+      pub fn begin(source_window: u32, tab: usize, tab_count: usize, press: Point, grab: Point /* cursor offset inside the tab */,
+          strip_origin: Point /* source strip top-left */, threshold: i32, detach_margin: i32) Machine;
+      pub fn feed(self: *Machine, ev: Event) Feedback;
+  };
+  pub fn detachMargin(dpi: u32) i32;   // geom.scale(24, dpi)
+  ```
+  States `pressed → in_strip → detached`. `pressed` stays until the cursor moves beyond `threshold`; then over the own strip → `in_strip` (live reorder feedback, as Task 10's drag rules), elsewhere → `detached`. `in_strip` → `detached` when the hit is not the own strip and the cursor is more than `detach_margin` outside the source strip bounds; `detached` over the own strip → back to `in_strip`. `detached`: `ghost = pt - grab`; over another window's strip → `marker`. Release: `pressed` → `click`; `in_strip` → `reorder` (the final from/to, possibly equal); `detached` over another strip → `move_to`; `detached` over nothing → `tear_off(pt - grab - strip_origin_offset)` or `move_window(...)` when `tab_count == 1`. `cancel` in any drag state → `cancelled` with the index the tab had at `begin`.
+  ```zig
+  // drag_ghost.zig
+  pub fn show(app: *App, title: []const u8, size: geom.Rect, at: tab_drag.Point) void; // one per process: WS_POPUP, WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST
+  pub fn moveTo(at: tab_drag.Point) void;   // SetWindowPos without activation
+  pub fn hide() void;
+  // content: Chrome.paintTabChip into a premultiplied 32bpp DIB, UpdateLayeredWindow(ULW_ALPHA, constant alpha 0xD8);
+  // WS_EX_TRANSPARENT keeps it out of WindowFromPoint; WM_DPICHANGED (moving across monitors) repaints at the new dpi
+  ```
+- [ ] **Step 1: Failing tests**
+  ```zig
+  test "win32 tab drag: press and release without moving is a click" {}
+  test "win32 tab drag: below threshold stays pressed" {}
+  test "win32 tab drag: reorder inside the own strip" { // live_reorder {0,1}, release → reorder {0,1} }
+  test "win32 tab drag: leaving the strip by the margin detaches and shows the ghost" { // y = strip bottom + margin + 1, hit none → ghost = pt - grab }
+  test "win32 tab drag: back over the own strip re-attaches" {}
+  test "win32 tab drag: drop on another window's strip" { // marker {7, 1}; release → move_to {7, 1} }
+  test "win32 tab drag: drop outside tears off, single tab moves the window" {}
+  test "win32 tab drag: Esc restores the original index" { // after live reorder 0→2, cancel → cancelled{restore_index 0} }
+  ```
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 tab drag"` → FAIL.
+- [ ] **Step 3: Implement** (the ghost has no unit test beyond compiling; Task 32's scenario shows it).
+- [ ] **Step 4: Run** → PASS.
+- [ ] **Step 5: Commit** `git commit -m "feat(win32): tab drag state machine and layered drag ghost"`
+
+### Task 32: Tab tear-off and re-dock across windows
+
+**Files:**
+- Modify: `src/apprt/win32/strip_input.zig` (drag through `tab_drag.Machine` with capture on the source window; cross-window hit testing; ghost; Esc), `src/apprt/win32/Window.zig` (`insertTab`, `createForTearOff`), `src/apprt/win32/Tab.zig` (`setWindow` also rescales surfaces when the dpi differs and calls `bumpPresentTarget` on each surface)
+- Create: `test/windows/e2e/tab-drag.ps1`
+
+**Interfaces:**
+- Consumes: Tasks 19 (strip input), 21 (`detachTab`, `move_tab_to_new_window` path), 30 (`bumpPresentTarget`), 31 (machine, ghost), Task 18 (drop marker from `strip_input.State.drop_index`).
+- Produces:
+  ```zig
+  // strip_input.zig
+  pub fn hitAt(app: *App, pt: tab_drag.Point) tab_drag.Hit;
+  //   WindowFromPoint → GetAncestor(GA_ROOT) → must be one of app.windows (class GhosttyWindow of this process; other processes are never targets)
+  //   → ScreenToClient → that window's strip.hitTest → insertion index = slot whose centre is right of x (count when past the last tab)
+  // drag start (threshold passed): SetCapture(source hwnd); SetFocus(source hwnd) so Esc reaches it (WM_SETFOCUS redirect to the surface is
+  //   suppressed while dragging); WM_KEYDOWN VK_ESCAPE → cancel; WM_CAPTURECHANGED → cancel; WM_LBUTTONUP → release
+  // feedback: live_reorder → window.moveTab; marker → target window strip_input.drop_index + Chrome.invalidate (cleared on leave);
+  //   ghost → drag_ghost.show/moveTo/hide
+  // outcomes: move_to → source.detachTab, target.insertTab(tab, index), tab.setWindow(target), select it, SetForegroundWindow(target);
+  //   tear_off → createForTearOff(app, origin, source size) + detachTab/insertTab/setWindow + show;
+  //   move_window → SetWindowPos(source) to the origin; cancelled → moveTab back to restore_index;
+  //   afterwards: source with no tab → requestClose(true) (last-window rule of Task 28 applies only if no window remains); focus the moved tab's surface
+  // Window.zig
+  pub fn insertTab(self: *Window, tab: *Tab, index: usize) void;           // clamp index, select, layout, refreshTitle
+  pub fn createForTearOff(app: *App, origin: tab_drag.Point, size: struct { w: i32, h: i32 }) !*Window; // first_tab = false, placed at origin (dpi of the monitor there)
+  // Tab.zig
+  pub fn setWindow(self: *Tab, window: *Window) void;  // SetParent(container); every surface: window = window; dpi differs → content scale + contentScaleCallback; bumpPresentTarget
+  ```
+  The core surface, its pty and its child process never restart: only HWND parents change.
+- [ ] **Step 1: Failing test** `"win32 strip input: insertion index from x"` (pure `insertionIndex(tabs: []const geom.Rect, x: i32) usize`: left of tab 0 centre → 0, between centres → 1, past the last → count).
+- [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 strip input"` → FAIL.
+- [ ] **Step 3: Implement**; scenario `tab-drag` (order 460, cmd config, interactive only: window A with tabs T0, T1; record the `cmd.exe` pids of both shells (process tree) and T1's surface `hwnd`; `Send-MouseDrag` from T1's centre to 250 px below A's bottom edge in 25 steps, holding 300 ms before release → 2 windows, each with one tab, T1's surface `hwnd` unchanged, both `cmd.exe` pids alive and unchanged, echo oracle in T1 works, a `GhosttyDragGhost` window was visible mid-drag and is hidden after; drag T1 from the new window onto A's strip right of T0 → 1 window with tabs [T0, T1], the new window gone, pids unchanged; drag T0 out and press Esc before releasing → still 1 window, order unchanged).
+- [ ] **Step 4: Verify** unit PASS; `E2E -Only tab-drag,tab-strip-mouse,windows-multi` → PASS.
+- [ ] **Step 5: Commit** `git commit -m "feat(win32): drag tabs out into new windows and onto other windows"`
+
+### Task 33: M2 end-to-end run
+
+**Files:** none planned; bug notes only (the lead files 34.n).
 
 - [ ] **Step 1:** `LOCK ZIG build -j2`; `E2E -Milestone all -EvidenceDir %TEMP%\m2-evidence` (Debug). Then `LOCK ZIG build -j2 -Doptimize=ReleaseFast --prefix zig-out-rf`; `$env:GHOSTTY_E2E_EXE` = the RF exe; `E2E -Milestone all` again.
 - [ ] **Step 2:** For every FAIL write a bug note (scenario, build, symptom, log excerpt, evidence path). `LOCK ZIG build test -j2 -Dtest-filter="win32 "` and `--build-file pkg/win32/build.zig` → record counts.
 - [ ] **Step 3: Commit** only if scenario scripts needed fixes of their own: `git commit -m "test(windows): M2 e2e stabilisation"`.
 
-### Task 29.n: Integration fix (template, one bug per task)
+### Task 34.n: Integration fix (template, one bug per task)
 
 **Files:** exactly the files the bug note names (lead assigns; ≤ 3 parallel only with disjoint files).
 
@@ -859,10 +1026,10 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 - [ ] **Step 2:** Fix; unit filter + scenario → PASS (SKIP noted when not interactive).
 - [ ] **Step 3: Commit** `git commit -m "fix(win32): <bug summary>"`
 
-### Task 30: RAM rows, screenshots, M2 acceptance
+### Task 35: RAM rows, screenshots, M2 acceptance
 
 **Files:**
-- Modify: `test/windows/measure-ram.ps1` (scenarios `tabs`, `splits`, `windows`, `close-10`, driven by `Invoke-GhosttyAction`, no keyboard input), `docs/windows/ram-baseline.csv`, `test/windows/README.md` (M2 runner, IPC module, scenario list), `docs/windows/SPEC.md` §17 (M2 marked done with the commit, any scope moved during execution)
+- Modify: `test/windows/measure-ram.ps1` (scenarios `tabs`, `splits`, `windows`, `close-10`, driven by `Invoke-GhosttyAction`, no keyboard input), `docs/windows/ram-baseline.csv`, `test/windows/README.md` (M2 runner, IPC module, scenario list, tray and tab-close behaviour), `docs/windows/SPEC.md` §17 (M2 marked done with the commit, any scope moved during execution)
 
 **Interfaces:**
 - Produces rows (ReleaseFast, hardware adapter): `tabs` = (1 window + 10 tabs − one-surface) / 10 per tab; `splits` = 10 splits in one tab, per split; `windows` = 5 windows, per extra window; `close-10` = open 10 tabs, close them, wait 30 s, private bytes vs before opening.
@@ -881,15 +1048,15 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 3. `E2E -Milestone all` green on Debug and on ReleaseFast (M1 18 + M2 scenarios); SKIPs only for a non-interactive desktop and re-run by the owner.
 4. Single instance: second launch exits 0 ≤ 2 s and the new window shows ≤ 1.5 s (ReleaseFast); `+new-window` works; e2e instances never touched the owner's Ghostty (class isolation).
 5. RAM rows `tabs`, `splits`, `windows`, `close-10` within SPEC §14 targets.
-6. Screenshot set (Task 30 Step 3) inspected by the lead.
-7. Owner manual checklist (record PASS/FAIL per line): snap layouts flyout on hovering maximize; Aero snap by dragging the caption to an edge; moving a window between monitors of different scale; Mica visible behind the strip with "Transparency effects" on and solid with it off; switching Windows light/dark in Settings repaints the strip and conditional themes; Alt+Tab/taskbar titles follow the active tab; taskbar progress during a `winget`-style OSC 9;4 run.
+6. Screenshot set (Task 35 Step 3) inspected by the lead.
+7. Owner manual checklist (record PASS/FAIL per line): tray icon present after closing the last window, left click opens a window, menu New Window / Quit work, icon returns after restarting Explorer; `start cmd` from a tab survives closing that tab; dragging a tab to a window on a monitor with another scale renders it at that scale; snap layouts flyout on hovering maximize; Aero snap by dragging the caption to an edge; moving a window between monitors of different scale; Mica visible behind the strip with "Transparency effects" on and solid with it off; switching Windows light/dark in Settings repaints the strip and conditional themes; Alt+Tab/taskbar titles follow the active tab; taskbar progress during a `winget`-style OSC 9;4 run.
 8. Upstream rebase of `windows` onto upstream main (lead), M2 changelog for the owner.
 
 ## M1 carry-over assignment
 
 | M1 ledger item | Assigned |
 |---|---|
-| T14 last-window close always quits; `quit-after-last-window-closed` + delay unreachable; `startQuitTimer` doc | Task 20 |
+| T14 last-window close always quits; `quit-after-last-window-closed` + delay unreachable; `startQuitTimer` doc | Task 28 |
 | T14 local `RegGetValueW`; T24 local `SystemParametersInfoW`/`GetClassNameW`; T26 local `EnumClipboardFormats`; T27 local kernel32 externs in `SwapChain.zig` | Task 1 |
 | T14 `terminate()` spin on failing `DestroyWindow`, `Window.create` errdefer pop not keyed by pointer | Task 6 |
 | T14 wakeup re-arm untested | Task 3 |
@@ -901,12 +1068,12 @@ Private message ids (`messages.zig`, Task 2): `WM_APP+1` wakeup, `+2` clipboard 
 | T28 all-SKIP run exits 0 | Task 4 |
 | T30 CSV commit stamp, CRLF, README double blank line, `AdapterDesc` layout assert | Task 4 |
 | T5 SharedDeps links Win32 libs for lib-vt consumers | Task 1 |
-| T19 owner question (console processes killed on tab close) | owner; M2 tab/split close reuses the M1 surface teardown unchanged |
+| T19 owner question (console processes killed on tab close) | answered by the owner (Windows Terminal semantics) → Task 29 |
 | T13 `systemExists` OOB, T19 pid-reuse race in `killTree` ("fix in final wave") | M1 final review (not M2) |
 | T23 keyboard, T26 clipboard, T12 font, T11/T20 shader, T16 logging, T8/T9 renderer minors | stay deferred (M3 input/clipboard/font/shader polish, M5 logging) |
 
 ## Self-review notes
 
-- Spec coverage (SPEC §17 M2 as amended): custom frame + Mica + snap (12, 17, 18), tabs incl. reorder/rename (10, 13, 19), splits (9, 14, 16), multi-window (21), placement toggles (22), DPI (23), theme/colour scheme/config reload (15), scrollbar (25), bell + taskbar progress (26), resize overlay (24), TaskDialog confirmations (27), IPC + single instance + `performIpc` (5, 8, 11, 20), action coverage (3), RAM/screenshots (30). Deferred by design: unfocused-split dimming and `bell-features=border` (M3 DComp overlays), tab tear-off by drag (M3), readonly badge (M3), everything in Task 3's deferred list.
+- Spec coverage (SPEC §17 M2 as amended): custom frame + Mica + snap (12, 17, 18), tabs incl. reorder/rename (10, 13, 19), splits (9, 14, 16), multi-window (21), placement toggles (22), DPI (23), theme/colour scheme/config reload (15), scrollbar (25), bell + taskbar progress (26), resize overlay (24), TaskDialog confirmations (27), tray + last-window lifecycle (28), tab-close process semantics (29), tab tear-off/re-dock with re-parent-safe swap chains (30, 31, 32), IPC + single instance + `performIpc` (5, 8, 11, 20), action coverage (3), RAM/screenshots (35). Deferred by design: unfocused-split dimming and `bell-features=border` (M3 DComp overlays), readonly badge (M3), everything in Task 3's deferred list.
 - Every wave re-checked: ≤ 3 tasks, disjoint `Files:` including the hot files table; stubs created in W1 carry every cross-task signature so later waves never edit another task's file.
 - Type names used across tasks: `TabStrip.Layout/Metrics/Part/Mode/Drag`, `SplitLayout.Layout(Tree)`, `geom.Rect`, `theme.Palette/Color`, `frame.State/Decorations`, `placement.State`, `scrollbar.State`, `taskbar.State`, `resize_overlay.State`, `Overrides`, `protocol.Request/Response/Code`, `Server.Pending`, `client.Error`, `Window/Tab/Surface.CreateOptions`, `dialogs.CloseKind` — defined once (Task 2, 5, 6, 8, 9, 10) and only consumed elsewhere.

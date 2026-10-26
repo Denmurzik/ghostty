@@ -559,11 +559,13 @@ a locked/non-interactive desktop are recorded as SKIP and re-run interactively b
 Mica under the titlebar/tab strip, own caption buttons, `HTMAXBUTTON` snap layouts, `window-decoration` client/server/none),
 Direct2D/DirectWrite tab strip (select, close, middle-click, new, drag reorder, overflow scroll, inline rename = `prompt_title`),
 tabs and splits over core `SplitTree` (one container HWND per tab, one child HWND per surface; divider drag, zoom, equalize,
-goto, resize), multiple windows (cascade, goto/present, move tab to new window), maximize/fullscreen/float/decorations toggles,
+goto, resize), multiple windows (cascade, goto/present, move tab to new window, tab tear-off by drag into a new window and
+re-dock onto another window's strip with live ghost/insertion feedback, Esc cancel; processes keep running, §18.16), maximize/fullscreen/float/decorations toggles,
 per-monitor DPI incl. hidden tabs, theme (`window-theme`, titlebar colours, system colour scheme → conditional config), config
 reload (soft/hard) and `open_config`, native scrollbar, bell (title/attention/system/audio), taskbar progress, resize overlay
 (owned popup), TaskDialog close confirmations, named-pipe IPC + single-instance (`windows-single-instance`) + `performIpc` +
-test-only IPC ops, `quit-after-last-window-closed`. Every `Action.Key` is classified implemented / deferred (milestone) /
+test-only IPC ops, notification-area icon with Ghostty staying alive after the last window (Windows default
+`quit-after-last-window-closed = false`, §18.7/§18.15), Windows Terminal tab-close process semantics (§18.14). Every `Action.Key` is classified implemented / deferred (milestone) /
 unsupported by `apprt/win32/actions.zig`. Exit: action-coverage test green; M1+M2 e2e green on Debug and ReleaseFast;
 screenshots at 100/150/200% (simulated through the test DPI op; real multi-monitor checked by the owner); per-tab/split/window
 and close-10 RAM rows within §14 targets. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
@@ -573,8 +575,8 @@ AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrus
 inspector (imgui win32+dx11), config-errors dialog, custom shaders (HLSL via SPIRV-Cross), Kitty graphics
 and background image verified, transparency + blur (DComp composition swap chains), DirectWrite discovery/fallback,
 device-loss recovery + renderer-health bar, key-sequence/table indicator, export-terminal-io save dialog, vt-smoke
-screenshots; from M2: unfocused-split dimming and `bell-features = border` (DComp overlay visuals), readonly badge, tab
-tear-off by drag, `toggle_visibility` (with global hotkeys), `toggle_background_opacity`. Exit: feature checklist (one line per cross-platform feature) all green with a test or screenshot each.
+screenshots; from M2: unfocused-split dimming and `bell-features = border` (DComp overlay visuals), readonly badge,
+`toggle_visibility` (with global hotkeys), `toggle_background_opacity`. Exit: feature checklist (one line per cross-platform feature) all green with a test or screenshot each.
 
 **M4 — tmux shim + IPC + Claude Code e2e.** `tmux.exe`, IPC server, registry, all §12 semantics, DCS tmux unwrap,
 `SplitTree.replace`, PATH prepend + TMUX/TMUX_PANE in every surface. Exit: replay test green; real Claude Code agent-team
@@ -610,8 +612,10 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
    the command line has anything besides `--working-directory=`, `--title=`, `--command=`, `--shell-integration=`, or uses
    `-e`. The second process's cwd is not forwarded (Start-menu cwd is meaningless); Explorer passes `--working-directory`.
    The first instance always serves the pipe when it can claim the name. Cost if wrong: one default flip.
-7. `quit-after-last-window-closed` defaults to `true` on Windows (as on Linux); `false` keeps a windowless process only
-   while it serves the pipe (reachable by the next launch), otherwise it quits with a log line. Cost if wrong: default flip.
+7. Owner decision (DECISIONS, 2026-10-26): `quit-after-last-window-closed` defaults to `false` on Windows — closing the last
+   window leaves Ghostty running in the notification area (§18.15), reachable from the tray icon and by the next launch
+   (single instance). `true` restores quit-on-last-window, honouring `quit-after-last-window-closed-delay` and core's
+   `quit_timer` start/stop.
 8. Test-only IPC ops `state`, `action`, `dpi`, `color-scheme` answer only when Ghostty was started with
    `GHOSTTY_WIN32_TEST_IPC=1`; e2e uses them instead of system-wide DPI/theme changes (owner-machine safety). Cost if
    wrong: none for users.
@@ -623,3 +627,19 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
     reflow when scrollback first appears), dark via the `DarkMode_Explorer` theme; none with `scrollbar = never`.
 12. Frame dumps are named `surface-<apprt surface id>.bmp` (first surface = 1); headless renderers keep the index.
 13. `bell-features = audio` plays WAV files through `PlaySoundW`; `bell-audio-volume` is ignored on Windows in M2.
+14. Owner decision (DECISIONS, 2026-10-26; amends §8.4 and the M1 Task 19 ruling): closing a surface (split, tab or window)
+    terminates only its direct child and then closes its pseudo console, so the console clients attached to it receive
+    `CTRL_CLOSE_EVENT` and end (Windows Terminal semantics). Programs with their own console (`start cmd`), detached
+    processes and GUI programs survive. The job object stays only for listing a surface's processes (M4 pane queries); it
+    is never used to kill.
+15. Owner decision (DECISIONS, 2026-10-26): a notification-area icon (`Shell_NotifyIconW`, hidden `GhosttyTray` tool window,
+    re-added on `TaskbarCreated`) is shown while `quit-after-last-window-closed = false`. Left click presents the last
+    active window or opens a new one; the menu has New Window and Quit (Quit confirms like the `quit` action when
+    processes are running).
+16. Owner requirement (2026-10-26): tab tear-off and re-dock. A tab moves between windows by `SetParent` of its container
+    HWND; the core surfaces, ptys and child processes stay untouched. After every re-parent the apprt bumps the surface's
+    `PresentTarget.generation` and the render thread recreates the swap chain for the same HWND before its next frame
+    (the UI thread never calls DXGI). Drop targets are this process's `GhosttyWindow`s found by `WindowFromPoint` +
+    `GA_ROOT` (the layered drag ghost is `WS_EX_TRANSPARENT`); other Ghostty processes are never targets. A drop outside
+    every strip creates a new window under the cursor (a single-tab source window just moves); an emptied source window
+    closes; a dpi change between windows rescales the moved surfaces.
