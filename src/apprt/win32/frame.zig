@@ -279,7 +279,13 @@ fn setHover(window: *Window, part: TabStrip.Part) void {
     Chrome.invalidate(window);
 }
 
-fn showSystemMenuBelowStrip(window: *Window) void {
+/// Whether we open the system menu for Alt+Space ourselves: only
+/// client-drawn windows lack `WS_SYSMENU`, so Windows would not.
+pub fn altSpaceOpensMenu(decorations: Decorations) bool {
+    return decorations == .client;
+}
+
+pub fn showSystemMenuBelowStrip(window: *Window) void {
     var pt: win32.foundation.POINT = .{ .x = 0, .y = window.strip.bounds.h };
     _ = user32.ClientToScreen(window.hwnd, &pt);
     showSystemMenu(window, pt.x, pt.y);
@@ -430,6 +436,12 @@ test "win32 frame: decorations mapping" {
     try std.testing.expect(windowStyle(.client) & user32.WS_SYSMENU == 0);
     try std.testing.expect(windowStyle(.server) & user32.WS_SYSMENU != 0);
     try std.testing.expect(windowStyle(.client) & user32.WS_THICKFRAME != 0);
+}
+
+test "win32 frame: alt+space opens the menu only with client decorations" {
+    try std.testing.expect(altSpaceOpensMenu(.client));
+    try std.testing.expect(!altSpaceOpensMenu(.server));
+    try std.testing.expect(!altSpaceOpensMenu(.none));
 }
 
 test "win32 frame: hit codes incl. top corners" {

@@ -10,6 +10,7 @@ const win32 = @import("win32");
 const input = @import("../../input.zig");
 const Surface = @import("Surface.zig");
 const key = @import("key.zig");
+const frame = @import("frame.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const user32 = win32.user32;
@@ -286,8 +287,14 @@ fn handleChar(
     msg: u32,
     wparam: win32.foundation.WPARAM,
 ) ?win32.foundation.LRESULT {
-    // Alt+Space opens the system menu; that is the default procedure's.
-    if (msg == user32.WM_SYSCHAR and wparam == user32.VK_SPACE) return null;
+    if (msg == user32.WM_SYSCHAR and wparam == user32.VK_SPACE) {
+        // Alt+Space opens the system menu. With server decorations that is
+        // the default procedure's; without WS_SYSMENU it never raises
+        // SC_KEYMENU, so the menu is opened here.
+        if (!frame.altSpaceOpensMenu(surface.window.frame.decorations)) return null;
+        frame.showSystemMenuBelowStrip(surface.window);
+        return 0;
+    }
 
     var out: [key.Utf16Joiner.max_out]u8 = undefined;
     const state = &surface.keyboard_state;
