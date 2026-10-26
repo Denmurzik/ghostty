@@ -1419,6 +1419,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 state.lockDemand(global.io());
                 defer state.unlockDemand(global.io());
+                // The snapshot below is what the frame shows.
+                if (comptime builtin.os.tag == .windows) {
+                    @import("../os/main.zig").windows_latency.markRenderStart();
+                }
 
                 // If we're in a synchronized output state, we pause all rendering.
                 if (state.terminal.modes.get(.synchronized_output)) {
@@ -1800,7 +1804,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 sync;
 
             if (!needs_redraw) {
-                @import("../os/main.zig").windows_latency.markNote('N');
+                if (comptime builtin.os.tag == .windows) {
+                    @import("../os/main.zig").windows_latency.markNote('N');
+                }
                 // Ask our caller to resync the display link once the draw
                 // mutex is released, because we can probably pause the
                 // display link at this point.

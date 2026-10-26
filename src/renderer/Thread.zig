@@ -483,7 +483,9 @@ fn wakeupCallback(
     };
 
     const t = self_.?;
-    @import("../os/main.zig").windows_latency.markNote('K');
+    if (comptime builtin.os.tag == .windows) {
+        @import("../os/main.zig").windows_latency.markNote('K');
+    }
 
     // When we wake up, we check the mailbox. Mailbox producers should
     // wake up our thread after publishing.
@@ -577,7 +579,9 @@ fn renderCallback(
     ) catch |err|
         log.warn("error rendering err={}", .{err});
 
-    @import("../os/main.zig").windows_latency.markNote('U');
+    if (comptime builtin.os.tag == .windows) {
+        @import("../os/main.zig").windows_latency.markNote('U');
+    }
     // Draw
     t.drawFrame(false);
 

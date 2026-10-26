@@ -151,6 +151,11 @@ pub const Tracer = struct {
         self.events.add('P', sub(now, self.t0));
     }
 
+    /// The read loop handed the renderer state mutex off after a slice.
+    pub fn yielded(self: *Tracer) void {
+        if (self.open and self.t_out != null) self.yields += 1;
+    }
+
     pub fn renderStart(self: *Tracer, now: u64) void {
         if (!self.open) return;
         self.events.add('R', sub(now, self.t0));
@@ -386,7 +391,17 @@ pub fn markOutput(bytes: usize) void {
     if (tracer.output(now, bytes)) |old| emit(io, old);
 }
 
-/// Read loop: `processOutput` of that read finished.
+/// Read loop: one `yieldToDemand` ran.
+pub fn markYield() void {
+    if (!enabled()) return;
+    const io = global.io();
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    tracer.yielded();
+}
+
+/// `processOutput` of one slice finished, with the renderer state mutex
+/// still held: the renderer's snapshot cannot predate the mark.
 pub fn markParsed(slices: u32, yields: u32) void {
     if (!enabled()) return;
     const now = nowNs();

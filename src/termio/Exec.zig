@@ -1860,14 +1860,12 @@ pub const ReadThread = struct {
 
             fn process(self: @This(), slice: []const u8) void {
                 self.io.processOutput(slice);
-                // Before the hand-off below: the renderer may draw as soon
-                // as it gets the mutex. One slice, one `yieldToDemand`.
-                latency.markParsed(1, 1);
 
                 // See threadMainPosix: hand the renderer state mutex
                 // off if the renderer is waiting, since this loop
                 // would otherwise starve it under heavy output.
                 self.io.renderer_state.yieldToDemand(global.io());
+                latency.markYield();
             }
 
             fn onData(self: @This(), buf: []const u8) void {
