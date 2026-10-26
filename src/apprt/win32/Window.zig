@@ -5,7 +5,6 @@ const Window = @This();
 const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
-const renderer = @import("../../renderer.zig");
 const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const dialogs = @import("dialogs.zig");
@@ -227,10 +226,7 @@ fn syncSurface(self: *Window, surface: *Surface) void {
     _ = win32.user32.GetClientRect(self.hwnd, &rc);
     layoutChild(surface, rc.right - rc.left, rc.bottom - rc.top);
 
-    const size = renderer.D3D11.unpackSize(surface.size.load(.acquire));
-    if (size.width == 0 or size.height == 0) return;
-    surface.core_surface.sizeCallback(.{ .width = size.width, .height = size.height }) catch |err|
-        log.warn("size callback failed err={}", .{err});
+    surface.applySize(surface.size.load(.acquire));
 }
 
 fn handleSize(self: *Window, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) void {
@@ -336,6 +332,11 @@ fn wndProc(
         win32.user32.WM_SIZE => {
             self.handleSize(wparam, lparam);
             return 0;
+        },
+
+        // The drag is over: do not leave the last size waiting for the timer.
+        win32.user32.WM_EXITSIZEMOVE => {
+            if (self.surface) |s| s.flushSize();
         },
 
         win32.user32.WM_DPICHANGED => {

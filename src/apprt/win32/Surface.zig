@@ -31,6 +31,11 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
 /// Sent to a child window after its parent's DPI changed (winuser.h).
 const WM_DPICHANGED_AFTERPARENT = 0x02E3;
 
+/// Timer that applies a coalesced size to core (SPEC §6.4). The system
+/// timer cannot tick faster than its ~15.6 ms resolution anyway.
+const resize_timer_id: usize = 1;
+const resize_interval_ms: u32 = 16;
+
 /// Source of `id`, for log correlation only.
 var next_id: std.atomic.Value(u32) = .init(1);
 
@@ -53,6 +58,9 @@ title: ?[:0]const u8,
 
 /// Whether the top-level window is minimized (a WM_SIZE of 0x0).
 minimized: bool = false,
+
+/// Sizes waiting for the resize timer; see `ResizeCoalescer`.
+resize: ResizeCoalescer = .{},
 
 /// Set by WM_NCDESTROY: the HWND is gone (for example with its parent).
 hwnd_destroyed: bool = false,
@@ -277,6 +285,50 @@ pub fn sizeMessage(
     };
 }
 
+/// Coalesces the stream of WM_SIZE messages of a live resize into at most
+/// one size update for core per timer tick. Pure bookkeeping, so it can be
+/// tested without a window.
+pub const ResizeCoalescer = struct {
+    /// The size core was last given; 0 until the first one.
+    applied: u64 = 0,
+
+    /// The newest size core has not seen yet; 0 for none.
+    pending: u64 = 0,
+
+    /// Whether the resize timer is running.
+    timer_armed: bool = false,
+
+    pub const Action = enum { none, arm_timer };
+
+    /// Note the client size of a WM_SIZE (packed). A zero dimension (a
+    /// minimized or collapsed window) cancels what is pending: there is
+    /// nothing to lay out. Returns `.arm_timer` when the caller has to
+    /// start the timer.
+    pub fn request(self: *ResizeCoalescer, packed_size: u64) Action {
+        const size = renderer.D3D11.unpackSize(packed_size);
+        if (size.width == 0 or size.height == 0 or packed_size == self.applied) {
+            self.pending = 0;
+            return .none;
+        }
+
+        self.pending = packed_size;
+        if (self.timer_armed) return .none;
+        self.timer_armed = true;
+        return .arm_timer;
+    }
+
+    /// The timer fired, or the drag ended: the size to hand to core now, if
+    /// it differs from what core has. The caller stops the timer.
+    pub fn take(self: *ResizeCoalescer) ?u64 {
+        self.timer_armed = false;
+        if (self.pending == 0) return null;
+        const size = self.pending;
+        self.pending = 0;
+        self.applied = size;
+        return size;
+    }
+};
+
 fn clientSize(self: *const Surface) apprt.SurfaceSize {
     var rc: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return .{ .width = 0, .height = 0 };
@@ -286,13 +338,50 @@ fn clientSize(self: *const Surface) apprt.SurfaceSize {
     };
 }
 
+/// Hand a size to core. Core mails it to the IO and render threads; the
+/// push can wait on a full mailbox, so this is timed and only ever called
+/// from the resize timer or an explicit flush, never per WM_SIZE.
+pub fn applySize(self: *Surface, packed_size: u64) void {
+    const size = renderer.D3D11.unpackSize(packed_size);
+    // A zero-sized client (a collapsed parent) has nothing to lay out or draw.
+    if (size.width == 0 or size.height == 0) return;
+    self.resize.applied = packed_size;
+    if (!self.initialized) return;
+
+    const io = global.io();
+    const start = std.Io.Timestamp.now(io, .awake);
+    self.core_surface.sizeCallback(.{ .width = size.width, .height = size.height }) catch |err|
+        log.warn("size callback failed err={}", .{err});
+    log.debug("size callback id={} {}x{} took {} ms", .{
+        self.id,
+        size.width,
+        size.height,
+        start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds(),
+    });
+}
+
+/// Apply the newest size that has not reached core yet, if any, and stop
+/// the resize timer. Called by the timer and when a resize drag ends.
+pub fn flushSize(self: *Surface) void {
+    _ = win32.user32.KillTimer(self.hwnd, resize_timer_id);
+    if (self.resize.take()) |packed_size| self.applySize(packed_size);
+}
+
 fn handleSize(self: *Surface, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) void {
+    const io = global.io();
+    const start = std.Io.Timestamp.now(io, .awake);
+    defer log.debug("WM_SIZE id={} took {} ms", .{
+        self.id,
+        start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds(),
+    });
+
     const msg = sizeMessage(wparam, lparam);
     self.size.store(msg.packed_size, .release);
     if (!self.initialized) return;
 
     if (!msg.visible) {
         self.minimized = true;
+        _ = self.resize.request(0);
         self.core_surface.occlusionCallback(false) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
         return;
@@ -304,14 +393,16 @@ fn handleSize(self: *Surface, wparam: win32.foundation.WPARAM, lparam: win32.fou
             log.warn("occlusion callback failed err={}", .{err});
     }
 
-    const size = renderer.D3D11.unpackSize(msg.packed_size);
-    // A zero-sized client (a collapsed parent) has nothing to lay out or draw.
-    if (size.width == 0 or size.height == 0) return;
-
-    self.core_surface.sizeCallback(.{ .width = size.width, .height = size.height }) catch |err|
-        log.warn("size callback failed err={}", .{err});
-    self.core_surface.draw() catch |err|
-        log.warn("draw on resize failed err={}", .{err});
+    // Core is told from the resize timer, and the renderer picks the new
+    // size up from `size` on its own thread: the UI thread never waits for
+    // core while the user drags the border (SPEC §6.4).
+    switch (self.resize.request(msg.packed_size)) {
+        .none => {},
+        .arm_timer => if (win32.user32.SetTimer(self.hwnd, resize_timer_id, resize_interval_ms, null) == 0) {
+            log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
+            self.flushSize();
+        },
+    }
 }
 
 fn handleDpiChanged(self: *Surface) void {
@@ -349,6 +440,11 @@ fn wndProc(
     switch (msg) {
         win32.user32.WM_SIZE => {
             self.handleSize(wparam, lparam);
+            return 0;
+        },
+
+        win32.user32.WM_TIMER => if (wparam == resize_timer_id) {
+            self.flushSize();
             return 0;
         },
 
@@ -401,6 +497,58 @@ test {
     _ = ime;
     _ = clipboard;
     _ = dialogs;
+}
+
+test "win32 surface: resize coalescer applies only the newest size per tick" {
+    const packSize = renderer.D3D11.packSize;
+    var c: ResizeCoalescer = .{};
+
+    // A burst of sizes arms the timer once and collapses to the last one.
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(810, 600)));
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(820, 610)));
+    try std.testing.expectEqual(@as(?u64, packSize(820, 610)), c.take());
+
+    // Nothing new: the next tick has nothing to apply.
+    try std.testing.expectEqual(@as(?u64, null), c.take());
+
+    // The timer was stopped by `take`, so the next change re-arms it.
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(900, 700)));
+    try std.testing.expectEqual(@as(?u64, packSize(900, 700)), c.take());
+}
+
+test "win32 surface: resize coalescer ignores sizes core already has" {
+    const packSize = renderer.D3D11.packSize;
+    var c: ResizeCoalescer = .{};
+
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(@as(?u64, packSize(800, 600)), c.take());
+
+    // Same size again: no timer.
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(@as(?u64, null), c.take());
+
+    // Dragged away and back before the tick: nothing to tell core.
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(900, 600)));
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(@as(?u64, null), c.take());
+}
+
+test "win32 surface: resize coalescer drops zero sizes" {
+    const packSize = renderer.D3D11.packSize;
+    var c: ResizeCoalescer = .{};
+
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(0, 0)));
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(packSize(800, 0)));
+    try std.testing.expectEqual(@as(?u64, null), c.take());
+
+    // Minimizing while a size is pending cancels it; the restore brings a
+    // fresh one.
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(ResizeCoalescer.Action.none, c.request(0));
+    try std.testing.expectEqual(@as(?u64, null), c.take());
+    try std.testing.expectEqual(ResizeCoalescer.Action.arm_timer, c.request(packSize(800, 600)));
+    try std.testing.expectEqual(@as(?u64, packSize(800, 600)), c.take());
 }
 
 test "win32 surface: WM_SIZE decoding" {
