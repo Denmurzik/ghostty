@@ -30,6 +30,7 @@ const messages = @import("messages.zig");
 const mouse = @import("mouse.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const scrollbar_mod = @import("scrollbar.zig");
+const taskbar = @import("taskbar.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_surface);
@@ -148,6 +149,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
         .core_surface = undefined,
         .initialized = false,
         .shell_kind = drop.shellKindFor(config.command),
+        .scrollbar = .{ .enabled = config.scrollbar == .system },
         .id = next_id.fetchAdd(1, .monotonic),
         .size = .init(0),
         .content_scale = dpi.contentScale(window.dpi),
@@ -167,13 +169,17 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     var parent_rect: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     _ = win32.user32.GetClientRect(tab.hwnd, &parent_rect);
 
+    // The bar is part of the window from the start, so the grid never reflows.
+    var style: u32 = win32.user32.WS_CHILD | win32.user32.WS_VISIBLE | win32.user32.WS_CLIPSIBLINGS;
+    if (self.scrollbar.enabled) style |= win32.user32.WS_VSCROLL;
+
     // The window procedure sees WM_NCCREATE before this returns and stores
     // `self` as the window's user data.
     const hwnd = win32.user32.CreateWindowExW(
         0,
         class_name,
         null,
-        win32.user32.WS_CHILD | win32.user32.WS_VISIBLE | win32.user32.WS_CLIPSIBLINGS,
+        style,
         0,
         0,
         parent_rect.right - parent_rect.left,
@@ -188,6 +194,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     };
     errdefer _ = win32.user32.DestroyWindow(hwnd);
     self.hwnd = hwnd;
+    scrollbar_mod.init(self);
 
     const client = self.clientSize();
     self.size.store(renderer.D3D11.packSize(client.width, client.height), .release);
@@ -236,6 +243,7 @@ pub fn deinit(self: *Surface) void {
     const alloc = self.app.core_app.alloc;
 
     clipboard.cancelPending(self);
+    taskbar.surfaceClosed(self.window, self.id);
     self.initialized = false;
 
     self.core_surface.deinit();
@@ -497,6 +505,7 @@ fn handleFocus(self: *Surface, focused: bool) void {
     if (focused) {
         self.tab.focused = self;
         self.bell_ringing = false;
+        self.window.refreshTitle();
         Chrome.invalidate(self.window);
     }
     if (!self.initialized) return;
@@ -539,6 +548,11 @@ fn wndProc(
             return 0;
         },
 
+        win32.user32.WM_VSCROLL => {
+            scrollbar_mod.handle(self, wparam);
+            return 0;
+        },
+
         win32.user32.WM_SETFOCUS => {
             self.handleFocus(true);
             return 0;
@@ -578,6 +592,7 @@ fn wndProc(
 
 test {
     _ = dpi;
+    _ = scrollbar_mod;
     _ = keyboard;
     _ = mouse;
     _ = ime;

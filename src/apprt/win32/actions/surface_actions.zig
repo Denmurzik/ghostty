@@ -5,6 +5,7 @@ const apprt = @import("../../../apprt.zig");
 const mouse = @import("../mouse.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
+const scrollbar_mod = @import("../scrollbar.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -46,10 +47,8 @@ pub fn render(app: *App, target: apprt.Target, value: void) !bool {
     return true;
 }
 
-/// Stub until Task 25.
+/// The viewport or the scrollback changed: move the native scrollbar.
 pub fn scrollbar(app: *App, target: apprt.Target, value: apprt.Action.Value(.scrollbar)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const s = surfaceOf(app, target) orelse return false;
+    return scrollbar_mod.update(s, value);
 }
