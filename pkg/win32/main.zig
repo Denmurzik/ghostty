@@ -14,6 +14,8 @@ pub const shell32 = @import("shell32.zig");
 pub const comctl32 = @import("comctl32.zig");
 pub const uxtheme = @import("uxtheme.zig");
 pub const winmm = @import("winmm.zig");
+pub const d2d1 = @import("d2d1.zig");
+pub const dwrite = @import("dwrite.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

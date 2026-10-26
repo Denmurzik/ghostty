@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     }) |lib| module.linkSystemLibrary(lib, .{});
 
     const test_step = b.step("test", "Run the pkg/win32 tests");
-    for ([_][]const u8{ "test_spike.zig", "test_user32.zig" }) |file| {
+    for ([_][]const u8{ "test_spike.zig", "test_user32.zig", "test_d2d.zig" }) |file| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(file),
