@@ -1153,7 +1153,10 @@ const Subprocess = struct {
         // but we're done with the job.
         if (comptime is_windows) {
             if (self.process) |*p| switch (p.*) {
-                .fork_exec => |*cmd| cmd.closeJob(),
+                .fork_exec => |*cmd| {
+                    cmd.closeJob();
+                    cmd.closeProcess();
+                },
                 .flatpak => {},
             };
         }
@@ -1216,6 +1219,7 @@ const Subprocess = struct {
                 .windows => {
                     // Kills the child and its console descendants, not
                     // the GUI programs it started.
+                    defer command.closeProcess();
                     defer command.closeJob();
                     try command.killTree();
 

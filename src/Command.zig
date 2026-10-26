@@ -579,6 +579,15 @@ pub fn closeJob(self: *Command) void {
     self.job = null;
 }
 
+/// Close the process handle (Windows). Call once the child has been
+/// waited for or has otherwise exited; `pid` is null afterwards. Safe to
+/// call repeatedly.
+pub fn closeProcess(self: *Command) void {
+    if (comptime builtin.target.os.tag != .windows) return;
+    if (self.pid) |h| _ = windows.exp.kernel32.CloseHandle(h);
+    self.pid = null;
+}
+
 fn setupFd(src: File.Handle, target: i32) !void {
     const PosixCall = struct {
         fn f(func: anytype, args: anytype) !usize {
@@ -1252,7 +1261,7 @@ const JobTree = struct {
         };
         if (self.cmd.job != null) self.cmd.killTree() catch {};
         self.cmd.closeJob();
-        _ = k32.CloseHandle(self.cmd.pid.?);
+        self.cmd.closeProcess();
     }
 
     /// Wait (bounded) until the job lists processes satisfying `ready`,
@@ -1360,6 +1369,25 @@ test "windows command: killTree leaves GUI grandchildren running" {
         @as(windows.DWORD, windows.WAIT_TIMEOUT),
         k32.WaitForSingleObject(gui, 0),
     );
+}
+
+test "windows command: closeProcess closes the handle once" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    var tree = try JobTree.start("ping -n 60 127.0.0.1 >nul");
+    defer tree.deinit();
+    const old = tree.cmd.pid.?;
+
+    try tree.cmd.killTree();
+    _ = try tree.cmd.wait(false);
+    tree.cmd.closeProcess();
+    try testing.expect(tree.cmd.pid == null);
+    // The handle is gone: waiting on it is now an error.
+    try testing.expectEqual(
+        windows.WAIT_FAILED,
+        JobTree.k32.WaitForSingleObject(old, 0),
+    );
+    tree.cmd.closeProcess(); // idempotent
 }
 
 test "windows command: closing the job kills nothing" {
