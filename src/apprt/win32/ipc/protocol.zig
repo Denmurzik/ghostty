@@ -18,9 +18,10 @@ pub fn writeFrame(w: *std.Io.Writer, payload: []const u8) !void {
     try w.writeAll(payload);
 }
 
-pub fn readFrame(r: *std.Io.Reader, alloc: Allocator) ![]u8 {
+/// `max` is checked before allocating: the server passes `max_request_m2`.
+pub fn readFrame(r: *std.Io.Reader, alloc: Allocator, max: u32) ![]u8 {
     const len = try r.takeInt(u32, .little);
-    if (len > max_frame) return error.FrameTooLarge;
+    if (len > @min(max, max_frame)) return error.FrameTooLarge;
     const buf = try alloc.alloc(u8, len);
     errdefer alloc.free(buf);
     try r.readSliceAll(buf);
@@ -147,7 +148,8 @@ pub fn sanitizeClass(buf: []u8, class: []const u8) []const u8 {
     return buf[0..n];
 }
 
-/// `\\.\pipe\ghostty-<sid>-<session>-<class>`, plus `-admin` when elevated.
+/// `\\.\pipe\ghostty-<sid>-<session>-<u|a>-<class>`: the marker segment (`a`
+/// elevated, `u` not) precedes the class, so a class can never mimic it.
 pub fn pipeName(
     buf: []u8,
     sid: []const u8,
@@ -156,11 +158,11 @@ pub fn pipeName(
     elevated: bool,
 ) ![]const u8 {
     var class_buf: [max_class_len]u8 = undefined;
-    return std.fmt.bufPrint(buf, "\\\\.\\pipe\\ghostty-{s}-{d}-{s}{s}", .{
+    return std.fmt.bufPrint(buf, "\\\\.\\pipe\\ghostty-{s}-{d}-{c}-{s}", .{
         sid,
         session,
+        @as(u8, if (elevated) 'a' else 'u'),
         sanitizeClass(&class_buf, class),
-        if (elevated) "-admin" else "",
     });
 }
 
@@ -172,18 +174,21 @@ test "win32 ipc protocol: frame roundtrip and limits" {
     try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, '{', '}' }, aw.written());
 
     var r: std.Io.Reader = .fixed(aw.written());
-    const got = try readFrame(&r, testing.allocator);
+    const got = try readFrame(&r, testing.allocator, max_frame);
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("{}", got);
 
     var big: std.Io.Reader = .fixed(&.{ 1, 0, 0, 1 }); // 16 MiB + 1
-    try testing.expectError(error.FrameTooLarge, readFrame(&big, testing.allocator));
+    try testing.expectError(error.FrameTooLarge, readFrame(&big, testing.allocator, max_frame));
+
+    var m2: std.Io.Reader = .fixed(&.{ 0x00, 0x04, 0x01, 0, 0 }); // 65 KiB header
+    try testing.expectError(error.FrameTooLarge, readFrame(&m2, testing.allocator, max_request_m2));
 
     var trunc: std.Io.Reader = .fixed(&.{ 2, 0 });
-    try testing.expectError(error.EndOfStream, readFrame(&trunc, testing.allocator));
+    try testing.expectError(error.EndOfStream, readFrame(&trunc, testing.allocator, max_frame));
 
     var short: std.Io.Reader = .fixed(&.{ 5, 0, 0, 0, 'a' });
-    try testing.expectError(error.EndOfStream, readFrame(&short, testing.allocator));
+    try testing.expectError(error.EndOfStream, readFrame(&short, testing.allocator, max_frame));
 }
 
 test "win32 ipc protocol: request parse ignores unknown fields" {
@@ -225,11 +230,17 @@ test "win32 ipc protocol: response with data" {
 }
 
 test "win32 ipc protocol: pipe name has the elevation marker" {
-    var buf: [256]u8 = undefined;
-    const admin = try pipeName(&buf, "S-1", 1, "c", true);
-    try std.testing.expect(std.mem.endsWith(u8, admin, "-admin"));
-    const normal = try pipeName(&buf, "S-1", 1, "c", false);
-    try std.testing.expect(!std.mem.endsWith(u8, normal, "-admin"));
+    const t = std.testing;
+    var b1: [256]u8 = undefined;
+    var b2: [256]u8 = undefined;
+    const admin = try pipeName(&b1, "S-1", 1, "c", true);
+    try t.expectEqualStrings("\\\\.\\pipe\\ghostty-S-1-1-a-c", admin);
+    const normal = try pipeName(&b2, "S-1", 1, "c", false);
+    try t.expectEqualStrings("\\\\.\\pipe\\ghostty-S-1-1-u-c", normal);
+    // A class can never mimic the other instance's pipe.
+    const spoof = try pipeName(&b2, "S-1", 1, "x-admin", false);
+    const real = try pipeName(&b1, "S-1", 1, "x", true);
+    try t.expect(!std.mem.eql(u8, spoof, real));
 }
 
 test "win32 ipc protocol: deadline" {
@@ -252,7 +263,7 @@ test "win32 ipc protocol: pipe name sanitizes class" {
     const testing = std.testing;
     var buf: [256]u8 = undefined;
     const name = try pipeName(&buf, "S-1-5-21-1", 1, "com.mitchellh.ghostty", false);
-    try testing.expectEqualStrings("\\\\.\\pipe\\ghostty-S-1-5-21-1-1-com.mitchellh.ghostty", name);
+    try testing.expectEqualStrings("\\\\.\\pipe\\ghostty-S-1-5-21-1-1-u-com.mitchellh.ghostty", name);
 
     var cb: [80]u8 = undefined;
     try testing.expectEqualStrings("a_b___", sanitizeClass(&cb, "a b/ж"));
