@@ -1,13 +1,31 @@
-//! Colours of the window chrome and the system colour scheme. Stub: Task 15.
+//! Colours of the window chrome and the system colour scheme: the palette of
+//! the tab strip, the dark mode of the frame and scrollbars, and the reaction
+//! to a changed system theme or high contrast setting.
+const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
+const configpkg = @import("../../config.zig");
+const terminal = @import("../../terminal/main.zig");
 const App = @import("App.zig");
+const Chrome = @import("Chrome.zig");
 const Window = @import("Window.zig");
 const util = @import("util.zig");
 
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
+
+const log = std.log.scoped(.win32_theme);
+
+extern "user32" fn GetSysColor(index: i32) callconv(.winapi) u32;
+
+const COLOR_WINDOW = 5;
+const COLOR_WINDOWTEXT = 8;
+const COLOR_HIGHLIGHT = 13;
+const COLOR_HIGHLIGHTTEXT = 14;
+
+/// The chrome painter draws over Mica (Task 12 decision, SPEC §18 item 9).
+const painter_over_mica = true;
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 
@@ -26,41 +44,383 @@ pub const Palette = struct {
     divider: Color,
 };
 
-pub fn palette(window: *const Window) Palette {
-    _ = window;
+/// The system colours that replace the palette in high contrast mode.
+const SystemColors = struct {
+    window: Color,
+    window_text: Color,
+    highlight: Color,
+    highlight_text: Color,
+
+    fn read() SystemColors {
+        return .{
+            .window = fromColorRef(GetSysColor(COLOR_WINDOW)),
+            .window_text = fromColorRef(GetSysColor(COLOR_WINDOWTEXT)),
+            .highlight = fromColorRef(GetSysColor(COLOR_HIGHLIGHT)),
+            .highlight_text = fromColorRef(GetSysColor(COLOR_HIGHLIGHTTEXT)),
+        };
+    }
+};
+
+/// A COLORREF is 0x00BBGGRR.
+fn fromColorRef(c: u32) Color {
     return .{
-        .dark = true,
-        .mica = false,
-        .strip_bg = .{ .r = 0x20, .g = 0x20, .b = 0x20 },
-        .tab_active_bg = .{ .r = 0x2D, .g = 0x2D, .b = 0x2D },
-        .tab_hover_bg = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
-        .text = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
-        .text_inactive = .{ .r = 0x9D, .g = 0x9D, .b = 0x9D },
-        .button_hover_bg = .{ .r = 0x33, .g = 0x33, .b = 0x33 },
-        .button_pressed_bg = .{ .r = 0x3D, .g = 0x3D, .b = 0x3D },
-        .divider = .{ .r = 0x3A, .g = 0x3A, .b = 0x3A },
+        .r = @truncate(c),
+        .g = @truncate(c >> 8),
+        .b = @truncate(c >> 16),
     };
 }
 
-pub fn applyToWindow(window: *Window) void {
-    const dark: win32.foundation.BOOL = @intFromBool(util.systemUsesDarkTheme());
-    _ = win32.dwmapi.DwmSetWindowAttribute(
-        window.hwnd,
-        win32.dwmapi.DWMWA_USE_IMMERSIVE_DARK_MODE,
-        &dark,
-        @sizeOf(win32.foundation.BOOL),
+fn luminanceIsDark(c: Color) bool {
+    const rgb: terminal.color.RGB = .{ .r = c.r, .g = c.g, .b = c.b };
+    return rgb.luminance() < 0.5;
+}
+
+/// The fields of the config that the chrome depends on. Kept as a copy:
+/// the config handed to `config_change` is only valid during the call.
+const Inputs = struct {
+    window_theme: configpkg.Config.WindowTheme,
+    background: Color,
+    foreground: Color,
+    titlebar_background: ?Color,
+    titlebar_foreground: ?Color,
+    split_divider: ?Color,
+
+    fn from(config: *const configpkg.Config) Inputs {
+        return .{
+            .window_theme = config.@"window-theme",
+            .background = fromConfig(config.background),
+            .foreground = fromConfig(config.foreground),
+            .titlebar_background = if (config.@"window-titlebar-background") |c| fromConfig(c) else null,
+            .titlebar_foreground = if (config.@"window-titlebar-foreground") |c| fromConfig(c) else null,
+            .split_divider = if (config.@"split-divider-color") |c| fromConfig(c) else null,
+        };
+    }
+
+    fn fromConfig(c: configpkg.Config.Color) Color {
+        return .{ .r = c.r, .g = c.g, .b = c.b };
+    }
+
+    fn isDark(self: Inputs, sys_dark: bool) bool {
+        return switch (self.window_theme) {
+            .light => false,
+            .dark => true,
+            .auto, .system => sys_dark,
+            .ghostty => luminanceIsDark(self.background),
+        };
+    }
+};
+
+/// The system colour scheme; null until the first read. UI thread only.
+var system_dark: ?bool = null;
+
+/// Cached `SPI_GETHIGHCONTRAST`; null until read. UI thread only.
+var high_contrast: ?bool = null;
+
+/// What the last `config_change` delivered: the config with its
+/// conditional (light/dark theme) state applied, which `App.config` is not.
+var applied: ?Inputs = null;
+
+/// Message time of the last `WM_SETTINGCHANGE` that was acted on.
+var last_setting_time: ?i32 = null;
+
+pub fn highContrast() bool {
+    if (high_contrast) |hc| return hc;
+    var info: win32.user32.HIGHCONTRASTW = .{};
+    const ok = win32.user32.SystemParametersInfoW(
+        win32.user32.SPI_GETHIGHCONTRAST,
+        @sizeOf(win32.user32.HIGHCONTRASTW),
+        &info,
+        0,
+    );
+    const on = ok != 0 and (info.dwFlags & win32.user32.HCF_HIGHCONTRASTON) != 0;
+    high_contrast = on;
+    return on;
+}
+
+pub fn isDark(config: *const configpkg.Config, sys_dark: bool) bool {
+    return Inputs.from(config).isDark(sys_dark);
+}
+
+pub fn compute(config: *const configpkg.Config, sys_dark: bool, active: bool) Palette {
+    return computeWith(.from(config), sys_dark, active, if (highContrast()) SystemColors.read() else null);
+}
+
+fn computeWith(in: Inputs, sys_dark: bool, active: bool, hc: ?SystemColors) Palette {
+    // An inactive window's caption text is `text_inactive`, picked by the painter.
+    _ = active;
+
+    if (hc) |sys| {
+        const text = sys.window_text;
+        const overlay: Color = .{ .r = text.r, .g = text.g, .b = text.b, .a = 0x30 };
+        return .{
+            .dark = luminanceIsDark(sys.window),
+            .mica = false,
+            .strip_bg = sys.window,
+            .tab_active_bg = sys.window,
+            .tab_hover_bg = overlay,
+            .text = text,
+            .text_inactive = text,
+            .button_hover_bg = overlay,
+            .button_pressed_bg = .{ .r = text.r, .g = text.g, .b = text.b, .a = 0x50 },
+            .close_hover_bg = sys.highlight,
+            .close_hover_text = sys.highlight_text,
+            .divider = text,
+        };
+    }
+
+    const ghostty = in.window_theme == .ghostty;
+    const mica = painter_over_mica and !ghostty;
+
+    var p: Palette = if (in.isDark(sys_dark)) .{
+        .dark = true,
+        .mica = mica,
+        .strip_bg = .{ .r = 0x20, .g = 0x20, .b = 0x20 },
+        .tab_active_bg = in.background,
+        .tab_hover_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x10 },
+        .text = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .text_inactive = .{ .r = 0x9E, .g = 0x9E, .b = 0x9E },
+        .button_hover_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x15 },
+        .button_pressed_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x0B },
+        .divider = .{ .r = 0x3C, .g = 0x3C, .b = 0x3C },
+    } else .{
+        .dark = false,
+        .mica = mica,
+        .strip_bg = .{ .r = 0xF3, .g = 0xF3, .b = 0xF3 },
+        .tab_active_bg = in.background,
+        .tab_hover_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x0A },
+        .text = .{ .r = 0, .g = 0, .b = 0, .a = 0xE4 },
+        .text_inactive = .{ .r = 0x5C, .g = 0x5C, .b = 0x5C },
+        .button_hover_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x09 },
+        .button_pressed_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x06 },
+        .divider = .{ .r = 0xC8, .g = 0xC8, .b = 0xC8 },
+    };
+
+    if (ghostty) {
+        p.strip_bg = in.titlebar_background orelse in.background;
+        p.text = in.titlebar_foreground orelse in.foreground;
+    }
+    if (in.split_divider) |c| p.divider = c;
+    if (mica) p.strip_bg.a = 0;
+    return p;
+}
+
+pub fn palette(window: *const Window) Palette {
+    const active = if (win32.user32.GetForegroundWindow()) |fg| fg == window.hwnd else false;
+    return computeWith(
+        applied orelse .from(&window.app.config),
+        system_dark orelse false,
+        active,
+        if (highContrast()) SystemColors.read() else null,
     );
 }
 
+/// Dark title bar and scrollbars of one window, and a repaint of its chrome.
+/// The first call also reports the system colour scheme to core, so that the
+/// `theme = light:...,dark:...` of the config is resolved before it is used.
+pub fn applyToWindow(window: *Window) void {
+    const app = window.app;
+    if (system_dark == null) {
+        const dark = util.systemUsesDarkTheme();
+        system_dark = dark;
+        app.core_app.colorSchemeEvent(app, if (dark) .dark else .light) catch |err| {
+            log.warn("unable to report the color scheme err={}", .{err});
+        };
+    }
+
+    const in: Inputs = applied orelse .from(&app.config);
+    const dark = in.isDark(system_dark orelse false);
+
+    const flag: win32.foundation.BOOL = @intFromBool(dark);
+    _ = win32.dwmapi.DwmSetWindowAttribute(
+        window.hwnd,
+        win32.dwmapi.DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &flag,
+        @sizeOf(win32.foundation.BOOL),
+    );
+
+    const dark_explorer = std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer");
+    for (window.tabs.items) |tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| {
+            _ = win32.uxtheme.SetWindowTheme(entry.view.hwnd, if (dark) dark_explorer else null, null);
+        }
+    }
+
+    Chrome.invalidate(window);
+}
+
+fn applyToAll(app: *App) void {
+    for (app.windows.items) |window| applyToWindow(window);
+}
+
+/// Remember the config the chrome is drawn from, and apply it everywhere.
+pub fn configChanged(app: *App, config: *const configpkg.Config) void {
+    applied = .from(config);
+    for (app.windows.items) |window| {
+        applyToWindow(window);
+        window.layout();
+    }
+}
+
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
-    _ = window;
-    _ = msg;
     _ = wparam;
-    _ = lparam;
+    switch (msg) {
+        win32.user32.WM_SETTINGCHANGE => settingChanged(window.app, lparam),
+        win32.user32.WM_ACTIVATE => Chrome.invalidate(window),
+        else => {},
+    }
     return null;
 }
 
+/// The system colour scheme changed (or was simulated by the test op).
 pub fn schemeChanged(app: *App, scheme: apprt.ColorScheme) void {
-    _ = app;
-    _ = scheme;
+    system_dark = scheme == .dark;
+    app.core_app.colorSchemeEvent(app, scheme) catch |err| {
+        log.warn("unable to report the color scheme err={}", .{err});
+    };
+    for (app.windows.items) |window| {
+        for (window.tabs.items) |tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                entry.view.core().colorSchemeCallback(scheme) catch |err| {
+                    log.warn("unable to report the color scheme to a surface err={}", .{err});
+                };
+            }
+        }
+    }
+    applyToAll(app);
+}
+
+/// `WM_SETTINGCHANGE`; `lparam` is the name of the changed setting, if any.
+/// A broadcast reaches every top-level window, only the first one acts.
+pub fn settingChanged(app: *App, lparam: LPARAM) void {
+    const time = win32.user32.GetMessageTime();
+    if (last_setting_time) |t| if (t == time) return;
+    last_setting_time = time;
+
+    if (lparam != 0) {
+        const name: [*:0]const u16 = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        const wide = std.mem.span(name);
+        if (std.mem.eql(u16, wide, std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet"))) {
+            const dark = util.systemUsesDarkTheme();
+            if (system_dark != dark) schemeChanged(app, if (dark) .dark else .light);
+            return;
+        }
+        if (!std.mem.eql(u16, wide, std.unicode.utf8ToUtf16LeStringLiteral("WindowsThemeElement"))) return;
+    }
+
+    // WindowsThemeElement, or SPI_SETHIGHCONTRAST (no name).
+    high_contrast = null;
+    applyToAll(app);
+}
+
+test "win32 theme: dark and light palettes" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    const dark = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expect(dark.dark);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, dark.text);
+    try std.testing.expectEqual(Color{ .r = 0x9E, .g = 0x9E, .b = 0x9E }, dark.text_inactive);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x10 }, dark.tab_hover_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x15 }, dark.button_hover_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x0B }, dark.button_pressed_bg);
+    try std.testing.expectEqual(Color{ .r = 0x20, .g = 0x20, .b = 0x20, .a = 0 }, dark.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 0x3C, .g = 0x3C, .b = 0x3C }, dark.divider);
+    try std.testing.expectEqual(Color{ .r = cfg.background.r, .g = cfg.background.g, .b = cfg.background.b }, dark.tab_active_bg);
+
+    const light = computeWith(.from(&cfg), false, true, null);
+    try std.testing.expect(!light.dark);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0xE4 }, light.text);
+    try std.testing.expectEqual(Color{ .r = 0x5C, .g = 0x5C, .b = 0x5C }, light.text_inactive);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x0A }, light.tab_hover_bg);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x09 }, light.button_hover_bg);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x06 }, light.button_pressed_bg);
+    try std.testing.expectEqual(Color{ .r = 0xF3, .g = 0xF3, .b = 0xF3, .a = 0 }, light.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 0xC8, .g = 0xC8, .b = 0xC8 }, light.divider);
+
+    // window-theme light/dark ignores the system scheme, and the divider
+    // colour of the config wins.
+    cfg.@"window-theme" = .light;
+    cfg.@"split-divider-color" = .{ .r = 1, .g = 2, .b = 3 };
+    const forced = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expect(!forced.dark);
+    try std.testing.expectEqual(Color{ .r = 1, .g = 2, .b = 3 }, forced.divider);
+    cfg.@"window-theme" = .dark;
+    try std.testing.expect(isDark(&cfg, false));
+}
+
+test "win32 theme: ghostty theme follows background luminance" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    cfg.@"window-theme" = .ghostty;
+
+    cfg.background = .{ .r = 0xFA, .g = 0xFA, .b = 0xFA };
+    try std.testing.expect(!isDark(&cfg, true));
+    try std.testing.expect(!computeWith(.from(&cfg), true, true, null).dark);
+
+    cfg.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    try std.testing.expect(isDark(&cfg, false));
+    try std.testing.expect(computeWith(.from(&cfg), false, true, null).dark);
+}
+
+test "win32 theme: titlebar colours only with window-theme ghostty" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    cfg.@"window-titlebar-background" = .{ .r = 0x11, .g = 0x22, .b = 0x33 };
+    cfg.@"window-titlebar-foreground" = .{ .r = 0x44, .g = 0x55, .b = 0x66 };
+
+    const plain = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expectEqual(@as(u8, 0x20), plain.strip_bg.r);
+    try std.testing.expectEqual(@as(u8, 0xFF), plain.text.r);
+
+    cfg.@"window-theme" = .ghostty;
+    const ghostty = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expectEqual(Color{ .r = 0x11, .g = 0x22, .b = 0x33 }, ghostty.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 0x44, .g = 0x55, .b = 0x66 }, ghostty.text);
+
+    // Without the overrides the terminal colours are used.
+    cfg.@"window-titlebar-background" = null;
+    cfg.@"window-titlebar-foreground" = null;
+    const fallback = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expectEqual(Color{ .r = cfg.background.r, .g = cfg.background.g, .b = cfg.background.b }, fallback.strip_bg);
+    try std.testing.expectEqual(Color{ .r = cfg.foreground.r, .g = cfg.foreground.g, .b = cfg.foreground.b }, fallback.text);
+}
+
+test "win32 theme: mica clears strip alpha" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    const mica = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expect(mica.mica);
+    try std.testing.expectEqual(@as(u8, 0), mica.strip_bg.a);
+
+    cfg.@"window-theme" = .ghostty;
+    const solid = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expect(!solid.mica);
+    try std.testing.expectEqual(@as(u8, 255), solid.strip_bg.a);
+}
+
+test "win32 theme: high contrast disables mica" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    const sys: SystemColors = .{
+        .window = .{ .r = 0, .g = 0, .b = 0 },
+        .window_text = .{ .r = 0xFF, .g = 0xFF, .b = 0 },
+        .highlight = .{ .r = 0x1A, .g = 0xEB, .b = 0xFF },
+        .highlight_text = .{ .r = 0, .g = 0, .b = 0 },
+    };
+    const p = computeWith(.from(&cfg), false, true, sys);
+    try std.testing.expect(!p.mica);
+    try std.testing.expect(p.dark);
+    try std.testing.expectEqual(sys.window, p.strip_bg);
+    try std.testing.expectEqual(sys.window_text, p.text);
+    try std.testing.expectEqual(sys.window_text, p.divider);
+    try std.testing.expectEqual(sys.highlight, p.close_hover_bg);
+    try std.testing.expectEqual(sys.highlight_text, p.close_hover_text);
+}
+
+test "win32 theme: colorref channel order" {
+    try std.testing.expectEqual(Color{ .r = 0x11, .g = 0x22, .b = 0x33 }, fromColorRef(0x00332211));
 }

@@ -204,18 +204,12 @@ pub const Command = union(enum) {
             .direct => |v| {
                 if (comptime builtin.target.os.tag == .windows) {
                     // Quote the arguments back so that parseCLI reads the
-                    // same arguments again.
-                    var line_buf: [4096]u8 = undefined;
-                    var fba: std.heap.FixedBufferAllocator = .init(&line_buf);
-                    const line = windows_cmdline.createCommandLine(
-                        fba.allocator(),
-                        v,
-                    ) catch return error.OutOfMemory;
-
-                    var buf: [4096 + "direct:".len]u8 = undefined;
-                    var writer: std.Io.Writer = .fixed(&buf);
-                    writer.print("direct:{s}", .{line}) catch return error.OutOfMemory;
-                    try formatter.formatEntry([]const u8, writer.buffered());
+                    // same arguments again. Written straight through the
+                    // formatter's writer: a command line has no size limit.
+                    const writer = formatter.writer;
+                    try writer.print("{s} = direct:", .{formatter.name});
+                    try windows_cmdline.writeCommandLine(writer, v);
+                    try writer.writeByte('\n');
                     return;
                 }
 
@@ -442,6 +436,28 @@ pub const Command = union(enum) {
         try back.parseCLI(alloc, value);
         try testing.expectEqual(v.direct.len, back.direct.len);
         for (v.direct, back.direct) |want, got| try testing.expectEqualStrings(want, got);
+    }
+
+    test "config command: formatEntry with a 10000-byte direct command" {
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var buf: std.Io.Writer.Allocating = .init(alloc);
+        defer buf.deinit();
+
+        const long = try alloc.alloc(u8, 10000);
+        @memset(long, 'x');
+        const input = try std.fmt.allocPrint(alloc, "direct:tool.exe {s}", .{long});
+        var v: Self = undefined;
+        try v.parseCLI(alloc, input);
+        try v.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try testing.expectEqualStrings(
+            try std.fmt.allocPrint(alloc, "a = {s}\n", .{input}),
+            buf.written(),
+        );
     }
 };
 

@@ -85,8 +85,12 @@ pub fn tokenizeWindows(alloc: Allocator, s: []const u8) Allocator.Error![][:0]co
 pub fn createCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
-    const writer = &buf.writer;
+    try writeCommandLine(&buf.writer, argv);
+    return buf.toOwnedSliceSentinel(0);
+}
 
+/// `createCommandLine` into a writer.
+pub fn writeCommandLine(writer: *std.Io.Writer, argv: []const []const u8) std.Io.Writer.Error!void {
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
         if (arg.len > 0 and mem.indexOfAny(u8, arg, " \t\n\"") == null) {
@@ -121,6 +125,4 @@ pub fn createCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:
         try writer.splatByteAll('\\', backslash_count * 2);
         try writer.writeByte('"');
     }
-
-    return buf.toOwnedSliceSentinel(0);
 }
