@@ -17,6 +17,15 @@ Scenarios:
                the surface (cmd has no `seq`), so the scrollback is full, then
                idles. Needs a usable foreground window to type into; without
                one it is reported and no row is written.
+  tabs         one window with 5 tabs (4 x `new_tab`), idle. Driven by the test
+               IPC `action` op, no keyboard input. The per-tab cost is
+               (tabs - one-surface) / 4.
+  splits       one tab with 5 split panes (4 x `new_split`, right/down
+               alternating), idle. Per split: (splits - one-surface) / 4.
+  zero-windows one window opened then closed with the Windows default
+               `quit-after-last-window-closed = false`: the process stays
+               resident (tray, Task 28) and is sampled. A build whose process
+               exits with its last window (before Task 28) records `n/a`.
 
 Budgeted numbers come from a ReleaseFast build. Debug rows may be recorded
 with -Optimize Debug but are never gated.
@@ -33,7 +42,7 @@ adapter is read from the `d3d11 adapter=` line of the sandbox's ghostty.log.
 hardware (default) or warp (GHOSTTY_D3D11_DRIVER=warp).
 
 .PARAMETER Scenario
-one-surface (default) or scrollback.
+one-surface (default), scrollback, tabs, splits or zero-windows.
 
 .PARAMETER Optimize
 ReleaseFast (default) or Debug: which build to measure and what the row says.
@@ -64,7 +73,7 @@ powershell -NoProfile -File test/windows/measure-ram.ps1 -Driver warp -Scenario 
 #>
 param(
     [ValidateSet('hardware', 'warp')][string]$Driver = 'hardware',
-    [ValidateSet('one-surface', 'scrollback')][string]$Scenario = 'one-surface',
+    [ValidateSet('one-surface', 'scrollback', 'tabs', 'splits', 'zero-windows')][string]$Scenario = 'one-surface',
     [ValidateSet('ReleaseFast', 'Debug')][string]$Optimize = 'ReleaseFast',
     [string]$Exe,
     [string]$Csv,
@@ -77,6 +86,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'lib\Harness.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\GhosttyIpc.psm1') -Force
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Exe) {
@@ -100,9 +110,11 @@ $dirs = @{
 foreach ($d in $dirs.Values) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 $configHome = Join-Path $dirs.Home '.config'
 New-Item -ItemType Directory -Force -Path (Join-Path $configHome 'ghostty') | Out-Null
+# zero-windows needs the Windows default (the process outlives its last window).
+$quitLine = if ($Scenario -eq 'zero-windows') { '' } else { "quit-after-last-window-closed = true`n" }
 $ramClass = 'ghostty-ram-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 [IO.File]::WriteAllText((Join-Path $configHome 'ghostty\config.ghostty'),
-    (New-GhosttyConfigText -Class $ramClass -Extra "command = direct:cmd.exe /k`nconfirm-close-surface = false`nquit-after-last-window-closed = true`n$ConfigExtra"),
+    (New-GhosttyConfigText -Class $ramClass -Extra "command = direct:cmd.exe /k`nconfirm-close-surface = false`n$quitLine$ConfigExtra"),
     (New-Object Text.UTF8Encoding $false))
 
 $vars = [ordered]@{
@@ -115,6 +127,7 @@ $vars = [ordered]@{
     XDG_CONFIG_HOME      = $configHome
     GHOSTTY_D3D11_DRIVER = $(if ($Driver -eq 'warp') { 'warp' } else { $null })
     GHOSTTY_D3D11_DUMP   = $null
+    GHOSTTY_WIN32_TEST_IPC = $(if ($Scenario -in 'tabs', 'splits', 'zero-windows') { '1' } else { $null })
 }
 
 $lock = Enter-GuiLock -Owner 'measure-ram.ps1' -TimeoutMinutes 30
@@ -160,11 +173,56 @@ try {
         Write-Host ('INFO scrollback filled in {0:N1} s' -f $sw.Elapsed.TotalSeconds)
     }
 
+    # The IPC `state` op: windows, tabs and surfaces as the app sees them.
+    function Get-RamState {
+        $r = Get-GhosttyState -Class $ramClass
+        if ($r.PSObject.Properties['data'] -and $null -ne $r.data) { $r.data } else { $r }
+    }
+    function Invoke-RamAction([string]$Action) {
+        $r = Invoke-GhosttyAction -Class $ramClass -Action $Action
+        if ($r.PSObject.Properties['code'] -and $r.code -ne 0) { throw "action '$Action' failed: $($r.stderr)" }
+        $d = if ($r.PSObject.Properties['data'] -and $null -ne $r.data) { $r.data } else { $r }
+        if ($d.PSObject.Properties['performed'] -and -not $d.performed) { throw "action '$Action' was not performed" }
+        Start-Sleep -Milliseconds 700
+    }
+
+    $notApplicable = $false
+    switch ($Scenario) {
+        'tabs' {
+            for ($i = 0; $i -lt 4; $i++) { Invoke-RamAction 'new_tab' }
+            $w = @((Get-RamState).windows)[0]
+            if (@($w.tabs).Count -ne 5) { throw "expected 5 tabs, state shows $(@($w.tabs).Count)" }
+        }
+        'splits' {
+            for ($i = 0; $i -lt 4; $i++) { Invoke-RamAction $(if ($i % 2 -eq 0) { 'new_split:right' } else { 'new_split:down' }) }
+            $w = @((Get-RamState).windows)[0]
+            $n = @(@($w.tabs)[[int]$w.active_tab].surfaces).Count
+            if ($n -ne 5) { throw "expected 5 surfaces, state shows $n" }
+        }
+        'zero-windows' {
+            Invoke-RamAction 'close_window'
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt 3) { Start-Sleep -Milliseconds 100 }
+            if ($proc.HasExited) {
+                Write-Host 'INFO the process ended with its last window (no resident tray yet): n/a'
+                $notApplicable = $true
+            } else {
+                $windows = @((Get-RamState).windows)
+                if ($windows.Count -ne 0) { throw "expected no windows after close_window, state shows $($windows.Count)" }
+            }
+        }
+    }
+
+    if ($notApplicable) {
+        $privateMb = 'n/a'
+        $wsMb = 'n/a'
+    } else {
     Start-Sleep -Seconds $IdleSeconds
     $proc.Refresh()
     if ($proc.HasExited) { throw 'ghostty exited before it could be sampled' }
     $privateMb = [math]::Round($proc.PrivateMemorySize64 / 1MB, 1)
     $wsMb = [math]::Round($proc.WorkingSet64 / 1MB, 1)
+    }
 
     $adapter = 'unknown'
     $log = Join-Path $dirs.Local 'ghostty\logs\ghostty.log'
@@ -193,7 +251,7 @@ if (-not (Test-Path -LiteralPath $Csv)) {
 # Adapter names have no commas in practice; keep the file parseable anyway.
 $row = '{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
     ($adapter -replace ',', ' '), $Scenario,
-    $privateMb.ToString([Globalization.CultureInfo]::InvariantCulture),
-    $wsMb.ToString([Globalization.CultureInfo]::InvariantCulture)
+    ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $privateMb)),
+    ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $wsMb))
 [IO.File]::AppendAllText($Csv, $row + "`n", (New-Object Text.UTF8Encoding $false))
 Write-Output $row
