@@ -119,7 +119,7 @@ fn handleKey(
     var text: []const u8 = "";
     var dead = false;
     if (is_down) {
-        const drained = drainChars(surface, &text_buf);
+        const drained = drainChars(surface, sys, &text_buf);
         text = drained.text;
         dead = drained.dead;
     }
@@ -231,18 +231,21 @@ const Drained = struct {
 
 /// Remove the WM_CHAR family messages `TranslateMessage` queued for the
 /// key-down being handled and return their text.
-fn drainChars(surface: *Surface, buf: []u8) Drained {
+///
+/// One `PeekMessageW(PM_REMOVE)` per unit, filtered to the character
+/// messages of the key's kind. `TranslateMessage` queues them right behind
+/// the key-down and the next key's characters only exist after this
+/// handler returned, so anything the filter finds belongs to this key.
+fn drainChars(surface: *Surface, sys: bool, buf: []u8) Drained {
     var len: usize = 0;
     var dead = false;
 
     // A key yields at most a few units; bound the loop regardless.
     for (0..16) |_| {
-        var peek: user32.MSG = .{};
-        if (user32.PeekMessageW(&peek, surface.hwnd, WM_KEYFIRST, WM_KEYLAST, user32.PM_NOREMOVE) == 0) break;
-        if (!isCharMessage(peek.message)) break;
-
         var msg: user32.MSG = .{};
-        if (user32.PeekMessageW(&msg, surface.hwnd, peek.message, peek.message, user32.PM_REMOVE) == 0) break;
+        const first = if (sys) user32.WM_SYSCHAR else user32.WM_CHAR;
+        const last = if (sys) user32.WM_SYSDEADCHAR else user32.WM_DEADCHAR;
+        if (user32.PeekMessageW(&msg, surface.hwnd, first, last, user32.PM_REMOVE) == 0) break;
 
         const unit: u16 = @truncate(msg.wParam);
         var out: [key.Utf16Joiner.max_out]u8 = undefined;
@@ -260,13 +263,6 @@ fn drainChars(surface: *Surface, buf: []u8) Drained {
     }
 
     return .{ .text = buf[0..len], .dead = dead };
-}
-
-fn isCharMessage(message: u32) bool {
-    return switch (message) {
-        user32.WM_CHAR, user32.WM_SYSCHAR, user32.WM_DEADCHAR, user32.WM_SYSDEADCHAR => true,
-        else => false,
-    };
 }
 
 fn encodeUnit(unit: u16, out: *[key.Utf16Joiner.max_out]u8) []const u8 {
