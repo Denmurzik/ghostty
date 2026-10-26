@@ -123,7 +123,8 @@ holds, not with pixels:
    (`00000042 <printable ASCII payload> <CRC-32>`, at most 78 characters,
    line `i` is a function of `i` alone) into the sandbox `TEMP`:
    50 MB by default, `GHOSTTY_E2E_STREAM_MB` to change it.
-2. Git Bash runs `cat` on it, then prints an end marker.
+2. Git Bash writes it to the terminal with `cmd //c type`, then prints an
+   end marker.
 3. `ctrl+shift+f12` is bound to `write_screen_file:paste`
    (`configs/stream-integrity.ghostty`, with `scrollback-limit-bytes =
    unlimited`): Ghostty writes the screen and scrollback as plain text to a
@@ -132,7 +133,8 @@ holds, not with pixels:
    changed or extra line with its line number and the first column that
    differs; any of them, or a missing end marker, FAILs.
 
-The throughput of the `cat` is reported as an INFO line. Run it on a
+The throughput is reported as an INFO line; it is the writer's (`type`
+writes slowly, about 1 MB/s) rather than the terminal's. Run it on a
 ReleaseFast build (a Debug build parses far too slowly for 50 MB; use
 `GHOSTTY_E2E_STREAM_MB=2` there):
 
@@ -140,6 +142,22 @@ ReleaseFast build (a Debug build parses far too slowly for 50 MB; use
 $env:GHOSTTY_E2E_EXE = "$PWD\zig-out-rf\bin\ghostty.exe"
 powershell -NoProfile -File test/windows/e2e-m1.ps1 -Only stream-integrity
 ```
+
+**Why not `cat`:** Git Bash's own programs lose data on the way to any
+console. msys2-runtime (3.6.9 here) converts a run of up to 32768 bytes for
+`WriteConsoleW` into a 32768-character buffer, and its `_sys_mbstowcs`
+keeps the last slot for a NUL, so the last byte of every full 32 KiB run is
+dropped, and the run is still counted as written
+(`fhandler_console::write_normal` / `CONVERT_LIMIT`). `cat` writes 128 KiB
+at a time, so a `cat` of 50 MB loses exactly one byte per 32 KiB: 1600
+bytes at stream offsets 32767, 65535, ... The raw pseudo console output
+already lacks them, while `type` and PowerShell writing in the same 32 KiB
+chunks (`WriteFile` and `WriteConsoleW`) arrive intact. This was the
+"quick brow fox" seen after a Task 30 throughput run.
+`GHOSTTY_E2E_STREAM_WRITER=cat` runs the scenario with `cat` anyway: losses
+with exactly that signature are reported as INFO and pass, any other damage
+fails. `cat` also gives the end-to-end throughput (about 9 MB/s on
+ReleaseFast).
 
 Below the GUI, the `windows exec:` tests in `src/termio/Exec.zig` cover
 the same path in parts: the 2 KiB slicing of a read, a 50 MB stream of

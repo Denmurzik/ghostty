@@ -13,7 +13,9 @@
 # plain text, one terminal row per line) and compares the stream lines in it
 # with the generated ones. It reports every missing, changed or extra line
 # with its line number and, for a changed line, the first column that
-# differs.
+# differs. A changed line that only lost the byte at stream offset
+# 32767 mod 32768 is counted in BlockEndLosses: the signature of
+# msys2-runtime's console write (see README.md, stream-integrity).
 #
 # Keep this file ASCII only (Windows PowerShell 5.1 reads a BOM-less script
 # as ANSI).
@@ -99,11 +101,20 @@ public class Result {
     public long Missing;
     public long Changed;
     public long Extra;
+    // Changed lines whose only damage is the loss of the byte at stream
+    // offset 32767 mod 32768: msys2-runtime's console write (see below).
+    public long BlockEndLosses;
     public bool SawEnd;
     public long FirstDumpLine = -1;
     public List<string> Problems = new List<string>();
     public void Note(string s) { if (Problems.Count < 40) Problems.Add(s); }
 }
+
+// msys2-runtime (Cygwin) writes runs of up to 32768 bytes to a console
+// through a 32768-character conversion buffer that keeps its last slot for
+// a NUL, so the last byte of every full 32 KiB run is lost before the
+// console ever sees it. A lost byte at such an offset is recognised.
+public const long BlockLen = 32768;
 
 // Checks the dump against lines 0..count-1 followed by endMarker. Only
 // lines after the dump's first stream line are looked at (the shell's
@@ -112,6 +123,8 @@ public static Result Check(string dumpPath, long count, string endMarker) {
     Result r = new Result();
     r.Expected = count;
     long next = 0;
+    // Stream offset of line `next`.
+    long off = 0;
     long dumpLine = 0;
     bool started = false;
     foreach (string raw in File.ReadLines(dumpPath, Encoding.UTF8)) {
@@ -135,7 +148,7 @@ public static Result Check(string dumpPath, long count, string endMarker) {
         }
 
         string want = Line(next);
-        if (l == want) { r.Matched++; next++; continue; }
+        if (l == want) { r.Matched++; off += want.Length + 1; next++; continue; }
 
         long idx = ParseValid(l);
         if (idx > next && idx < count) {
@@ -143,6 +156,7 @@ public static Result Check(string dumpPath, long count, string endMarker) {
             r.Missing += idx - next;
             r.Note("dump line " + dumpLine + ": stream lines " + next + ".." + (idx - 1) + " missing (" + (idx - next) + " lines)");
             r.Matched++;
+            for (long i = next; i <= idx; i++) off += Line(i).Length + 1;
             next = idx + 1;
         } else if (idx >= 0) {
             r.Extra++;
@@ -155,7 +169,23 @@ public static Result Check(string dumpPath, long count, string endMarker) {
             break;
         } else {
             r.Changed++;
-            r.Note("dump line " + dumpLine + ": stream line " + next + " " + Describe(want, l) + "\n    want '" + want + "'\n    got  '" + l + "'");
+            // Where in this line the last byte of a 32 KiB block is (the
+            // line's length is its newline).
+            long k = BlockLen - 1 - off % BlockLen;
+            if (k < want.Length && want.Remove((int)k, 1) == l) {
+                r.BlockEndLosses++;
+                r.Note("dump line " + dumpLine + ": stream line " + next + " lost the byte at stream offset " + (off + k) + " (last byte of a 32 KiB block)");
+            } else if (k == want.Length && next + 1 < count && l == want + Line(next + 1)) {
+                // The newline was lost: two lines in one.
+                r.BlockEndLosses++;
+                r.Note("dump line " + dumpLine + ": stream lines " + next + " and " + (next + 1) + " joined, the newline at stream offset " + (off + k) + " lost (last byte of a 32 KiB block)");
+                off += want.Length + 1;
+                next++;
+                want = Line(next);
+            } else {
+                r.Note("dump line " + dumpLine + ": stream line " + next + " " + Describe(want, l) + "\n    want '" + want + "'\n    got  '" + l + "'");
+            }
+            off += want.Length + 1;
             next++;
         }
     }
