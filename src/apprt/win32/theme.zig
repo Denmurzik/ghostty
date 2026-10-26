@@ -5,6 +5,7 @@ const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
+const frame = @import("frame.zig");
 const terminal = @import("../../terminal/main.zig");
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
@@ -270,6 +271,8 @@ pub fn applyToWindow(window: *Window) void {
         }
     }
 
+    // Mica follows the palette, which the config or the scheme just changed.
+    frame.apply(window);
     Chrome.invalidate(window);
 }
 
