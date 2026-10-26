@@ -27,6 +27,34 @@ pub fn confirmClose(owner: win32.foundation.HWND) bool {
     );
 }
 
+/// What a close would take down. Decides the sentence of the confirmation.
+pub const CloseKind = enum { surface, tab, window, all_windows, app };
+
+/// Ask whether `kind` may be closed while a process is still running in it.
+pub fn confirmCloseKind(owner: win32.foundation.HWND, kind: CloseKind) bool {
+    return confirm(owner, closeTitle(kind), closeBody(kind));
+}
+
+fn closeTitle(kind: CloseKind) []const u8 {
+    return switch (kind) {
+        .surface => "Close Terminal",
+        .tab => "Close Tab",
+        .window => "Close Window",
+        .all_windows => "Close All Windows",
+        .app => "Quit Ghostty",
+    };
+}
+
+fn closeBody(kind: CloseKind) []const u8 {
+    return switch (kind) {
+        .surface => "A process is still running in this terminal. Close it anyway?",
+        .tab => "A process is still running in this tab. Close it anyway?",
+        .window => "A process is still running in this window. Close it anyway?",
+        .all_windows => "Processes are still running in your windows. Close them all anyway?",
+        .app => "Processes are still running. Quit Ghostty anyway?",
+    };
+}
+
 /// Show a yes/no question on top of `owner`. True for yes. "No" is the
 /// default button: every question asked here is about something that is
 /// hard to undo. Text that does not fit the (generous) fixed buffers is
@@ -189,4 +217,16 @@ test "win32 dialogs: wide conversion handles non-BMP, invalid bytes and truncati
     var small: [4]u16 = undefined;
     const cut = toWide(&small, "ab😀c");
     try std.testing.expectEqualSlices(u16, &.{ 'a', 'b' }, cut);
+}
+
+test "win32 dialogs: every close kind has its own sentence" {
+    const kinds = std.enums.values(CloseKind);
+    for (kinds, 0..) |a, i| {
+        try std.testing.expect(closeTitle(a).len > 0);
+        for (kinds[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(u8, closeBody(a), closeBody(b)));
+        }
+    }
+    // confirmClose keeps the M1 text.
+    try std.testing.expectEqualStrings("Close Terminal", closeTitle(.surface));
 }
