@@ -143,8 +143,9 @@ $env:GHOSTTY_E2E_EXE = "$PWD\zig-out-rf\bin\ghostty.exe"
 powershell -NoProfile -File test/windows/e2e-m1.ps1 -Only stream-integrity
 ```
 
-**Why not `cat`:** Git Bash's own programs lose data on the way to any
-console. msys2-runtime (3.6.9 here) converts a run of up to 32768 bytes for
+**Why not `cat`:** Git Bash's own programs lose data on the way to the
+console (measured here through a pseudo console; per the msys2-runtime
+source, this affects any console host). msys2-runtime (3.6.9 here) converts a run of up to 32768 bytes for
 `WriteConsoleW` into a 32768-character buffer, and its `_sys_mbstowcs`
 keeps the last slot for a NUL, so the last byte of every full 32 KiB run is
 dropped, and the run is still counted as written
