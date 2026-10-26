@@ -7,7 +7,7 @@
 //! back buffer (`copyToBackbuffer`) right before `present`.
 //!
 //! Everything that touches the swap chain except `waitForSlot` runs under
-//! the device context lock. `MakeWindowAssociation(NO_WINDOW_CHANGES)`
+//! the device context lock; `pacer` is atomic so that wait needs no lock. `MakeWindowAssociation(NO_WINDOW_CHANGES)`
 //! keeps DXGI from subclassing the window, so `present` never sends a
 //! message to the UI thread (which may be blocked joining the render
 //! thread).
@@ -57,7 +57,8 @@ height: u32,
 /// Flags the swap chain was created with, repeated by `ResizeBuffers`.
 flags: u32,
 
-/// Presents not yet matched by a wait (see `Pacer`).
+/// Presents not yet matched by a wait (see `Pacer`). Atomic: the render
+/// thread waits without the draw mutex while a sync draw may present.
 pacer: Pacer = .{},
 
 /// The id of the surface this chain presents for (latency trace tag).
@@ -147,7 +148,7 @@ pub fn deinit(self: *Self) void {
 /// the context lock for it.
 pub fn waitForSlot(self: *Self, timeout_ms: u32) bool {
     const handle = self.waitable orelse {
-        self.pacer.pending = 0;
+        self.pacer.pending.store(0, .monotonic);
         return true;
     };
     const waiter: HandleWaiter = .{ .handle = handle, .owner = self };
@@ -156,7 +157,7 @@ pub fn waitForSlot(self: *Self, timeout_ms: u32) bool {
 
 /// Whether a present is waiting to be matched by a wait.
 pub fn waitArmed(self: *const Self) bool {
-    return self.pacer.pending > 0;
+    return self.pacer.pending.load(.monotonic) > 0;
 }
 
 /// Whether the chain has been idle long enough that no frame of it can
@@ -202,36 +203,50 @@ pub const Pacer = struct {
     pub const idle_ns: u64 = 50 * ns_per_ms;
 
     /// Presents that no wait consumed yet; never more than the back
-    /// buffers, which bound the frames in flight.
-    pending: u32 = 0,
+    /// buffers, which bound the frames in flight. Atomic: a wait and a
+    /// present (or two waits) may run on different threads at once.
+    pending: std.atomic.Value(u32) = .init(0),
 
     /// When the last present returned.
-    last_present_ns: u64 = 0,
+    last_present_ns: std.atomic.Value(u64) = .init(0),
 
     pub fn presented(self: *Pacer, now: u64) void {
-        self.pending = @min(self.pending + 1, buffer_count);
-        self.last_present_ns = now;
+        self.last_present_ns.store(now, .monotonic);
+        var cur = self.pending.load(.monotonic);
+        while (cur < buffer_count) {
+            cur = self.pending.cmpxchgWeak(cur, cur + 1, .monotonic, .monotonic) orelse return;
+        }
     }
 
     pub fn isIdle(self: *const Pacer, now: u64) bool {
-        return self.pending > 0 and now -| self.last_present_ns >= idle_ns;
+        return self.pending.load(.monotonic) > 0 and
+            now -| self.last_present_ns.load(.monotonic) >= idle_ns;
     }
 
     /// `waiter.wait(timeout_ms)` returns a `WaitResult`. An idle chain is
     /// only polled: its frame is long gone, blocking would be for nothing.
     pub fn wait(self: *Pacer, now: u64, timeout_ms: u32, waiter: anytype) bool {
-        if (self.pending == 0) return true;
+        if (self.pending.load(.monotonic) == 0) return true;
         const effective = if (self.isIdle(now)) 0 else timeout_ms;
         switch (waiter.wait(effective)) {
             .signaled => {
-                self.pending -= 1;
+                self.consume();
                 return true;
             },
             .timeout => return false,
             .failed => {
-                self.pending = 0;
+                self.pending.store(0, .monotonic);
                 return true;
             },
+        }
+    }
+
+    /// One present matched by a wait; another wait may have matched it
+    /// first, so this never goes below zero.
+    fn consume(self: *Pacer) void {
+        var cur = self.pending.load(.monotonic);
+        while (cur > 0) {
+            cur = self.pending.cmpxchgWeak(cur, cur - 1, .monotonic, .monotonic) orelse return;
         }
     }
 };
@@ -438,7 +453,7 @@ test "d3d11 swapchain: waitForSlot only waits after a present" {
     chain.pacer.presented(nowNs());
     const acquired = chain.waitForSlot(0);
     // Only a consumed slot disarms the wait; a timeout leaves it pending.
-    try testing.expectEqual(@as(u32, if (acquired) 0 else 1), chain.pacer.pending);
+    try testing.expectEqual(@as(u32, if (acquired) 0 else 1), chain.pacer.pending.load(.monotonic));
 }
 
 test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
@@ -511,18 +526,18 @@ test "d3d11 swapchain: pending presents are counted, not a bool" {
     var p: Pacer = .{};
     p.presented(0);
     p.presented(1);
-    try testing.expectEqual(@as(u32, 2), p.pending);
+    try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
 
     var w: FakeWaiter = .{ .results = &.{ .signaled, .timeout, .timeout, .signaled } };
     try testing.expect(p.wait(2, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 1), p.pending);
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
 
     // Timed out waits keep the present pending and never underflow.
     try testing.expect(!p.wait(3, 100, FakeRef{ .inner = &w }));
     try testing.expect(!p.wait(4, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 1), p.pending);
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
     try testing.expect(p.wait(5, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending);
+    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
 
     // Nothing pending: the waiter is not even asked.
     try testing.expect(p.wait(6, 100, FakeRef{ .inner = &w }));
@@ -530,7 +545,7 @@ test "d3d11 swapchain: pending presents are counted, not a bool" {
 
     // Capped at the back buffers.
     for (0..10) |i| p.presented(i);
-    try testing.expectEqual(@as(u32, buffer_count), p.pending);
+    try testing.expectEqual(@as(u32, buffer_count), p.pending.load(.monotonic));
 }
 
 test "d3d11 frame slot: no wait after an idle interval" {
@@ -558,5 +573,49 @@ test "d3d11 frame slot: a failing waitable gives up on pacing" {
     p.presented(0);
     var w: FakeWaiter = .{ .results = &.{.failed} };
     try testing.expect(p.wait(0, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending);
+    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+}
+
+test "d3d11 frame slot: concurrent waits and presents keep pending in bounds" {
+    // The render thread waits without the draw mutex, so a sync draw on the
+    // UI thread may present and poll at the same time.
+    const Signaled = struct {
+        pub fn wait(_: @This(), _: u32) Pacer.WaitResult {
+            return .signaled;
+        }
+    };
+    const Worker = struct {
+        p: *Pacer,
+        out_of_bounds: *std.atomic.Value(bool),
+
+        fn present(self: @This()) void {
+            for (0..20_000) |i| {
+                self.p.presented(i);
+                self.check();
+            }
+        }
+
+        fn wait(self: @This()) void {
+            for (0..20_000) |i| {
+                _ = self.p.wait(i, 100, Signaled{});
+                self.check();
+            }
+        }
+
+        fn check(self: @This()) void {
+            if (self.p.pending.load(.monotonic) > buffer_count)
+                self.out_of_bounds.store(true, .monotonic);
+        }
+    };
+
+    var p: Pacer = .{};
+    var out_of_bounds: std.atomic.Value(bool) = .init(false);
+    const w: Worker = .{ .p = &p, .out_of_bounds = &out_of_bounds };
+    var threads: [3]std.Thread = .{
+        try std.Thread.spawn(.{}, Worker.present, .{w}),
+        try std.Thread.spawn(.{}, Worker.wait, .{w}),
+        try std.Thread.spawn(.{}, Worker.wait, .{w}),
+    };
+    for (&threads) |*t| t.join();
+    try testing.expect(!out_of_bounds.load(.monotonic));
 }

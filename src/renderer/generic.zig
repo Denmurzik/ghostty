@@ -1725,6 +1725,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // mutex. The display link is synced after the mutex is
             // released. It doesn't need the lock, and this keeps the
             // critical section to just drawing.
+            //
+            // A graphics API that paces the render thread on the display
+            // waits before the mutex, so a sync draw (UI thread) is never
+            // held up by that wait.
+            if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) {
+                if (!sync) self.api.waitFrameSlot();
+            }
             const sync_display_link = locked: {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());

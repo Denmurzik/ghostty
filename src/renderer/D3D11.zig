@@ -50,9 +50,6 @@ const log = std.log.scoped(.d3d11);
 /// stall the thread, which also has to notice that it should exit.
 const frame_slot_wait_ms = 100;
 
-/// `render_thread` outside the render thread's life; no real thread has id 0.
-const no_thread: std.Thread.Id = 0;
-
 /// Where the swap chain presents. Provided by the apprt through an optional
 /// `d3d11PresentTarget` decl on its Surface; null means headless.
 pub const PresentTarget = struct {
@@ -120,10 +117,6 @@ swap_chain_failure_logged: bool = false,
 /// The size `setViewport` last reported. Headless `surfaceSize` returns it.
 viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
 
-/// The render thread, once `threadEnter` ran (`no_thread` before and after).
-/// Draws from any other thread are the synchronous (UI thread) kind.
-render_thread: std.atomic.Value(std.Thread.Id) = .init(no_thread),
-
 /// `GHOSTTY_D3D11_PACING_LOG=1`: log the slot wait and build time of every
 /// frame. `frame_begin_ns` and `frame_slot_ns` belong to the frame in flight.
 pacing_log: bool = false,
@@ -172,8 +165,6 @@ pub fn deinit(self: *D3D11) void {
 /// Callback called by renderer.Thread when it begins. Called on the render
 /// thread.
 pub fn threadEnter(self: *D3D11, surface: *apprt.Surface) !void {
-    self.render_thread.store(std.Thread.getCurrentId(), .release);
-
     // Apprts without a window (`app_runtime = none`) render headless.
     if (comptime @hasDecl(apprt.Surface, "d3d11PresentTarget")) {
         self.present_target = surface.d3d11PresentTarget();
@@ -203,7 +194,6 @@ pub fn threadExit(self: *D3D11) void {
     }
 
     self.present_target = null;
-    self.render_thread.store(no_thread, .release);
 }
 
 /// The swap chain of the present target, created at the given size if it
@@ -322,19 +312,19 @@ pub fn drawFrameEnd(self: *D3D11) void {
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for
 /// until a swap chain exists and a frame was presented.
 ///
-/// The render thread polls first: a free slot, or a chain idle for longer
-/// than a refresh interval, costs one syscall under the context lock. Only a
-/// busy chain is waited on, without the lock, so one surface pacing itself
-/// does not hold up the others. A synchronous draw (UI thread, e.g. during
-/// resize) never waits: it must not stall the window.
-fn waitForFrameSlot(self: *D3D11, sync: bool) void {
+/// Render thread, called by the renderer before it takes its draw mutex
+/// (a sync draw on the UI thread is never held up by this wait). Polls
+/// first: a free slot, or a chain idle for longer than a refresh interval,
+/// costs one syscall under the context lock. Only a busy chain is waited
+/// on, without the lock, so one surface pacing itself does not hold up the
+/// others. The swap chain is destroyed only on this thread (`threadExit`).
+pub fn waitFrameSlot(self: *D3D11) void {
+    self.device.lockContext();
+    defer self.device.unlockContext();
+    self.frame_slot_ns = 0;
+
     const sc = if (self.swap_chain) |*sc| sc else return;
     if (!sc.waitArmed()) return;
-
-    if (sync) {
-        _ = sc.waitForSlot(0);
-        return;
-    }
     if (sc.waitForSlot(0) or sc.idle()) return;
 
     self.device.unlockContext();
@@ -346,8 +336,16 @@ fn waitForFrameSlot(self: *D3D11, sync: bool) void {
     const start = nowNs();
     _ = sc.waitForSlot(frame_slot_wait_ms);
     const waited = nowNs() -| start;
-    self.frame_slot_ns += waited;
+    self.frame_slot_ns = waited;
     latency.markSlotWait(waited);
+}
+
+/// A frame takes a slot freed since `waitFrameSlot`, or one a synchronous
+/// draw (UI thread, e.g. during resize) owes the waitable. Never blocks:
+/// the caller holds the draw mutex and the context lock.
+fn pollFrameSlot(self: *D3D11) void {
+    const sc = if (self.swap_chain) |*sc| sc else return;
+    if (sc.waitArmed()) _ = sc.waitForSlot(0);
 }
 
 fn nowNs() u64 {
@@ -481,10 +479,7 @@ pub inline fn beginFrame(
     /// The target is presented via the provided renderer's API when completed.
     target: *Target,
 ) !Frame {
-    // Draws off the render thread are the synchronous UI thread ones.
-    const sync = self.render_thread.load(.acquire) != std.Thread.getCurrentId();
-    self.frame_slot_ns = 0;
-    self.waitForFrameSlot(sync);
+    self.pollFrameSlot();
     if (self.pacing_log) self.frame_begin_ns = nowNs();
     return try Frame.begin(.{ .api = self }, renderer, target);
 }
@@ -587,8 +582,6 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
 
     var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
     api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
-    // The test thread plays the render thread.
-    api.render_thread.store(std.Thread.getCurrentId(), .release);
     defer api.threadExit();
 
     var target = try api.initTarget(32, 32);
@@ -614,7 +607,7 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
     const sc = &api.swap_chain.?;
     // A hidden window may be reported occluded, which queues nothing.
     // Model a queued frame either way.
-    sc.pacer.pending = 1;
+    sc.pacer.pending.store(1, .monotonic);
 
     // Draws that return before `beginFrame` (zero size, nothing changed)
     // only take and release the lock: they must not wait or touch the slot.
@@ -624,14 +617,13 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
         api.drawFrameEnd();
     }
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 20);
-    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending);
+    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
 
-    // The first real frame takes the slot, on the render thread (waits at
-    // most `frame_slot_wait_ms`) and holds the lock again afterwards.
+    // The render thread takes the slot before its next draw (waits at most
+    // `frame_slot_wait_ms`) and leaves the lock free for it.
+    api.waitFrameSlot();
     api.drawFrameStart();
-    defer api.drawFrameEnd();
-    api.waitForFrameSlot(false);
-    api.device.assertContextLocked();
+    api.drawFrameEnd();
 }
 
 test "d3d11 pacing: sync draws never block on the slot" {
@@ -644,19 +636,78 @@ test "d3d11 pacing: sync draws never block on the slot" {
     api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
     defer api.threadExit();
 
-    // Before `threadEnter` no thread is the render thread: every draw is
-    // a sync one.
-    try std.testing.expect(api.render_thread.load(.acquire) != std.Thread.getCurrentId());
-
+    // A sync draw only reaches `beginFrame`, which polls.
     api.drawFrameStart();
     defer api.drawFrameEnd();
     const sc = try api.swapChain(16, 16);
-    sc.pacer.presented(0);
-
     const io = @import("../global.zig").io();
+    const never = try neverSignaled(sc);
+    defer restoreWaitable(sc, never);
+    sc.pacer.presented(nowNs());
+
     const start = std.Io.Timestamp.now(io, .awake);
-    api.waitForFrameSlot(true);
+    api.pollFrameSlot();
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < frame_slot_wait_ms);
+    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
+}
+
+test "d3d11 frame slot: no lock is held during the wait" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(16, 16));
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer api.threadExit();
+
+    const sc = sc: {
+        api.device.lockContext();
+        defer api.device.unlockContext();
+        break :sc try api.swapChain(16, 16);
+    };
+    const never = try neverSignaled(sc);
+    defer restoreWaitable(sc, never);
+    sc.pacer.presented(nowNs());
+
+    // The renderer calls `waitFrameSlot` before its draw mutex, so a sync
+    // draw (here: the context lock it takes) gets through while the render
+    // thread waits on a busy chain. The drawer starts well into the wait.
+    const Drawer = struct {
+        device: *Device,
+        start: u64,
+        drew: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            while (nowNs() -| self.start < 20 * std.time.ns_per_ms) std.atomic.spinLoopHint();
+            self.device.lockContext();
+            self.drew.store(true, .release);
+            self.device.unlockContext();
+        }
+    };
+    var drawer: Drawer = .{ .device = api.device, .start = nowNs() };
+    const thread = try std.Thread.spawn(.{}, Drawer.run, .{&drawer});
+    api.waitFrameSlot();
+    const drew_during_wait = drawer.drew.load(.acquire);
+    thread.join();
+    try std.testing.expect(drew_during_wait);
+    // The wait timed out: the present is still pending.
+    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
+}
+
+/// Replaces the frame latency waitable of `sc` with an event that is never
+/// set, so a wait on the chain always times out. Returns the original.
+fn neverSignaled(sc: *SwapChain) !?win32.foundation.HANDLE {
+    const event = win32.kernel32.CreateEventW(null, 1, 0, null) orelse
+        return error.Unexpected;
+    const original = sc.waitable;
+    sc.waitable = event;
+    return original;
+}
+
+fn restoreWaitable(sc: *SwapChain, original: ?win32.foundation.HANDLE) void {
+    if (sc.waitable) |h| _ = win32.kernel32.CloseHandle(h);
+    sc.waitable = original;
 }
 
 test "d3d11 swapchain: no recreation without a bump" {
@@ -715,7 +766,7 @@ test "d3d11 swapchain: a bump alone keeps the swap chain, a failed present after
     try std.testing.expect(api.recreateOnPresentFailure(error.ComFailure));
     try std.testing.expect(api.swap_chain == null);
     const second = try api.swapChain(32, 32);
-    try std.testing.expectEqual(@as(u32, 0), second.pacer.pending);
+    try std.testing.expectEqual(@as(u32, 0), second.pacer.pending.load(.monotonic));
     try second.present(true);
     api.presentSucceeded(api.presentGeneration());
     try std.testing.expect(!api.recreateOnPresentFailure(error.ComFailure));
