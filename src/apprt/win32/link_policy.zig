@@ -74,24 +74,34 @@ fn isPlainUrl(url: []const u8) bool {
 }
 
 /// A `mailto:` header named attach or attachment makes some clients attach
-/// a local file. Looks at the percent-decoded, lowercased query.
+/// a local file. Compares the percent-decoded header names only.
 fn hasAttachment(buf: []u8, rest: []const u8) bool {
     const q = std.mem.indexOfScalar(u8, rest, '?') orelse return false;
-    const query = rest[q + 1 ..];
+    var it = std.mem.splitScalar(u8, rest[q + 1 ..], '&');
+    while (it.next()) |field| {
+        const key = field[0 .. std.mem.indexOfScalar(u8, field, '=') orelse field.len];
+        const name = percentDecode(buf, key);
+        if (std.ascii.eqlIgnoreCase(name, "attach") or std.ascii.eqlIgnoreCase(name, "attachment")) return true;
+    }
+    return false;
+}
+
+/// Decodes valid `%XX` escapes into `buf`; the result is cut at `buf.len`.
+fn percentDecode(buf: []u8, in: []const u8) []const u8 {
     var n: usize = 0;
     var i: usize = 0;
-    while (i < query.len and n < buf.len) : (i += 1) {
-        var c = query[i];
-        if (c == '%' and i + 2 < query.len) {
-            if (std.fmt.parseInt(u8, query[i + 1 .. i + 3], 16)) |d| {
+    while (i < in.len and n < buf.len) : (i += 1) {
+        var c = in[i];
+        if (c == '%' and i + 2 < in.len) {
+            if (std.fmt.parseInt(u8, in[i + 1 .. i + 3], 16)) |d| {
                 c = d;
                 i += 2;
             } else |_| {}
         }
-        buf[n] = std.ascii.toLower(c);
+        buf[n] = c;
         n += 1;
     }
-    return std.mem.indexOf(u8, buf[0..n], "attach") != null;
+    return buf[0..n];
 }
 
 /// Index of the ':' ending a URL scheme of two or more characters, null if
@@ -176,24 +186,25 @@ fn finishReveal(path_: []u8) Verdict {
     return .{ .reveal = path };
 }
 
-/// U+202A..202E, U+2066..2069 and U+2028/2029 in UTF-8.
+/// U+200E/200F, U+202A..202E, U+2066..2069, U+2028/2029, U+061C and U+0085 in UTF-8.
 fn hasBidiControl(path: []const u8) bool {
     var i: usize = 0;
     while (i + 2 < path.len) : (i += 1) {
         if (path[i] != 0xE2) continue;
         const b1 = path[i + 1];
         const b2 = path[i + 2];
-        if (b1 == 0x80 and b2 >= 0xA8 and b2 <= 0xAE) return true;
+        if (b1 == 0x80 and (b2 == 0x8E or b2 == 0x8F or (b2 >= 0xA8 and b2 <= 0xAE))) return true;
         if (b1 == 0x81 and b2 >= 0xA6 and b2 <= 0xA9) return true;
     }
-    return false;
+    // U+061C and U+0085.
+    return std.mem.indexOf(u8, path, "\xd8\x9c") != null or std.mem.indexOf(u8, path, "\xc2\x85") != null;
 }
 
-/// CON, PRN, AUX, NUL, COM1-9, LPT1-9 with any extension.
+/// CON, PRN, AUX, NUL, CONIN$, CONOUT$, CLOCK$, COM1-9, LPT1-9 with any extension.
 fn isDeviceName(part: []const u8) bool {
     const dot = std.mem.indexOfScalar(u8, part, '.') orelse part.len;
     const stem = std.mem.trimEnd(u8, part[0..dot], " ");
-    const names = [_][]const u8{ "con", "prn", "aux", "nul" };
+    const names = [_][]const u8{ "con", "prn", "aux", "nul", "conin$", "conout$", "clock$" };
     for (names) |n| if (std.ascii.eqlIgnoreCase(stem, n)) return true;
     if (stem.len == 4 and stem[3] >= '1' and stem[3] <= '9') {
         if (std.ascii.eqlIgnoreCase(stem[0..3], "com") or std.ascii.eqlIgnoreCase(stem[0..3], "lpt")) return true;
@@ -290,6 +301,8 @@ test "win32 link policy: URL bytes and mail attachments" {
     try expectRefuse("mailto:a@b.c?subject=x&Attachment=y");
     try expectRefuse("mailto:a@b.c?%61ttach=y");
     try expectOpen("mailto:a@b.c?subject=hi");
+    try expectOpen("mailto:a@b.c?subject=attach%20me&body=attachment");
+    try expectRefuse("mailto:a@b.c?subject=x&ATTACH=y");
 }
 
 test "win32 link policy: reveal path hardening" {
@@ -303,6 +316,13 @@ test "win32 link policy: reveal path hardening" {
     try expectRefuse("C:\\x\\nul.txt");
     try expectRefuse("C:\\x\\com1.tar.gz");
     try expectRefuse("C:\\lpt9\\a");
+    try expectRefuse("C:\\a\xe2\x80\x8eb");
+    try expectRefuse("C:\\a\xe2\x80\x8fb");
+    try expectRefuse("C:\\a\xd8\x9cb");
+    try expectRefuse("C:\\a\xc2\x85b");
+    try expectRefuse("C:\\x\\CONIN$");
+    try expectRefuse("C:\\x\\conout$.txt");
+    try expectRefuse("C:\\x\\CLOCK$");
     try expectReveal("C:\\x\\com10", "C:\\x\\com10");
     try expectReveal("C:\\x\\console.txt", "C:\\x\\console.txt");
 }

@@ -120,28 +120,7 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
     };
     defer alloc.free(path);
 
-    const wide = util.utf16z(alloc, path) catch return false;
-    defer alloc.free(wide);
-
-    const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
-    const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
-    if (rc > 32) return true;
-    if (rc != win32.shell32.SE_ERR_NOASSOC) {
-        log.warn("unable to open the config file rc={}", .{rc});
-        return false;
-    }
-
-    const quoted = std.fmt.allocPrint(alloc, "\"{s}\"", .{path}) catch return false;
-    defer alloc.free(quoted);
-    const params = util.utf16z(alloc, quoted) catch return false;
-    defer alloc.free(params);
-    const notepad = std.unicode.utf8ToUtf16LeStringLiteral("notepad.exe");
-    const rc2 = win32.shell32.ShellExecuteW(null, open, notepad, params.ptr, null, win32.user32.SW_SHOWNORMAL);
-    if (rc2 <= 32) {
-        log.warn("unable to open the config file in notepad rc={}", .{rc2});
-        return false;
-    }
-    return true;
+    return shellOpen(alloc, path);
 }
 
 /// `text` and `html` are paths Ghostty wrote itself (screen and scrollback
@@ -208,9 +187,15 @@ fn shellOpen(alloc: std.mem.Allocator, path: []const u8) bool {
         return false;
     }
 
-    const quoted = std.fmt.allocPrint(alloc, "\"{s}\"", .{path}) catch return false;
+    const quoted = std.fmt.allocPrint(alloc, "\"{s}\"", .{path}) catch |err| {
+        log.warn("unable to build notepad arguments err={}", .{err});
+        return false;
+    };
     defer alloc.free(quoted);
-    const params = util.utf16z(alloc, quoted) catch return false;
+    const params = util.utf16z(alloc, quoted) catch |err| {
+        log.warn("unable to convert notepad arguments err={}", .{err});
+        return false;
+    };
     defer alloc.free(params);
     const notepad = std.unicode.utf8ToUtf16LeStringLiteral("notepad.exe");
     const rc2 = win32.shell32.ShellExecuteW(null, open, notepad, params.ptr, null, win32.user32.SW_SHOWNORMAL);
