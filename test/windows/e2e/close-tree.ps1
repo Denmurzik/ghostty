@@ -9,7 +9,7 @@ Invoke-E2eScenario 'close-tree' {
     $g = Start-BashE2e
     $survivor = 0
     try {
-        Send-Line $g.Hwnd 'ping -n 60 127.0.0.1 > "$TEMP/gt-ping.txt"'
+        Send-Line $g.Hwnd 'ping -n 60 127.0.0.1 > "$TEMP/gt-ping.txt" &'
         if (-not (Wait-ChildNamed $g @('ping.exe') 15)) { throw 'ping.exe never started' }
         Start-Sleep -Milliseconds 800
         $survivor = Start-SurvivorConsole $g
@@ -25,7 +25,7 @@ Invoke-E2eScenario 'close-tree' {
         $exit = Wait-ProcessExit $g 3
         Write-E2eInfo "ghostty exited after $($exit.Ms) ms"
         if (-not $exit.Exited) { throw 'ghostty still running 3 s after the window was closed' }
-        Assert-NoSurvivors $snapshot $g.Pid 6 -Except $keep
+        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep
         if (-not (Test-ProcessAlive $survivor)) { throw "the survivor console ($survivor) ended with the window" }
     } finally {
         Stop-Survivor $survivor

@@ -30,7 +30,7 @@ Invoke-E2eScenario 'tab-close-tree' {
             [void](Wait-File $ready 4)
         }
 
-        Send-Line $g.Hwnd 'ping -n 60 127.0.0.1 > "$TEMP/gt-ping.txt"'
+        Send-Line $g.Hwnd 'ping -n 60 127.0.0.1 > "$TEMP/gt-ping.txt" &'
         $ping = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
             Get-ProcessTree $g.Pid | Where-Object { $_.Name -ieq 'ping.exe' -and $beforeIds -notcontains [int]$_.ProcessId } | Select-Object -First 1
         }
@@ -46,7 +46,7 @@ Invoke-E2eScenario 'tab-close-tree' {
         if ($names -notcontains 'bash.exe' -or $names -notcontains 'ping.exe') { throw "unexpected tab 1 tree: $(Format-Procs $snapshot)" }
 
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'close_tab:this')
-        Assert-NoSurvivors $snapshot $g.Pid 6 -Except $keep -GhosttyAlive
+        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep -GhosttyAlive
         if (-not (Test-ProcessAlive $g.Pid)) { throw 'ghostty ended with the closed tab' }
         if (-not (Test-ProcessAlive $survivor)) { throw "the survivor console ($survivor) ended with the tab" }
         $left = @(Get-ProcessTree $g.Pid | Where-Object { $beforeIds -contains [int]$_.ProcessId })

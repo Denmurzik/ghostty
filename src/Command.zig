@@ -1247,9 +1247,11 @@ test "windows command: killChild ends only the direct child" {
         try testing.expect(begin.untilNow(io, .awake).toMilliseconds() < 8000);
         try std.Io.sleep(io, .fromMilliseconds(50), .awake);
         // Pick up processes that appeared since.
-        const prev = tree.count;
+        for (tree.handles[0..tree.count]) |h| if (h) |handle| {
+            _ = k32.CloseHandle(handle);
+        };
         tree.count = tree.cmd.jobProcessIds(&tree.ids).len;
-        for (tree.ids[prev..tree.count], prev..) |id, i| {
+        for (tree.ids[0..tree.count], 0..) |id, i| {
             tree.handles[i] = windows.OpenProcess(
                 windows.SYNCHRONIZE | windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION,
                 windows.FALSE,

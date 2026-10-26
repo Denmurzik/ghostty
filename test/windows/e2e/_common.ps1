@@ -887,10 +887,10 @@ function Assert-NoSurvivors([object[]]$Snapshot, [int]$OldPid, [double]$GraceSec
 function Start-SurvivorConsole($G) {
     $tag = 'gt-survivor-' + ('{0:x8}' -f (Get-Random -Maximum ([int]::MaxValue)))
     # MSYS would turn the lone /k into a path.
-    Send-Line $G.Hwnd "MSYS2_ARG_CONV_EXCL=* cmd /c start `"$tag`" cmd /k echo $tag"
+    Send-Line $G.Hwnd "cmd //c start `"`" cmd //k echo $tag"
     $found = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
         Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" |
-            Where-Object { $_.CommandLine -like "*$tag*" -and $_.CommandLine -like '*/k*' } |
+            Where-Object { $_.CommandLine -like "*$tag*" -and $_.CommandLine -like '*/k*' -and $_.CommandLine -notlike '*start*' } |
             Select-Object -First 1
     }
     if (-not $found) { throw "the survivor console ($tag) never started" }
