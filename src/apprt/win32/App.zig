@@ -17,6 +17,11 @@ const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const actions = @import("actions.zig");
 const dialogs = @import("dialogs.zig");
+const instance = @import("instance.zig");
+const ipc = struct {
+    const ops = @import("ipc/ops.zig");
+    const Server = @import("ipc/Server.zig");
+};
 const messages = @import("messages.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
@@ -26,6 +31,7 @@ const log = std.log.scoped(.win32_app);
 pub const WM_GHOSTTY_WAKEUP = messages.WM_GHOSTTY_WAKEUP;
 pub const WM_GHOSTTY_QUIT_TIMER = messages.WM_GHOSTTY_QUIT_TIMER;
 pub const WM_GHOSTTY_QUIT = messages.WM_GHOSTTY_QUIT;
+pub const WM_GHOSTTY_IPC = messages.WM_GHOSTTY_IPC;
 
 /// Timer id on `msg_hwnd` for the delayed quit after the last window.
 const quit_timer_id: usize = messages.timers.msg_window.quit;
@@ -48,6 +54,10 @@ last_active: ?*Window = null,
 /// True while a WM_GHOSTTY_WAKEUP is queued and not yet handled, so that
 /// bursts of `wakeup` calls from other threads post a single message.
 wakeup_pending: std.atomic.Value(bool) = .init(false),
+
+/// The IPC pipe server; null when another instance owns the pipe or the
+/// server could not start. Main thread only.
+server: ?*ipc.Server = null,
 
 /// Guards the quit confirmation dialog against a second quit request
 /// (its message loop keeps dispatching).
@@ -72,6 +82,9 @@ const QuitGate = struct {
 pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     _ = opts;
 
+    // Before anything can spawn a child process.
+    ipc.ops.cacheTestOps(core_app.alloc);
+
     // OLE (not plain COM) because drag-and-drop and the clipboard need it.
     try win32.foundation.check(win32.ole32.OleInitialize(null));
     errdefer win32.ole32.OleUninitialize();
@@ -91,6 +104,11 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
 
     try self.createMessageWindow();
     errdefer _ = win32.user32.DestroyWindow(self.msg_hwnd);
+
+    // Claimed before any window exists: a second launch 50 ms later already
+    // finds the pipe and queues in it.
+    self.startServer();
+    errdefer self.stopServer();
 
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
@@ -116,6 +134,9 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
+    // The message loop is over: no WM_GHOSTTY_IPC can touch a freed request.
+    self.stopServer();
+
     // Popped before they are destroyed: a window whose DestroyWindow fails
     // never gets to unregister itself, and must not be retried forever.
     self.last_active = null;
@@ -125,6 +146,50 @@ pub fn terminate(self: *App) void {
     _ = win32.user32.DestroyWindow(self.msg_hwnd);
     self.config.deinit();
     win32.ole32.OleUninitialize();
+}
+
+/// Whether this instance owns the IPC pipe.
+pub fn serving(self: *const App) bool {
+    return self.server != null;
+}
+
+fn startServer(self: *App) void {
+    const alloc = self.core_app.alloc;
+    const name = instance.pipeNameFor(alloc, self.config.class) catch |err| {
+        log.warn("unable to build the IPC pipe name err={}", .{err});
+        return;
+    };
+    defer alloc.free(name);
+
+    const server = ipc.Server.claim(alloc, name) catch |err| switch (err) {
+        error.AddressInUse => {
+            log.info("another instance owns the IPC pipe", .{});
+            return;
+        },
+        else => {
+            log.warn("unable to claim the IPC pipe err={}", .{err});
+            return;
+        },
+    };
+    server.start(self.msg_hwnd) catch |err| {
+        log.warn("unable to start the IPC server err={}", .{err});
+        server.stop();
+        return;
+    };
+    self.server = server;
+}
+
+/// Stops the IPC thread and frees the server. Only after the message loop.
+fn stopServer(self: *App) void {
+    const server = self.server orelse return;
+    self.server = null;
+    server.stop();
+}
+
+/// Handle a request from the IPC thread on the UI thread.
+fn handleIpc(self: *App, pending: *ipc.Server.Pending) void {
+    const response = ipc.ops.handle(self, pending.alloc, pending.request);
+    ipc.Server.complete(pending, response);
 }
 
 /// Wake the UI thread so it ticks the core app. Callable from any thread.
@@ -255,6 +320,13 @@ fn msgWndProc(
             return 0;
         },
 
+        WM_GHOSTTY_IPC => {
+            // After `stopServer` the request belongs to the server again.
+            if (self.server == null) return 0;
+            self.handleIpc(@ptrFromInt(@as(usize, @bitCast(lparam))));
+            return 0;
+        },
+
         win32.user32.WM_TIMER => if (wparam == quit_timer_id) {
             self.stopQuitTimer();
             win32.user32.PostQuitMessage(0);
@@ -328,6 +400,7 @@ test {
     _ = util;
     _ = Window;
     _ = actions;
+    _ = ipc.ops;
 }
 
 test "win32 app: runtime is win32 on windows" {
