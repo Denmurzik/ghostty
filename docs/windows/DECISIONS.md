@@ -47,3 +47,4 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - Tab tear-off / re-dock: dragging a tab outside the window opens it in a new window (process keeps running); dragging a tab onto another window's tab strip moves it there; in-strip drag reorders.
 - File drag-and-drop: dropping files/folders from Explorer onto a terminal surface inserts their paths (shell-quoted for the running shell, space-separated) as if typed/pasted — M2.
 - Input latency: the owner reports heavy input lag ("вообще не отзывчивый") while testing the M1 Debug build. M2 must measure keypress-to-frame latency on ReleaseFast AND Debug, find the causes (frame pacing wait, WM_CHAR handling, renderer wakeups, Debug-only costs) and make typing feel immediate; acceptance threshold set in the M2 plan.
+- Input latency (update 2026-10-26): lag reproduces on ReleaseFast too; HIGH lag in TUI apps on mouse-wheel scroll and interaction. Highest priority in M2 (first task).
