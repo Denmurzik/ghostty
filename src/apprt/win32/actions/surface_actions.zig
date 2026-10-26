@@ -4,20 +4,27 @@ const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const mouse = @import("../mouse.zig");
 const App = @import("../App.zig");
+const Surface = @import("../Surface.zig");
 
 const log = std.log.scoped(.win32_actions);
 
+/// The apprt surface an action is aimed at.
+fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
+    return switch (target) {
+        .app => null,
+        .surface => |s| app.surfaceFor(s),
+    };
+}
+
 pub fn mouse_shape(app: *App, target: apprt.Target, value: apprt.Action.Value(.mouse_shape)) !bool {
-    const window = app.windowForTarget(target) orelse return false;
-    const s = window.surface orelse return false;
+    const s = surfaceOf(app, target) orelse return false;
     s.mouse_state.shape = value;
     mouse.refreshCursor(s);
     return true;
 }
 
 pub fn mouse_visibility(app: *App, target: apprt.Target, value: apprt.Action.Value(.mouse_visibility)) !bool {
-    const window = app.windowForTarget(target) orelse return false;
-    const s = window.surface orelse return false;
+    const s = surfaceOf(app, target) orelse return false;
     s.mouse_state.hidden = value == .hidden;
     mouse.refreshCursor(s);
     return true;

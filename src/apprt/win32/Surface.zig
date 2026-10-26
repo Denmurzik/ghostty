@@ -14,19 +14,36 @@ const apprt = @import("../../apprt.zig");
 const global = @import("../../global.zig");
 const renderer = @import("../../renderer.zig");
 const CoreSurface = @import("../../Surface.zig");
+const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const App = @import("App.zig");
+const Chrome = @import("Chrome.zig");
+const Overrides = @import("Overrides.zig");
+const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
 const clipboard = @import("clipboard.zig");
 const dialogs = @import("dialogs.zig");
 const dpi = @import("dpi.zig");
+const drop = @import("drop.zig");
 const ime = @import("ime.zig");
 const keyboard = @import("keyboard.zig");
 const mouse = @import("mouse.zig");
+const resize_overlay = @import("resize_overlay.zig");
+const scrollbar_mod = @import("scrollbar.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_surface);
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
+pub const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
+
+/// The split tree of a tab holds surfaces by reference.
+pub const Tree = SplitTree(Surface);
+
+pub const CreateOptions = struct {
+    /// The surface the new one is created from (font size inheritance).
+    parent: ?*CoreSurface = null,
+    overrides: Overrides = .none,
+    context: apprt.surface.NewSurfaceContext,
+};
 
 /// Sent to a child window after its parent's DPI changed (winuser.h).
 const WM_DPICHANGED_AFTERPARENT = 0x02E3;
@@ -40,8 +57,22 @@ const resize_interval_ms: u32 = 16;
 var next_id: std.atomic.Value(u32) = .init(1);
 
 hwnd: win32.foundation.HWND,
+/// The window of `tab`, kept in step by `Tab.setWindow`.
 window: *Window,
+tab: *Tab,
 core_surface: CoreSurface,
+
+/// Number of owners (split trees). Zero only between `create` and the
+/// first `Tree.init`; the last `unref` destroys the surface.
+refs: u32 = 0,
+
+/// Whether a bell is waiting to be seen; cleared when the surface gets focus.
+bell_ringing: bool = false,
+
+scrollbar: scrollbar_mod.State = .{},
+
+/// The kind of shell this surface runs, for the paths pasted by a drop.
+shell_kind: drop.ShellKind,
 
 /// Set once `core_surface` is initialized and cleared before it is torn
 /// down. Window messages arriving outside that span never reach core.
@@ -70,9 +101,11 @@ mouse_state: mouse.State,
 ime_state: ime.State,
 clipboard_state: clipboard.State,
 
-/// Create the child window filling `window`'s client area and the core
-/// surface inside it.
-pub fn create(window: *Window) !*Surface {
+/// Create the child window filling `tab`'s container and the core surface
+/// inside it. The surface has no owner yet (`refs` is zero): the split tree
+/// that takes it over references it.
+pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
+    const window = tab.window;
     const app = window.app;
     const alloc = app.core_app.alloc;
 
@@ -85,16 +118,29 @@ pub fn create(window: *Window) !*Surface {
         .lpszClassName = class_name,
     });
 
+    // The config of this surface alone: inherited values, then the
+    // command-line overrides of its window.
+    var config = try apprt.surface.newConfig(app.core_app, &app.config, opts.context);
+    defer config.deinit();
+    try opts.overrides.apply(&config);
+    if (opts.parent) |parent| {
+        if (app.config.@"window-inherit-font-size") {
+            config.@"font-size" = parent.font_size.points;
+        }
+    }
+
     const self = try alloc.create(Surface);
     errdefer alloc.destroy(self);
     self.* = .{
         .hwnd = undefined,
         .window = window,
+        .tab = tab,
         .core_surface = undefined,
         .initialized = false,
+        .shell_kind = drop.shellKindFor(config.command),
         .id = next_id.fetchAdd(1, .monotonic),
         .size = .init(0),
-        .content_scale = .{ .x = 1, .y = 1 },
+        .content_scale = dpi.contentScale(window.dpi),
         .title = null,
         .keyboard_state = .{},
         .mouse_state = .{},
@@ -109,7 +155,7 @@ pub fn create(window: *Window) !*Surface {
     errdefer app.core_app.deleteSurface(self);
 
     var parent_rect: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    _ = win32.user32.GetClientRect(window.hwnd, &parent_rect);
+    _ = win32.user32.GetClientRect(tab.hwnd, &parent_rect);
 
     // The window procedure sees WM_NCCREATE before this returns and stores
     // `self` as the window's user data.
@@ -122,7 +168,7 @@ pub fn create(window: *Window) !*Surface {
         0,
         parent_rect.right - parent_rect.left,
         parent_rect.bottom - parent_rect.top,
-        window.hwnd,
+        tab.hwnd,
         null,
         app.hinstance,
         self,
@@ -133,15 +179,10 @@ pub fn create(window: *Window) !*Surface {
     errdefer _ = win32.user32.DestroyWindow(hwnd);
     self.hwnd = hwnd;
 
-    self.content_scale = dpi.contentScale(win32.user32.GetDpiForWindow(hwnd));
     const client = self.clientSize();
     self.size.store(renderer.D3D11.packSize(client.width, client.height), .release);
 
-    // Registered up front so core's early actions (title, ...) find us.
-    window.surface = self;
-    errdefer window.surface = null;
-
-    try self.core_surface.init(alloc, &app.config, app.core_app, app, self);
+    try self.core_surface.init(alloc, &config, app.core_app, app, self);
     self.initialized = true;
 
     // Core assumes focus. The child normally gets it later, via WM_SETFOCUS.
@@ -151,6 +192,25 @@ pub fn create(window: *Window) !*Surface {
     }
 
     return self;
+}
+
+/// Take a reference. The split tree calls this for every node it holds.
+pub fn ref(self: *Surface, alloc: Allocator) Allocator.Error!*Surface {
+    _ = alloc;
+    self.refs += 1;
+    return self;
+}
+
+/// Drop a reference; the last one destroys the surface.
+pub fn unref(self: *Surface, alloc: Allocator) void {
+    _ = alloc;
+    self.refs -= 1;
+    if (self.refs == 0) self.destroy();
+}
+
+/// Identity: a surface is only equal to itself.
+pub fn eql(a: *const Surface, b: *const Surface) bool {
+    return a == b;
 }
 
 /// Tear the surface down and free it. Joins the core threads, so it must
@@ -169,7 +229,6 @@ pub fn deinit(self: *Surface) void {
     self.initialized = false;
 
     self.core_surface.deinit();
-    if (self.window.surface == self) self.window.surface = null;
 
     // The parent's destruction may already have taken the child with it.
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
@@ -351,6 +410,8 @@ pub fn applySize(self: *Surface, packed_size: u64) void {
     const start = std.Io.Timestamp.now(io, .awake);
     if (self.core_surface.sizeCallback(.{ .width = size.width, .height = size.height })) {
         self.resize.applied = packed_size;
+        const grid = self.core_surface.size.grid();
+        resize_overlay.notify(self, grid.columns, grid.rows);
     } else |err| {
         // `take` already counted this size as applied: forget it, so the
         // next WM_SIZE of the same size tries again.
@@ -384,20 +445,8 @@ fn handleSize(self: *Surface, wparam: win32.foundation.WPARAM, lparam: win32.fou
     self.size.store(msg.packed_size, .release);
     if (!self.initialized) return;
 
-    if (!msg.visible) {
-        self.minimized = true;
-        _ = self.resize.request(0);
-        self.core_surface.occlusionCallback(false) catch |err|
-            log.warn("occlusion callback failed err={}", .{err});
-        return;
-    }
-
-    if (self.minimized) {
-        self.minimized = false;
-        self.core_surface.occlusionCallback(true) catch |err|
-            log.warn("occlusion callback failed err={}", .{err});
-    }
-
+    // A minimized top-level window never sends this child a WM_SIZE (the
+    // window forwards occlusion itself), so every size here is a real one.
     // Core is told from the resize timer, and the renderer picks the new
     // size up from `size` on its own thread: the UI thread never waits for
     // core while the user drags the border (SPEC §6.4).
@@ -410,14 +459,20 @@ fn handleSize(self: *Surface, wparam: win32.foundation.WPARAM, lparam: win32.fou
     }
 }
 
-fn handleDpiChanged(self: *Surface) void {
-    self.content_scale = dpi.contentScale(win32.user32.GetDpiForWindow(self.hwnd));
+/// Follow the window's DPI, the single source of it.
+pub fn applyDpi(self: *Surface) void {
+    self.content_scale = dpi.contentScale(self.window.dpi);
     if (!self.initialized) return;
     self.core_surface.contentScaleCallback(self.content_scale) catch |err|
         log.warn("content scale callback failed err={}", .{err});
 }
 
 fn handleFocus(self: *Surface, focused: bool) void {
+    if (focused) {
+        self.tab.focused = self;
+        self.bell_ringing = false;
+        Chrome.invalidate(self.window);
+    }
     if (!self.initialized) return;
     self.core_surface.focusCallback(focused) catch |err|
         log.warn("focus callback failed err={}", .{err});
@@ -454,7 +509,7 @@ fn wndProc(
         },
 
         WM_DPICHANGED_AFTERPARENT => {
-            self.handleDpiChanged();
+            self.applyDpi();
             return 0;
         },
 

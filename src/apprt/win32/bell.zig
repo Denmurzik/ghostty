@@ -2,9 +2,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Placeholder until Task 6a adds the real tab type; only the pointer type
-/// is part of the signature.
-pub const Tab = opaque {};
+const Tab = @import("Tab.zig");
 
 pub fn decorateTitle(alloc: Allocator, title: []const u8, tab: *const Tab) ![:0]u8 {
     _ = tab;

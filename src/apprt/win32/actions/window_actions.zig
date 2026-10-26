@@ -12,7 +12,7 @@ pub fn close_window(app: *App, target: apprt.Target, value: void) !bool {
         .app => return false,
         .surface => |s| s,
     };
-    const window = app.windowForSurface(surface) orelse return false;
+    const window = app.windowFor(surface) orelse return false;
     window.requestCloseWithConfirm();
     return true;
 }

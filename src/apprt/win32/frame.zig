@@ -51,7 +51,7 @@ pub fn nonClientSize(window: *const Window) Size {
         style,
         0,
         ex_style,
-        win32.user32.GetDpiForWindow(window.hwnd),
+        window.dpi,
     );
     return .{ .w = rc.right - rc.left, .h = rc.bottom - rc.top };
 }

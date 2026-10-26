@@ -7,17 +7,17 @@ const App = @import("../App.zig");
 const log = std.log.scoped(.win32_actions);
 
 pub fn set_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.set_title)) !bool {
-    const surface = switch (target) {
+    const core = switch (target) {
         .app => return false,
         .surface => |s| s,
     };
-    const window = app.windowForSurface(surface) orelse return false;
+    const surface = app.surfaceFor(core) orelse return false;
     // The surface keeps the copy that core reads back with getTitle.
-    if (window.surface) |s| s.setTitle(value.title) catch |err| {
+    surface.setTitle(value.title) catch |err| {
         log.warn("unable to store title err={}", .{err});
         return false;
     };
-    window.setTitle(value.title);
+    surface.window.refreshTitle();
     return true;
 }
 

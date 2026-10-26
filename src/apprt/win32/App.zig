@@ -13,6 +13,7 @@ const global = @import("../../global.zig");
 const renderer = @import("../../renderer.zig");
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
+const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const actions = @import("actions.zig");
 const dialogs = @import("dialogs.zig");
@@ -40,6 +41,9 @@ msg_hwnd: win32.foundation.HWND,
 
 /// Top-level windows, in creation order. Main thread only.
 windows: std.ArrayList(*Window) = .empty,
+
+/// The window that was active last; null when there is none.
+last_active: ?*Window = null,
 
 /// True while a WM_GHOSTTY_WAKEUP is queued and not yet handled, so that
 /// bursts of `wakeup` calls from other threads post a single message.
@@ -91,7 +95,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
 
-    const window = try Window.create(self);
+    const window = try Window.create(self, .{});
     errdefer window.destroy();
     window.show();
     renderer.Device.logPrivateUsage("first surface");
@@ -159,29 +163,38 @@ pub fn stopQuitTimer(self: *App) void {
     _ = win32.user32.KillTimer(self.msg_hwnd, quit_timer_id);
 }
 
-/// Called from the window procedure when a top-level window goes away.
-pub fn windowDestroyed(self: *App, window: *Window) void {
+/// Drop a window from the app's list; false if it was not listed.
+pub fn unregisterWindow(self: *App, window: *Window) bool {
+    if (self.last_active == window) self.last_active = null;
     for (self.windows.items, 0..) |w, i| {
         if (w != window) continue;
         _ = self.windows.orderedRemove(i);
-        break;
+        return true;
     }
+    return false;
+}
 
+/// Called from the window procedure when a top-level window goes away.
+pub fn windowDestroyed(self: *App, window: *Window) void {
+    _ = self.unregisterWindow(window);
     if (self.windows.items.len == 0) win32.user32.PostQuitMessage(0);
 }
 
-pub fn windowForSurface(self: *App, surface: *CoreSurface) ?*Window {
-    for (self.windows.items) |w| {
-        const s = w.surface orelse continue;
-        if (&s.core_surface == surface) return w;
-    }
-    return null;
+/// The apprt surface of a core surface.
+pub fn surfaceFor(self: *App, core: *CoreSurface) ?*Surface {
+    _ = self;
+    return core.rt_surface;
+}
+
+/// The window that holds a core surface.
+pub fn windowFor(self: *App, core: *CoreSurface) ?*Window {
+    return (self.surfaceFor(core) orelse return null).window;
 }
 
 pub fn windowForTarget(self: *App, target: apprt.Target) ?*Window {
     return switch (target) {
         .app => null,
-        .surface => |s| self.windowForSurface(s),
+        .surface => |s| self.windowFor(s),
     };
 }
 
