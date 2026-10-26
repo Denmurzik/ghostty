@@ -113,12 +113,15 @@ pub const Layout = struct {
         }
 
         const available = width - m.tab_pad - m.new_tab_w - m.min_drag_w - buttons_w;
-        // Keep room for one tab so the active tab is never invisible.
-        const clip_w = @max(available, m.tab_min_w);
+        // Narrow windows: the caption buttons keep their place, then the
+        // new-tab button is dropped, then the tabs shrink below `tab_min_w`.
+        const keep_new_tab = buttons_x - m.tab_pad - m.new_tab_w > 0;
+        const room = @max(buttons_x - m.tab_pad - (if (keep_new_tab) m.new_tab_w else 0), 0);
+        const clip_w = @max(available, @min(m.tab_min_w, room));
         self.clip = .{ .x = m.tab_pad, .y = 0, .w = clip_w, .h = h };
 
         const n: i32 = @intCast(@min(count, std.math.maxInt(i32) / @max(m.tab_max_w, 1)));
-        const tab_w = std.math.clamp(@divTrunc(clip_w, @max(n, 1)), m.tab_min_w, m.tab_max_w);
+        const tab_w = if (clip_w < m.tab_min_w) clip_w else std.math.clamp(@divTrunc(clip_w, @max(n, 1)), m.tab_min_w, m.tab_max_w);
         const total = tab_w * n;
         const overflow = @max(total - clip_w, 0);
 
@@ -145,12 +148,14 @@ pub const Layout = struct {
             });
         }
 
-        // After the last tab, or at the clip end on overflow; never under the buttons.
-        var nx = self.clip.x + @min(total, clip_w);
-        nx = @max(@min(nx, buttons_x - m.new_tab_w), 0);
-        self.new_tab = .{ .x = nx, .y = 0, .w = m.new_tab_w, .h = h };
+        // After the last tab, or at the clip end on overflow.
+        const nx = self.clip.x + @min(total, clip_w);
+        var cx = nx;
+        if (keep_new_tab) {
+            self.new_tab = .{ .x = nx, .y = 0, .w = m.new_tab_w, .h = h };
+            cx = nx + m.new_tab_w;
+        }
         if (mode == .titlebar) {
-            const cx = nx + m.new_tab_w;
             self.caption = .{ .x = cx, .y = 0, .w = @max(buttons_x - cx, 0), .h = h };
         }
     }
@@ -286,12 +291,21 @@ test "win32 tabstrip: overflow keeps active visible" {
     try layout.compute(alloc, m, 800, .titlebar, true, 30, 0);
     try std.testing.expectEqual(@as(i32, 0), layout.scroll);
 
-    // Tiny window: no zero or negative widths, active tab still inside.
-    try layout.compute(alloc, m, 200, .titlebar, true, 30, 15);
-    for (layout.tabs.items) |r| try std.testing.expect(r.w > 0);
-    try std.testing.expect(layout.new_tab.?.w > 0);
-    const a = layout.tabs.items[15];
-    try std.testing.expect(a.x >= layout.clip.x and a.right() <= layout.clip.right());
+    // Narrow windows: tabs shrink, never overlap new_tab or the buttons.
+    for ([_]i32{ 200, 300, 340 }) |w| {
+        try layout.compute(alloc, m, w, .titlebar, true, 30, 15);
+        for (layout.tabs.items) |r| try std.testing.expect(r.w > 0);
+        const a = layout.tabs.items[15];
+        try std.testing.expect(a.x >= layout.clip.x and a.right() <= layout.clip.right());
+        try std.testing.expect(layout.clip.right() <= layout.new_tab.?.x);
+        try std.testing.expect(layout.new_tab.?.right() <= layout.minimize.?.x);
+        try std.testing.expectEqual(Part{ .tab = 15 }, layout.hitTest(m, a.x + 1, 20, true));
+    }
+    // No room at all: new_tab dropped, buttons stay.
+    try layout.compute(alloc, m, 100, .titlebar, true, 3, 0);
+    try std.testing.expect(layout.new_tab == null);
+    try std.testing.expect(layout.close != null);
+    try std.testing.expectEqual(Part.close, layout.hitTest(m, 99, 20, true));
 }
 
 test "win32 tabstrip: hit test parts" {
