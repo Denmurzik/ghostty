@@ -356,10 +356,9 @@ fn handleQuit(self: *App) void {
         fn confirm(a: @This()) bool {
             // Owner: the most recent window. Without one nothing can be lost.
             if (a.app.windows.items.len == 0) return true;
-            return dialogs.confirm(
+            return dialogs.confirmCloseKind(
                 a.app.windows.items[a.app.windows.items.len - 1].hwnd,
-                "Quit Ghostty",
-                "A process is still running in at least one terminal. Quit anyway?",
+                .app,
             );
         }
     };

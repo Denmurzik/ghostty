@@ -1,15 +1,22 @@
-//! Modal confirmation dialogs (MessageBoxW in M1).
+//! Modal confirmation dialogs (TaskDialog; MessageBoxW when it is unavailable).
 //!
-//! A message box runs its own message loop, so anything that shows one
-//! can see its window, and the surface behind it, destroyed before the
-//! call returns. Callers decide when it is safe to show one; see
-//! `clipboard.zig` for how that is handled for clipboard prompts.
+//! A dialog runs its own message loop, so anything that shows one can see
+//! its window, and the surface behind it, destroyed before the call
+//! returns, and posted messages (IPC ops included) run re-entrantly inside
+//! it. Dialogs are therefore shown only from posted-message handlers, never
+//! from `performAction`, core callbacks or IPC op handlers, and every call
+//! site checks that its window survived. See `clipboard.zig` for how that
+//! is handled for clipboard prompts.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
+const comctl32 = win32.comctl32;
 
 const IDYES = 6;
 const MB_DEFBUTTON2 = 0x00000100;
+
+/// Id of the affirmative custom button ("&Close", "&Allow").
+const button_accept = 100;
 
 /// The codepoint that stands in for bytes that are not valid UTF-8.
 const replacement: u21 = 0xFFFD;
@@ -18,13 +25,11 @@ const replacement: u21 = 0xFFFD;
 /// the visible symbol for the control character c.
 const control_pictures: u21 = 0x2400;
 
+const w16 = std.unicode.utf8ToUtf16LeStringLiteral;
+
 /// Ask whether a surface with a running process may be closed.
 pub fn confirmClose(owner: win32.foundation.HWND) bool {
-    return confirm(
-        owner,
-        "Close Terminal",
-        "A process is still running in this terminal. Close it anyway?",
-    );
+    return confirmCloseKind(owner, .surface);
 }
 
 /// What a close would take down. Decides the sentence of the confirmation.
@@ -32,7 +37,58 @@ pub const CloseKind = enum { surface, tab, window, all_windows, app };
 
 /// Ask whether `kind` may be closed while a process is still running in it.
 pub fn confirmCloseKind(owner: win32.foundation.HWND, kind: CloseKind) bool {
-    return confirm(owner, closeTitle(kind), closeBody(kind));
+    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
+        .{ .nButtonID = button_accept, .pszButtonText = w16("&Close") },
+        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
+    };
+    const config = buildConfig(owner, kind, &buttons);
+    if (comctl32.taskDialogIndirect(&config)) |id| return id == button_accept;
+
+    return fallbackBox(owner, closeTitle(kind), closeBody(kind));
+}
+
+/// The task dialog of a close confirmation. Pure: nothing is shown.
+fn buildConfig(
+    owner: win32.foundation.HWND,
+    kind: CloseKind,
+    buttons: []const comctl32.TASKDIALOG_BUTTON,
+) comctl32.TASKDIALOGCONFIG {
+    return buildConfigText(
+        owner,
+        w16("Ghostty"),
+        closeInstruction(kind),
+        w16("A process is still running. Closing will end it."),
+        buttons,
+    );
+}
+
+fn buildConfigText(
+    owner: ?win32.foundation.HWND,
+    title: [*:0]const u16,
+    instruction: ?[*:0]const u16,
+    content: [*:0]const u16,
+    buttons: []const comctl32.TASKDIALOG_BUTTON,
+) comctl32.TASKDIALOGCONFIG {
+    return .{
+        .hwndParent = owner,
+        .dwFlags = comctl32.TDF_POSITION_RELATIVE_TO_WINDOW | comctl32.TDF_ALLOW_DIALOG_CANCELLATION,
+        .pszWindowTitle = title,
+        .pszMainInstruction = instruction,
+        .pszContent = content,
+        .cButtons = @intCast(buttons.len),
+        .pButtons = buttons.ptr,
+        .nDefaultButton = comctl32.IDCANCEL,
+    };
+}
+
+fn closeInstruction(kind: CloseKind) [*:0]const u16 {
+    return switch (kind) {
+        .surface => w16("Close this terminal?"),
+        .tab => w16("Close this tab?"),
+        .window => w16("Close this window?"),
+        .all_windows => w16("Close all windows?"),
+        .app => w16("Quit Ghostty?"),
+    };
 }
 
 fn closeTitle(kind: CloseKind) []const u8 {
@@ -55,7 +111,7 @@ fn closeBody(kind: CloseKind) []const u8 {
     };
 }
 
-/// Show a yes/no question on top of `owner`. True for yes. "No" is the
+/// Show a question on top of `owner`. True for "Allow". "Cancel" is the
 /// default button: every question asked here is about something that is
 /// hard to undo. Text that does not fit the (generous) fixed buffers is
 /// cut, and invalid UTF-8 shows as U+FFFD.
@@ -64,6 +120,23 @@ pub fn confirm(
     title: []const u8,
     body: []const u8,
 ) bool {
+    var title_buf: [128]u16 = undefined;
+    var body_buf: [2048]u16 = undefined;
+    const wide_title = toWide(&title_buf, title);
+    const wide_body = toWide(&body_buf, body);
+
+    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
+        .{ .nButtonID = button_accept, .pszButtonText = w16("&Allow") },
+        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
+    };
+    const config = buildConfigText(owner, wide_title, null, wide_body, &buttons);
+    if (comctl32.taskDialogIndirect(&config)) |id| return id == button_accept;
+
+    return fallbackBox(owner, title, body);
+}
+
+/// The M1 message box, for when `TaskDialogIndirect` cannot be used.
+fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8) bool {
     var title_buf: [128]u16 = undefined;
     var body_buf: [2048]u16 = undefined;
     const result = win32.user32.MessageBoxW(
@@ -229,4 +302,31 @@ test "win32 dialogs: every close kind has its own sentence" {
     }
     // confirmClose keeps the M1 text.
     try std.testing.expectEqualStrings("Close Terminal", closeTitle(.surface));
+}
+
+test "win32 dialogs: task dialog config is valid" {
+    const owner: win32.foundation.HWND = @ptrFromInt(0x1000);
+    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
+        .{ .nButtonID = button_accept, .pszButtonText = w16("&Close") },
+        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
+    };
+    for (std.enums.values(CloseKind)) |kind| {
+        const config = buildConfig(owner, kind, &buttons);
+        try std.testing.expectEqual(@sizeOf(comctl32.TASKDIALOGCONFIG), config.cbSize);
+        try std.testing.expectEqual(comctl32.IDCANCEL, config.nDefaultButton);
+        try std.testing.expectEqual(2, config.cButtons);
+        try std.testing.expect(config.dwFlags & comctl32.TDF_POSITION_RELATIVE_TO_WINDOW != 0);
+        try std.testing.expectEqual(owner, config.hwndParent.?);
+        try std.testing.expect(config.pszMainInstruction != null);
+    }
+    try std.testing.expectEqualSlices(u16, w16("Quit Ghostty?"), std.mem.span(closeInstruction(.app)));
+}
+
+// Sizes from a throwaway `zig cc -target x86_64-windows-msvc` program against
+// the SDK headers (commctrl.h): sizeof(TASKDIALOGCONFIG) == 160,
+// sizeof(TASKDIALOG_BUTTON) == 12.
+test "win32 comctl32: TASKDIALOGCONFIG is byte-packed" {
+    try std.testing.expectEqual(160, @sizeOf(comctl32.TASKDIALOGCONFIG));
+    try std.testing.expectEqual(12, @sizeOf(comctl32.TASKDIALOG_BUTTON));
+    try std.testing.expectEqual(148, @offsetOf(comctl32.TASKDIALOGCONFIG, "lpCallbackData"));
 }
