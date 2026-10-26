@@ -14,7 +14,7 @@ Invoke-E2eScenario 'device-lost' {
     }
     if (-not $modeLine) { throw 'no "ghostty build optimize=" line in the log' }
     $mode = $modeLine.Matches[0].Groups[1].Value
-    if ($mode -ne 'Debug') { throw "E2E-SKIP: build optimize=$mode does not simulate device loss" }
+    if ($mode -ine 'debug') { throw "E2E-SKIP: build optimize=$mode does not simulate device loss" }
     $armed = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
         Select-String -LiteralPath $g.Log -Pattern 'device loss simulation armed' -Quiet
     }
