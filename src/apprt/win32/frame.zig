@@ -42,6 +42,13 @@ pub const Insets = struct { left: i32, top: i32, right: i32, bottom: i32 };
 const SC_KEYMENU = 0xF100;
 const SC_SIZEMASK = 0xFFF0;
 
+const SC_MOVE = 0xF010;
+const SC_SIZE = 0xF000;
+const MF_BYCOMMAND: u32 = 0x00000000;
+const MF_ENABLED: u32 = 0x00000000;
+const MF_GRAYED: u32 = 0x00000001;
+
+extern "user32" fn EnableMenuItem(user32.HMENU, id: u32, flags: u32) callconv(.winapi) i32;
 extern "user32" fn GetSystemMenu(hwnd: win32.foundation.HWND, revert: win32.foundation.BOOL) callconv(.winapi) ?user32.HMENU;
 
 pub fn decorationsFor(setting: configpkg.Config.WindowDecoration) Decorations {
@@ -106,18 +113,25 @@ fn partOfHit(hit: usize) TabStrip.Part {
 }
 
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
+    // `server` keeps its system menu and Windows' handling of Alt.
+    switch (window.frame.decorations) {
+        .server => return null,
+        .none => if (msg != user32.WM_NCCALCSIZE) return null,
+        .client => {},
+    }
+
     if (msg == user32.WM_SYSCOMMAND) {
         if ((wparam & SC_SIZEMASK) != SC_KEYMENU) return null;
         // A lone Alt tap would start the menu's modal loop and freeze the
-        // UI thread. Alt+Space is the system menu; no other Alt+key has a
-        // menu to open.
+        // UI thread. Alt+Space is the system menu (the window has none of
+        // its own); Alt+key is left to the keyboard path.
         const key: usize = @bitCast(lparam);
-        if (window.frame.decorations == .client and key == ' ') showSystemMenuBelowStrip(window);
-        return 0;
+        if (key == ' ') {
+            showSystemMenuBelowStrip(window);
+            return 0;
+        }
+        return if (key == 0) 0 else null;
     }
-
-    if (window.frame.decorations != .client and msg != user32.WM_NCCALCSIZE) return null;
-    if (window.frame.decorations == .server) return null;
 
     switch (msg) {
         user32.WM_NCCALCSIZE => {
@@ -168,9 +182,15 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             return null;
         },
 
-        // Pointer in the client area: the strip's own hover takes over.
+        // Pointer in the client area: the strip's own hover takes over,
+        // except while a caption button holds the capture.
         user32.WM_MOUSEMOVE => {
-            setHover(window, .nowhere);
+            if (window.frame.pressed == .nowhere) {
+                setHover(window, .nowhere);
+            } else {
+                const over = buttonAt(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
+                setHover(window, if (std.meta.eql(over, window.frame.pressed)) over else .nowhere);
+            }
             return null;
         },
 
@@ -179,28 +199,32 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             if (part == .nowhere) return null;
             // DefWindowProc would draw the classic button.
             window.frame.pressed = part;
+            // The release then arrives as WM_LBUTTONUP wherever the pointer is.
+            _ = user32.SetCapture(window.hwnd);
             Chrome.invalidate(window);
             return 0;
         },
 
+        // Without the capture (it failed or was taken) the release is
+        // still non-client.
         user32.WM_NCLBUTTONUP => {
-            const part = partOfHit(wparam);
-            if (part == .nowhere) return null;
             const pressed = window.frame.pressed;
-            window.frame.pressed = .nowhere;
-            Chrome.invalidate(window);
-            if (!std.meta.eql(pressed, part)) return 0;
-            const sc: usize = switch (part) {
-                .minimize => user32.SC_MINIMIZE,
-                .maximize => if (user32.IsZoomed(window.hwnd) != 0) user32.SC_RESTORE else user32.SC_MAXIMIZE,
-                else => user32.SC_CLOSE,
-            };
-            _ = user32.PostMessageW(window.hwnd, user32.WM_SYSCOMMAND, sc, 0);
+            if (pressed == .nowhere) return null;
+            _ = user32.ReleaseCapture();
+            releaseButton(window, pressed, partOfHit(wparam));
             return 0;
         },
 
-        // The button was released outside the non-client area.
         user32.WM_LBUTTONUP => {
+            const pressed = window.frame.pressed;
+            if (pressed == .nowhere) return null;
+            _ = user32.ReleaseCapture();
+            releaseButton(window, pressed, buttonAt(window, user32.getXLparam(lparam), user32.getYLparam(lparam)));
+            return 0;
+        },
+
+        // Capture lost (Alt+Tab, a dialog): the press is over.
+        user32.WM_CAPTURECHANGED => {
             if (window.frame.pressed != .nowhere) {
                 window.frame.pressed = .nowhere;
                 Chrome.invalidate(window);
@@ -223,6 +247,31 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
     }
 }
 
+/// The caption button at a client point, else `.nowhere`.
+fn buttonAt(window: *const Window, x: i32, y: i32) TabStrip.Part {
+    const m = TabStrip.Metrics.forDpi(window.dpi);
+    return switch (window.strip.hitTest(m, x, y, user32.IsZoomed(window.hwnd) != 0)) {
+        .minimize => .minimize,
+        .maximize => .maximize,
+        .close => .close,
+        else => .nowhere,
+    };
+}
+
+/// A caption button was released over `over`; a click when it is the one
+/// that was pressed.
+fn releaseButton(window: *Window, pressed: TabStrip.Part, over: TabStrip.Part) void {
+    window.frame.pressed = .nowhere;
+    Chrome.invalidate(window);
+    if (!std.meta.eql(pressed, over)) return;
+    const sc: usize = switch (pressed) {
+        .minimize => user32.SC_MINIMIZE,
+        .maximize => if (user32.IsZoomed(window.hwnd) != 0) user32.SC_RESTORE else user32.SC_MAXIMIZE,
+        else => user32.SC_CLOSE,
+    };
+    _ = user32.PostMessageW(window.hwnd, user32.WM_SYSCOMMAND, sc, 0);
+}
+
 fn setHover(window: *Window, part: TabStrip.Part) void {
     if (std.meta.eql(window.frame.hover, part)) return;
     window.frame.hover = part;
@@ -237,12 +286,26 @@ fn showSystemMenuBelowStrip(window: *Window) void {
 }
 
 /// The system menu at a screen point; the chosen command is posted as
-/// `WM_SYSCOMMAND`.
+/// `WM_SYSCOMMAND`. A window without `WS_SYSMENU` may have no system menu
+/// to fetch, then a popup with the same commands is built.
 fn showSystemMenu(window: *Window, x: i32, y: i32) void {
-    const menu = GetSystemMenu(window.hwnd, 0) orelse {
-        log.warn("no system menu err={}", .{win32.kernel32.GetLastError()});
+    const system = GetSystemMenu(window.hwnd, 0);
+    const menu = system orelse buildMenu() orelse {
+        log.warn("unable to build the system menu err={}", .{win32.kernel32.GetLastError()});
         return;
     };
+    defer if (system == null) {
+        _ = user32.DestroyMenu(menu);
+    };
+
+    const zoomed = user32.IsZoomed(window.hwnd) != 0;
+    enable(menu, user32.SC_RESTORE, zoomed);
+    enable(menu, SC_MOVE, !zoomed);
+    enable(menu, SC_SIZE, !zoomed);
+    enable(menu, user32.SC_MINIMIZE, true);
+    enable(menu, user32.SC_MAXIMIZE, !zoomed);
+    enable(menu, user32.SC_CLOSE, true);
+
     // The menu belongs to the foreground window, or it will not close
     // when the user clicks elsewhere.
     _ = user32.SetForegroundWindow(window.hwnd);
@@ -254,7 +317,28 @@ fn showSystemMenu(window: *Window, x: i32, y: i32) void {
         window.hwnd,
         null,
     );
+    // Lets the loop of the menu finish before the next message.
+    _ = user32.PostMessageW(window.hwnd, user32.WM_NULL, 0, 0);
     if (cmd > 0) _ = user32.PostMessageW(window.hwnd, user32.WM_SYSCOMMAND, @intCast(cmd), 0);
+}
+
+fn enable(menu: user32.HMENU, id: usize, on: bool) void {
+    _ = EnableMenuItem(menu, @intCast(id), MF_BYCOMMAND | if (on) MF_ENABLED else MF_GRAYED);
+}
+
+fn buildMenu() ?user32.HMENU {
+    const menu = user32.CreatePopupMenu() orelse return null;
+    const items = [_]struct { id: usize, text: [*:0]const u16 }{
+        .{ .id = user32.SC_RESTORE, .text = std.unicode.utf8ToUtf16LeStringLiteral("&Restore") },
+        .{ .id = SC_MOVE, .text = std.unicode.utf8ToUtf16LeStringLiteral("&Move") },
+        .{ .id = SC_SIZE, .text = std.unicode.utf8ToUtf16LeStringLiteral("&Size") },
+        .{ .id = user32.SC_MINIMIZE, .text = std.unicode.utf8ToUtf16LeStringLiteral("Mi&nimize") },
+        .{ .id = user32.SC_MAXIMIZE, .text = std.unicode.utf8ToUtf16LeStringLiteral("Ma&ximize") },
+    };
+    for (items) |item| _ = user32.AppendMenuW(menu, user32.MF_STRING, item.id, item.text);
+    _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
+    _ = user32.AppendMenuW(menu, user32.MF_STRING, user32.SC_CLOSE, std.unicode.utf8ToUtf16LeStringLiteral("&Close\tAlt+F4"));
+    return menu;
 }
 
 /// Bring the window's frame in line with the config: decorations, system

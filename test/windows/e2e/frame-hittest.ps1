@@ -1,19 +1,28 @@
-# e2e: milestone=M2 timeout=120 order=290
+# e2e: milestone=M2 timeout=180 order=290
 # frame-hittest: the custom frame answers WM_NCHITTEST for the caption buttons,
 # the strip and the top edge, maximizing keeps the client on the monitor, a
-# double click on the caption maximizes, and Alt+Space opens the system menu
-# (the top-level has no WS_SYSMENU, SPEC section 18 item 9).
+# double click on the caption maximizes, and the top-level has no WS_SYSMENU
+# (SPEC section 18 item 9), so the acceptance items of that removal are
+# checked here: Alt+Space and caption right-click menus, Win+Up/Down, a lone
+# Alt tap, Alt+key reaching the terminal, the inactive caption, Alt+F4.
+# Strip rects come from the IPC `state` op when it is there, else from the
+# fixed metrics of the strip.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
+$script:HaveIpc = Test-Path -LiteralPath (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1')
+if ($script:HaveIpc) { Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force }
 
 if (-not ('GhosttyE2e.Frame' -as [type])) {
     Add-Type -Namespace GhosttyE2e -Name Frame -MemberDefinition @"
 [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
-[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 "@
 }
 
@@ -37,27 +46,98 @@ function Get-ClientWidth([IntPtr]$Hwnd) {
     $rc.Right
 }
 
+# Centre of a [l,t,r,b] rect.
+function Get-Centre($R) { , @([int](($R[0] + $R[2]) / 2), [int](($R[1] + $R[3]) / 2)) }
+
+# The points to probe, from the strip rects of the `state` op, or from the
+# metrics of the strip (46x40 caption buttons at 96 dpi, close rightmost).
+function Get-FramePoints($G) {
+    $w = Get-ClientWidth $G.Hwnd
+    $s = [GhosttyE2e.Frame]::GetDpiForWindow($G.Hwnd) / 96.0
+    if ($script:HaveIpc) {
+        try {
+            $st = Get-GhosttyState -Class $G.Class
+            $strip = $st.strip
+            if ($strip -and $strip.close -and $strip.maximize -and $strip.minimize -and $strip.new_tab) {
+                return @{
+                    close = Get-Centre $strip.close
+                    maximize = Get-Centre $strip.maximize
+                    minimize = Get-Centre $strip.minimize
+                    new_tab = Get-Centre $strip.new_tab
+                    caption = Get-Centre $strip.caption
+                    source = 'state'
+                }
+            }
+        } catch {
+            Write-E2eInfo "state op unusable, using metrics: $($_.Exception.Message)"
+        }
+    }
+    $btn = [int][Math]::Round(46 * $s)
+    $mid = [int][Math]::Round(20 * $s)
+    @{
+        close = @(($w - [int]($btn / 2)), $mid)
+        maximize = @(($w - $btn - [int]($btn / 2)), $mid)
+        minimize = @(($w - 2 * $btn - [int]($btn / 2)), $mid)
+        new_tab = @(($w - 3 * $btn - [int](20 * $s)), $mid)
+        caption = @([int]($w / 2), $mid)
+        source = 'metrics'
+    }
+}
+
+function Wait-SystemMenu {
+    $script:menu = [IntPtr]::Zero
+    $found = Wait-Until {
+        $script:menu = [GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', $null)
+        $script:menu -ne [IntPtr]::Zero
+    } 5
+    [bool]$found
+}
+
+function Close-SystemMenu($G, [string]$What) {
+    Invoke-SendInput -Hwnd $G.Hwnd -Keys 'esc'
+    if (-not (Wait-Until { -not [GhosttyE2e.Win]::IsWindowVisible($script:menu) } 5)) { throw "$What : Esc did not close the menu" }
+}
+
+function Test-Responsive([IntPtr]$Hwnd) {
+    $r = [IntPtr]::Zero
+    # SMTO_ABORTIFHUNG
+    [GhosttyE2e.Frame]::SendMessageTimeout($Hwnd, 0, [IntPtr]::Zero, [IntPtr]::Zero, 2, 2000, [ref]$r) -ne [IntPtr]::Zero
+}
+
+function Get-ScreenPixel([int]$X, [int]$Y) {
+    $bmp = New-Object Drawing.Bitmap 1, 1
+    try {
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size 1, 1))
+        $g.Dispose()
+        $c = $bmp.GetPixel(0, 0)
+        , @([int]$c.R, [int]$c.G, [int]$c.B)
+    } finally { $bmp.Dispose() }
+}
+
 Invoke-E2eScenario 'frame-hittest' {
-    $g = Start-E2eGhostty -ConfigText "confirm-close-surface = false`nwindow-decoration = client`n"
+    $g = Start-E2eGhostty -ConfigText "confirm-close-surface = false`nwindow-decoration = client`nkeybind = alt+x=new_tab`n"
     if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
     $h = $g.Hwnd
     $s = [GhosttyE2e.Frame]::GetDpiForWindow($h) / 96.0
-    $btn = [int][Math]::Round(46 * $s)
-    $mid = [int][Math]::Round(20 * $s)
     $w = Get-ClientWidth $h
+    $pt = Get-FramePoints $g
+    Write-E2eInfo "probe points from $($pt.source)"
 
-    Assert-Hit $g ($w - [int]($btn / 2)) $mid 20 'close'
-    Assert-Hit $g ($w - $btn - [int]($btn / 2)) $mid 9 'maximize'
-    Assert-Hit $g ($w - 2 * $btn - [int]($btn / 2)) $mid 8 'minimize'
-    Assert-Hit $g ([int]($w / 2)) $mid 2 'caption'
-    # With one tab the strip holds the title, the new-tab button and the caption.
-    Assert-Hit $g ($w - 3 * $btn - [int](20 * $s)) $mid 1 'new tab button'
+    Assert-Hit $g $pt.close[0] $pt.close[1] 20 'close'
+    Assert-Hit $g $pt.maximize[0] $pt.maximize[1] 9 'maximize'
+    Assert-Hit $g $pt.minimize[0] $pt.minimize[1] 8 'minimize'
+    Assert-Hit $g $pt.caption[0] $pt.caption[1] 2 'caption'
+    Assert-Hit $g $pt.new_tab[0] $pt.new_tab[1] 1 'new tab button'
     Assert-Hit $g ([int]($w / 2)) 1 12 'top edge'
     Assert-Hit $g 1 1 13 'top-left corner'
     Assert-Hit $g ($w - 2) 1 14 'top-right corner'
 
-    # Maximize: the client must stay on the monitor.
-    [void][GhosttyE2e.Frame]::ShowWindow($h, 3)
+    # Maximize (toggle_maximize through the action, else ShowWindow): the
+    # client must stay on the monitor.
+    $viaAction = $false
+    if ($script:HaveIpc) { $viaAction = [bool](Invoke-GhosttyAction -Class $g.Class -Action 'toggle_maximize') }
+    if (-not $viaAction) { [void][GhosttyE2e.Frame]::ShowWindow($h, 3) }
     if (-not (Wait-Until { [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'window did not maximize' }
     Start-Sleep -Milliseconds 300
     $scr = [Windows.Forms.Screen]::FromHandle($h)
@@ -71,25 +151,72 @@ Invoke-E2eScenario 'frame-hittest' {
     }
     [void][GhosttyE2e.Frame]::ShowWindow($h, 9)
     if (-not (Wait-Until { -not [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'window did not restore' }
+    $pt = Get-FramePoints $g
 
     # Double click on the caption toggles maximize.
     [void](Set-ForegroundSafe -Hwnd $h)
-    Send-MouseClick -Hwnd $h -X ([int]((Get-ClientWidth $h) / 2)) -Y $mid -Double
+    Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Double
     if (-not (Wait-Until { [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'double click on the caption did not maximize' }
     Start-Sleep -Milliseconds 300
-    Send-MouseClick -Hwnd $h -X ([int]((Get-ClientWidth $h) / 2)) -Y $mid -Double
+    $pt = Get-FramePoints $g
+    Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Double
     if (-not (Wait-Until { -not [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'double click on the caption did not restore' }
+    $pt = Get-FramePoints $g
 
     # Alt+Space opens the system menu (#32768); Esc closes it.
     [void](Set-ForegroundSafe -Hwnd $h)
     Invoke-SendInput -Hwnd $h -Keys 'alt+space'
-    $script:menu = [IntPtr]::Zero
-    $found = Wait-Until {
-        $script:menu = [GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', $null)
-        $script:menu -ne [IntPtr]::Zero
-    } 5
-    if (-not $found) { throw 'Alt+Space did not open the system menu' }
-    Invoke-SendInput -Hwnd $h -Keys 'esc'
-    if (-not (Wait-Until { -not [GhosttyE2e.Frame]::IsWindowVisible($script:menu) } 5)) { throw 'Esc did not close the system menu' }
-    Write-E2eInfo 'hit codes, maximize bounds, caption double click and Alt+Space menu pass'
+    if (-not (Wait-SystemMenu)) { throw 'Alt+Space did not open the system menu' }
+    Close-SystemMenu $g 'Alt+Space'
+
+    # Right click on the caption opens it too.
+    Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Button right
+    if (-not (Wait-SystemMenu)) { throw 'caption right click did not open the system menu' }
+    Close-SystemMenu $g 'caption right click'
+
+    # Win+Up maximizes, Win+Down restores.
+    [void](Set-ForegroundSafe -Hwnd $h)
+    Invoke-SendInput -Hwnd $h -Keys 'win+up'
+    if (-not (Wait-Until { [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'Win+Up did not maximize' }
+    Invoke-SendInput -Hwnd $h -Keys 'win+down'
+    if (-not (Wait-Until { -not [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'Win+Down did not restore' }
+
+    # A lone Alt tap must not start a modal menu loop.
+    [void](Set-ForegroundSafe -Hwnd $h)
+    Invoke-SendInput -Hwnd $h -Keys 'alt'
+    Start-Sleep -Milliseconds 400
+    if (-not (Test-Responsive $h)) { throw 'the UI thread is blocked after a lone Alt tap' }
+    if ([GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', $null) -ne [IntPtr]::Zero) {
+        throw 'a lone Alt tap opened a menu'
+    }
+
+    # The inactive caption repaints: the shell window takes the focus, the
+    # strip background beside the title changes.
+    $origin = New-Object GhosttyE2e.Mouse+POINT
+    [void][GhosttyE2e.Mouse]::ClientToScreen($h, [ref]$origin)
+    $sx = $origin.X + $pt.caption[0]
+    $sy = $origin.Y + $pt.caption[1]
+    $active = Get-ScreenPixel $sx $sy
+    [void][GhosttyE2e.Frame]::SetForegroundWindow([GhosttyE2e.Frame]::GetShellWindow())
+    Start-Sleep -Milliseconds 600
+    $inactive = Get-ScreenPixel $sx $sy
+    if (($active -join ',') -eq ($inactive -join ',')) {
+        throw "the caption did not repaint when inactive: pixel ($sx,$sy) stays $($active -join ',')"
+    }
+    [void](Set-ForegroundSafe -Hwnd $h)
+
+    # Alt+x reaches the terminal (keybind alt+x=new_tab): a second tab.
+    if ($script:HaveIpc) {
+        Invoke-SendInput -Hwnd $h -Keys 'alt+x'
+        [void](Wait-GhosttyState -Class $g.Class -Predicate { $_.tabs.Count -eq 2 } -TimeoutSec 10)
+    } else {
+        Write-E2eInfo 'no IPC state: Alt+x delivery not checked'
+    }
+
+    # Alt+F4 closes the window and the process ends.
+    [void](Set-ForegroundSafe -Hwnd $h)
+    Invoke-SendInput -Hwnd $h -Keys 'alt+f4'
+    $exit = Wait-ProcessExit $g 15
+    if (-not $exit.Exited) { throw 'Alt+F4 did not close ghostty' }
+    Write-E2eInfo 'hit codes, maximize, double click, system menus, Win+Up/Down, Alt tap, Alt+x, inactive caption and Alt+F4 pass'
 }
