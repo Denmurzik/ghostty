@@ -10,7 +10,7 @@ Invoke-E2eScenario 'device-lost' {
 
     # Only Debug builds simulate the loss; the startup line names the mode.
     $modeLine = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
-        if (Test-Path -LiteralPath $g.Log) { Select-String -LiteralPath $g.Log -Pattern 'ghostty build optimize=(S+)' | Select-Object -First 1 }
+        if (Test-Path -LiteralPath $g.Log) { Select-String -LiteralPath $g.Log -Pattern 'ghostty build optimize=(\S+)' | Select-Object -First 1 }
     }
     if (-not $modeLine) { throw 'no "ghostty build optimize=" line in the log' }
     $mode = $modeLine.Matches[0].Groups[1].Value
