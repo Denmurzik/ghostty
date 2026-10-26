@@ -1183,6 +1183,12 @@ const Subprocess = struct {
                 // DO NOT call cmd.wait
                 killCommand(cmd) catch |err|
                     log.err("error sending SIGHUP to command, may hang: {}", .{err});
+
+                // Closing the pseudo console sends CTRL_CLOSE_EVENT to
+                // the console clients attached to it, which ends them.
+                if (comptime is_windows) {
+                    if (self.pty) |*pty| pty.closeConsoleAsync();
+                }
             },
 
             .flatpak => |*cmd| if (comptime build_config.flatpak) {
@@ -1226,11 +1232,12 @@ const Subprocess = struct {
         if (command.pid) |pid| {
             switch (builtin.target.os.tag) {
                 .windows => {
-                    // Kills the child and its console descendants, not
-                    // the GUI programs it started.
+                    // Only the child goes. The console programs attached
+                    // to its pseudo console end when stop closes it; ones
+                    // with a console of their own and GUI programs stay.
                     defer command.closeProcess();
                     defer command.closeJob();
-                    try command.killTree();
+                    try command.killChild();
 
                     _ = try command.wait(false);
                 },
@@ -2850,6 +2857,82 @@ test "windows exec: output before child exit is drained and EOF follows" {
     try testing.expect(testElapsedMs(start) < 1000);
     try testing.expectEqual(ReadLoopEnd.eof, loop.end);
     try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-drain-token") != null);
+}
+
+test "windows exec: closing the pseudo console ends attached console clients" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 });
+    defer pty.deinit();
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/k", "ping -n 60 127.0.0.1" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(testing.allocator);
+    defer cmd.closeJob();
+    pty.closeChildSide();
+
+    var loop = try TestReadLoop.init(pty.out_pipe);
+    defer loop.deinit();
+    try loop.start();
+
+    // Find the ping among the job's processes and keep a handle to it.
+    var ping: ?windows.HANDLE = null;
+    defer if (ping) |h| {
+        _ = k32.TerminateProcess(h, 0);
+        _ = k32.CloseHandle(h);
+    };
+    const begin: std.Io.Timestamp = .now(global.io(), .awake);
+    while (ping == null) {
+        var ids: [64]windows.DWORD = undefined;
+        for (cmd.jobProcessIds(&ids)) |id| {
+            const proc = windows.OpenProcess(
+                windows.SYNCHRONIZE | windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION,
+                windows.FALSE,
+                id,
+            ) orelse continue;
+            var buf: [1024]u16 = undefined;
+            var len: windows.DWORD = buf.len;
+            var is_ping = false;
+            if (windows.QueryFullProcessImageNameW(proc, 0, @ptrCast(&buf), &len) != windows.FALSE and len >= 8) {
+                var tail: [8]u8 = undefined;
+                for (buf[len - 8 .. len], &tail) |w, *d| d.* = std.ascii.toLower(@truncate(w));
+                is_ping = std.mem.eql(u8, &tail, "ping.exe");
+            }
+            if (is_ping) {
+                ping = proc;
+                break;
+            }
+            _ = k32.CloseHandle(proc);
+        }
+        if (ping != null) break;
+        try testing.expect(testElapsedMs(begin) < 8000);
+        try std.Io.sleep(global.io(), .fromMilliseconds(50), .awake);
+    }
+
+    // The shell goes right away, the ping only when the console closes.
+    try cmd.killChild();
+    _ = try cmd.wait(false);
+    cmd.closeProcess();
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_TIMEOUT),
+        k32.WaitForSingleObject(ping.?, 200),
+    );
+
+    pty.closeConsoleAsync();
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(ping.?, 6000),
+    );
 }
 
 test "windows exec: quit is honoured within a bound while a large stream is processed slowly" {

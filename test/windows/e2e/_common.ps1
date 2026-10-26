@@ -864,16 +864,57 @@ function Invoke-PayloadCase($G, [string]$File, [scriptblock]$TypePayload) {
 # After the process is gone: nothing from the snapshot (a process tree taken
 # while it ran) may still be alive, and nothing may still claim the old pid
 # as its parent.
-function Assert-NoSurvivors([object[]]$Snapshot, [int]$OldPid, [double]$GraceSec) {
+function Assert-NoSurvivors([object[]]$Snapshot, [int]$OldPid, [double]$GraceSec, [int[]]$Except = @(), [switch]$GhosttyAlive) {
     $survivors = @()
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     do {
-        $survivors = @(Get-SurvivingProcesses $Snapshot)
+        $survivors = @(Get-SurvivingProcesses $Snapshot | Where-Object { $Except -notcontains [int]$_.ProcessId })
         if ($survivors.Count -eq 0) { break }
         Start-Sleep -Milliseconds 250
     } while ($deadline.Elapsed.TotalSeconds -lt $GraceSec)
-    if ($survivors.Count) { throw "processes left behind after ghostty exited: $(Format-Procs $survivors)" }
+    if ($survivors.Count) { throw "processes left behind: $(Format-Procs $survivors)" }
+    # Only meaningful once ghostty itself is gone.
+    if ($GhosttyAlive) { return }
     $orphans = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $OldPid } |
         Select-Object ProcessId, Name)
     if ($orphans.Count) { throw "processes still reporting the old ghostty pid as parent: $(Format-Procs $orphans)" }
+}
+
+# A program with a console of its own, as `start cmd` makes it: it must outlive
+# the surface it was started from (Windows Terminal behaviour). Typed into the
+# focused Git Bash; returns the pid of the new cmd.exe, found by its command
+# line. The caller stops it with Stop-Survivor from a `finally`.
+function Start-SurvivorConsole($G) {
+    $tag = 'gt-survivor-' + ('{0:x8}' -f (Get-Random -Maximum ([int]::MaxValue)))
+    # MSYS would turn the lone /k into a path.
+    Send-Line $G.Hwnd "MSYS2_ARG_CONV_EXCL=* cmd /c start `"$tag`" cmd /k echo $tag"
+    $found = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" |
+            Where-Object { $_.CommandLine -like "*$tag*" -and $_.CommandLine -like '*/k*' } |
+            Select-Object -First 1
+    }
+    if (-not $found) { throw "the survivor console ($tag) never started" }
+    [int]$found.ProcessId
+}
+
+# The survivor cmd.exe and the console host it owns.
+function Get-SurvivorIds([int]$SurvivorPid) {
+    $ids = @($SurvivorPid)
+    $ids += @(Get-CimInstance Win32_Process |
+        Where-Object { $_.ParentProcessId -eq $SurvivorPid -and @('conhost.exe', 'openconsole.exe') -contains $_.Name.ToLowerInvariant() } |
+        ForEach-Object { [int]$_.ProcessId })
+    $ids
+}
+
+# Kills the survivor and its console host. Only ever the processes
+# Start-SurvivorConsole found; safe to call twice or with 0.
+function Stop-Survivor([int]$SurvivorPid) {
+    if (-not $SurvivorPid) { return }
+    foreach ($id in @(Get-SurvivorIds $SurvivorPid)) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-ProcessAlive([int]$ProcessId) {
+    [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
