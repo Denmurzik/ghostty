@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=40
 # typing-de-altgr: on the German layout AltGr+Q is @ (and AltGr gives the
 # other third-level characters); the fake Ctrl that Windows sends with AltGr
 # must not turn them into control characters.

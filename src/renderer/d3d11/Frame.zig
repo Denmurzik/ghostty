@@ -3,7 +3,8 @@
 //! A frame draws into a `Target` between `begin` and `complete`, all under
 //! the device context lock (`drawFrameStart`/`drawFrameEnd`). Completing it
 //! copies the target into the swap chain and presents it (when the API has a
-//! present target) and, with `GHOSTTY_D3D11_DUMP` set, dumps the target.
+//! present target) and, with `GHOSTTY_D3D11_DUMP` set, dumps the target: the
+//! pixels are read back under the lock, the file is written after it.
 const Self = @This();
 
 const std = @import("std");
@@ -115,7 +116,11 @@ fn submit(self: *const Self) error{DeviceLost}!void {
     // Any failing reason code means the device is gone.
     api.device.device.checkDeviceRemoved() catch return error.DeviceLost;
 
-    if (api.dump) |*dump| try dump.maybeWrite(api.alloc, self.target);
+    if (api.dump) |*dump| {
+        // The surface id names the file once the apprt provides one.
+        const file_index: usize = if (api.present_target) |pt| pt.id else dump.index;
+        try dump.capture(api.alloc, self.target, file_index);
+    }
 }
 
 /// Copies the target into the swap chain's back buffer and presents it.
@@ -138,6 +143,10 @@ fn present(self: *const Self) !void {
 /// `width * height * 4` bytes of BGRA) holding the target's stored bytes:
 /// sRGB encoded for `window-colorspace`/linear blending targets, with
 /// premultiplied alpha.
+///
+/// The read back (`capture`) happens under the device context lock; the
+/// file I/O (`flush`) runs after `drawFrameEnd` released it, so a slow disk
+/// never holds up the other surfaces.
 pub const Dump = struct {
     /// Owned by `deinit`.
     dir: []const u8,
@@ -145,6 +154,23 @@ pub const Dump = struct {
     interval_ms: i64 = 250,
     last: ?std.Io.Timestamp = null,
     failed_logged: bool = false,
+
+    /// The captured frame waiting for `flush`.
+    pending: ?Pending = null,
+
+    /// Test hook: runs in `flush` right before the file is written.
+    before_write: ?struct {
+        ctx: *anyopaque,
+        run: *const fn (*anyopaque) void,
+    } = null,
+
+    const Pending = struct {
+        /// Tightly packed BGRA, owned by the dump.
+        pixels: []u8,
+        width: usize,
+        height: usize,
+        file_index: usize,
+    };
 
     /// Null unless `GHOSTTY_D3D11_DUMP` is set to a non-empty value.
     pub fn initFromEnv(alloc: Allocator, index: usize) ?Dump {
@@ -159,19 +185,22 @@ pub const Dump = struct {
     }
 
     pub fn deinit(self: *Dump, alloc: Allocator) void {
+        if (self.pending) |p| alloc.free(p.pixels);
         alloc.free(self.dir);
         self.* = undefined;
     }
 
-    /// Writes the target unless the last dump is too recent. Only a lost
-    /// device is an error; other failures are logged once.
+    /// Reads the target back unless the last dump is too recent; `flush`
+    /// writes it. Only a lost device is an error; other failures are logged
+    /// once.
     ///
     /// Reads the target with the immediate context: the caller holds the
     /// device context lock.
-    pub fn maybeWrite(
+    pub fn capture(
         self: *Dump,
         alloc: Allocator,
         target: *const Target,
+        file_index: usize,
     ) error{DeviceLost}!void {
         const now = std.Io.Timestamp.now(global.io(), .awake);
         if (self.last) |last| {
@@ -180,34 +209,53 @@ pub const Dump = struct {
         // Also set on failure, so a broken dump dir is not retried per frame.
         self.last = now;
 
-        self.write(alloc, target) catch |err| {
+        const pixels = target.readPixelsAlloc(alloc) catch |err| {
             if (err == error.DeviceLost) return error.DeviceLost;
-            if (!self.failed_logged) {
-                self.failed_logged = true;
-                log.warn("d3d11 frame dump failed dir={s} err={}", .{ self.dir, err });
-            }
+            self.logFailure(err);
+            return;
+        };
+        if (self.pending) |p| alloc.free(p.pixels);
+        self.pending = .{
+            .pixels = pixels,
+            .width = target.width,
+            .height = target.height,
+            .file_index = file_index,
         };
     }
 
-    fn write(self: *const Dump, alloc: Allocator, target: *const Target) !void {
-        const io = global.io();
+    /// Writes the captured frame, if any. Takes no device state, so it runs
+    /// without the context lock.
+    pub fn flush(self: *Dump, alloc: Allocator) void {
+        const p = self.pending orelse return;
+        self.pending = null;
+        defer alloc.free(p.pixels);
 
-        const pixels = try target.readPixelsAlloc(alloc);
-        defer alloc.free(pixels);
+        if (self.before_write) |hook| hook.run(hook.ctx);
+        self.write(p) catch |err| self.logFailure(err);
+    }
+
+    fn logFailure(self: *Dump, err: anyerror) void {
+        if (self.failed_logged) return;
+        self.failed_logged = true;
+        log.warn("d3d11 frame dump failed dir={s} err={}", .{ self.dir, err });
+    }
+
+    fn write(self: *const Dump, p: Pending) !void {
+        const io = global.io();
 
         try std.Io.Dir.cwd().createDirPath(io, self.dir);
         var dir = try std.Io.Dir.cwd().openDir(io, self.dir, .{});
         defer dir.close(io);
 
         var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "surface-{d}.bmp", .{self.index});
+        const name = try std.fmt.bufPrint(&name_buf, "surface-{d}.bmp", .{p.file_index});
 
         var atomic = try dir.createFileAtomic(io, name, .{ .replace = true });
         defer atomic.deinit(io);
 
         var buf: [4096]u8 = undefined;
         var file_writer = atomic.file.writer(io, &buf);
-        try writeBmp(&file_writer.interface, target.width, target.height, pixels);
+        try writeBmp(&file_writer.interface, p.width, p.height, p.pixels);
         try file_writer.flush();
         try atomic.replace(io);
     }
@@ -273,6 +321,12 @@ const Recorder = struct {
         self.count += 1;
     }
 };
+
+/// Ends the frame (the dump is written) and begins the next one.
+fn cycleLock(api: *D3D11) void {
+    api.drawFrameEnd();
+    api.drawFrameStart();
+}
 
 /// A headless API, its shaders and a target on a WARP device.
 const Fixture = struct {
@@ -623,6 +677,7 @@ test "d3d11 frame: dump hook writes a BMP" {
         }});
         pass.complete();
         frame.complete(false);
+        cycleLock(&fx.api);
 
         const bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-0.bmp", testing.allocator, .limited(1 << 20));
         defer testing.allocator.free(bytes);
@@ -643,6 +698,7 @@ test "d3d11 frame: dump hook writes a BMP" {
     fx.api.dump.?.interval_ms = 0;
     var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
     frame.complete(false);
+    cycleLock(&fx.api);
     const bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-0.bmp", testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(bytes);
     try testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, bytes[bmp_header_len..][0..4]);
@@ -667,8 +723,89 @@ test "d3d11 frame: a failing dump does not fail the frame" {
 
     var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
     frame.complete(false);
+    cycleLock(&fx.api);
     try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
     try testing.expect(fx.api.dump.?.failed_logged);
+}
+
+/// A second thread that waits for the context lock, as a render thread of
+/// another surface does.
+const LockWaiter = struct {
+    device: *Device,
+    dir: std.Io.Dir,
+    path: []const u8,
+    acquired: std.atomic.Value(bool) = .init(false),
+    checked: std.atomic.Value(bool) = .init(false),
+    file_existed: bool = true,
+
+    fn run(self: *LockWaiter) void {
+        self.device.lockContext();
+        defer self.device.unlockContext();
+        self.acquired.store(true, .release);
+        self.file_existed = if (self.dir.access(testing.io, self.path, .{})) true else |_| false;
+        self.checked.store(true, .release);
+    }
+
+    /// The dump's `before_write` hook: runs after the frame unlocked and
+    /// before the file is written. Gives the waiter time to get the lock.
+    fn waitForCheck(ptr: *anyopaque) void {
+        const self: *LockWaiter = @ptrCast(@alignCast(ptr));
+        const start = std.Io.Timestamp.now(testing.io, .awake);
+        while (!self.checked.load(.acquire)) {
+            const waited = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
+            if (waited.toMilliseconds() > 5000) return;
+            std.Thread.yield() catch {};
+        }
+    }
+};
+
+test "d3d11 frame: dump is written after the context lock is released" {
+    var fx: Fixture = try .init(.native, 16, 8);
+    defer fx.deinit();
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = path_buf[0..try tmp.dir.realPath(testing.io, &path_buf)];
+    const dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "dumps" });
+    defer testing.allocator.free(dir);
+    // The index of a headless renderer is overridden by the surface id.
+    fx.api.dump = .{ .dir = dir, .index = 0 };
+
+    var packed_size: std.atomic.Value(u64) = .init(D3D11.packSize(16, 8));
+    fx.api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .id = 7 };
+    defer fx.api.threadExit();
+
+    var waiter: LockWaiter = .{
+        .device = fx.device,
+        .dir = tmp.dir,
+        .path = "dumps/surface-7.bmp",
+    };
+    fx.api.dump.?.before_write = .{ .ctx = &waiter, .run = LockWaiter.waitForCheck };
+
+    fx.api.drawFrameStart();
+    const thread = try std.Thread.spawn(.{}, LockWaiter.run, .{&waiter});
+    {
+        var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+        var pass = frame.renderPass(&.{.{
+            .target = .{ .target = fx.target },
+            .clear_color = .{ 1, 0, 0, 1 },
+        }});
+        pass.complete();
+        frame.complete(false);
+    }
+    // Unlocks, then writes: the waiter gets the lock before the file exists.
+    fx.api.drawFrameEnd();
+    thread.join();
+
+    try testing.expect(waiter.acquired.load(.acquire));
+    try testing.expect(!waiter.file_existed);
+    const bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-7.bmp", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(usize, bmp_header_len + 16 * 8 * 4), bytes.len);
+    try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
 }
 
 test "d3d11 frame: complete presents into a lazily created swap chain" {
@@ -712,4 +849,3 @@ test "d3d11 frame: bmp header" {
     try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, out[34..38], .little));
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, out[bmp_header_len..]);
 }
-

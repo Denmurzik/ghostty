@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=420 order=180
 # resize-while-streaming: 200 SetWindowPos calls while a child streams
 # output. A watchdog keeps sending WM_NULL (2000 ms timeout): the window must
 # answer throughout, and the run must end within 10 s of the last resize

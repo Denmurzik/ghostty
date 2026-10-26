@@ -229,9 +229,11 @@ pub fn drawFrameStart(self: *D3D11) void {
     self.device.lockContext();
 }
 
-/// Actions taken after `drawFrame` is done.
+/// Actions taken after `drawFrame` is done. Releases the context lock.
 pub fn drawFrameEnd(self: *D3D11) void {
     self.device.unlockContext();
+    // The frame dump's file I/O stays out of the context lock.
+    if (self.dump) |*d| d.flush(self.alloc);
 }
 
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for

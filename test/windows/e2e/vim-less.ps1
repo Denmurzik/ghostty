@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=180 order=160
 # vim-less: full-screen programs work: `less` pages a file and `q` returns
 # to the prompt; vim takes typed text (i, text, Esc) and writes it out.
 . (Join-Path $PSScriptRoot '_common.ps1')

@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=30
 # typing-us: every printable ASCII key reaches the shell on the US layout.
 . (Join-Path $PSScriptRoot '_common.ps1')
 

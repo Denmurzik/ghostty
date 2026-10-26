@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=120 order=10
 # startup: the window appears within 1.5 s, a shell child runs and starts in
 # %USERPROFILE%.
 . (Join-Path $PSScriptRoot '_common.ps1')

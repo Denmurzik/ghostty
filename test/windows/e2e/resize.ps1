@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=120 order=130
 # resize: SetWindowPos to 400x300 and then 1200x800; every size produces a
 # dump that matches the client area and is clean at its edges, with no
 # `error` line in ghostty.log.

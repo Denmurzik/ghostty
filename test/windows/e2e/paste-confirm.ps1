@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=180 order=110
 # paste-confirm: pasting a multi-line clipboard asks for confirmation (a
 # #32770 dialog). The default button is No: Enter cancels and nothing runs;
 # answering Yes pastes both lines and (after Enter, as Git Bash holds a

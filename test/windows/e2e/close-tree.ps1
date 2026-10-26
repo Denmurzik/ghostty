@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=120 order=140
 # close-tree: closing the window while a program runs kills the whole tree:
 # no ping.exe, bash.exe, conhost.exe or OpenConsole.exe survives.
 . (Join-Path $PSScriptRoot '_common.ps1')

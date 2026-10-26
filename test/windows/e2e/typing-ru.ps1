@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=60
 # typing-ru: real key presses on the Russian layout produce Cyrillic text.
 . (Join-Path $PSScriptRoot '_common.ps1')
 

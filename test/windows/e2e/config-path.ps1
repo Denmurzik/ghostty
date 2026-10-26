@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=90 order=20
 # config-path: with no config and a fresh USERPROFILE the template is created
 # at <USERPROFILE>\.config\ghostty\config.ghostty (and nowhere else).
 . (Join-Path $PSScriptRoot '_common.ps1')

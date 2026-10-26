@@ -75,8 +75,37 @@ human) that starts windows or sends input must follow this protocol:
 
 `Enter-GuiLock`, `Update-GuiLock` and `Exit-GuiLock` in `lib/Harness.psm1`
 implement this; `Invoke-GuiScenario` takes the lock itself (a held lock is a
-SKIP after the wait). `e2e-m1.ps1` takes it once for the whole run and hands
+SKIP after the wait). `e2e.ps1` takes it once for the whole run and hands
 its id to the scenarios in `GHOSTTY_E2E_LOCK_ID`, so they do not wait on it.
+
+### The e2e runner and scenario headers
+
+```
+powershell -NoProfile -File test/windows/e2e.ps1 -Milestone M1 [-Only a,b] [-EvidenceDir d]
+```
+
+`e2e.ps1` discovers `e2e/*.ps1` (scripts starting with `_` are helpers). The
+first `# e2e:` line of the leading comment block is the header:
+
+```
+# e2e: milestone=M1 timeout=150 order=30 [surfaces=N]
+```
+
+Scenarios run in `order`; `timeout` (seconds) kills the scenario and its
+process tree. `surfaces` > 4 makes the runner check `Assert-FreeRam 2.5`
+first (SKIP when less is free) and, for a Debug exe, run the scenario under
+the team's `test-lock` (`GHOSTTY_TEST_LOCK` overrides its path). Exit code:
+`0` no FAIL and at least one PASS, `1` any FAIL, `2` every scenario SKIPped.
+`e2e-m1.ps1` is `e2e.ps1 -Milestone M1`.
+
+Every `Start-E2eGhostty` writes its config through `New-GhosttyConfigText`
+(`lib/Harness.psm1`), which always adds `class = ghostty-e2e-<8 hex>` (also
+`$G.Class`): a test instance has an identity of its own and cannot reach
+another instance or the owner's. It also adds
+`quit-after-last-window-closed = true` (`-KeepDefaultQuit` omits it), sets
+`GHOSTTY_WIN32_TEST_IPC=1` (`-NoTestIpc` omits it), and finds the window
+by class `GhosttyWindow` plus pid. Frame dumps are
+`surface-<surface id>.bmp` (`$G.Dump` is surface 1, `Get-DumpPath $G <id>`).
 
 ### launch.ps1
 

@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=70
 # typing-ru-ctrl-shift-c: on the Russian layout the keys of the Latin
 # shortcuts type Cyrillic letters, and Ctrl+Shift+A / Ctrl+Shift+C must
 # still match (core falls back to the physical key). Select all, copy, and

@@ -25,6 +25,8 @@ The run takes the shared desktop lock (%TEMP%\gui-e2e.lock, see README.md)
 and kills only the ghostty.exe it started.
 
 CSV columns: date,commit,optimize,adapter,scenario,private_mb,ws_mb. The
+commit is the short HEAD at measure time, with `-dirty` when the tree has
+uncommitted changes (the file is written with LF line endings). The
 adapter is read from the `d3d11 adapter=` line of the sandbox's ghostty.log.
 
 .PARAMETER Driver
@@ -85,6 +87,7 @@ if (-not $Csv) { $Csv = Join-Path $root 'docs\windows\ram-baseline.csv' }
 
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)
 if (-not $commit) { $commit = 'unknown' }
+elseif (& git -C $root status --porcelain 2>$null) { $commit += '-dirty' }
 
 # Sandbox: nothing of the user's profile is read or written.
 $sbx = Join-Path $env:TEMP ('ghostty-ram\' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -97,8 +100,9 @@ $dirs = @{
 foreach ($d in $dirs.Values) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 $configHome = Join-Path $dirs.Home '.config'
 New-Item -ItemType Directory -Force -Path (Join-Path $configHome 'ghostty') | Out-Null
+$ramClass = 'ghostty-ram-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 [IO.File]::WriteAllText((Join-Path $configHome 'ghostty\config.ghostty'),
-    "command = direct:cmd.exe /k`r`nconfirm-close-surface = false`r`n$(if ($ConfigExtra) { $ConfigExtra + "`r`n" })",
+    (New-GhosttyConfigText -Class $ramClass -Extra "command = direct:cmd.exe /k`nconfirm-close-surface = false`nquit-after-last-window-closed = true`n$ConfigExtra"),
     (New-Object Text.UTF8Encoding $false))
 
 $vars = [ordered]@{
@@ -184,12 +188,12 @@ try {
 }
 
 if (-not (Test-Path -LiteralPath $Csv)) {
-    [IO.File]::WriteAllText($Csv, "date,commit,optimize,adapter,scenario,private_mb,ws_mb`r`n", (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllText($Csv, "date,commit,optimize,adapter,scenario,private_mb,ws_mb`n", (New-Object Text.UTF8Encoding $false))
 }
 # Adapter names have no commas in practice; keep the file parseable anyway.
 $row = '{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
     ($adapter -replace ',', ' '), $Scenario,
     $privateMb.ToString([Globalization.CultureInfo]::InvariantCulture),
     $wsMb.ToString([Globalization.CultureInfo]::InvariantCulture)
-[IO.File]::AppendAllText($Csv, $row + "`r`n", (New-Object Text.UTF8Encoding $false))
+[IO.File]::AppendAllText($Csv, $row + "`n", (New-Object Text.UTF8Encoding $false))
 Write-Output $row

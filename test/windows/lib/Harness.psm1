@@ -331,6 +331,42 @@ function Stop-OwnGhostty {
     $script:OwnPids.Clear()
 }
 
-Export-ModuleMember -Function Enter-GuiLock, Exit-GuiLock, Update-GuiLock, Test-InteractiveSession, Get-SkipReason, Invoke-GuiScenario,
+<#
+Free physical memory in GB (GlobalMemoryStatusEx's ullAvailPhys, through
+Win32_OperatingSystem.FreePhysicalMemory, which is in KB).
+#>
+function Get-FreeRamGb {
+    [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+}
+
+<#
+Throws `E2E-SKIP: <reason>` (a SKIP in a scenario, and in the runner) when less
+than $Gb GB of RAM are free. Heavy scenarios call it before they start more
+windows than the machine can take (a swapping desktop is worse than a SKIP).
+#>
+function Assert-FreeRam {
+    param([Parameter(Mandatory)][double]$Gb)
+    $free = Get-FreeRamGb
+    if ($free -lt $Gb) {
+        throw ('E2E-SKIP: only {0:N1} GB RAM free, {1:N1} GB needed' -f $free, $Gb)
+    }
+}
+
+<#
+The one writer of the config.ghostty text every test script uses: the Extra
+lines, then `class = <Class>`, always. The class gives the instance an
+identity of its own (window class, IPC pipe), so a test instance can never
+reach another instance or the owner's.
+#>
+function New-GhosttyConfigText {
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9._-]+$')][string]$Class,
+        [string]$Extra
+    )
+    $text = if ($Extra) { ($Extra -replace "`r`n", "`n").TrimEnd("`n") + "`n" } else { '' }
+    $text + "class = $Class`n"
+}
+
+Export-ModuleMember -Function New-GhosttyConfigText, Assert-FreeRam, Get-FreeRamGb, Enter-GuiLock, Exit-GuiLock, Update-GuiLock, Test-InteractiveSession, Get-SkipReason, Invoke-GuiScenario,
     Set-ForegroundSafe, Save-KeyboardLayouts, Restore-KeyboardLayouts, Switch-GhosttyLayout,
     Register-OwnGhostty, Stop-OwnGhostty

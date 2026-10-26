@@ -353,6 +353,22 @@ config.ghostty contents (default: a plain test config). -NoConfig writes none.
 
 .PARAMETER NoXdg
 Leaves XDG_CONFIG_HOME unset, so the config path comes from USERPROFILE.
+
+.PARAMETER KeepDefaultQuit
+Does not add `quit-after-last-window-closed = true`; the process then keeps
+the Windows default (false) and outlives its last window.
+
+.PARAMETER ExtraArgs
+Command line arguments for the exe.
+
+.PARAMETER NoTestIpc
+Leaves GHOSTTY_WIN32_TEST_IPC unset (it is `1` otherwise).
+
+.PARAMETER Env
+Extra environment variables for the child process (name -> value).
+
+Every start gets a class of its own (`ghostty-e2e-<8 hex>`, in $G.Class), so
+no scenario can reach another instance, nor an instance of the owner.
 #>
 function Start-E2eGhostty {
     param(
@@ -361,17 +377,23 @@ function Start-E2eGhostty {
         [switch]$NoConfig,
         [switch]$NoXdg,
         [switch]$NoDump,
+        [switch]$KeepDefaultQuit,
+        [switch]$NoTestIpc,
+        [string[]]$ExtraArgs,
+        [hashtable]$Env,
         [double]$WindowTimeoutSec = 15
     )
 
     $sbx = $script:Sbx
     if ($ConfigFile) { $ConfigText = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 }
 
+    $class = 'ghostty-e2e-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     $configHome = Join-Path $sbx.Home '.config'
     if (-not $NoConfig) {
+        $extra = if ($KeepDefaultQuit) { $ConfigText } else { "quit-after-last-window-closed = true`n$ConfigText" }
         $dir = Join-Path $configHome 'ghostty'
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        [IO.File]::WriteAllText((Join-Path $dir 'config.ghostty'), $ConfigText, (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllText((Join-Path $dir 'config.ghostty'), (New-GhosttyConfigText -Class $class -Extra $extra), (New-Object Text.UTF8Encoding $false))
     }
     if (-not $NoDump) { New-Item -ItemType Directory -Force -Path $sbx.Dump | Out-Null }
 
@@ -384,14 +406,18 @@ function Start-E2eGhostty {
         TMP                  = $sbx.Tmp
         XDG_CONFIG_HOME      = $(if ($NoXdg) { $null } else { $configHome })
         GHOSTTY_D3D11_DUMP   = $(if ($NoDump) { $null } else { $sbx.Dump })
+        GHOSTTY_WIN32_TEST_IPC = $(if ($NoTestIpc) { $null } else { '1' })
     }
+    if ($Env) { foreach ($k in $Env.Keys) { $vars[[string]$k] = $Env[$k] } }
     $saved = @{}
     foreach ($n in $vars.Keys) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $vars[$n], 'Process') }
-        $proc = Start-Process -FilePath $script:Exe -WorkingDirectory $script:Root -PassThru
+        $startArgs = @{ FilePath = $script:Exe; WorkingDirectory = $script:Root; PassThru = $true }
+        if ($ExtraArgs) { $startArgs.ArgumentList = $ExtraArgs }
+        $proc = Start-Process @startArgs
     } finally {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
     }
@@ -401,7 +427,10 @@ function Start-E2eGhostty {
     while ($sw.Elapsed.TotalSeconds -lt $WindowTimeoutSec) {
         $proc.Refresh()
         if ($proc.HasExited) { throw "ghostty exited early with code $($proc.ExitCode)" }
-        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = $proc.MainWindowHandle; break }
+        # Not MainWindowHandle: it is ambiguous once a process has several
+        # GhosttyWindows (or the unowned tab drag ghost).
+        $first = Find-GhosttyWindows $proc.Id | Select-Object -First 1
+        if ($first) { $hwnd = $first; break }
         Start-Sleep -Milliseconds 10
     }
     $startupMs = $sw.ElapsedMilliseconds
@@ -413,10 +442,23 @@ function Start-E2eGhostty {
         Hwnd      = $hwnd
         StartupMs = $startupMs
         Sandbox   = $sbx
+        Class     = $class
         Log       = Join-Path $sbx.Local 'ghostty\logs\ghostty.log'
-        Dump      = Join-Path $sbx.Dump 'surface-0.bmp'
+        Dump      = Join-Path $sbx.Dump 'surface-1.bmp'
     }
     $global:E2eLast
+}
+
+# The visible GhosttyWindows of a process in z-order, topmost first.
+function Find-GhosttyWindows([int]$ProcessId) {
+    @([GhosttyE2e.Win]::TopLevel([uint32]$ProcessId, 'GhosttyWindow') | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) })
+}
+
+function Get-GhosttyWindows($G) { Find-GhosttyWindows $G.Pid }
+
+# The frame dump of a surface (ids count from 1 in creation order).
+function Get-DumpPath($G, [int]$SurfaceId) {
+    Join-Path $G.Sandbox.Dump "surface-$SurfaceId.bmp"
 }
 
 function Get-LogErrors($G) {

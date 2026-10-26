@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=900 order=190
 # stream-integrity: Git Bash writes a file of numbered, CRC-checked lines
 # (50 MB by default, GHOSTTY_E2E_STREAM_MB to change it) to the terminal;
 # the terminal must then hold every line, unchanged and in order. What the

@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=170
 # close-while-streaming: closing the window while the child floods the
 # terminal does not hang; the process exits within 3 s and leaves nothing.
 . (Join-Path $PSScriptRoot '_common.ps1')

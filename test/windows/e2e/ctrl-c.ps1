@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=100
 # ctrl-c: Ctrl+C interrupts a running console program and the shell stays
 # usable.
 . (Join-Path $PSScriptRoot '_common.ps1')

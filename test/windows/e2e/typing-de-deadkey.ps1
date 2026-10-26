@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=50
 # typing-de-deadkey: on the German layout the ^ key (scancode 0x29) followed
 # by e gives e-circumflex, the acute key (0x0D) followed by e gives
 # e-acute, and the dead key followed by space is the bare accent.

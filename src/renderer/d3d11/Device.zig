@@ -113,6 +113,16 @@ const AdapterDesc = extern struct {
     dedicated_system_memory: usize,
     shared_system_memory: usize,
     luid: u64,
+
+    // DXGI_ADAPTER_DESC on x64: Description[128] WCHAR, 4 UINT, 3 SIZE_T,
+    // LUID (two 4-byte fields, 4-aligned in the C struct).
+    comptime {
+        if (@sizeOf(usize) == 8) {
+            std.debug.assert(@sizeOf(AdapterDesc) == 304);
+            std.debug.assert(@offsetOf(AdapterDesc, "dedicated_video_memory") == 272);
+            std.debug.assert(@offsetOf(AdapterDesc, "luid") == 296);
+        }
+    }
 };
 
 /// Logs the adapter the device runs on. `test/windows/measure-ram.ps1` reads the

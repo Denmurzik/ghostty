@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=90 order=120
 # render: the frame dump shows the configured background in the empty parts
 # of the window, and text (the prompt) where it belongs.
 . (Join-Path $PSScriptRoot '_common.ps1')

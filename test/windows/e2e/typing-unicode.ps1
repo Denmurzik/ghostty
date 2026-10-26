@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=120 order=80
 # typing-unicode: VK_PACKET input (any character, no layout), including a
 # surrogate pair (an emoji sent as two UTF-16 units), arrives as the right
 # UTF-8 bytes.

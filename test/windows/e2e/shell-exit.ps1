@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=120 order=150
 # shell-exit: `exit` in the shell closes the window and the process within
 # 3 s, with no orphan conhost.exe / OpenConsole.exe.
 . (Join-Path $PSScriptRoot '_common.ps1')

@@ -1,3 +1,4 @@
+# e2e: milestone=M1 timeout=150 order=90
 # typing-unicode-vim: characters sent as VK_PACKET (SendInput unicode, touch
 # keyboard, remote desktop, automation tools) reach a full-screen program in
 # the order they were typed and act as key presses (the `i` of `ivim-ok`
