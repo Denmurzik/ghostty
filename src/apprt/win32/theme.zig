@@ -76,6 +76,26 @@ fn luminanceIsDark(c: Color) bool {
     return rgb.luminance() < 0.5;
 }
 
+/// The split divider colour when the config sets none, as on macOS: the
+/// terminal background with its HSB brightness scaled down by 0.08 (light
+/// background) or 0.4 (dark). Scaling the brightness keeps hue and
+/// saturation, which is scaling all channels.
+fn derivedDivider(bg: Color) Color {
+    const lum = 0.299 * @as(f64, @floatFromInt(bg.r)) / 255 +
+        0.587 * @as(f64, @floatFromInt(bg.g)) / 255 +
+        0.114 * @as(f64, @floatFromInt(bg.b)) / 255;
+    const amount: f64 = if (lum > 0.5) 0.08 else 0.4;
+    return .{
+        .r = darkenChannel(bg.r, amount),
+        .g = darkenChannel(bg.g, amount),
+        .b = darkenChannel(bg.b, amount),
+    };
+}
+
+fn darkenChannel(c: u8, amount: f64) u8 {
+    return @intFromFloat(@round(@as(f64, @floatFromInt(c)) * (1 - amount)));
+}
+
 /// The fields of the config that the chrome depends on. Kept as a copy:
 /// the config handed to `config_change` is only valid during the call.
 const Inputs = struct {
@@ -224,7 +244,7 @@ fn computeWith(in: Inputs, sys_dark: bool, active: bool, hc: ?SystemColors) Pale
         p.strip_bg = in.titlebar_background orelse in.background;
         p.text = in.titlebar_foreground orelse in.foreground;
     }
-    if (in.split_divider) |c| p.divider = c;
+    p.divider = in.split_divider orelse derivedDivider(in.background);
     if (mica) p.strip_bg.a = 0;
     return p;
 }
@@ -359,7 +379,8 @@ test "win32 theme: dark and light palettes" {
     try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x15 }, dark.button_hover_bg);
     try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x0B }, dark.button_pressed_bg);
     try std.testing.expectEqual(Color{ .r = 0x20, .g = 0x20, .b = 0x20, .a = 0 }, dark.strip_bg);
-    try std.testing.expectEqual(Color{ .r = 0x3C, .g = 0x3C, .b = 0x3C }, dark.divider);
+    // Default background #282C34 is dark: darkened by 0.4.
+    try std.testing.expectEqual(Color{ .r = 24, .g = 26, .b = 31 }, dark.divider);
     try std.testing.expectEqual(Color{ .r = cfg.background.r, .g = cfg.background.g, .b = cfg.background.b }, dark.tab_active_bg);
 
     const light = computeWith(.from(&cfg), false, true, null);
@@ -370,7 +391,10 @@ test "win32 theme: dark and light palettes" {
     try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x09 }, light.button_hover_bg);
     try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x06 }, light.button_pressed_bg);
     try std.testing.expectEqual(Color{ .r = 0xF3, .g = 0xF3, .b = 0xF3, .a = 0 }, light.strip_bg);
-    try std.testing.expectEqual(Color{ .r = 0xC8, .g = 0xC8, .b = 0xC8 }, light.divider);
+    // The divider follows the terminal background, not the window theme.
+    try std.testing.expectEqual(Color{ .r = 24, .g = 26, .b = 31 }, light.divider);
+    try std.testing.expectEqual(Color{ .r = 235, .g = 235, .b = 235 }, derivedDivider(.{ .r = 255, .g = 255, .b = 255 }));
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, derivedDivider(.{ .r = 0, .g = 0, .b = 0 }));
 
     // window-theme light/dark ignores the system scheme, and the divider
     // colour of the config wins.

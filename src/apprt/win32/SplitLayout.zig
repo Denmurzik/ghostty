@@ -141,10 +141,20 @@ pub fn Layout(comptime Tree: type) type {
             return null;
         }
 
-        /// Index of the divider whose gap strip contains the point.
-        pub fn dividerAt(self: *const Self, x: i32, y: i32) ?usize {
+        /// Index of the divider whose gap strip, widened by `slop` pixels on
+        /// both sides across its axis, contains the point. The widening is
+        /// for hit testing only: it overlaps the panes.
+        pub fn dividerAt(self: *const Self, x: i32, y: i32, slop: i32) ?usize {
             for (self.dividers, 0..) |d, i| {
-                if (d.rect.contains(x, y)) return i;
+                var r = d.rect;
+                if (d.layout == .horizontal) {
+                    r.x -= slop;
+                    r.w += 2 * slop;
+                } else {
+                    r.y -= slop;
+                    r.h += 2 * slop;
+                }
+                if (r.contains(x, y)) return i;
             }
             return null;
         }
@@ -194,9 +204,15 @@ pub fn resizeRatio(
     return @floatCast(signed);
 }
 
-/// Divider thickness at `dpi`: 4 px at 96 DPI, at least 1.
+/// Divider thickness at `dpi`: 1 DIP like Ghostty on macOS, at least 1 px.
 pub fn gapPx(dpi: u32) i32 {
-    return @max(geom.scale(4, dpi), 1);
+    return @max(geom.scale(1, dpi), 1);
+}
+
+/// Invisible grab zone on each side of the divider: macOS has 6 DIP of
+/// hit area around the 1 DIP line, so 3 DIP either side.
+pub fn grabSlopPx(dpi: u32) i32 {
+    return geom.scale(3, dpi);
 }
 
 const TestView = struct {
@@ -403,10 +419,16 @@ test "win32 splitlayout: divider hit and drag ratio clamp" {
     var l = try TestLayout.compute(alloc, &tree, .{ .w = 1001, .h = 600 }, 4);
     defer l.deinit(alloc);
 
-    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(498, 10));
-    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(501, 599));
-    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(497, 10));
-    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(502, 10));
+    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(498, 10, 0));
+    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(501, 599, 0));
+    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(497, 10, 0));
+    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(502, 10, 0));
+    // The grab zone widens across the axis only.
+    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(495, 10, 3));
+    try std.testing.expectEqual(@as(?usize, 0), l.dividerAt(504, 10, 3));
+    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(494, 10, 3));
+    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(505, 10, 3));
+    try std.testing.expectEqual(@as(?usize, null), l.dividerAt(500, 600, 3));
 
     const span = l.dividers[0].span;
     const avail: f32 = 997;
@@ -432,7 +454,9 @@ test "win32 splitlayout: resizeRatio matches GTK" {
 }
 
 test "win32 splitlayout: gapPx scales and never reaches zero" {
-    try std.testing.expectEqual(@as(i32, 4), gapPx(96));
-    try std.testing.expectEqual(@as(i32, 6), gapPx(144));
+    try std.testing.expectEqual(@as(i32, 1), gapPx(96));
+    try std.testing.expectEqual(@as(i32, 2), gapPx(168));
     try std.testing.expectEqual(@as(i32, 1), gapPx(1));
+    try std.testing.expectEqual(@as(i32, 3), grabSlopPx(96));
+    try std.testing.expectEqual(@as(i32, 5), grabSlopPx(168));
 }

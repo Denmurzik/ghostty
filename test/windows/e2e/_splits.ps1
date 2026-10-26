@@ -34,10 +34,10 @@ function ConvertTo-Box($Surface) {
 
 function Get-SurfaceBoxes($State) { @($State.Surfaces | ForEach-Object { ConvertTo-Box $_ }) }
 
-# SplitLayout.gapPx: 4 px at 96 DPI scaled with rounding, at least 1.
+# SplitLayout.gapPx: 1 DIP scaled with rounding, at least 1 px.
 function Get-SplitGap($State) {
     $dpi = [int]$State.Window.dpi
-    [Math]::Max([int][Math]::Floor((4 * $dpi + 48) / 96), 1)
+    [Math]::Max([int][Math]::Floor(($dpi + 48) / 96), 1)
 }
 
 function Wait-SurfaceCount($G, [int]$Count, [double]$TimeoutSec = 10) {

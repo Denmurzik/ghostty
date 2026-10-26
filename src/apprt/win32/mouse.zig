@@ -119,7 +119,15 @@ pub fn handle(
             return 0;
         },
 
-        user32.WM_LBUTTONDOWN,
+        // A press in a divider's grab zone, which overlaps the pane,
+        // starts a divider drag instead.
+        user32.WM_LBUTTONDOWN => {
+            if (surface.tab.beginDragFrom(surface.hwnd, user32.getXLparam(lparam), user32.getYLparam(lparam))) return 0;
+            const ev = buttonEvent(msg, wparam) orelse return null;
+            handleButton(surface, ev.button, ev.state, lparam);
+            return 0;
+        },
+
         user32.WM_LBUTTONDBLCLK,
         user32.WM_RBUTTONDOWN,
         user32.WM_RBUTTONDBLCLK,
@@ -160,6 +168,10 @@ pub fn handle(
 
         user32.WM_SETCURSOR => {
             if (user32.loWord(@bitCast(lparam)) != user32.HTCLIENT) return null;
+            if (surface.tab.cursorForPoint()) |cursor| {
+                _ = user32.SetCursor(user32.LoadCursorW(null, cursor));
+                return 1;
+            }
             applyCursor(surface.mouse_state);
             return 1;
         },

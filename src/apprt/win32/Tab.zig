@@ -491,21 +491,32 @@ fn fillDividerColor(self: *Tab, hdc: win32.user32.HDC) void {
 }
 
 /// The size cursor when the pointer is over a divider or one is dragged.
-fn cursorForPoint(self: *Tab) ?*const anyopaque {
+pub fn cursorForPoint(self: *Tab) ?*const anyopaque {
     const kind: DragKind = if (self.drag) |d| d.kind else blk: {
         const l = self.split_layout orelse return null;
         var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
         if (win32.user32.GetCursorPos(&pt) == 0) return null;
         if (win32.user32.ScreenToClient(self.hwnd, &pt) == 0) return null;
-        const i = l.dividerAt(pt.x, pt.y) orelse return null;
+        const i = l.dividerAt(pt.x, pt.y, SplitLayout.grabSlopPx(self.window.dpi)) orelse return null;
         break :blk if (l.dividers[i].layout == .horizontal) .horizontal else .vertical;
     };
     return if (kind == .horizontal) win32.user32.IDC_SIZEWE else win32.user32.IDC_SIZENS;
 }
 
+/// Start a drag when a press at (x, y) of `child` (a pane, or null for the
+/// container itself) is on a divider's grab zone. Whether it started.
+pub fn beginDragFrom(self: *Tab, child: ?win32.foundation.HWND, x: i32, y: i32) bool {
+    var pt: win32.foundation.POINT = .{ .x = x, .y = y };
+    if (child) |c| {
+        if (win32.user32.MapWindowPoints(c, self.hwnd, @ptrCast(&pt), 1) == 0) return false;
+    }
+    self.beginDrag(pt.x, pt.y);
+    return self.drag != null;
+}
+
 fn beginDrag(self: *Tab, x: i32, y: i32) void {
     const l = self.split_layout orelse return;
-    const i = l.dividerAt(x, y) orelse return;
+    const i = l.dividerAt(x, y, SplitLayout.grabSlopPx(self.window.dpi)) orelse return;
     const d = l.dividers[i];
     const kind: DragKind = if (d.layout == .horizontal) .horizontal else .vertical;
     const centre = if (kind == .horizontal) d.rect.x + @divTrunc(d.rect.w, 2) else d.rect.y + @divTrunc(d.rect.h, 2);
@@ -604,7 +615,7 @@ fn wndProc(
         },
 
         win32.user32.WM_LBUTTONDOWN => {
-            self.beginDrag(win32.user32.getXLparam(lparam), win32.user32.getYLparam(lparam));
+            _ = self.beginDragFrom(null, win32.user32.getXLparam(lparam), win32.user32.getYLparam(lparam));
             return 0;
         },
 
