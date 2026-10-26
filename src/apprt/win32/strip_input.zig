@@ -251,7 +251,7 @@ pub fn hitAt(app: *App, pt: tab_drag.Point) tab_drag.Hit {
     const under = user32.WindowFromPoint(.{ .x = pt.x, .y = pt.y }) orelse return .none;
     const root = user32.GetAncestor(under, user32.GA_ROOT) orelse return .none;
     for (app.windows.items) |w| {
-        if (w.hwnd != root) continue;
+        if (w.hwnd != root or w.tearing_down) continue;
         var c: win32.foundation.POINT = .{ .x = pt.x, .y = pt.y };
         _ = user32.ScreenToClient(w.hwnd, &c);
         if (!w.strip.show_tabs or !w.strip.bounds.contains(c.x, c.y)) return .none;

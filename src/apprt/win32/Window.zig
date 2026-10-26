@@ -108,6 +108,11 @@ cell_size: ?apprt.action.CellSize = null,
 /// requests do not stack more dialogs.
 confirming_close: bool = false,
 
+/// True while `beginTeardown` runs. It answers sent messages between
+/// surfaces (see `util.serviceSentMessages`); those must not act on a
+/// window whose tabs are half gone.
+tearing_down: bool = false,
+
 /// True once closing the window was confirmed: the next WM_CLOSE goes
 /// through without asking.
 close_confirmed: bool = false,
@@ -303,8 +308,12 @@ pub fn destroy(self: *Window) void {
 /// before its container: core teardown still reads `window`, which must
 /// be alive until then.
 pub fn beginTeardown(self: *Window) void {
+    self.tearing_down = true;
+    defer self.tearing_down = false;
+
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
-    for (self.tabs.items) |tab| tab.stopThreads();
+    for (self.tabs.items) |tab| tab.stopRenderThreads();
+    for (self.tabs.items) |tab| tab.stopIoThreads();
     while (self.tabs.pop()) |tab| tab.destroy();
 }
 
@@ -1063,6 +1072,10 @@ fn wndProc(
 
     const self = util.fromUserData(Window, hwnd) orelse
         return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+
+    // Reached from `serviceSentMessages` mid-teardown: nothing may act on
+    // the tabs, or close the window a second time.
+    if (self.tearing_down) return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
     if (runHooks(self, &hooks, msg, wparam, lparam)) |result| return result;
 

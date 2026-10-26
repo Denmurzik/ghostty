@@ -951,6 +951,9 @@ pub const TPM_RETURNCMD = 0x0100;
 pub const IMAGE_ICON = 1;
 pub const LR_DEFAULTCOLOR = 0x00000000;
 
+/// PeekMessageW: handle only the messages sent from other threads (QS_SENDMESSAGE << 16).
+pub const PM_QS_SENDMESSAGE = 0x00400000;
+
 pub const ULW_ALPHA = 0x00000002;
 pub const AC_SRC_OVER = 0x00;
 pub const AC_SRC_ALPHA = 0x01;

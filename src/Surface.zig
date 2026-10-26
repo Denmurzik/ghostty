@@ -135,8 +135,10 @@ io: termio.Termio,
 io_thread: termio.Thread,
 io_thr: std.Thread,
 
-/// Set once `stopThreads` has asked the renderer and IO threads to quit.
+/// Set once `stopRenderThread` has asked the renderer thread to quit.
 threads_stopping: bool = false,
+renderer_joined: bool = false,
+io_stopping: bool = false,
 
 /// Terminal inspector
 inspector: ?*inspectorpkg.Inspector = null,
@@ -833,16 +835,31 @@ pub fn init(
     app.first = false;
 }
 
-/// Ask the renderer and IO threads to quit without waiting for them.
-/// `deinit` does this itself; a runtime tearing down many surfaces calls it
-/// on all of them first so that the joins in `deinit` overlap instead of
-/// running one after another. Safe to call more than once.
-pub fn stopThreads(self: *Surface) void {
+/// Ask the renderer thread to quit without waiting for it. `deinit` does
+/// this itself; a runtime tearing down many surfaces calls it on all of
+/// them, then `stopIoThread` on all of them, so that the waits in `deinit`
+/// overlap instead of running one after another. Safe to call more than
+/// once.
+pub fn stopRenderThread(self: *Surface) void {
     if (self.threads_stopping) return;
     self.threads_stopping = true;
 
     self.renderer_thread.stop.notify() catch |err|
         log.err("error notifying renderer thread to stop, may stall err={}", .{err});
+}
+
+/// Join the renderer thread, then ask the IO thread to quit without
+/// waiting for it. The IO thread must outlive the renderer thread, which
+/// may still send it messages. Safe to call more than once.
+pub fn stopIoThread(self: *Surface) void {
+    self.stopRenderThread();
+    if (!self.renderer_joined) {
+        self.renderer_thr.join();
+        self.renderer_joined = true;
+    }
+
+    if (self.io_stopping) return;
+    self.io_stopping = true;
     self.io_thread.stop.notify() catch |err|
         log.err("error notifying io thread to stop, may stall err={}", .{err});
 }
@@ -852,8 +869,7 @@ pub fn deinit(self: *Surface) void {
     if (self.search) |*s| s.deinit();
 
     // Stop the rendering and IO threads
-    self.stopThreads();
-    self.renderer_thr.join();
+    self.stopIoThread();
     self.io_thr.join();
 
     // We need to deinit AFTER everything is stopped, since there are
@@ -1817,6 +1833,9 @@ pub fn updateConfig(
     self: *Surface,
     original: *const configpkg.Config,
 ) !void {
+    // Nobody drains the mailboxes of threads that are going away.
+    if (self.threads_stopping) return;
+
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = original.changeConditionalState(
@@ -4881,6 +4900,8 @@ pub fn cursorPosCallback(
 /// Call to notify Ghostty that the color scheme for the terminal has
 /// changed.
 pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+    if (self.threads_stopping) return;
+
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;

@@ -19,21 +19,19 @@ pub fn utf8(alloc: Allocator, s: []const u16) ![]u8 {
     return std.unicode.utf16LeToUtf8Alloc(alloc, s);
 }
 
-/// The object pointer stored in a window's GWLP_USERDATA, or null if
-/// none has been stored (yet, or any more).
-/// `PM_QS_SENDMESSAGE`: PeekMessage handles only the messages sent from
-/// other threads.
-const PM_QS_SENDMESSAGE: u32 = 0x0040 << 16;
-
 /// Answer what other threads have sent to this thread's windows (a
-/// `WM_NULL` liveness probe, `WM_COPYDATA`, ...) without taking anything
-/// off the posted queue. Called between the slices of a long teardown on
-/// the UI thread, so that the other windows are not reported as hung.
+/// `WM_NULL` liveness probe, a settings broadcast, ...) without taking
+/// anything off the posted queue. Called between the slices of a long
+/// teardown on the UI thread, so that the other windows are not reported
+/// as hung. Whatever is dispatched here runs with the teardown half done:
+/// the caller guards the state it is taking apart.
 pub fn serviceSentMessages() void {
     var msg: win32.user32.MSG = undefined;
-    _ = win32.user32.PeekMessageW(&msg, null, 0, 0, win32.user32.PM_NOREMOVE | PM_QS_SENDMESSAGE);
+    _ = win32.user32.PeekMessageW(&msg, null, 0, 0, win32.user32.PM_NOREMOVE | win32.user32.PM_QS_SENDMESSAGE);
 }
 
+/// The object pointer stored in a window's GWLP_USERDATA, or null if
+/// none has been stored (yet, or any more).
 pub fn fromUserData(comptime T: type, hwnd: win32.foundation.HWND) ?*T {
     const value = win32.user32.GetWindowLongPtrW(hwnd, win32.user32.GWLP_USERDATA);
     if (value == 0) return null;
@@ -109,4 +107,49 @@ test "win32 util: serviceSentMessages leaves the posted queue alone" {
     var msg: user32.MSG = undefined;
     try std.testing.expect(user32.PeekMessageW(&msg, null, 0, 0, user32.PM_REMOVE) != 0);
     try std.testing.expectEqual(@as(u32, user32.WM_APP + 1), msg.message);
+}
+
+test "win32 util: serviceSentMessages answers a message sent from another thread" {
+    const user32 = win32.user32;
+    const SendMessageTimeoutW = struct {
+        extern "user32" fn SendMessageTimeoutW(
+            win32.foundation.HWND,
+            u32,
+            win32.foundation.WPARAM,
+            win32.foundation.LPARAM,
+            flags: u32,
+            timeout: u32,
+            result: *usize,
+        ) callconv(.winapi) isize;
+    }.SendMessageTimeoutW;
+
+    const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const hwnd = user32.CreateWindowExW(0, class, null, 0, 0, 0, 0, 0, user32.HWND_MESSAGE, null, null, null) orelse
+        return error.SkipZigTest;
+    defer _ = user32.DestroyWindow(hwnd);
+
+    const Probe = struct {
+        hwnd: win32.foundation.HWND,
+        answered: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            var result: usize = 0;
+            const ok = SendMessageTimeoutW(self.hwnd, user32.WM_NULL, 0, 0, 0, 5000, &result);
+            self.answered.store(ok != 0, .release);
+            self.done.store(true, .release);
+        }
+    };
+    var probe: Probe = .{ .hwnd = hwnd };
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    defer thread.join();
+
+    // The probe is only delivered while this thread services its queue.
+    var spins: usize = 0;
+    while (!probe.done.load(.acquire) and spins < 5000) : (spins += 1) {
+        serviceSentMessages();
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(probe.done.load(.acquire));
+    try std.testing.expect(probe.answered.load(.acquire));
 }

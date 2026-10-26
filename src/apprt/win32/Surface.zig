@@ -253,9 +253,6 @@ pub fn deinit(self: *Surface) void {
 
     if (self.title) |t| alloc.free(t);
     alloc.destroy(self);
-
-    // Taking down a big window means many of these in a row.
-    util.serviceSentMessages();
 }
 
 pub fn core(self: *Surface) *CoreSurface {

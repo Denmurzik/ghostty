@@ -297,13 +297,16 @@ pub fn applyToWindow(window: *Window) void {
 }
 
 fn applyToAll(app: *App) void {
-    for (app.windows.items) |window| applyToWindow(window);
+    for (app.windows.items) |window| {
+        if (!window.tearing_down) applyToWindow(window);
+    }
 }
 
 /// Remember the config the chrome is drawn from, and apply it everywhere.
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
     applied = .from(config);
     for (app.windows.items) |window| {
+        if (window.tearing_down) continue;
         applyToWindow(window);
         // A window still being created is in the list without tabs; its
         // creation lays it out itself.
@@ -327,6 +330,7 @@ pub fn schemeChanged(app: *App, scheme: apprt.ColorScheme) void {
         log.warn("unable to report the color scheme err={}", .{err});
     };
     for (app.windows.items) |window| {
+        if (window.tearing_down) continue;
         for (window.tabs.items) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {

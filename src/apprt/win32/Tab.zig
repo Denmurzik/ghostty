@@ -152,34 +152,61 @@ pub fn create(window: *Window, opts: CreateOptions) !*Tab {
     return self;
 }
 
-/// Ask the core threads of every surface to quit without waiting, so the
-/// joins in `destroy` overlap instead of adding up.
-pub fn stopThreads(self: *Tab) void {
+/// Ask the renderer thread of every surface to quit without waiting.
+pub fn stopRenderThreads(self: *Tab) void {
     var it = self.tree.iterator();
     while (it.next()) |entry| {
         const s = entry.view;
-        if (s.initialized) s.core_surface.stopThreads();
+        if (s.initialized) s.core_surface.stopRenderThread();
+    }
+}
+
+/// Then, once the renderer threads are on their way out, ask the IO thread
+/// of every surface to quit. Together the two make the waits in `destroy`
+/// overlap instead of adding up.
+pub fn stopIoThreads(self: *Tab) void {
+    var it = self.tree.iterator();
+    while (it.next()) |entry| {
+        const s = entry.view;
+        if (s.initialized) s.core_surface.stopIoThread();
     }
 }
 
 /// Destroy the tab and free it. Joins the core threads of every surface.
 pub fn destroy(self: *Tab) void {
     const alloc = self.window.app.core_app.alloc;
-    self.stopThreads();
+    self.stopRenderThreads();
+    self.stopIoThreads();
 
     // Hidden first: joining the threads of many surfaces takes a moment,
     // and the panes should not sit frozen on screen meanwhile.
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
 
     // Every surface goes first: core teardown still reads `window`. The
-    // tree is taken out of the tab: each surface answers the other windows'
-    // sent messages when it is gone (see `Surface.deinit`), and those may
-    // reach this tab.
+    // tree and its layout are taken out of the tab, and after each surface
+    // the thread answers what other threads have sent it meanwhile; those
+    // messages may reach this tab. The surfaces are held by `held` while
+    // the tree lets go of them, then released one by one.
     var tree = self.tree;
     self.tree = .empty;
     self.focused = null;
-    tree.deinit();
     if (self.split_layout) |*l| l.deinit(alloc);
+    self.split_layout = null;
+
+    var held: std.ArrayList(*Surface) = .empty;
+    defer held.deinit(alloc);
+    var it = tree.iterator();
+    while (it.next()) |entry| {
+        const s = entry.view.ref(alloc) catch continue;
+        held.append(alloc, s) catch {
+            s.refs -= 1;
+        };
+    }
+    tree.deinit();
+    for (held.items) |s| {
+        s.unref(alloc);
+        util.serviceSentMessages();
+    }
 
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
     if (self.title_override) |t| alloc.free(t);
