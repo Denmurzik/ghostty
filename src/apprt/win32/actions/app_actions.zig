@@ -144,34 +144,79 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
     return true;
 }
 
-/// Links come from terminal output, so nothing here may run a program: web
-/// and mail URLs go to the shell, local paths are only selected in Explorer
-/// (see `link_policy`). Always true so the core never falls back to
-/// `os.open`.
+/// `text` and `html` are paths Ghostty wrote itself (screen and scrollback
+/// files) and open like the config file. `unknown` and `osc8` come from
+/// terminal output, so nothing there may run a program: web and mail URLs go
+/// to the shell, local paths are only selected in Explorer (see
+/// `link_policy`). Always true so the core never falls back to `os.open`.
 pub fn open_url(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url)) !bool {
     _ = target;
     const alloc = app.core_app.alloc;
+
+    if (link_policy.isTrusted(value.kind)) {
+        _ = shellOpen(alloc, value.url);
+        return true;
+    }
 
     var buf: [link_policy.max_len]u8 = undefined;
     switch (link_policy.classify(&buf, value.url)) {
         .refuse => |why| log.warn("refusing to open link kind={t} why={s}", .{ value.kind, why }),
         .open => |url| {
-            const wide = util.utf16z(alloc, url) catch return true;
+            const wide = util.utf16z(alloc, url) catch |err| {
+                log.warn("unable to convert link err={}", .{err});
+                return true;
+            };
             defer alloc.free(wide);
             const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
             const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
             if (rc <= 32) log.warn("unable to open link rc={}", .{rc});
         },
         .reveal => |path| {
-            const params = std.fmt.allocPrint(alloc, "/select,\"{s}\"", .{path}) catch return true;
+            const params = std.fmt.allocPrint(alloc, "/select,\"{s}\"", .{path}) catch |err| {
+                log.warn("unable to build explorer arguments err={}", .{err});
+                return true;
+            };
             defer alloc.free(params);
-            const wide = util.utf16z(alloc, params) catch return true;
+            const wide = util.utf16z(alloc, params) catch |err| {
+                log.warn("unable to convert explorer arguments err={}", .{err});
+                return true;
+            };
             defer alloc.free(wide);
             const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
             const explorer = std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe");
             const rc = win32.shell32.ShellExecuteW(null, open, explorer, wide.ptr, null, win32.user32.SW_SHOWNORMAL);
             if (rc <= 32) log.warn("unable to reveal link rc={}", .{rc});
         },
+    }
+    return true;
+}
+
+/// Opens a file Ghostty wrote with the shell's "open" verb; without an
+/// association it goes to Notepad.
+fn shellOpen(alloc: std.mem.Allocator, path: []const u8) bool {
+    const wide = util.utf16z(alloc, path) catch |err| {
+        log.warn("unable to convert path err={}", .{err});
+        return false;
+    };
+    defer alloc.free(wide);
+
+    const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
+    const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
+    if (rc > 32) return true;
+    if (rc != win32.shell32.SE_ERR_NOASSOC) {
+        log.warn("unable to open the file rc={}", .{rc});
+        return false;
+    }
+
+    const quoted = std.fmt.allocPrint(alloc, "\"{s}\"", .{path}) catch return false;
+    defer alloc.free(quoted);
+    const params = util.utf16z(alloc, quoted) catch return false;
+    defer alloc.free(params);
+    const notepad = std.unicode.utf8ToUtf16LeStringLiteral("notepad.exe");
+    const rc2 = win32.shell32.ShellExecuteW(null, open, notepad, params.ptr, null, win32.user32.SW_SHOWNORMAL);
+    if (rc2 <= 32) {
+        log.warn("unable to open the file in notepad rc={}", .{rc2});
+        return false;
     }
     return true;
 }

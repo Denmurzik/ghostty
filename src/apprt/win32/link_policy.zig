@@ -2,8 +2,18 @@
 //! program controls, so only web and mail URLs are handed to the shell;
 //! local paths are revealed in Explorer, never executed.
 const std = @import("std");
+const apprt = @import("../../apprt.zig");
 
 pub const max_len = 2048;
+
+/// `text` and `html` are paths Ghostty wrote itself; `unknown` and `osc8`
+/// come from terminal output and must go through `classify`.
+pub fn isTrusted(kind: apprt.action.OpenUrl.Kind) bool {
+    return switch (kind) {
+        .text, .html => true,
+        .unknown, .osc8 => false,
+    };
+}
 
 pub const Verdict = union(enum) {
     /// Hand the URL to the shell's "open" verb.
@@ -18,6 +28,7 @@ pub const Verdict = union(enum) {
 /// `buf` holds the decoded path of a `reveal` verdict and must be at least
 /// `max_len` bytes.
 pub fn classify(buf: []u8, url: []const u8) Verdict {
+    std.debug.assert(buf.len >= max_len);
     if (url.len == 0) return .{ .refuse = "empty" };
     if (url.len > max_len) return .{ .refuse = "too long" };
     for (url) |c| {
@@ -35,14 +46,52 @@ pub fn classify(buf: []u8, url: []const u8) Verdict {
         if (!std.mem.startsWith(u8, rest, "//") or rest.len == 2 or rest[2] == '/') {
             return .{ .refuse = "web URL without host" };
         }
+        if (!isPlainUrl(url)) return .{ .refuse = "character not allowed in URL" };
         return .{ .open = url };
     }
     if (std.ascii.eqlIgnoreCase(scheme, "mailto")) {
         if (rest.len == 0) return .{ .refuse = "empty mailto" };
+        if (!isPlainUrl(url)) return .{ .refuse = "character not allowed in URL" };
+        if (hasAttachment(buf, rest)) return .{ .refuse = "mailto attachment" };
         return .{ .open = url };
     }
     if (std.ascii.eqlIgnoreCase(scheme, "file")) return fileUrl(buf, rest);
     return .{ .refuse = "scheme not allowed" };
+}
+
+/// Printable ASCII without the characters RFC 3986 excludes; anything else
+/// must arrive percent-encoded, so a handler that splices the URL into a
+/// command line or a bidi override cannot be smuggled in.
+fn isPlainUrl(url: []const u8) bool {
+    for (url) |c| {
+        if (c < 0x21 or c > 0x7e) return false;
+        switch (c) {
+            '\\', '<', '>', '^', '`', '{', '|', '}', '"' => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+/// A `mailto:` header named attach or attachment makes some clients attach
+/// a local file. Looks at the percent-decoded, lowercased query.
+fn hasAttachment(buf: []u8, rest: []const u8) bool {
+    const q = std.mem.indexOfScalar(u8, rest, '?') orelse return false;
+    const query = rest[q + 1 ..];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < query.len and n < buf.len) : (i += 1) {
+        var c = query[i];
+        if (c == '%' and i + 2 < query.len) {
+            if (std.fmt.parseInt(u8, query[i + 1 .. i + 3], 16)) |d| {
+                c = d;
+                i += 2;
+            } else |_| {}
+        }
+        buf[n] = std.ascii.toLower(c);
+        n += 1;
+    }
+    return std.mem.indexOf(u8, buf[0..n], "attach") != null;
 }
 
 /// Index of the ':' ending a URL scheme of two or more characters, null if
@@ -105,17 +154,51 @@ fn reveal(buf: []u8, path: []const u8) Verdict {
 
 /// Normalizes slashes in place and rejects names that address more than a
 /// plain file: alternate streams, wildcards, device syntax.
-fn finishReveal(path: []u8) Verdict {
+fn finishReveal(path_: []u8) Verdict {
+    var path = path_;
     for (path[2..]) |c| {
         switch (c) {
             ':', '*', '?', '<', '>', '|' => return .{ .refuse = "unsafe character in path" },
             else => {},
         }
     }
+    if (hasBidiControl(path)) return .{ .refuse = "bidi control character in path" };
     for (path) |*c| {
         if (c.* == '/') c.* = '\\';
     }
+    // A trailing separator would escape the closing quote of the argument.
+    while (path.len > 3 and path[path.len - 1] == '\\') path = path[0 .. path.len - 1];
+
+    var it = std.mem.splitScalar(u8, path[3..], '\\');
+    while (it.next()) |part| {
+        if (isDeviceName(part)) return .{ .refuse = "reserved device name" };
+    }
     return .{ .reveal = path };
+}
+
+/// U+202A..202E, U+2066..2069 and U+2028/2029 in UTF-8.
+fn hasBidiControl(path: []const u8) bool {
+    var i: usize = 0;
+    while (i + 2 < path.len) : (i += 1) {
+        if (path[i] != 0xE2) continue;
+        const b1 = path[i + 1];
+        const b2 = path[i + 2];
+        if (b1 == 0x80 and b2 >= 0xA8 and b2 <= 0xAE) return true;
+        if (b1 == 0x81 and b2 >= 0xA6 and b2 <= 0xA9) return true;
+    }
+    return false;
+}
+
+/// CON, PRN, AUX, NUL, COM1-9, LPT1-9 with any extension.
+fn isDeviceName(part: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, part, '.') orelse part.len;
+    const stem = std.mem.trimEnd(u8, part[0..dot], " ");
+    const names = [_][]const u8{ "con", "prn", "aux", "nul" };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(stem, n)) return true;
+    if (stem.len == 4 and stem[3] >= '1' and stem[3] <= '9') {
+        if (std.ascii.eqlIgnoreCase(stem[0..3], "com") or std.ascii.eqlIgnoreCase(stem[0..3], "lpt")) return true;
+    }
+    return false;
 }
 
 fn expectOpen(url: []const u8) !void {
@@ -191,6 +274,44 @@ test "win32 link policy: other schemes and junk are refused" {
     try expectRefuse("https://a/\x00");
     try expectRefuse("https://a/\"b");
     try expectRefuse("https://a/\nb");
+}
+
+test "win32 link policy: URL bytes and mail attachments" {
+    try expectRefuse("https://a b");
+    try expectRefuse("mailto:a@b c");
+    try expectRefuse("https://a/\xe2\x80\xae");
+    try expectRefuse("https://a/caf\xc3\xa9");
+    try expectRefuse("https://a/<b>");
+    try expectRefuse("https://a/{b}");
+    try expectRefuse("https://a/b\\c");
+    try expectRefuse("https://a/b^c");
+    try expectOpen("https://a/caf%C3%A9");
+    try expectRefuse("mailto:a@b.c?attach=C:\\x");
+    try expectRefuse("mailto:a@b.c?subject=x&Attachment=y");
+    try expectRefuse("mailto:a@b.c?%61ttach=y");
+    try expectOpen("mailto:a@b.c?subject=hi");
+}
+
+test "win32 link policy: reveal path hardening" {
+    try expectRefuse("C:\\a\xe2\x80\xaeb.exe");
+    try expectRefuse("C:\\a\xe2\x81\xa6b");
+    try expectRefuse("C:\\a\xe2\x80\xa8b");
+    try expectReveal("C:\\a\xc3\xa9\\b", "C:\\a\xc3\xa9\\b");
+    try expectReveal("C:\\x\\y\\", "C:\\x\\y");
+    try expectReveal("C:\\", "C:\\");
+    try expectRefuse("C:\\x\\CON");
+    try expectRefuse("C:\\x\\nul.txt");
+    try expectRefuse("C:\\x\\com1.tar.gz");
+    try expectRefuse("C:\\lpt9\\a");
+    try expectReveal("C:\\x\\com10", "C:\\x\\com10");
+    try expectReveal("C:\\x\\console.txt", "C:\\x\\console.txt");
+}
+
+test "win32 link policy: only terminal-controlled kinds are checked" {
+    try std.testing.expect(isTrusted(.text));
+    try std.testing.expect(isTrusted(.html));
+    try std.testing.expect(!isTrusted(.unknown));
+    try std.testing.expect(!isTrusted(.osc8));
 }
 
 test "win32 link policy: very long input is refused" {
