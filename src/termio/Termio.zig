@@ -523,8 +523,8 @@ pub fn resize(
 
     // Enter the critical area that we want to keep small
     {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         // Resizing the pty can immediately wake the shell with SIGWINCH.
         // Hold the same lock used by processOutput before notifying it, so

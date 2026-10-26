@@ -1617,8 +1617,8 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
         // highlight links. Additionally, mark the screen as dirty so
         // that the highlight state of all links is properly updated.
         {
-            self.renderer_state.lockDemand(global.io());
-            defer self.renderer_state.unlockDemand(global.io());
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
             self.renderer_state.mouse.mods = self.mouseModsWithCapture(self.mouse.mods);
 
             // We use the clear screen dirty flag to force a rebuild of all
@@ -2673,8 +2673,8 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    self.renderer_state.lockDemand(global.io());
-    defer self.renderer_state.unlockDemand(global.io());
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
 
     // We clear our selection when ANY OF:
     // 1. We have an existing preedit
@@ -2840,8 +2840,8 @@ pub fn keyCallback(
     )) |v| return v;
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
     }
 
@@ -2871,8 +2871,8 @@ pub fn keyCallback(
         {
             // Refresh our link state
             const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
-            self.renderer_state.lockDemand(global.io());
-            defer self.renderer_state.unlockDemand(global.io());
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
             self.mouseRefreshLinks(
                 pos,
                 self.posToViewport(pos.x, pos.y),
@@ -2964,8 +2964,8 @@ pub fn keyCallback(
     // some data to send to the pty, then we move the viewport down to the
     // bottom. We also clear the selection for any key other then modifiers.
     if (!event.key.modifier()) {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         if (self.config.selection_clear_on_typing or
             event.key == .escape)
@@ -3678,8 +3678,8 @@ pub fn scrollCallback(
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
 
     {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         // If we have an active mouse reporting mode, clear the selection.
         // The selection can occur if the user uses the shift mod key to
@@ -3805,8 +3805,8 @@ fn isMouseReporting(self: *const Surface) bool {
 }
 
 pub fn mouseReportingActive(self: *Surface) bool {
-    self.renderer_state.lockDemand(global.io());
-    defer self.renderer_state.unlockDemand(global.io());
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     return self.isMouseReporting();
 }
 
@@ -3907,8 +3907,8 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
 /// Returns true if the mouse is currently captured by the terminal
 /// (i.e. reporting events).
 pub fn mouseCaptured(self: *Surface) bool {
-    self.renderer_state.lockDemand(global.io());
-    defer self.renderer_state.unlockDemand(global.io());
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     return self.io.terminal.flags.mouse_event != .none;
 }
 
@@ -3980,8 +3980,8 @@ pub fn mouseButtonCallback(
     }
 
     if (button == .left and action == .release) {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         // The selection gesture tracks whether a press became a drag by
         // comparing the release cell to the original press cell. Resolve the
@@ -4056,8 +4056,8 @@ pub fn mouseButtonCallback(
 
     // Report mouse events if enabled
     {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
         if (self.isMouseReporting()) report: {
             // If we have shift-pressed and we aren't allowed to capture it,
             // then we do not do a mouse report.
@@ -4096,8 +4096,8 @@ pub fn mouseButtonCallback(
     // For left button clicks we always record some information for
     // selection/highlighting purposes.
     if (button == .left and action == .press) click: {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
         const t: *terminal.Terminal = self.renderer_state.terminal;
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
 
@@ -4196,8 +4196,8 @@ pub fn mouseButtonCallback(
     // want to be careful in the future we can add a function to apprts
     // that let's us know.
     if (button == .right and action == .press) sel: {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         // Get our viewport pin
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
@@ -4640,8 +4640,8 @@ pub fn mousePressureCallback(
     if (self.mouse.click_state[left_idx] == .press and
         stage == .deep)
     select: {
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         const sel = self.mouse.selection_gesture.deepPress(
             self.renderer_state.terminal,
@@ -4706,8 +4706,8 @@ pub fn cursorPosCallback(
             try self.queueRender();
         }
 
-        self.renderer_state.lockDemand(global.io());
-        defer self.renderer_state.unlockDemand(global.io());
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
 
         // No mouse point so we don't highlight links
         self.renderer_state.mouse.point = null;
@@ -4733,8 +4733,8 @@ pub fn cursorPosCallback(
     self.mouse.over_link = false;
 
     // We are reading/writing state for the remainder
-    self.renderer_state.lockDemand(global.io());
-    defer self.renderer_state.unlockDemand(global.io());
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
 
     // Update our mouse state. We set this to null initially because we only
     // want to set it when we're not selecting or doing any other mouse
