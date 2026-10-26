@@ -3,6 +3,7 @@ const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
+const title_edit = @import("../title_edit.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -89,12 +90,8 @@ pub fn resize_window(app: *App, target: apprt.Target, value: apprt.Action.Value(
     return false;
 }
 
-/// Stub until Task 19.
 pub fn prompt_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt_title)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    return title_edit.prompt(app, target, value);
 }
 
 /// Stub until Task 26.

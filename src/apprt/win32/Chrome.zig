@@ -564,10 +564,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
     var drag: ?DragView = null;
     if (window.strip_input.drag) |*d| {
         if (d.active) {
-            var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
-            _ = user32.GetCursorPos(&pt);
-            _ = user32.ScreenToClient(window.hwnd, &pt);
-            drag = .{ .index = d.current, .x = TabStrip.dragOffset(d, lay, pt.x) };
+            drag = .{ .index = d.current, .x = TabStrip.dragOffset(d, lay, window.strip_input.pointer_x) };
         }
     }
 

@@ -110,3 +110,32 @@ pub fn taskDialogIndirect(config: *const TASKDIALOGCONFIG) ?i32 {
     if (hr < 0) return null;
     return button;
 }
+
+// -- Window subclassing ------------------------------------------------------
+
+pub const SUBCLASSPROC = *const fn (
+    hwnd: foundation.HWND,
+    msg: u32,
+    wparam: foundation.WPARAM,
+    lparam: foundation.LPARAM,
+    subclass_id: usize,
+    ref_data: usize,
+) callconv(.winapi) foundation.LRESULT;
+
+pub extern "comctl32" fn SetWindowSubclass(
+    hwnd: foundation.HWND,
+    proc: SUBCLASSPROC,
+    subclass_id: usize,
+    ref_data: usize,
+) callconv(.winapi) foundation.BOOL;
+pub extern "comctl32" fn DefSubclassProc(
+    hwnd: foundation.HWND,
+    msg: u32,
+    wparam: foundation.WPARAM,
+    lparam: foundation.LPARAM,
+) callconv(.winapi) foundation.LRESULT;
+pub extern "comctl32" fn RemoveWindowSubclass(
+    hwnd: foundation.HWND,
+    proc: SUBCLASSPROC,
+    subclass_id: usize,
+) callconv(.winapi) foundation.BOOL;
