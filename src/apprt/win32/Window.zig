@@ -253,14 +253,26 @@ pub fn placeInitial(self: *Window, parent: ?*Window) void {
     var info: user32.MONITORINFO = .{};
     if (user32.GetMonitorInfoW(monitor, &info) == 0) return;
 
+    // The placement is in workspace coordinates (origin at the work area),
+    // everything else in screen coordinates.
+    if (restored) {
+        const dx = info.rcWork.left - info.rcMonitor.left;
+        const dy = info.rcWork.top - info.rcMonitor.top;
+        rc = .{ .left = rc.left + dx, .top = rc.top + dy, .right = rc.right + dx, .bottom = rc.bottom + dy };
+    }
+
     var own: win32.foundation.RECT = undefined;
     if (user32.GetWindowRect(self.hwnd, &own) == 0) return;
+    // The wrap test needs the visible edge: the shadow border of a
+    // top-level window is part of its rectangle but not of what is seen.
+    var visible: win32.foundation.RECT = own;
+    _ = win32.dwmapi.DwmGetWindowAttribute(self.hwnd, win32.dwmapi.DWMWA_EXTENDED_FRAME_BOUNDS, &visible, @sizeOf(win32.foundation.RECT));
 
     const origin = cascadeOrigin(
         geom.Rect.fromRECT(rc),
         geom.Rect.fromRECT(info.rcWork),
         user32.GetSystemMetricsForDpi(user32.SM_CYCAPTION, a.dpi),
-        .{ .w = own.right - own.left, .h = own.bottom - own.top },
+        .{ .w = visible.right - own.left, .h = visible.bottom - own.top },
     );
     _ = user32.SetWindowPos(self.hwnd, null, origin.x, origin.y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
 }
@@ -298,6 +310,11 @@ pub fn beginTeardown(self: *Window) void {
 /// Show the window at its start-up placement.
 pub fn show(self: *Window) void {
     placement_mod.applyStartup(self);
+    self.showPlain();
+}
+
+/// Show the window as it is: no `maximize` / `fullscreen` of the config.
+pub fn showPlain(self: *Window) void {
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_SHOW);
     _ = win32.user32.UpdateWindow(self.hwnd);
 }
@@ -482,8 +499,15 @@ pub fn moveTabToNewWindow(self: *Window, tab: *Tab) !?*Window {
     errdefer new.destroy();
     try new.tabs.ensureTotalCapacity(alloc, 1);
 
+    // Position first: the window starts on the primary monitor, and moving
+    // it to the source's monitor may change its DPI (WM_DPICHANGED is
+    // handled before this returns). Only then is the size known, and the
+    // cascade is checked against it.
+    new.placeInitial(self);
     const content = self.contentRect();
-    const size = windowSizeFor(.{ .w = content.w, .h = content.h }, frame_mod.nonClientSize(new));
+    const scaled_w: i32 = @intCast(@divTrunc(@as(i64, content.w) * new.dpi, self.dpi));
+    const scaled_h: i32 = @intCast(@divTrunc(@as(i64, content.h) * new.dpi, self.dpi));
+    const size = windowSizeFor(.{ .w = scaled_w, .h = scaled_h }, frame_mod.nonClientSize(new));
     _ = win32.user32.SetWindowPos(
         new.hwnd,
         null,
@@ -499,7 +523,7 @@ pub fn moveTabToNewWindow(self: *Window, tab: *Tab) !?*Window {
     tab.setWindow(new);
     new.tabs.appendAssumeCapacity(tab);
     new.selectTabFocus(0, false);
-    new.show();
+    new.showPlain();
     new.activate();
     return new;
 }
