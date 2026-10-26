@@ -14,8 +14,8 @@ const renderer = @import("../../renderer.zig");
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Window = @import("Window.zig");
+const actions = @import("actions.zig");
 const dialogs = @import("dialogs.zig");
-const mouse = @import("mouse.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
 
@@ -159,7 +159,7 @@ pub fn startQuitTimer(self: *App) void {
     }
 }
 
-fn stopQuitTimer(self: *App) void {
+pub fn stopQuitTimer(self: *App) void {
     _ = win32.user32.KillTimer(self.msg_hwnd, quit_timer_id);
 }
 
@@ -174,7 +174,7 @@ pub fn windowDestroyed(self: *App, window: *Window) void {
     if (self.windows.items.len == 0) win32.user32.PostQuitMessage(0);
 }
 
-fn windowForSurface(self: *App, surface: *CoreSurface) ?*Window {
+pub fn windowForSurface(self: *App, surface: *CoreSurface) ?*Window {
     for (self.windows.items) |w| {
         const s = w.surface orelse continue;
         if (&s.core_surface == surface) return w;
@@ -182,7 +182,7 @@ fn windowForSurface(self: *App, surface: *CoreSurface) ?*Window {
     return null;
 }
 
-fn windowForTarget(self: *App, target: apprt.Target) ?*Window {
+pub fn windowForTarget(self: *App, target: apprt.Target) ?*Window {
     return switch (target) {
         .app => null,
         .surface => |s| self.windowForSurface(s),
@@ -288,95 +288,7 @@ pub fn performAction(
     comptime action: apprt.Action.Key,
     value: apprt.Action.Value(action),
 ) !bool {
-    switch (action) {
-        .quit => {
-            // Confirmation (a modal loop) must not run inside the core tick.
-            if (win32.user32.PostMessageW(self.msg_hwnd, WM_GHOSTTY_QUIT, 0, 0) == 0) {
-                log.warn("unable to post quit request", .{});
-                return false;
-            }
-            return true;
-        },
-
-        .close_window => {
-            const surface = switch (target) {
-                .app => return false,
-                .surface => |s| s,
-            };
-            const window = self.windowForSurface(surface) orelse return false;
-            window.requestCloseWithConfirm();
-            return true;
-        },
-
-        .quit_timer => {
-            switch (value) {
-                .start => self.startQuitTimer(),
-                .stop => self.stopQuitTimer(),
-            }
-            return true;
-        },
-
-        .set_title => {
-            const surface = switch (target) {
-                .app => return false,
-                .surface => |s| s,
-            };
-            const window = self.windowForSurface(surface) orelse return false;
-            // The surface keeps the copy that core reads back with getTitle.
-            if (window.surface) |s| s.setTitle(value.title) catch |err| {
-                log.warn("unable to store title err={}", .{err});
-                return false;
-            };
-            window.setTitle(value.title);
-            return true;
-        },
-
-        .initial_size => {
-            const window = self.windowForTarget(target) orelse return false;
-            window.setInitialSize(value.width, value.height);
-            return true;
-        },
-
-        .size_limit => {
-            const window = self.windowForTarget(target) orelse return false;
-            window.size_limit = value;
-            return true;
-        },
-
-        .cell_size => {
-            const window = self.windowForTarget(target) orelse return false;
-            window.cell_size = value;
-            return true;
-        },
-
-        .mouse_shape => {
-            const window = self.windowForTarget(target) orelse return false;
-            const s = window.surface orelse return false;
-            s.mouse_state.shape = value;
-            mouse.refreshCursor(s);
-            return true;
-        },
-
-        .mouse_visibility => {
-            const window = self.windowForTarget(target) orelse return false;
-            const s = window.surface orelse return false;
-            s.mouse_state.hidden = value == .hidden;
-            mouse.refreshCursor(s);
-            return true;
-        },
-
-        // A false return makes core handle the exit itself, per
-        // `wait-after-command`.
-        .show_child_exited => return false,
-
-        // Drawing is driven by the renderer thread; nothing to do here.
-        .render => return true,
-
-        else => {
-            log.debug("unimplemented action={}", .{action});
-            return false;
-        },
-    }
+    return actions.perform(self, target, action, value);
 }
 
 /// Send the given IPC to a running Ghostty. Static because it is called from
@@ -406,6 +318,7 @@ fn exitImmediately(self: *const App) bool {
 test {
     _ = util;
     _ = Window;
+    _ = actions;
 }
 
 test "win32 app: runtime is win32 on windows" {
@@ -473,4 +386,40 @@ test "win32 app: wakeup coalesces" {
         win32.user32.PM_REMOVE,
     ) != 0) queued += 1;
     try std.testing.expect(queued >= 1 and queued <= 4);
+}
+
+test "win32 app: wakeup re-arms after the queued message is handled" {
+    var core_app: CoreApp = undefined;
+    try core_app.init(std.testing.allocator);
+    defer core_app.deinit();
+
+    var app: App = undefined;
+    app.core_app = &core_app;
+    app.hinstance = win32.kernel32.GetModuleHandleW(null).?;
+    app.wakeup_pending = .init(false);
+    try app.createMessageWindow();
+    defer _ = win32.user32.DestroyWindow(app.msg_hwnd);
+
+    app.wakeup();
+    try std.testing.expect(app.wakeup_pending.load(.acquire));
+
+    var msg: win32.user32.MSG = undefined;
+    try std.testing.expect(win32.user32.PeekMessageW(
+        &msg,
+        app.msg_hwnd,
+        WM_GHOSTTY_WAKEUP,
+        WM_GHOSTTY_WAKEUP,
+        win32.user32.PM_REMOVE,
+    ) != 0);
+    _ = win32.user32.DispatchMessageW(&msg);
+    try std.testing.expect(!app.wakeup_pending.load(.acquire));
+
+    app.wakeup();
+    try std.testing.expect(win32.user32.PeekMessageW(
+        &msg,
+        app.msg_hwnd,
+        WM_GHOSTTY_WAKEUP,
+        WM_GHOSTTY_WAKEUP,
+        win32.user32.PM_REMOVE,
+    ) != 0);
 }
