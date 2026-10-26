@@ -1,7 +1,10 @@
 # tui-latency: (b1) key navigation, (b2) mouse wheel and (b3) a wheel burst in
 # `less` (alternate-scroll and --mouse) and `vim -u NONE -c 'set mouse=a'` on a
 # 50 000 line file. Real SendInput keys and MOUSEEVENTF_WHEEL notches over the
-# surface; only records. A missing less or vim skips that half.
+# surface. Gates (ReleaseFast, Task 37): Ghostty-owned p95 <= 6 ms for b1/b2
+# and, for plain less, the last notch of the b3 burst presented within 50 ms.
+# The shell-side stage (vim, less --mouse) is recorded, not gated. A missing
+# less or vim skips that half.
 # e2e: milestone=M2 timeout=300 order=151
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_latency.ps1')
@@ -29,6 +32,7 @@ Invoke-E2eScenario 'tui-latency' {
 
         # One measurement block. $Keys: the b1 key sequence; Wheel: whether to
         # run b2/b3. $Tag names the rows.
+        $script:LatGates = @()
         function Measure-Tui($Tag, [string[]]$Keys, [bool]$Wheel) {
             if ($Keys) {
                 $since = Get-NowNs
@@ -38,7 +42,10 @@ Invoke-E2eScenario 'tui-latency' {
                 $rows = @(Get-LatencyRows)
                 $s = @(Get-Samples $rows 'key' $since $stamps $after | Where-Object { $_.Writes -gt 0 })
                 Write-E2eInfo "$Tag b1: $($s.Count) of $($Keys.Count) key samples"
-                if ($s.Count -gt 0) { $null = Publish-Latency "b1-$Tag" $s }
+                if ($s.Count -gt 0) {
+                    $st = Publish-Latency "b1-$Tag" $s
+                    $script:LatGates += ,@($st, $s, "b1-$Tag owned", 'ghostty_owned', 6, 20)
+                }
             }
             if ($Wheel) {
                 # b2: 60 notches 50 ms apart.
@@ -51,7 +58,8 @@ Invoke-E2eScenario 'tui-latency' {
                 $s = @(Get-Samples $rows 'wheel' $since $stamps $after | Where-Object { $_.Writes -gt 0 })
                 Write-E2eInfo "$Tag b2: $($s.Count) of 60 wheel samples"
                 if ($s.Count -gt 0) {
-                    $null = Publish-Latency "b2-$Tag" $s
+                    $st = Publish-Latency "b2-$Tag" $s
+                    $script:LatGates += ,@($st, $s, "b2-$Tag owned", 'ghostty_owned', 6, 20)
                     $inWindow = @($rows | Where-Object { $_.T0 -ge $since })
                     $before = @($rows0 | Select-Object -Last 1)
                     $m0 = if ($before) { $before[0].WheelMessages } else { 0 }
@@ -75,7 +83,8 @@ Invoke-E2eScenario 'tui-latency' {
                 if ($lastRow -and $lastRow.Complete) {
                     Write-E2eInfo ("$Tag b3: last notch -> last present {0:F3} ms ({1} wheel rows, {2} incomplete)" -f $lastRow.Total, $all.Count, $inc)
                     $one = @(Get-Samples $rows 'wheel' $since $stamps $after | Select-Object -Last 1)
-                    $null = Publish-Latency "b3-$Tag" $one
+                    $st = Publish-Latency "b3-$Tag" $one
+                    if ($Tag -eq 'less') { $script:LatGates += ,@($st, $one, 'b3-less burst', 'total', 50, 150) }
                 } else {
                     Write-E2eInfo "$Tag b3: the last notch did not close a sample ($($all.Count) wheel rows, $inc incomplete)"
                 }
@@ -109,6 +118,13 @@ Invoke-E2eScenario 'tui-latency' {
             Invoke-SendInput -Hwnd $g.Hwnd -Keys (@('esc') + (ConvertTo-KeyList ':q!') + 'enter')
             Start-Sleep -Milliseconds 800
         }
+
+        # Gates after every program ran, so one miss does not hide the rest.
+        $missed = @()
+        foreach ($g1 in $script:LatGates) {
+            try { Assert-LatencyGate @g1 } catch { $missed += $_.Exception.Message }
+        }
+        if ($missed) { throw ($missed -join '; ') }
     } finally {
         Exit-LatencyInput $cursor
     }

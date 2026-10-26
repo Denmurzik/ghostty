@@ -1,5 +1,6 @@
 # output-latency: (c) pty read -> present for output that nobody typed:
-# `while :; do date +%s%N; sleep 0.1; done`, 200 lines.
+# `while :; do date +%s%N; sleep 0.1; done`, 200 lines (cmd.exe with
+# GHOSTTY_LAT_SHELL=cmd runs a PowerShell loop instead). Gate: total p95 <= 8 ms.
 # e2e: milestone=M2 timeout=300 order=152
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_latency.ps1')
@@ -9,7 +10,11 @@ Invoke-E2eScenario 'output-latency' {
     $cursor = Enter-LatencyInput $g
     try {
         $since = Get-NowNs
-        Send-Line $g.Hwnd 'while :; do date +%s%N; sleep 0.1; done'
+        if ($env:GHOSTTY_LAT_SHELL -eq 'cmd') {
+            Send-Line $g.Hwnd 'powershell -NoProfile -Command "1..250 | ForEach-Object { [DateTime]::UtcNow.Ticks; Start-Sleep -Milliseconds 100 }"'
+        } else {
+            Send-Line $g.Hwnd 'while :; do date +%s%N; sleep 0.1; done'
+        }
         $deadline = (Get-Date).AddSeconds(60)
         $samples = @()
         while ((Get-Date) -lt $deadline) {
@@ -22,7 +27,8 @@ Invoke-E2eScenario 'output-latency' {
         if ($samples.Count -eq 0) { throw 'no output line was traced' }
         if ($samples.Count -lt 100) { Write-E2eInfo "WARN only $($samples.Count) of 200 output lines closed a sample" }
         $samples = @($samples | Select-Object -First 200)
-        $null = Publish-Latency 'output-idle' $samples
+        $stats = Publish-Latency 'output-idle' $samples
+        Assert-LatencyGate $stats $samples 'output-idle' 'total' 8 30
     } finally {
         Exit-LatencyInput $cursor
     }

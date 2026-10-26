@@ -13,7 +13,13 @@
 # GHOSTTY_WIN32_CONPTY_FLAGS / GHOSTTY_WIN32_CONPTY_DLL (set before running
 # the scenario) select the ConPTY variant, GHOSTTY_LAT_VARIANT names it in
 # the baseline row (default derived from the two variables); GHOSTTY_LAT_SHELL=cmd
-# runs input-latency against cmd.exe instead of Git Bash.
+# runs input-latency and output-latency against cmd.exe instead of Git Bash.
+#
+# Rows go to %TEMP%\ghostty-latency/runs.csv. Only GHOSTTY_LAT_RECORD_BASELINE=1
+# appends them to the tracked docs/windows/latency-baseline.csv;
+# GHOSTTY_LAT_BUILD_VARIANT names the code state in the `variant` column
+# (default `asis`: the tree as committed). Gates (Assert-LatencyGate) fail the
+# scenario on ReleaseFast builds and only report on Debug.
 
 Set-StrictMode -Version Latest
 
@@ -132,7 +138,8 @@ function Get-LatencyVariant {
     $parts -join '-'
 }
 
-# Git Bash is required; the tracer needs a build that has it.
+# Git Bash by default, cmd.exe with GHOSTTY_LAT_SHELL=cmd; the tracer needs
+# a build that has it.
 function Start-LatencyGhostty([string]$Scenario) {
     $csv = Join-Path $script:Sbx.Root 'latency.csv'
     $script:LatCsv = $csv
@@ -142,7 +149,7 @@ function Start-LatencyGhostty([string]$Scenario) {
     try {
         if ($env:GHOSTTY_LAT_SHELL -eq 'cmd') {
             # cmd.exe edits its line inside conhost: the ConPTY stage without
-            # a shell process of our own. Only input-latency uses it.
+            # a shell process of our own. input-latency and output-latency use it.
             $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath 'cmd')
             Set-WindowLayout $g.Hwnd '00000409'
             Start-Sleep -Seconds 3
@@ -315,21 +322,28 @@ function Get-GpuInfo {
     [pscustomobject]@{ Adapter = ($v.Name -replace ',', ' '); Hz = [int]$v.CurrentRefreshRate }
 }
 
-# Prints a stage table and appends its rows to docs/windows/latency-baseline.csv.
+# Prints a stage table and appends its rows to the run log in %TEMP%, and to
+# docs/windows/latency-baseline.csv when GHOSTTY_LAT_RECORD_BASELINE=1.
 function Publish-Latency([string]$Scenario, $Samples) {
     $stats = @(Get-StageStats $Samples)
     $build = if ($Samples) { @($Samples)[0].Build } else { 'unknown' }
     $gpu = Get-GpuInfo
     $commit = (& git -C $script:Root rev-parse --short HEAD 2>$null)
     $date = Get-Date -Format 'yyyy-MM-dd'
-    $out = Join-Path $script:Root 'docs\windows\latency-baseline.csv'
-    $header = 'date,commit,optimize,adapter,refresh_hz,conpty,scenario,stage,p50_ms,p95_ms,max_ms,n'
-    if (-not (Test-Path -LiteralPath $out)) { Set-Content -LiteralPath $out -Value $header -Encoding ASCII }
+    $header = 'date,commit,optimize,adapter,refresh_hz,conpty,variant,scenario,stage,p50_ms,p95_ms,max_ms,n'
+    $variant = if ($env:GHOSTTY_LAT_BUILD_VARIANT) { $env:GHOSTTY_LAT_BUILD_VARIANT } else { 'asis' }
     $lines = foreach ($s in $stats) {
-        '{0},{1},{2},{3},{4},{5},{6},{7},{8:F3},{9:F3},{10:F3},{11}' -f $date, $commit, $build, $gpu.Adapter, $gpu.Hz,
-            $script:LatVariant, $Scenario, $s.Stage, $s.P50, $s.P95, $s.Max, $s.N
+        '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9:F3},{10:F3},{11:F3},{12}' -f $date, $commit, $build, $gpu.Adapter, $gpu.Hz,
+            $script:LatVariant, $variant, $Scenario, $s.Stage, $s.P50, $s.P95, $s.Max, $s.N
     }
-    Add-Content -LiteralPath $out -Value $lines -Encoding ASCII
+    $outs = @(Join-Path (Join-Path $env:TEMP 'ghostty-latency') 'runs.csv')
+    if ($env:GHOSTTY_LAT_RECORD_BASELINE -eq '1') { $outs += Join-Path $script:Root 'docs\windows\latency-baseline.csv' }
+    foreach ($out in $outs) {
+        $dir = Split-Path -Parent $out
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        if (-not (Test-Path -LiteralPath $out)) { Set-Content -LiteralPath $out -Value $header -Encoding ASCII }
+        Add-Content -LiteralPath $out -Value $lines -Encoding ASCII
+    }
     Write-E2eInfo ("latency $Scenario build=$build conpty=$($script:LatVariant) hz=$($gpu.Hz) n=$(@($Samples).Count) bg-cpu=$($script:BgCpu)%")
     foreach ($s in $stats) {
         Write-E2eInfo ('  {0,-18} p50 {1,8:F3}  p95 {2,8:F3}  max {3,8:F3}  n {4}' -f $s.Stage, $s.P50, $s.P95, $s.Max, $s.N)
@@ -337,8 +351,22 @@ function Publish-Latency([string]$Scenario, $Samples) {
     $stats
 }
 
-# Value of one stage in a stats list (for reporting verdicts, not gating).
+# Value of one stage in a stats list.
 function Get-Stage($Stats, [string]$Name) { @($Stats | Where-Object { $_.Stage -eq $Name })[0] }
+
+# The latency gate of one stage's p95: a miss throws on a ReleaseFast build
+# and is only reported on Debug (whose target column is $DebugLimitMs).
+# $What names the gate in the message.
+function Assert-LatencyGate($Stats, $Samples, [string]$What, [string]$Stage, [double]$LimitMs, [double]$DebugLimitMs) {
+    $s = Get-Stage $Stats $Stage
+    if (-not $s -or $s.N -eq 0) { throw "latency gate ${What}: no $Stage samples" }
+    $build = @($Samples)[0].Build
+    $debug = $build -eq 'debug'
+    $limit = if ($debug) { $DebugLimitMs } else { $LimitMs }
+    $ok = $s.P95 -le $limit
+    Write-E2eInfo ('gate {0}: {1} p95 {2:F3} ms <= {3} ms ({4}): {5}' -f $What, $Stage, $s.P95, $limit, $build, $(if ($ok) { 'ok' } else { 'MISS' }))
+    if (-not $ok -and -not $debug) { throw ('latency gate {0} missed: {1} p95 {2:F3} ms > {3} ms' -f $What, $Stage, $s.P95, $limit) }
+}
 
 function Stop-LatencyShellProgram($G, [string[]]$Keys) {
     Invoke-SendInput -Hwnd $G.Hwnd -Keys $Keys
