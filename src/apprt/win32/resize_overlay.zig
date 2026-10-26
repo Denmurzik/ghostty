@@ -10,8 +10,6 @@ const messages = @import("messages.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
 
-const com = win32.com;
-const d2d1 = win32.d2d1;
 const user32 = win32.user32;
 
 const log = std.log.scoped(.win32_resize_overlay);
@@ -27,7 +25,6 @@ const margin_px = 8;
 const pad_x = 14;
 const char_w = 10;
 const height_px = 38;
-const font_px = 16;
 const corner_px = 6;
 
 pub const State = struct {
@@ -42,8 +39,7 @@ pub const State = struct {
     text: [32]u16 = undefined,
     text_len: usize = 0,
     dpi: u32 = 96,
-    bg: theme.Color = .{ .r = 0x30, .g = 0x30, .b = 0x30 },
-    fg: theme.Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+    pal: ?theme.Palette = null,
 };
 
 pub const Size = struct { w: i32, h: i32 };
@@ -118,11 +114,7 @@ fn show(surface: *Surface, state: *State, config: *const configpkg.Config, cols:
     state.text_len = n;
     state.dpi = window.dpi;
 
-    const pal = theme.palette(window);
-    state.bg = pal.tab_active_bg;
-    state.bg.a = 255;
-    state.fg = pal.text;
-    state.fg.a = 255;
+    state.pal = theme.palette(window);
 
     const dpi = window.dpi;
     const w = geom.scale(2 * pad_x + char_w * @as(i32, @intCast(n)), dpi);
@@ -217,37 +209,8 @@ fn paint(hwnd: win32.foundation.HWND, state: *const State) void {
 fn paintInto(hwnd: win32.foundation.HWND, hdc: user32.HDC, state: *const State) !void {
     var rc: win32.foundation.RECT = undefined;
     _ = user32.GetClientRect(hwnd, &rc);
-    const w = rc.right - rc.left;
-    const h = rc.bottom - rc.top;
-
-    const sh = try Chrome.shared();
-    const target = try sh.d2d.createDCRenderTarget(.{
-        .type = .SOFTWARE,
-        .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
-        .dpiX = 96,
-        .dpiY = 96,
-    });
-    defer com.release(target);
-    try target.bindDC(hdc, .{ .left = 0, .top = 0, .right = w, .bottom = h });
-    const rt = target.asRenderTarget();
-    const brush = try rt.createSolidColorBrush(.{ .r = 0, .g = 0, .b = 0, .a = 1 });
-    defer com.release(brush);
-
-    const size: f32 = @floatFromInt(geom.scale(font_px, state.dpi));
-    const format = try sh.dwrite.createTextFormat(sh.title_family, .NORMAL, .NORMAL, .NORMAL, size, L("en-us"));
-    defer com.release(format);
-    try format.setWordWrapping(.NO_WRAP);
-    try format.setTextAlignment(.CENTER);
-    try format.setParagraphAlignment(.CENTER);
-    const layout = try sh.dwrite.createTextLayout(state.text[0..state.text_len], format, @floatFromInt(w), @floatFromInt(h));
-    defer com.release(layout);
-
-    rt.beginDraw();
-    rt.setTextAntialiasMode(.GRAYSCALE);
-    rt.clear(Chrome.colorF(state.bg));
-    brush.setColor(Chrome.colorF(state.fg));
-    rt.drawTextLayout(.{ .x = 0, .y = 0 }, layout, brush.asBrush(), d2d1.DRAW_TEXT_OPTIONS_CLIP);
-    try rt.endDraw();
+    const pal = state.pal orelse return;
+    try Chrome.paintLabel(hdc, geom.Rect.fromRECT(rc), state.text[0..state.text_len], pal, state.dpi);
 }
 
 fn wndProc(

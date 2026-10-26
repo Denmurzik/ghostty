@@ -42,10 +42,13 @@ pub const Formats = struct {
     title: *dwrite.IDWriteTextFormat,
     /// Centred glyphs.
     icons: *dwrite.IDWriteTextFormat,
+    /// Centred both ways, larger; the resize overlay.
+    label: *dwrite.IDWriteTextFormat,
     sign: *dwrite.IDWriteInlineObject,
 
     fn deinit(self: Formats) void {
         com.release(self.sign);
+        com.release(self.label);
         com.release(self.icons);
         com.release(self.title);
     }
@@ -99,10 +102,16 @@ pub const Shared = struct {
         try icons.setTextAlignment(.CENTER);
         try icons.setParagraphAlignment(.CENTER);
 
+        const label = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, 16 * scale, L("en-us"));
+        errdefer com.release(label);
+        try label.setWordWrapping(.NO_WRAP);
+        try label.setTextAlignment(.CENTER);
+        try label.setParagraphAlignment(.CENTER);
+
         const slot = &self.formats[self.next_slot];
         self.next_slot = (self.next_slot + 1) % format_slots;
         if (slot.*) |old| old.deinit();
-        slot.* = .{ .dpi = dpi, .title = title, .icons = icons, .sign = sign };
+        slot.* = .{ .dpi = dpi, .title = title, .icons = icons, .label = label, .sign = sign };
         return &slot.*.?;
     }
 };
@@ -484,6 +493,20 @@ pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme
     withPainter(hdc, size.w, size.h, palette, dpi, ChipArgs{ .size = size, .title = title }, drawChipBody) catch |err| {
         logOnce(err);
     };
+}
+
+const LabelArgs = struct { size: geom.Rect, text: []const u16, pal: theme.Palette };
+
+fn drawLabelBody(args: LabelArgs, p: *Painter) void {
+    p.drawText(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, args.text, p.fm.label, args.pal.text);
+}
+
+/// A centred text label on an opaque `tab_active_bg` fill (the resize overlay).
+pub fn paintLabel(hdc: HDC, size: geom.Rect, text: []const u16, palette: theme.Palette, dpi: u32) !void {
+    var pal = palette;
+    pal.strip_bg = palette.tab_active_bg;
+    pal.strip_bg.a = 255;
+    try withPainter(hdc, size.w, size.h, pal, dpi, LabelArgs{ .size = size, .text = text, .pal = pal }, drawLabelBody);
 }
 
 var logged: bool = false;
