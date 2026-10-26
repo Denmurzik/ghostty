@@ -626,6 +626,7 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
 }
 
 /// Tell the visible surfaces whether the window is minimized.
+// TODO(task14): replace the loop below with activeTab().applyOcclusion(!minimized)
 fn setMinimized(self: *Window, minimized: bool) void {
     const tab = self.activeTab() orelse return;
     tab.applyOcclusion(!minimized);
