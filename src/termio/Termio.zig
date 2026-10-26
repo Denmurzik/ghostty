@@ -47,7 +47,7 @@ renderer_state: *renderer.State,
 
 /// A handle to wake up the renderer. This hints to the renderer that
 /// a repaint should happen.
-renderer_wakeup: xev.Async,
+renderer_wakeup: *xev.Async,
 
 /// The mailbox for notifying the renderer of things.
 renderer_mailbox: *renderer.Thread.Mailbox,
@@ -856,4 +856,40 @@ pub const ThreadData = struct {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.backend.getProcessInfo(info);
+}
+
+test "termio renderer wakeup notifies the original Async" {
+    const testing = std.testing;
+
+    // Termio must hold a pointer: an `xev.Async` can't be copied
+    // (the IOCP backend keeps its wakeup state inside the struct).
+    try testing.expect(@FieldType(Termio, "renderer_wakeup") == *xev.Async);
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+
+    const Fired = struct {
+        fn cb(
+            ud: ?*bool,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            r catch unreachable;
+            ud.?.* = true;
+            return .disarm;
+        }
+    };
+
+    var fired = false;
+    var c: xev.Completion = .{};
+    wakeup.wait(&loop, &c, bool, &fired, Fired.cb);
+
+    // This is what Termio stores and calls.
+    const stored: *xev.Async = &wakeup;
+    try stored.notify();
+    try loop.run(.until_done);
+    try testing.expect(fired);
 }
