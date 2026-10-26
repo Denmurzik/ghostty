@@ -105,7 +105,8 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     # Min track height includes the strip.
     $min = Get-MinTrack $h
     $stripH = $s.strip.bounds[3] - $s.strip.bounds[1]
-    if ($min.h -lt $stripH) { throw "min track height $($min.h) does not include the strip height $stripH" }
+    # The limit core reports (at least one cell) is added to the non-client size, strip included.
+    if ($min.h -lt $stripH + $s.cell[1]) { throw "min track height $($min.h) is below strip $stripH + one cell $($s.cell[1])" }
 
     # Decorations: none, and the former close-button point is not HTCLOSE.
     if ((Get-HitCode $h $closeX $closeY) -ne 20) { throw 'precondition: close button point is not HTCLOSE' }

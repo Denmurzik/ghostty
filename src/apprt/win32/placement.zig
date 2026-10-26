@@ -57,26 +57,23 @@ pub fn toggleFullscreen(window: *Window) bool {
 
         // A hidden window (start-up) must stay hidden until `show`.
         const visible: usize = if (user32.IsWindowVisible(hwnd) != 0) user32.WS_VISIBLE else 0;
-        const popup = (style & ~@as(usize, user32.WS_OVERLAPPEDWINDOW)) | user32.WS_POPUP | visible;
+        const popup = (style & ~@as(usize, user32.WS_OVERLAPPEDWINDOW | user32.WS_MAXIMIZE)) | user32.WS_POPUP | visible;
         _ = user32.SetWindowLongPtrW(hwnd, user32.GWL_STYLE, @bitCast(popup));
 
-        const r = fullscreenRect(mon);
-        _ = user32.SetWindowPos(
-            hwnd,
-            null,
-            r.x,
-            r.y,
-            r.w,
-            r.h,
-            user32.SWP_FRAMECHANGED | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE | user32.SWP_NOOWNERZORDER,
-        );
+        coverRect(hwnd, mon);
     } else {
         p.fullscreen = false;
         if (p.saved_valid) {
-            _ = user32.SetWindowLongPtrW(hwnd, user32.GWL_STYLE, @bitCast(p.saved_style));
+            // The system menu bit follows the decorations in force now (they
+            // may have changed while fullscreen), the rest is as before.
+            const sysmenu: usize = user32.WS_SYSMENU;
+            const current: usize = @bitCast(user32.GetWindowLongPtrW(hwnd, user32.GWL_STYLE));
+            const restored = (p.saved_style & ~sysmenu) | (current & sysmenu);
+            _ = user32.SetWindowLongPtrW(hwnd, user32.GWL_STYLE, @bitCast(restored));
             _ = user32.SetWindowPlacement(hwnd, &p.saved_placement);
             p.saved_valid = false;
         }
+        frame.applyDecorations(window, window.frame.decorations);
         _ = user32.SetWindowPos(
             hwnd,
             null,
@@ -96,6 +93,8 @@ pub fn toggleFullscreen(window: *Window) bool {
 /// `client`/`server` <-> `none`, through `frame.applyDecorations`.
 pub fn toggleDecorations(window: *Window) bool {
     const p = &window.placement;
+    // Fullscreen owns the style bits until it ends.
+    if (p.fullscreen) return false;
     if (window.frame.decorations == .none) {
         frame.applyDecorations(window, p.decorations_before_none);
     } else {
@@ -127,7 +126,7 @@ pub fn setFloat(window: *Window, mode: apprt.action.FloatWindow) bool {
 /// Re-apply the content size core reported at start-up.
 pub fn resetSize(window: *Window) bool {
     const size = window.placement.initial_size orelse return false;
-    return setContentSize(window, .{ .w = clamp(size.width), .h = clamp(size.height) });
+    return setContentSize(window, .{ .w = Window.clampPixels(size.width), .h = Window.clampPixels(size.height) });
 }
 
 /// Resize so the content area is `width` x `height` physical pixels; 0
@@ -136,7 +135,7 @@ pub fn resizeClient(window: *Window, width: u32, height: u32) bool {
     const current = window.contentRect();
     const target = targetClient(
         .{ .w = current.w, .h = current.h },
-        .{ .w = clamp(width), .h = clamp(height) },
+        .{ .w = Window.clampPixels(width), .h = Window.clampPixels(height) },
     );
     return setContentSize(window, target);
 }
@@ -147,6 +146,25 @@ pub fn applyStartup(window: *Window) void {
     const config = &window.app.config;
     if (config.maximize) _ = toggleMaximize(window);
     if (config.fullscreen != .false) _ = toggleFullscreen(window);
+}
+
+/// Cover the monitor the window is on (again), e.g. after a DPI change.
+pub fn coverMonitor(window: *Window) void {
+    const mon = monitorRect(window.hwnd) orelse return;
+    coverRect(window.hwnd, mon);
+}
+
+fn coverRect(hwnd: win32.foundation.HWND, monitor: geom.Rect) void {
+    const r = fullscreenRect(monitor);
+    _ = user32.SetWindowPos(
+        hwnd,
+        null,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        user32.SWP_FRAMECHANGED | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE | user32.SWP_NOOWNERZORDER,
+    );
 }
 
 /// What a fullscreen window covers on a monitor: all of it.
@@ -163,15 +181,10 @@ pub fn targetClient(current: frame.Size, requested: frame.Size) frame.Size {
     };
 }
 
-/// The window size that leaves `content` for the terminal.
-pub fn windowSizeFor(content: frame.Size, nc: frame.Size) frame.Size {
-    return .{ .w = content.w + nc.w, .h = content.h + nc.h };
-}
-
 fn setContentSize(window: *Window, content: frame.Size) bool {
     if (window.placement.fullscreen) return false;
     if (user32.IsZoomed(window.hwnd) != 0 or user32.IsIconic(window.hwnd) != 0) return false;
-    const size = windowSizeFor(content, frame.nonClientSize(window));
+    const size = Window.windowSizeFor(content, frame.nonClientSize(window));
     return user32.SetWindowPos(
         window.hwnd,
         null,
@@ -190,10 +203,6 @@ fn monitorRect(hwnd: win32.foundation.HWND) ?geom.Rect {
     return geom.Rect.fromRECT(info.rcMonitor);
 }
 
-fn clamp(v: u32) i32 {
-    return @intCast(@min(v, 1 << 24));
-}
-
 test "win32 placement: resize keeps a zero dimension" {
     const cur: frame.Size = .{ .w = 900, .h = 500 };
     try std.testing.expectEqual(frame.Size{ .w = 800, .h = 600 }, targetClient(cur, .{ .w = 800, .h = 600 }));
@@ -208,21 +217,21 @@ test "win32 placement: fullscreen covers the monitor" {
 }
 
 test "win32 placement: window size from content size per decorations" {
-    // client: sizing frame on three sides plus the strip on top.
-    const client = frame.frameInsets(96, false, .client);
     const strip_h: i32 = 40;
-    const nc_client: frame.Size = .{ .w = client.left + client.right, .h = client.top + client.bottom + strip_h };
-    try std.testing.expectEqual(
-        frame.Size{ .w = 800 + nc_client.w, .h = 600 + nc_client.h },
-        windowSizeFor(.{ .w = 800, .h = 600 }, nc_client),
-    );
-
-    // none: nothing but the strip.
+    const content: frame.Size = .{ .w = 800, .h = 600 };
+    for ([_]u32{ 96, 144 }) |dpi| {
+        for ([_]frame.Decorations{ .client, .none }) |decorations| {
+            const i = frame.frameInsets(dpi, false, decorations);
+            const nc: frame.Size = .{ .w = i.left + i.right, .h = i.top + i.bottom + strip_h };
+            const win = Window.windowSizeFor(content, nc);
+            // The window is bigger by exactly the insets plus the strip
+            // and the content comes back out of it.
+            try std.testing.expectEqual(content.w + i.left + i.right, win.w);
+            try std.testing.expectEqual(content.h + i.top + i.bottom + strip_h, win.h);
+            try std.testing.expectEqual(content, Window.contentSizeFor(win, nc));
+        }
+    }
+    // `none` has no sizing frame: only the strip is non-client.
     const none = frame.frameInsets(96, false, .none);
-    const nc_none: frame.Size = .{ .w = none.left + none.right, .h = none.top + none.bottom + strip_h };
-    try std.testing.expectEqual(frame.Size{ .w = 800, .h = 600 + strip_h }, windowSizeFor(.{ .w = 800, .h = 600 }, nc_none));
-
-    // server: caption and borders from the system, no strip.
-    const nc_server: frame.Size = .{ .w = 16, .h = 39 };
-    try std.testing.expectEqual(frame.Size{ .w = 816, .h = 639 }, windowSizeFor(.{ .w = 800, .h = 600 }, nc_server));
+    try std.testing.expectEqual(frame.Size{ .w = 800, .h = 640 }, Window.windowSizeFor(content, .{ .w = none.left + none.right, .h = none.top + none.bottom + strip_h }));
 }

@@ -588,18 +588,18 @@ pub fn setInitialSize(self: *Window, width: u32, height: u32) void {
 }
 
 /// The window size that leaves `content` for the terminal.
-fn windowSizeFor(content: frame_mod.Size, nc: frame_mod.Size) frame_mod.Size {
+pub fn windowSizeFor(content: frame_mod.Size, nc: frame_mod.Size) frame_mod.Size {
     return .{ .w = content.w + nc.w, .h = content.h + nc.h };
 }
 
 /// The inverse of `windowSizeFor`.
-fn contentSizeFor(window_size: frame_mod.Size, nc: frame_mod.Size) frame_mod.Size {
+pub fn contentSizeFor(window_size: frame_mod.Size, nc: frame_mod.Size) frame_mod.Size {
     return .{ .w = window_size.w - nc.w, .h = window_size.h - nc.h };
 }
 
 /// A pixel count as a signed coordinate; no real window is anywhere near
 /// the limit.
-fn clampPixels(v: u32) i32 {
+pub fn clampPixels(v: u32) i32 {
     return @intCast(@min(v, 1 << 24));
 }
 
@@ -652,6 +652,10 @@ pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) 
             win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
         );
     }
+    // The suggested rectangle is for a windowed frame; a fullscreen window
+    // keeps covering its (possibly new) monitor. The saved placement
+    // restores logically on that monitor when fullscreen ends.
+    if (self.placement.fullscreen) placement_mod.coverMonitor(self);
 
     for (self.tabs.items) |tab| {
         var it = tab.tree.iterator();
