@@ -75,3 +75,22 @@ test "win32 shell32: ITaskbarList3 slot count" {
     const std = @import("std");
     try std.testing.expectEqual(21 * @sizeOf(usize), @sizeOf(ITaskbarList3.VTable));
 }
+
+// Drag and drop (shellapi.h, shlobj_core.h)
+
+/// Query the number of files with `index = 0xFFFFFFFF` and a null buffer;
+/// otherwise the length (without the NUL) copied or, with a null buffer, needed.
+pub extern "shell32" fn DragQueryFileW(drop: foundation.HANDLE, index: u32, file: ?[*]u16, cch: u32) callconv(.winapi) u32;
+
+/// Header of the `CF_HDROP` data; the file list follows at `pFiles`.
+pub const DROPFILES = extern struct {
+    pFiles: u32,
+    pt: foundation.POINT,
+    fNC: foundation.BOOL,
+    fWide: foundation.BOOL,
+};
+
+test "win32 shell32: DROPFILES size" {
+    const std = @import("std");
+    try std.testing.expectEqual(20, @sizeOf(DROPFILES));
+}
