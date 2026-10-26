@@ -57,7 +57,7 @@ Invoke-E2eScenario 'tabs-basic' {
 
     # 4. The title of tab 0 comes from the shell (OSC 2) and reaches the
     # window caption. The shell stays in `sleep` so its prompt does not
-    # overwrite the title. The escapes are doubled: the text: parser turns \ into
+    # overwrite the title. The escapes are doubled: the text: parser turns a double backslash into
     # one backslash and printf then makes the bytes (a raw ESC would reach readline).
     Invoke-Act 'goto_tab:1'
     [void](Wait-Win 'active 0 again' { param($w) $w.active_tab -eq 0 })
