@@ -3819,6 +3819,8 @@ else
 ///     is never forwarded, such a launch starts its own process.
 ///   * `false` - Every launch starts its own process.
 ///
+/// `--class` selects the instance and never counts as an argument.
+///
 /// This only applies to Windows.
 @"windows-single-instance": WindowsSingleInstance = .detect,
 

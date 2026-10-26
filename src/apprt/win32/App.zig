@@ -210,25 +210,21 @@ fn forwardLaunch(self: *App, name: [:0]const u16) bool {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var args: std.ArrayList([]const u8) = .empty;
+    var all: std.ArrayList([]const u8) = .empty;
     var iter = cli.args.argsIterator(a, global.args()) catch return false;
     defer iter.deinit();
-    while (iter.next()) |arg| {
-        // The class picks the instance (it is in the pipe name); it is not
-        // something to forward.
-        if (std.mem.startsWith(u8, arg, "--class=")) continue;
-        args.append(a, a.dupe(u8, arg) catch return false) catch return false;
-    }
+    while (iter.next()) |arg| all.append(a, a.dupe(u8, arg) catch return false) catch return false;
+    const args = instance.withoutClass(a, all.items) catch return false;
 
     if (!instance.shouldForward(
         self.config.@"windows-single-instance",
-        args.items,
+        args,
         self.config.@"initial-command" != null,
     )) return false;
 
     var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = std.Io.Dir.cwd().realPathFile(global.io(), ".", &cwd_buf) catch return false;
-    const forwarded_args = instance.absolutizeWorkingDirectory(a, args.items, cwd_buf[0..cwd_len]) catch return false;
+    const forwarded_args = instance.absolutizeWorkingDirectory(a, args, cwd_buf[0..cwd_len]) catch return false;
 
     switch (instance.forwardNewWindow(self.core_app.alloc, name, forwarded_args)) {
         .forwarded => return true,
@@ -249,7 +245,9 @@ fn stopServer(self: *App) void {
 
 /// Handle a request from the IPC thread on the UI thread.
 fn handleIpc(self: *App, pending: *ipc.Server.Pending) void {
-    const response = ipc.ops.handle(self, pending.alloc, pending.request);
+    // Window-creating ops answer before the window is built (see
+    // `handleEarly`) and give no response here.
+    const response = ipc.ops.handleEarly(self, pending.alloc, pending.request, pending) orelse return;
     ipc.Server.complete(pending, response);
 }
 

@@ -58,6 +58,25 @@ fn queryElevated(token: HANDLE) ?bool {
     return elev.TokenIsElevated != 0;
 }
 
+/// The mandatory integrity level (the last sub-authority of the label SID)
+/// of `token`; null when it cannot be read.
+fn queryIntegrity(token: HANDLE) ?u32 {
+    var buf: [256]u8 align(8) = undefined;
+    var len: u32 = 0;
+    if (advapi32.GetTokenInformation(token, advapi32.TokenIntegrityLevel, &buf, buf.len, &len) == 0) return null;
+    const label: *const advapi32.TOKEN_MANDATORY_LABEL = @ptrCast(&buf);
+    const sid = label.Label.Sid orelse return null;
+    const count = advapi32.GetSidSubAuthorityCount(sid).*;
+    if (count == 0) return null;
+    return advapi32.GetSidSubAuthority(sid, count - 1).*;
+}
+
+/// Two processes of one user at different integrity levels are not peers: a
+/// low-integrity process must not pass for the instance (and read launches).
+fn sameIntegrity(a: ?u32, b: ?u32) bool {
+    return a != null and b != null and a.? == b.?;
+}
+
 /// The SID of the current user as "S-1-5-…". Caller owns the result.
 pub fn currentUserSid(alloc: Allocator) ![]u8 {
     const token = openToken(kernel32.GetCurrentProcess()) orelse return error.TokenQueryFailed;
@@ -126,7 +145,19 @@ pub fn peerMatchesAs(pid: u32, own_elevated: bool) bool {
     if (advapi32.EqualSid(peer_user.sid(), own_user.sid()) == 0) return false;
 
     const peer_elevated = queryElevated(peer_token) orelse return false;
-    return peer_elevated == own_elevated;
+    if (peer_elevated != own_elevated) return false;
+    return sameIntegrity(queryIntegrity(peer_token), queryIntegrity(own_token));
+}
+
+/// `args` without `--class=`: the class selects the instance (it is part of
+/// the pipe name), it is not something to forward or to count as an argument.
+pub fn withoutClass(arena: Allocator, args: []const []const u8) Allocator.Error![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--class=")) continue;
+        try list.append(arena, arg);
+    }
+    return list.items;
 }
 
 /// How long a forwarded launch waits for the running instance. The request
@@ -271,6 +302,30 @@ test "win32 instance: pipe name has sid, session, class and elevation marker" {
         @as(u8, if (isElevated()) 'a' else 'u'),
     });
     try std.testing.expect(std.mem.indexOf(u8, utf8, want) != null);
+}
+
+test "win32 instance: integrity levels must be equal" {
+    try std.testing.expect(sameIntegrity(0x2000, 0x2000));
+    try std.testing.expect(!sameIntegrity(0x1000, 0x2000));
+    try std.testing.expect(!sameIntegrity(0x3000, 0x2000));
+    try std.testing.expect(!sameIntegrity(null, 0x2000));
+    try std.testing.expect(!sameIntegrity(0x2000, null));
+    try std.testing.expect(!sameIntegrity(null, null));
+
+    const own = openToken(kernel32.GetCurrentProcess()).?;
+    defer _ = kernel32.CloseHandle(own);
+    const level = queryIntegrity(own);
+    try std.testing.expect(level != null);
+    try std.testing.expect(level.? >= 0x1000);
+}
+
+test "win32 instance: the class is not an argument" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try withoutClass(arena.allocator(), &.{ "--class=x", "--working-directory=C:\\a", "--class=y" });
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectEqualStrings("--working-directory=C:\\a", out[0]);
+    try std.testing.expect(shouldForward(.detect, try withoutClass(arena.allocator(), &.{"--class=x"}), false));
 }
 
 test "win32 instance: peerMatches own pid" {

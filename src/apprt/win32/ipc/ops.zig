@@ -22,6 +22,7 @@ const geom = @import("../geom.zig");
 const instance = @import("../instance.zig");
 const theme = @import("../theme.zig");
 const protocol = @import("protocol.zig");
+const Server = @import("Server.zig");
 
 const log = std.log.scoped(.win32_ipc_ops);
 
@@ -58,6 +59,14 @@ pub fn testOpsEnabled() bool {
 /// Answers one request. Never fails: errors become a response. The result
 /// is owned by the caller (allocated with `alloc`).
 pub fn handle(app: *App, alloc: Allocator, request: []const u8) []u8 {
+    return handleEarly(app, alloc, request, null).?;
+}
+
+/// Like `handle`, but with `early` the ops that create windows answer `ok`
+/// through it as soon as the request is accepted, before the (slow) window
+/// is built, so the client never times out on window creation and starts a
+/// second window of its own. The result is then null: it was answered.
+pub fn handleEarly(app: *App, alloc: Allocator, request: []const u8, early: ?*Server.Pending) ?[]u8 {
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
@@ -80,8 +89,8 @@ pub fn handle(app: *App, alloc: Allocator, request: []const u8) []u8 {
     }
 
     return switch (op) {
-        .@"new-window" => newWindow(app, alloc, a, req),
-        .@"new-tab" => newTab(app, alloc, a, req),
+        .@"new-window" => newWindow(app, alloc, a, req, early),
+        .@"new-tab" => newTab(app, alloc, a, req, early),
         .@"toggle-quick-terminal" => reply(alloc, .failed, "", "quick terminal is not available yet", null),
         .action => action(app, alloc, req),
         .dpi => setDpi(app, alloc, req),
@@ -137,25 +146,35 @@ fn overridesOf(alloc: Allocator, arena: Allocator, req: protocol.Request) union(
     return .{ .ok = overrides };
 }
 
-fn newWindow(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request) []u8 {
+fn newWindow(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, early: ?*Server.Pending) ?[]u8 {
     const overrides = switch (overridesOf(alloc, arena, req)) {
         .ok => |o| o,
         .refused => |r| return r,
     };
-    return openWindow(app, alloc, null, overrides);
+    return openWindow(app, alloc, null, overrides, early);
 }
 
-fn openWindow(app: *App, alloc: Allocator, parent: ?*CoreSurface, overrides: Overrides) []u8 {
+/// Answers `ok` through `early` (when given) and reports whether it did.
+fn answerEarly(alloc: Allocator, early: ?*Server.Pending) bool {
+    const pending = early orelse return false;
+    Server.complete(pending, reply(alloc, .ok, "", "", null));
+    return true;
+}
+
+fn openWindow(app: *App, alloc: Allocator, parent: ?*CoreSurface, overrides: Overrides, early: ?*Server.Pending) ?[]u8 {
+    const answered = answerEarly(alloc, early);
     const window = Window.create(app, .{ .parent = parent, .overrides = overrides }) catch |err| {
         log.warn("unable to create a window err={}", .{err});
+        if (answered) return null;
         return reply(alloc, .failed, "", "unable to create a window", null);
     };
     window.show();
     _ = user32.SetForegroundWindow(window.hwnd);
+    if (answered) return null;
     return reply(alloc, .ok, "", "", null);
 }
 
-fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request) []u8 {
+fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, early: ?*Server.Pending) ?[]u8 {
     const overrides = switch (overridesOf(alloc, arena, req)) {
         .ok => |o| o,
         .refused => |r| return r,
@@ -169,12 +188,15 @@ fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request) 
         app.core_app.findSurfaceByID(id);
     const window = if (core) |c| app.windowFor(c) else null;
 
-    const w = window orelse return openWindow(app, alloc, core, overrides);
+    const w = window orelse return openWindow(app, alloc, core, overrides, early);
+    const answered = answerEarly(alloc, early);
     _ = w.addTab(.{ .parent = core, .overrides = overrides }) catch |err| {
         log.warn("unable to create a tab err={}", .{err});
+        if (answered) return null;
         return reply(alloc, .failed, "", "unable to create a tab", null);
     };
     _ = user32.SetForegroundWindow(w.hwnd);
+    if (answered) return null;
     return reply(alloc, .ok, "", "", null);
 }
 

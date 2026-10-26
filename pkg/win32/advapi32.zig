@@ -61,3 +61,13 @@ pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     size: ?*u32,
 ) callconv(.winapi) BOOL;
 pub extern "advapi32" fn EqualSid(a: *anyopaque, b: *anyopaque) callconv(.winapi) BOOL;
+
+/// `TOKEN_INFORMATION_CLASS`: the mandatory integrity level of a token.
+pub const TokenIntegrityLevel = 25;
+
+pub const TOKEN_MANDATORY_LABEL = extern struct {
+    Label: SID_AND_ATTRIBUTES,
+};
+
+pub extern "advapi32" fn GetSidSubAuthorityCount(sid: *anyopaque) callconv(.winapi) *u8;
+pub extern "advapi32" fn GetSidSubAuthority(sid: *anyopaque, index: u32) callconv(.winapi) *u32;
