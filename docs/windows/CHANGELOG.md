@@ -9,7 +9,7 @@
 - One top-level window hosting one terminal surface: ConPTY, VT parsing,
   scrollback, selection, mouse, keyboard (including non-Latin layouts, AltGr
   and IME), clipboard (with confirmation prompts for unsafe paste and OSC 52),
-  per-monitor DPI, config reload.
+  per-monitor DPI. (Config reload arrives in M2.)
 - Shell: Git Bash by default, `cmd.exe` and PowerShell via `command`. A
   `direct:` command is parsed with MS C runtime quoting rules. `TERM` is
   `xterm-256color`.
@@ -50,7 +50,7 @@
 | Check | Result |
 | --- | --- |
 | GUI e2e (`test/windows/e2e-m1.ps1`) | 18/18 pass in ReleaseFast and in Debug |
-| RAM, one surface (`docs/windows/ram-baseline.csv`) | 105.8 MB private working set, ReleaseFast |
+| RAM, one surface (`docs/windows/ram-baseline.csv`) | 105.8 MB private bytes, ReleaseFast |
 | Output throughput | 9.1 MB/s |
 | Linux cross-compile (`-Dtarget=x86_64-linux-gnu -Dapp-runtime=none`, also with `-Demit-lib-vt`) | builds; `ghostty-internal` and `libghostty-vt` produced. Test binary not run (no Linux host) |
 | macOS compile | not checked (no SDK here; waits for CI) |
