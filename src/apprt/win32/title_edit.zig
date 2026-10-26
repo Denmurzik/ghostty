@@ -7,6 +7,8 @@ const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
 const App = @import("App.zig");
+const Surface = @import("Surface.zig");
+const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");
 const geom = @import("geom.zig");
@@ -122,7 +124,7 @@ pub fn begin(window: *Window, kind: Kind, rect: geom.Rect, initial: []const u8) 
     beginFor(window, kind, id, rect, initial);
 }
 
-fn beginFor(window: *Window, kind: Kind, target_id: u32, rect: geom.Rect, initial: []const u8) void {
+pub fn beginFor(window: *Window, kind: Kind, target_id: u32, rect: geom.Rect, initial: []const u8) void {
     cancel(window);
     const alloc = window.app.core_app.alloc;
 
@@ -206,6 +208,30 @@ pub fn prompt(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt
         },
     }
     return true;
+}
+
+/// Takes the editor down when it edits `tab` or a surface of it (the tab
+/// is being removed).
+pub fn cancelForTab(window: *Window, tab: *const Tab) void {
+    const s = window.strip_input.edit orelse return;
+    const affected = switch (s.kind) {
+        .window => false,
+        .tab => s.target_id == tab.id,
+        .surface => blk: {
+            var it = @constCast(tab).tree.iterator();
+            while (it.next()) |entry| {
+                if (entry.view.id == s.target_id) break :blk true;
+            }
+            break :blk false;
+        },
+    };
+    if (affected) cancel(window);
+}
+
+/// Takes the editor down when it edits `surface` (it is being removed).
+pub fn cancelForSurface(window: *Window, surface: *const Surface) void {
+    const s = window.strip_input.edit orelse return;
+    if (s.kind == .surface and s.target_id == surface.id) cancel(window);
 }
 
 /// Takes the editor down without applying anything.

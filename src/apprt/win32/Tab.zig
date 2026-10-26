@@ -14,6 +14,7 @@ const Overrides = @import("Overrides.zig");
 const SplitLayout = @import("SplitLayout.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const title_edit = @import("title_edit.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_tab);
@@ -354,6 +355,7 @@ pub fn replaceTree(self: *Tab, tree: Surface.Tree) void {
 pub fn removeSurface(self: *Tab, s: *Surface) void {
     const alloc = self.window.app.core_app.alloc;
     const at = self.tree.locate(s) orelse return;
+    title_edit.cancelForSurface(self.window, s);
 
     // The new focus is picked in the old tree but only taken once the
     // removal went through.

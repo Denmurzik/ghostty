@@ -44,10 +44,12 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
                 .tab => |i| {
                     if (title_edit.tabRect(window, i)) |rect| {
                         const tab = window.tabs.items[i];
-                        title_edit.begin(window, .tab, rect, tab.title());
+                        title_edit.beginFor(window, .tab, tab.id, rect, tab.title());
                     }
                     return 0;
                 },
+                // The second press of a double click is not another click.
+                .tab_close, .new_tab => return 0,
                 else => {},
             };
             switch (part) {

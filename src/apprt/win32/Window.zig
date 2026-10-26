@@ -25,6 +25,7 @@ const resize_overlay = @import("resize_overlay.zig");
 const strip_input_mod = @import("strip_input.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
+const title_edit = @import("title_edit.zig");
 const util = @import("util.zig");
 
 const messages = @import("messages.zig");
@@ -202,6 +203,7 @@ pub fn destroy(self: *Window) void {
     self.beginTeardown();
 
     drop.revoke(self);
+    title_edit.cancel(self);
     resize_overlay.deinit(&self.overlay);
 
     // DestroyWindow runs the WM_DESTROY handler, which unregisters us.
@@ -352,6 +354,7 @@ pub fn selectTab(self: *Window, index: usize) void {
 pub fn removeTab(self: *Window, tab: *Tab) void {
     const index = self.tabIndex(tab) orelse return;
     const was_active = index == self.active_tab;
+    title_edit.cancelForTab(self, tab);
 
     _ = self.tabs.orderedRemove(index);
 

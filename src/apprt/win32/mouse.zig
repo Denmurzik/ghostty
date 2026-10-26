@@ -327,6 +327,11 @@ fn handleWheel(
             _ = user32.SendMessageW(target, msg, wparam, lparam);
             return;
         }
+        // Over the tab strip: the window scrolls it.
+        if (target == surface.window.hwnd) {
+            _ = user32.SendMessageW(target, msg, wparam, lparam);
+            return;
+        }
     }
 
     const delta = user32.getWheelDelta(wparam);
@@ -383,6 +388,11 @@ fn handleVerticalWheel(surface: *Surface, first: i16) void {
         };
         if (user32.WindowFromPoint(screen)) |target| {
             if (target != surface.hwnd and isSurfaceWindow(target)) {
+                if (acc.take()) |d| scrollDelivery(surface, d);
+                _ = user32.SendMessageW(target, queued.message, queued.wParam, queued.lParam);
+                continue;
+            }
+            if (target == surface.window.hwnd) {
                 if (acc.take()) |d| scrollDelivery(surface, d);
                 _ = user32.SendMessageW(target, queued.message, queued.wParam, queued.lParam);
                 continue;
