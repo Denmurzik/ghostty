@@ -92,8 +92,8 @@ pub const DROPFILES = extern struct {
 };
 
 test "win32 shell32: DROPFILES size" {
-    const std = @import("std");
     try std.testing.expectEqual(20, @sizeOf(DROPFILES));
+}
 
 // Notification area (shellapi.h)
 
