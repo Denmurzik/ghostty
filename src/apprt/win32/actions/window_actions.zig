@@ -5,6 +5,8 @@ const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
 const title_edit = @import("../title_edit.zig");
 const placement = @import("../placement.zig");
+const bell = @import("../bell.zig");
+const taskbar = @import("../taskbar.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -82,18 +84,20 @@ pub fn prompt_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.
     return title_edit.prompt(app, target, value);
 }
 
-/// Stub until Task 26.
 pub fn ring_bell(app: *App, target: apprt.Target, value: apprt.Action.Value(.ring_bell)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const surface = switch (target) {
+        .app => return false,
+        .surface => |s| app.surfaceFor(s) orelse return false,
+    };
+    return bell.ring(surface);
 }
 
-/// Stub until Task 26.
 pub fn progress_report(app: *App, target: apprt.Target, value: apprt.Action.Value(.progress_report)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    if (!app.config.@"progress-style") return false;
+    const surface = switch (target) {
+        .app => return false,
+        .surface => |s| app.surfaceFor(s) orelse return false,
+    };
+    return taskbar.setProgressFrom(surface.window, surface.id, value);
 }
