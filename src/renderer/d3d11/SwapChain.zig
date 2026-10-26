@@ -65,7 +65,7 @@ pacer: Pacer = .{},
 surface_id: u32 = 0,
 
 /// Set once a failing wait was logged.
-wait_failed_logged: bool = false,
+wait_failed_logged: std.atomic.Value(bool) = .init(false),
 
 /// Unique per created chain: a new chain may reuse the old one's addresses.
 serial: u64,
@@ -195,8 +195,7 @@ pub fn beginUnlockedWait(self: *Self) ?UnlockedWait {
 pub fn finishUnlockedWait(self: *Self, w: UnlockedWait, result: Pacer.WaitResult) void {
     self.device.assertContextLocked();
     if (self.serial != w.serial) return;
-    if (result == .failed and !self.wait_failed_logged) {
-        self.wait_failed_logged = true;
+    if (result == .failed and !self.wait_failed_logged.swap(true, .monotonic)) {
         log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
     }
     self.pacer.book(result);
@@ -228,8 +227,7 @@ const HandleWaiter = struct {
             kernel32.WAIT_TIMEOUT => .timeout,
             else => {
                 // A broken handle would fail every frame: give up on pacing.
-                if (!self.owner.wait_failed_logged) {
-                    self.owner.wait_failed_logged = true;
+                if (!self.owner.wait_failed_logged.swap(true, .monotonic)) {
                     log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
                 }
                 return .failed;
@@ -258,16 +256,16 @@ pub const Pacer = struct {
     last_present_ns: std.atomic.Value(u64) = .init(0),
 
     pub fn presented(self: *Pacer, now: u64) void {
-        self.last_present_ns.store(now, .monotonic);
+        self.last_present_ns.store(now, .release);
         var cur = self.pending.load(.monotonic);
         while (cur < buffer_count) {
-            cur = self.pending.cmpxchgWeak(cur, cur + 1, .monotonic, .monotonic) orelse return;
+            cur = self.pending.cmpxchgWeak(cur, cur + 1, .release, .monotonic) orelse return;
         }
     }
 
     pub fn isIdle(self: *const Pacer, now: u64) bool {
-        return self.pending.load(.monotonic) > 0 and
-            now -| self.last_present_ns.load(.monotonic) >= idle_ns;
+        return self.pending.load(.acquire) > 0 and
+            now -| self.last_present_ns.load(.acquire) >= idle_ns;
     }
 
     /// `waiter.wait(timeout_ms)` returns a `WaitResult`. An idle chain is
