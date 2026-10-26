@@ -458,13 +458,9 @@ fn skipUnlessOnlyText(hwnd: win32.foundation.HWND) !void {
         if (format == 0) return;
         switch (format) {
             win32.user32.CF_TEXT, cf_oemtext, win32.user32.CF_UNICODETEXT, cf_locale => {},
-            else => {
-                std.debug.print(
-                    "skipping: the clipboard holds a non-text format ({}) the test could not restore\n",
-                    .{format},
-                );
-                return error.SkipZigTest;
-            },
+            // No notice is printed: output on stderr makes `zig build test`
+            // report the whole run as failed, skip or not.
+            else => return error.SkipZigTest,
         }
     }
 }
