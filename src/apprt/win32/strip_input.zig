@@ -93,7 +93,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             setHover(window, hoverOf(hitTest(window, x, user32.getYLparam(lparam))));
             if (window.strip_input.session != null) {
                 if (wparam & MK_LBUTTON == 0) {
-                    finish(window, .cancel);
+                    finish(window, .cancel, true);
                 } else {
                     dragTo(window, x, user32.getYLparam(lparam));
                 }
@@ -103,19 +103,20 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
 
         user32.WM_LBUTTONUP => {
             if (window.strip_input.session == null) return null;
-            finish(window, .release);
+            finish(window, .release, true);
             return 0;
         },
 
         // The capture was taken (Alt+Tab, a dialog): the drag is over.
         user32.WM_CAPTURECHANGED => {
-            if (window.strip_input.session != null) finish(window, .cancel);
+            // The focus is leaving (Alt+Tab, a dialog): do not take it back.
+            if (window.strip_input.session != null) finish(window, .cancel, false);
             return null;
         },
 
         user32.WM_KEYDOWN => {
             if (window.strip_input.session == null or wparam != user32.VK_ESCAPE) return null;
-            finish(window, .cancel);
+            finish(window, .cancel, true);
             return 0;
         },
 
@@ -286,9 +287,10 @@ fn windowById(app: *App, id: u32) ?*Window {
 
 fn dragTo(window: *Window, x: i32, y: i32) void {
     const s = &(window.strip_input.session orelse return);
-    if (window.tabIndex(s.tab) == null) {
-        // The tab ended behind the drag (its shell exited).
-        finish(window, .cancel);
+    if (window.tabIndex(s.tab) == null or window.tabs.items.len != s.machine.tab_count) {
+        // A tab ended behind the drag (its shell exited): the machine's
+        // indices are stale.
+        finish(window, .cancel, false);
         return;
     }
     window.strip_input.pointer_x = x;
@@ -341,7 +343,7 @@ fn setMarker(window: *Window, s: *Session, to: ?Marker) void {
 }
 
 /// End the drag with `ev` (release or cancel) and apply the outcome.
-fn finish(window: *Window, ev: tab_drag.Event) void {
+fn finish(window: *Window, ev: tab_drag.Event, refocus: bool) void {
     var s = window.strip_input.session orelse return;
     window.strip_input.session = null;
     window.strip_input.drag = null;
@@ -354,13 +356,15 @@ fn finish(window: *Window, ev: tab_drag.Event) void {
 
     // The tab may have ended behind the drag.
     if (window.tabIndex(s.tab) == null) return;
-    const outcome = s.machine.feed(ev).done orelse return;
+    // Another tab of the window ended behind the drag: only a cancel is safe.
+    const stale = window.tabs.items.len != s.machine.tab_count;
+    const outcome = s.machine.feed(if (stale) .cancel else ev).done orelse return;
     const tab = s.tab;
     switch (outcome) {
         .click, .reorder => focusActive(window),
-        .cancelled => |c| {
-            window.moveTab(s.machine.index, c.restore_index);
-            focusActive(window);
+        .cancelled => {
+            restoreOrder(window, &s);
+            if (refocus) focusActive(window);
         },
         .move_window => |o| {
             _ = user32.SetWindowPos(window.hwnd, null, o.x, o.y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
@@ -374,24 +378,33 @@ fn finish(window: *Window, ev: tab_drag.Event) void {
             transfer(window, target.?, tab, m.index);
         },
         .tear_off => |o| {
-            var wr: win32.foundation.RECT = undefined;
-            if (user32.GetWindowRect(window.hwnd, &wr) == 0) return restore(window, &s);
-            const new = Window.createForTearOff(
-                window.app,
-                .{ .x = o.x, .y = o.y },
-                .{ .w = wr.right - wr.left, .h = wr.bottom - wr.top },
-                window.dpi,
-            ) catch |err| {
+            const new = Window.createForTearOff(window.app, .{ .x = o.x, .y = o.y }, window) catch |err| {
                 log.warn("unable to create a window for the tab err={}", .{err});
                 return restore(window, &s);
             };
+            if (new.dpi != window.dpi) {
+                // The grab offset was measured in source pixels.
+                const m = &s.machine;
+                const scale = @as(f64, @floatFromInt(new.dpi)) / @as(f64, @floatFromInt(window.dpi));
+                const ox: i32 = m.last_pt.x - @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(m.grab.x + m.window_offset.x)) * scale)));
+                const oy: i32 = m.last_pt.y - @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(m.grab.y + m.window_offset.y)) * scale)));
+                _ = user32.SetWindowPos(new.hwnd, null, ox, oy, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+            }
             transfer(window, new, tab, 0);
         },
     }
 }
 
+/// Put the dragged tab back where it was grabbed, whatever closed since.
+fn restoreOrder(window: *Window, s: *const Session) void {
+    const from = window.tabIndex(s.tab) orelse return;
+    const count = window.tabs.items.len;
+    if (count == 0) return;
+    window.moveTab(from, @min(s.machine.origin_index, count - 1));
+}
+
 fn restore(window: *Window, s: *const Session) void {
-    window.moveTab(s.machine.index, s.machine.origin_index);
+    restoreOrder(window, s);
     focusActive(window);
 }
 

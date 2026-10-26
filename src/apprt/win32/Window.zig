@@ -542,8 +542,7 @@ pub fn insertTab(self: *Window, tab: *Tab, index: usize) void {
 pub fn createForTearOff(
     app: *App,
     origin: struct { x: i32, y: i32 },
-    size: struct { w: i32, h: i32 },
-    source_dpi: u32,
+    source: *const Window,
 ) !*Window {
     const alloc = app.core_app.alloc;
     const new = try create(app, .{ .first_tab = false });
@@ -561,15 +560,17 @@ pub fn createForTearOff(
         0,
         win32.user32.SWP_NOSIZE | win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
     );
-    const w: i32 = @intCast(@divTrunc(@as(i64, size.w) * new.dpi, source_dpi));
-    const h: i32 = @intCast(@divTrunc(@as(i64, size.h) * new.dpi, source_dpi));
+    const content = source.contentRect();
+    const scaled_w: i32 = @intCast(@divTrunc(@as(i64, content.w) * new.dpi, source.dpi));
+    const scaled_h: i32 = @intCast(@divTrunc(@as(i64, content.h) * new.dpi, source.dpi));
+    const size = windowSizeFor(.{ .w = scaled_w, .h = scaled_h }, frame_mod.nonClientSize(new));
     _ = win32.user32.SetWindowPos(
         new.hwnd,
         null,
         origin.x,
         origin.y,
-        w,
-        h,
+        size.w,
+        size.h,
         win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
     );
     return new;
@@ -961,7 +962,18 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
 }
 
 fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
-    if (self.nextCloseTarget(mode, anchor_id) == null) return;
+    if (self.nextCloseTarget(mode, anchor_id) == null) {
+        // The anchor tab may have moved to another window since the close
+        // was posted. (A mode other than `this` is posted by the user's
+        // click on a live window and is not forwarded.)
+        if (mode != .this) return;
+        for (self.app.windows.items) |w| {
+            if (w == self or w.findTab(anchor_id) == null) continue;
+            _ = win32.user32.PostMessageW(w.hwnd, messages.WM_GHOSTTY_CLOSE_TAB, @backingInt(mode), @as(isize, anchor_id));
+            break;
+        }
+        return;
+    }
 
     if (closeDecision(false, self.closeTargetsNeedConfirm(mode, anchor_id)) == .ask) {
         if (!(self.askClose(.tab) orelse return)) return;
