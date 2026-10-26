@@ -31,7 +31,7 @@ Invoke-E2eScenario 'tab-rename' {
         $w
     }
     function Get-Centre($R) { , @([int](($R[0] + $R[2]) / 2), [int](($R[1] + $R[3]) / 2)) }
-    function Get-Edit { [GhosttyE2e.EditProbe]::FindWindowExW($g.Hwnd, [IntPtr]::Zero, 'Edit', $null) }
+    function Get-Edit { [GhosttyE2e.EditProbe]::FindWindowExW($g.Hwnd, [IntPtr]::Zero, 'Edit', [NullString]::Value) }
     function Wait-Edit([bool]$Present, [string]$What) {
         $ok = Wait-Until -TimeoutSec 4 -PollMs 50 -Condition { ((Get-Edit) -ne [IntPtr]::Zero) -eq $Present }
         if (-not $ok) { throw "$What : the Edit control is $(if ($Present) { 'missing' } else { 'still there' })" }
