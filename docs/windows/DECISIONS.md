@@ -29,7 +29,7 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - v1.0 gate: feature checklist closed with automated tests (upstream tests on Windows, win32 apprt tests, vttest-style checks, RAM measurements, Claude Code tmux-mode run) + a pre-release smoked manually by the owner.
 
 ## Process constraints
-- Machine: 15.5 GB RAM, ~4–5 GB free. Builds/test suites strictly one at a time via the teamlead `test-lock` script; zig builds with `-j4`.
+- Machine: 15.5 GB RAM, ~4–5 GB free. Builds/test suites strictly one at a time via the teamlead `test-lock` script; zig builds with `-j6` (owner speed rules 2026-10-26; `-j4` if a build OOMs).
 - Commits: no `Co-Authored-By` or similar trailers.
 - Visual verification: screenshots of the Ghostty window are allowed and expected after UI/renderer changes.
 
