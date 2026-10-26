@@ -77,14 +77,19 @@ test "spawn_config commits little and keeps a large stack reserve" {
     // commit 64 MiB.
     var probes: [4]Probe = @splat(.{});
     var threads: [probes.len]std.Thread = undefined;
-    const before = k32.privateUsage();
-    for (&probes, &threads) |*p, *t| t.* = try std.Thread.spawn(spawn_config, Probe.run, .{p});
-    for (&probes) |*p| while (!p.go.load(.acquire)) std.atomic.spinLoopHint();
-    const after = k32.privateUsage();
-    for (&probes, threads) |*p, t| {
+    var spawned: usize = 0;
+    // Stops and joins whatever was spawned, also when a spawn fails.
+    defer for (probes[0..spawned], threads[0..spawned]) |*p, t| {
         p.exit.store(true, .release);
         t.join();
+    };
+    const before = k32.privateUsage();
+    for (&probes, &threads) |*p, *t| {
+        t.* = try std.Thread.spawn(spawn_config, Probe.run, .{p});
+        spawned += 1;
     }
+    for (&probes) |*p| while (!p.go.load(.acquire)) std.atomic.spinLoopHint();
+    const after = k32.privateUsage();
 
     try std.testing.expect(after -| before < 4 * 1024 * 1024);
     for (probes) |p| try std.testing.expect(p.reserve >= 8 * 1024 * 1024);

@@ -16,6 +16,7 @@ const BlockingQueue = @import("datastruct/main.zig").BlockingQueue;
 const renderer = @import("renderer.zig");
 const font = @import("font/main.zig");
 const global = @import("global.zig");
+const internal_os = @import("os/main.zig");
 
 const log = std.log.scoped(.app);
 
@@ -99,7 +100,7 @@ pub fn create(alloc: Allocator) CreateError!*App {
     // one-time framework initialization costs on first use.
     if (comptime @hasDecl(renderer.Device, "warmup")) {
         if (std.Thread.spawn(
-            .{},
+            internal_os.thread.spawn_config,
             renderer.Device.warmup,
             .{},
         )) |thr| thr.detach() else |err| {
