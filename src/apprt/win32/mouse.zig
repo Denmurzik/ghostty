@@ -7,6 +7,7 @@ const apprt = @import("../../apprt.zig");
 const input = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
+const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.win32_mouse);
 
@@ -91,6 +92,8 @@ pub fn handle(
         },
 
         user32.WM_MOUSEWHEEL, user32.WM_MOUSEHWHEEL => {
+            latency.markInput(.wheel);
+            latency.count(.wheel_message);
             handleWheel(surface, msg, wparam, lparam);
             return 0;
         },
@@ -299,6 +302,8 @@ fn handleWheel(
             if (horizontal) cell.width else cell.height,
         );
     }
+
+    latency.count(.scroll_call);
 
     // Core's positive y is up, as for the wheel. Its x is inverted: the
     // wheel reports right as positive (GTK makes the same flip).

@@ -264,7 +264,7 @@ pub fn renderDeviceOptions(self: *const Surface) !renderer.Device.Options {
 
 /// Where the D3D11 renderer presents.
 pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
-    return .{ .hwnd = self.hwnd, .size = &self.size };
+    return .{ .hwnd = self.hwnd, .size = &self.size, .id = self.id };
 }
 
 /// Decode a WM_SIZE message. A minimized window reports 0x0, which must

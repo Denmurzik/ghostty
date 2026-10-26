@@ -21,6 +21,7 @@ const dxgi = win32.dxgi;
 const foundation = win32.foundation;
 const Device = @import("Device.zig");
 const Target = @import("Target.zig");
+const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.d3d11);
 
@@ -66,6 +67,9 @@ flags: u32,
 /// Whether `present` ran since the last `waitForSlot`. A slot is only
 /// consumed by a present, so a wait without one would block for nothing.
 presented_since_wait: bool = false,
+
+/// The id of the surface this chain presents for (latency trace tag).
+surface_id: u32 = 0,
 
 /// Set once a failing wait was logged.
 wait_failed_logged: bool = false,
@@ -205,6 +209,8 @@ pub fn present(self: *Self, vsync: bool) Error!void {
         @intFromBool(vsync),
         if (tearing) dxgi.PRESENT_ALLOW_TEARING else 0,
     );
+
+    latency.markPresent(self.surface_id);
 
     // An occluded present queues nothing, so there is no slot to wait for.
     if (hr != dxgi.STATUS_OCCLUDED) self.presented_since_wait = true;

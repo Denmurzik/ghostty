@@ -155,6 +155,15 @@ pub const exp = struct {
             size: COORD,
         ) callconv(.winapi) HRESULT;
         pub extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.winapi) void;
+        pub extern "kernel32" fn LoadLibraryExW(
+            lpLibFileName: LPCWSTR,
+            hFile: ?HANDLE,
+            dwFlags: DWORD,
+        ) callconv(.winapi) ?HANDLE;
+        pub extern "kernel32" fn GetProcAddress(
+            hModule: HANDLE,
+            lpProcName: [*:0]const u8,
+        ) callconv(.winapi) ?*const anyopaque;
         pub extern "kernel32" fn InitializeProcThreadAttributeList(
             lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
             dwAttributeCount: DWORD,
@@ -560,4 +569,91 @@ pub fn peSubsystem(image: []const u8) ?u16 {
     if (end > image.len) return null;
     if (!std.mem.eql(u8, image[pe..][0..4], "PE\x00\x00")) return null;
     return std.mem.readInt(u16, image[pe + 4 + 20 + 68 ..][0..2], .little);
+}
+
+/// The ConPTY entry points the pty uses, plus the flags `CreatePseudoConsole`
+/// gets. Diagnostic overrides (latency measurements, not configuration):
+/// `GHOSTTY_WIN32_CONPTY_FLAGS=<u32>` replaces the flags (0 otherwise) and
+/// `GHOSTTY_WIN32_CONPTY_DLL=<path to conpty.dll>` loads the three functions
+/// from that DLL (next to its `OpenConsole.exe`) instead of kernel32. Any
+/// failure falls back to kernel32.
+pub const ConPty = struct {
+    pub const CreateFn = *const fn (COORD, HANDLE, HANDLE, DWORD, *HPCON) callconv(.winapi) HRESULT;
+    pub const ResizeFn = *const fn (HPCON, COORD) callconv(.winapi) HRESULT;
+    pub const CloseFn = *const fn (HPCON) callconv(.winapi) void;
+
+    create: CreateFn,
+    resize: ResizeFn,
+    close: CloseFn,
+    flags: DWORD,
+
+    pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
+};
+
+var conpty_state: ConPty = undefined;
+var conpty_ready: std.atomic.Value(bool) = .init(false);
+var conpty_mutex: std.Io.Mutex = .init;
+
+/// Resolved once; the first call must come before the pty is used by
+/// several threads (`Pty.open` does).
+pub fn conpty() *const ConPty {
+    if (conpty_ready.load(.acquire)) return &conpty_state;
+
+    const global = @import("../global.zig");
+    const io = global.io();
+    conpty_mutex.lockUncancelable(io);
+    defer conpty_mutex.unlock(io);
+    if (conpty_ready.load(.acquire)) return &conpty_state;
+
+    const log = std.log.scoped(.conpty);
+    const alloc = global.alloc();
+    const k32 = exp.kernel32;
+    var api: ConPty = .{
+        .create = &k32.CreatePseudoConsole,
+        .resize = &k32.ResizePseudoConsole,
+        .close = &k32.ClosePseudoConsole,
+        .flags = 0,
+    };
+
+    if (global.environ().getAlloc(alloc, "GHOSTTY_WIN32_CONPTY_FLAGS")) |text| {
+        defer alloc.free(text);
+        if (std.fmt.parseInt(DWORD, text, 0)) |flags| {
+            api.flags = flags;
+            log.info("conpty flags override flags={d}", .{flags});
+        } else |_| log.warn("ignoring GHOSTTY_WIN32_CONPTY_FLAGS={s}", .{text});
+    } else |_| {}
+
+    if (global.environ().getAlloc(alloc, "GHOSTTY_WIN32_CONPTY_DLL")) |path| {
+        defer alloc.free(path);
+        loadDll(path, &api) catch |err| log.warn("conpty dll {s} not used err={}, using kernel32", .{ path, err });
+    } else |_| {}
+
+    conpty_state = api;
+    conpty_ready.store(true, .release);
+    return &conpty_state;
+}
+
+fn loadDll(path: []const u8, api: *ConPty) !void {
+    const log = std.log.scoped(.conpty);
+    const global = @import("../global.zig");
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(global.alloc(), path);
+    defer global.alloc().free(path_w);
+
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the DLL's own directory is searched
+    // for its dependencies; it needs an absolute path.
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x100;
+    const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800;
+    const module = exp.kernel32.LoadLibraryExW(
+        path_w.ptr,
+        null,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+    ) orelse return unexpectedError(GetLastError());
+
+    const create = exp.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse return error.MissingExport;
+    const resize = exp.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse return error.MissingExport;
+    const close = exp.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse return error.MissingExport;
+    api.create = @ptrCast(create);
+    api.resize = @ptrCast(resize);
+    api.close = @ptrCast(close);
+    log.info("conpty functions from {s}", .{path});
 }

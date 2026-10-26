@@ -501,13 +501,24 @@ const WindowsPty = struct {
         try SetHandleInformation.f(pty.out_pipe);
         try SetHandleInformation.f(pty.out_pipe_pty);
 
-        const result = windows.exp.kernel32.CreatePseudoConsole(
+        const conpty = windows.conpty();
+        var result = conpty.create(
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
             pty.in_pipe_pty,
             pty.out_pipe_pty,
-            0,
+            conpty.flags,
             &pty.pseudo_console,
         );
+        if (result == windows.ConPty.E_INVALIDARG and conpty.flags != 0) {
+            log.warn("CreatePseudoConsole rejected flags={d}, retrying with 0", .{conpty.flags});
+            result = conpty.create(
+                .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+                pty.in_pipe_pty,
+                pty.out_pipe_pty,
+                0,
+                &pty.pseudo_console,
+            );
+        }
         if (result != windows.S_OK) return error.Unexpected;
 
         pty.size = size;
@@ -520,7 +531,7 @@ const WindowsPty = struct {
         _ = windows.exp.kernel32.CloseHandle(self.in_pipe);
         _ = windows.exp.kernel32.CloseHandle(self.out_pipe);
         if (!self.console_closed.load(.acquire)) {
-            windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+            windows.conpty().close(self.pseudo_console);
         }
         self.* = undefined;
     }
@@ -556,7 +567,7 @@ const WindowsPty = struct {
     }
 
     fn closeConsole(hpc: windows.HPCON) void {
-        windows.exp.kernel32.ClosePseudoConsole(hpc);
+        windows.conpty().close(hpc);
     }
 
     pub const GetSizeError = error{};
@@ -577,7 +588,7 @@ const WindowsPty = struct {
             return;
         }
 
-        const result = windows.exp.kernel32.ResizePseudoConsole(
+        const result = windows.conpty().resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );

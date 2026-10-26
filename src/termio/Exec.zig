@@ -27,6 +27,7 @@ const Pty = ptypkg.Pty;
 const EnvMap = std.process.Environ.Map;
 const PasswdEntry = internal_os.passwd.Entry;
 const windows = internal_os.windows;
+const latency = internal_os.windows_latency;
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const compat_fd = @import("../lib/compat/fd.zig");
 
@@ -500,6 +501,7 @@ pub fn queueWrite(
             w,
             ttyWrite,
         );
+        if (comptime is_windows) latency.markWrite(slice.len);
     }
 }
 
@@ -671,6 +673,13 @@ const Subprocess = struct {
         // then we get it ourselves.
         var env = cfg.env;
         errdefer env.deinit();
+
+        // Diagnostic variables of the Windows port stay with Ghostty.
+        if (comptime is_windows) {
+            inline for (.{ "GHOSTTY_LATENCY_TRACE", "GHOSTTY_LATENCY_TAG", "GHOSTTY_WIN32_CONPTY_FLAGS", "GHOSTTY_WIN32_CONPTY_DLL" }) |name| {
+                _ = env.swapRemove(name);
+            }
+        }
 
         // If we have a resources dir then set our env var
         if (cfg.resources_dir) |dir| {
@@ -1851,6 +1860,9 @@ pub const ReadThread = struct {
 
             fn process(self: @This(), slice: []const u8) void {
                 self.io.processOutput(slice);
+                // Before the hand-off below: the renderer may draw as soon
+                // as it gets the mutex. One slice, one `yieldToDemand`.
+                latency.markParsed(1, 1);
 
                 // See threadMainPosix: hand the renderer state mutex
                 // off if the renderer is waiting, since this loop
@@ -1859,6 +1871,7 @@ pub const ReadThread = struct {
             }
 
             fn onData(self: @This(), buf: []const u8) void {
+                latency.markOutput(buf.len);
                 processSlicedWindows(self.quit, self, buf, process);
             }
         };

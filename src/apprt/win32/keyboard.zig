@@ -10,6 +10,7 @@ const win32 = @import("win32");
 const input = @import("../../input.zig");
 const Surface = @import("Surface.zig");
 const key = @import("key.zig");
+const latency = @import("../../os/main.zig").windows_latency;
 
 const user32 = win32.user32;
 const log = std.log.scoped(.win32_keyboard);
@@ -46,6 +47,11 @@ pub fn handle(
     wparam: win32.foundation.WPARAM,
     lparam: win32.foundation.LPARAM,
 ) ?win32.foundation.LRESULT {
+    switch (msg) {
+        user32.WM_KEYDOWN, user32.WM_SYSKEYDOWN, user32.WM_CHAR => latency.markInput(.key),
+        else => {},
+    }
+
     return switch (msg) {
         user32.WM_KEYDOWN,
         user32.WM_SYSKEYDOWN,

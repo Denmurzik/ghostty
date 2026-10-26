@@ -12,6 +12,8 @@ const shadertoy = @import("shadertoy.zig");
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
 const configpkg = @import("../config.zig");
+const global = @import("../global.zig");
+const latency = @import("../os/main.zig").windows_latency;
 const rendererpkg = @import("../renderer.zig");
 const Renderer = rendererpkg.GenericRenderer(D3D11);
 pub const Device = @import("d3d11/Device.zig");
@@ -60,6 +62,9 @@ pub const PresentTarget = struct {
     /// Physical client size packed with `packSize`, written by the UI
     /// thread on WM_SIZE.
     size: *const std.atomic.Value(u64),
+
+    /// The surface's id, tagging latency trace samples.
+    id: u32 = 0,
 };
 
 /// Pack a size into one word so it can be read and written atomically.
@@ -106,7 +111,6 @@ viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
 /// The render thread, once `threadEnter` ran (`no_thread` before and after).
 /// Draws from any other thread are the synchronous (UI thread) kind.
 render_thread: std.atomic.Value(std.Thread.Id) = .init(no_thread),
-
 
 /// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
 dump: ?Frame.Dump = null,
@@ -188,6 +192,7 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
         self.logSwapChainFailure("create", err);
         return err;
     };
+    self.swap_chain.?.surface_id = target.id;
     return &self.swap_chain.?;
 }
 
@@ -246,7 +251,14 @@ fn waitForFrameSlot(self: *D3D11, sync: bool) void {
 
     self.device.unlockContext();
     defer self.device.lockContext();
+    if (!latency.enabled()) {
+        _ = sc.waitForSlot(frame_slot_wait_ms);
+        return;
+    }
+    const start = std.Io.Timestamp.now(global.io(), .awake);
     _ = sc.waitForSlot(frame_slot_wait_ms);
+    const waited = start.durationTo(std.Io.Timestamp.now(global.io(), .awake)).toNanoseconds();
+    latency.markSlotWait(@intCast(@max(0, waited)));
 }
 
 pub fn initShaders(
@@ -365,6 +377,8 @@ pub inline fn beginFrame(
     /// The target is presented via the provided renderer's API when completed.
     target: *Target,
 ) !Frame {
+    latency.markRenderStart();
+
     // Draws off the render thread are the synchronous UI thread ones.
     const sync = self.render_thread.load(.acquire) != std.Thread.getCurrentId();
     self.waitForFrameSlot(sync);

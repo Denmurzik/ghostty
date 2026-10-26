@@ -1800,6 +1800,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 sync;
 
             if (!needs_redraw) {
+                @import("../os/main.zig").windows_latency.markNote('N');
                 // Ask our caller to resync the display link once the draw
                 // mutex is released, because we can probably pause the
                 // display link at this point.
