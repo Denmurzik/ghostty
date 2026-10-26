@@ -1,12 +1,16 @@
 //! Single-instance identity: the per-user, per-session, per-class and
 //! per-elevation IPC pipe name, and the checks that decide whether a
 //! process on the other end of the pipe is "us" (same user, same
-//! elevation). Task 20 adds the single-instance decision on top.
+//! elevation), and the single-instance decision: whether a launch hands
+//! itself to the running instance, and the request that does it.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const win32 = @import("win32");
+const configpkg = @import("../../config.zig");
+const client = @import("ipc/client.zig");
 const protocol = @import("ipc/protocol.zig");
+const Overrides = @import("Overrides.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_instance);
@@ -123,6 +127,132 @@ pub fn peerMatchesAs(pid: u32, own_elevated: bool) bool {
 
     const peer_elevated = queryElevated(peer_token) orelse return false;
     return peer_elevated == own_elevated;
+}
+
+/// How long a forwarded launch waits for the running instance. The request
+/// itself expires 250 ms earlier (see `client.request`), so a late server
+/// never opens a window after this process has started its own.
+const forward_timeout_ms = 1500;
+
+/// Whether a launch hands itself to the running instance. A command is never
+/// forwarded (nor any argument but `--working-directory=`): such a launch
+/// runs its own process. `initial_command` is a command from the config.
+pub fn shouldForward(
+    mode: configpkg.Config.WindowsSingleInstance,
+    args: []const []const u8,
+    initial_command: bool,
+) bool {
+    return switch (mode) {
+        .false => false,
+        .true, .detect => !initial_command and Overrides.forwardable(args),
+    };
+}
+
+/// Makes a relative `--working-directory=` absolute against `cwd`: the
+/// running instance has another current directory. `home`, `inherit`,
+/// `~/...` and absolute (drive or UNC) paths are kept. Other arguments are
+/// copied as they are.
+pub fn absolutizeWorkingDirectory(
+    arena: Allocator,
+    args: []const []const u8,
+    cwd: []const u8,
+) ![]const []const u8 {
+    const result = try arena.alloc([]const u8, args.len);
+    for (args, result) |arg, *out| {
+        out.* = arg;
+        const raw = std.mem.cutPrefix(u8, arg, "--working-directory=") orelse continue;
+        const value = std.mem.trim(u8, raw, &std.ascii.whitespace);
+        if (value.len == 0 or
+            std.mem.eql(u8, value, "home") or
+            std.mem.eql(u8, value, "inherit") or
+            std.mem.startsWith(u8, value, "~") or
+            std.fs.path.isAbsoluteWindows(value)) continue;
+        const joined = try std.fs.path.join(arena, &.{ cwd, value });
+        out.* = try std.fmt.allocPrint(arena, "--working-directory={s}", .{joined});
+    }
+    return result;
+}
+
+pub const ForwardResult = enum { forwarded, no_server, not_our_server, failed };
+
+pub const Sent = struct {
+    result: ForwardResult,
+    /// The server's stderr text for a refused request; owned by the caller.
+    message: ?[]u8 = null,
+};
+
+/// Sends `req` to the instance behind `name` and waits for its answer.
+pub fn send(alloc: Allocator, name: [:0]const u16, req: protocol.Request, timeout_ms: u32) Sent {
+    const payload = protocol.encodeRequest(alloc, req) catch return .{ .result = .failed };
+    defer alloc.free(payload);
+    const bytes = client.request(alloc, name, payload, timeout_ms) catch |err| return .{
+        .result = switch (err) {
+            error.NoServer => .no_server,
+            error.NotOurServer => .not_our_server,
+            else => blk: {
+                log.warn("IPC request failed err={}", .{err});
+                break :blk .failed;
+            },
+        },
+    };
+    defer alloc.free(bytes);
+
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const response = protocol.parseResponse(arena.allocator(), bytes) catch return .{ .result = .failed };
+    if (response.code == .ok) return .{ .result = .forwarded };
+    return .{
+        .result = .failed,
+        .message = alloc.dupe(u8, response.stderr) catch null,
+    };
+}
+
+/// Asks the running instance behind `name` for a new window. `args` are
+/// already forwardable (`shouldForward`) and absolutized.
+pub fn forwardNewWindow(alloc: Allocator, name: [:0]const u16, args: []const []const u8) ForwardResult {
+    const sent = send(alloc, name, .{
+        .v = protocol.version,
+        .op = "new-window",
+        .args = args,
+    }, forward_timeout_ms);
+    if (sent.message) |m| {
+        log.warn("running instance refused the new window: {s}", .{m});
+        alloc.free(m);
+    }
+    return sent.result;
+}
+
+test "win32 instance: forward decision" {
+    const W = configpkg.Config.WindowsSingleInstance;
+    const none: []const []const u8 = &.{};
+    try std.testing.expect(shouldForward(W.detect, none, false));
+    try std.testing.expect(shouldForward(W.detect, &.{"--working-directory=C:\\x"}, false));
+    try std.testing.expect(!shouldForward(W.detect, &.{"--title=x"}, false));
+    try std.testing.expect(!shouldForward(W.detect, &.{"--font-size=20"}, false));
+    try std.testing.expect(!shouldForward(W.true, &.{"--command=x"}, false));
+    try std.testing.expect(!shouldForward(W.true, &.{ "-e", "vim" }, false));
+    try std.testing.expect(shouldForward(W.true, none, false));
+    try std.testing.expect(!shouldForward(W.detect, none, true));
+    try std.testing.expect(!shouldForward(W.true, none, true));
+    try std.testing.expect(!shouldForward(W.false, none, false));
+}
+
+test "win32 instance: working directory is absolutized" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const rel = try absolutizeWorkingDirectory(a, &.{"--working-directory=sub dir"}, "C:\\a");
+    try std.testing.expectEqualStrings("--working-directory=C:\\a\\sub dir", rel[0]);
+    const cyr = try absolutizeWorkingDirectory(a, &.{"--working-directory=Рабочая папка"}, "C:\\a");
+    try std.testing.expectEqualStrings("--working-directory=C:\\a\\Рабочая папка", cyr[0]);
+    const abs = try absolutizeWorkingDirectory(a, &.{"--working-directory=D:\\x y"}, "C:\\a");
+    try std.testing.expectEqualStrings("--working-directory=D:\\x y", abs[0]);
+    const unc = try absolutizeWorkingDirectory(a, &.{"--working-directory=\\\\srv\\share"}, "C:\\a");
+    try std.testing.expectEqualStrings("--working-directory=\\\\srv\\share", unc[0]);
+    const keep = try absolutizeWorkingDirectory(a, &.{ "--working-directory=home", "--title=t" }, "C:\\a");
+    try std.testing.expectEqualStrings("--working-directory=home", keep[0]);
+    try std.testing.expectEqualStrings("--title=t", keep[1]);
 }
 
 test "win32 instance: pipe name has sid, session, class and elevation marker" {

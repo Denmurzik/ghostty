@@ -3806,6 +3806,22 @@ else
 /// so you can test single instance without conflicting with release builds.
 @"gtk-single-instance": GtkSingleInstance = .default,
 
+/// Whether a launch of Ghostty on Windows opens a new window in the running
+/// instance (of the same `class`, user and elevation) instead of starting
+/// another process.
+///
+/// Valid values are:
+///
+///   * `detect` (default) - A launch without arguments opens a new window in
+///     the running instance and exits. A launch with arguments (other than a
+///     bare `--working-directory`) starts its own process.
+///   * `true` - Like `detect`; a command (`-e`, `--command`, `initial-command`)
+///     is never forwarded, such a launch starts its own process.
+///   * `false` - Every launch starts its own process.
+///
+/// This only applies to Windows.
+@"windows-single-instance": WindowsSingleInstance = .detect,
+
 /// When enabled, the full GTK titlebar is displayed instead of your window
 /// manager's simple titlebar. The behavior of this option will vary with your
 /// window manager.
@@ -9368,6 +9384,13 @@ pub const GtkSingleInstance = enum {
     detect,
 
     pub const default: GtkSingleInstance = .detect;
+};
+
+/// See windows-single-instance
+pub const WindowsSingleInstance = enum {
+    detect,
+    true,
+    false,
 };
 
 /// See gtk-tabs-location

@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
+const cli = @import("../../cli.zig");
 const build_config = @import("../../build_config.zig");
 const configpkg = @import("../../config.zig");
 const global = @import("../../global.zig");
@@ -21,6 +22,7 @@ const dialogs = @import("dialogs.zig");
 const instance = @import("instance.zig");
 const ipc = struct {
     const ops = @import("ipc/ops.zig");
+    const protocol = @import("ipc/protocol.zig");
     const Server = @import("ipc/Server.zig");
 };
 const messages = @import("messages.zig");
@@ -59,6 +61,16 @@ wakeup_pending: std.atomic.Value(bool) = .init(false),
 /// The IPC pipe server; null when another instance owns the pipe or the
 /// server could not start. Main thread only.
 server: ?*ipc.Server = null,
+
+/// Whether this process owns the IPC pipe (`server != null`). A process
+/// that does not (standalone after `AddressInUse`, `windows-single-instance
+/// = false` next to a running instance) has no tray icon and quits after
+/// its last window.
+pipe_owner: bool = false,
+
+/// This launch was handed to the running instance: no window is created and
+/// `run` returns at once, so the process exits 0.
+forwarded: bool = false,
 
 /// Guards the quit confirmation dialog against a second quit request
 /// (its message loop keeps dispatching).
@@ -112,6 +124,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     // finds the pipe and queues in it.
     self.startServer();
     errdefer self.stopServer();
+    if (self.forwarded) return;
 
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
@@ -124,6 +137,8 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
 
 /// Run the message loop until WM_QUIT.
 pub fn run(self: *App) !void {
+    if (self.forwarded) return;
+
     // Test hook: with no window to close there is otherwise no way to leave
     // the loop, so the e2e smoke tests ask to quit before the first message.
     if (self.exitImmediately()) win32.user32.PostQuitMessage(0);
@@ -170,6 +185,7 @@ fn startServer(self: *App) void {
     const server = ipc.Server.claim(alloc, name) catch |err| switch (err) {
         error.AddressInUse => {
             log.info("another instance owns the IPC pipe", .{});
+            self.forwarded = self.forwardLaunch(name);
             return;
         },
         else => {
@@ -183,12 +199,51 @@ fn startServer(self: *App) void {
         return;
     };
     self.server = server;
+    self.pipe_owner = true;
+}
+
+/// Hands this launch to the instance that owns the pipe `name`, when
+/// `windows-single-instance` and the arguments allow it. False: run
+/// standalone (a squatter, a stale pipe, a refusal, no forwarding wanted).
+fn forwardLaunch(self: *App, name: [:0]const u16) bool {
+    var arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var args: std.ArrayList([]const u8) = .empty;
+    var iter = cli.args.argsIterator(a, global.args()) catch return false;
+    defer iter.deinit();
+    while (iter.next()) |arg| {
+        // The class picks the instance (it is in the pipe name); it is not
+        // something to forward.
+        if (std.mem.startsWith(u8, arg, "--class=")) continue;
+        args.append(a, a.dupe(u8, arg) catch return false) catch return false;
+    }
+
+    if (!instance.shouldForward(
+        self.config.@"windows-single-instance",
+        args.items,
+        self.config.@"initial-command" != null,
+    )) return false;
+
+    var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_len = std.Io.Dir.cwd().realPathFile(global.io(), ".", &cwd_buf) catch return false;
+    const forwarded_args = instance.absolutizeWorkingDirectory(a, args.items, cwd_buf[0..cwd_len]) catch return false;
+
+    switch (instance.forwardNewWindow(self.core_app.alloc, name, forwarded_args)) {
+        .forwarded => return true,
+        .not_our_server => log.warn("the IPC pipe is owned by another user or elevation; running standalone", .{}),
+        .no_server => log.info("the IPC pipe is stale; running standalone", .{}),
+        .failed => log.warn("forwarding to the running instance failed; running standalone", .{}),
+    }
+    return false;
 }
 
 /// Stops the IPC thread and frees the server. Only after the message loop.
 fn stopServer(self: *App) void {
     const server = self.server orelse return;
     self.server = null;
+    self.pipe_owner = false;
     server.stop();
 }
 
@@ -380,16 +435,76 @@ pub fn performAction(
 /// Send the given IPC to a running Ghostty. Static because it is called from
 /// a CLI process that has no apprt App.
 pub fn performIpc(
-    _: Allocator,
-    _: apprt.ipc.Target,
+    alloc: Allocator,
+    target: apprt.ipc.Target,
     comptime action: apprt.ipc.Action.Key,
-    _: apprt.ipc.Action.Value(action),
+    value: apprt.ipc.Action.Value(action),
 ) (Allocator.Error || apprt.ipc.Errors)!bool {
-    switch (action) {
-        .new_window => return false,
-        .new_tab => return false,
-        .toggle_quick_terminal => return false,
+    const class: ?[]const u8 = switch (target) {
+        .class => |c| c,
+        .detect => null,
+    };
+    const name = instance.pipeNameFor(alloc, class) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            ipcError("unable to build the IPC pipe name: {}", .{err});
+            return error.IPCFailed;
+        },
+    };
+    defer alloc.free(name);
+
+    var surface_buf: [32]u8 = undefined;
+    const req: ipc.protocol.Request = switch (action) {
+        .new_window => .{
+            .v = ipc.protocol.version,
+            .op = "new-window",
+            .args = argsOf(value.arguments),
+        },
+        .new_tab => .{
+            .v = ipc.protocol.version,
+            .op = "new-tab",
+            .args = argsOf(value.arguments),
+            .core_surface = std.fmt.bufPrint(&surface_buf, "{d}", .{value.surface_id}) catch unreachable,
+        },
+        .toggle_quick_terminal => .{
+            .v = ipc.protocol.version,
+            .op = "toggle-quick-terminal",
+        },
+    };
+
+    const sent = instance.send(alloc, name, req, ipc_timeout_ms);
+    defer if (sent.message) |m| alloc.free(m);
+    switch (sent.result) {
+        .forwarded => return true,
+        .no_server => {
+            ipcError("no running Ghostty instance (class {s})", .{class orelse instance.defaultClass()});
+            return error.IPCFailed;
+        },
+        .not_our_server => {
+            ipcError("the IPC pipe of class {s} is owned by a process of another user or elevation", .{class orelse instance.defaultClass()});
+            return error.IPCFailed;
+        },
+        .failed => {
+            ipcError("the running instance did not accept the request: {s}", .{sent.message orelse "no answer"});
+            return error.IPCFailed;
+        },
     }
+}
+
+/// How long the CLI waits for the running instance.
+const ipc_timeout_ms = 3000;
+
+fn argsOf(arguments: ?[][:0]const u8) []const []const u8 {
+    const list = arguments orelse return &.{};
+    // `[:0]const u8` slices are `[]const u8` slices; the list is a view.
+    return @as([*]const []const u8, @ptrCast(list.ptr))[0..list.len];
+}
+
+fn ipcError(comptime fmt: []const u8, args: anytype) void {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(global.io(), &buffer);
+    writer.interface.print("ghostty: " ++ fmt ++ "\n", args) catch {};
+    writer.interface.flush() catch {};
 }
 
 fn exitImmediately(self: *const App) bool {
