@@ -171,7 +171,16 @@ exit 1
 # Another session may be running GUI tests on this desktop: take turns through
 # %TEMP%\gui-e2e.lock (see README.md). Acquired right before the try whose
 # finally releases it; the scenarios inherit it through GHOSTTY_E2E_LOCK_ID.
-$lockToken = Enter-GuiLock -Owner 'e2e.ps1' -TimeoutMinutes 30
+# A desktop that stays busy is not a failure of the product: SKIP (exit 2).
+# The scenarios' timeouts only start after this.
+try {
+    $lockToken = Enter-GuiLock -Owner 'e2e.ps1' -TimeoutMinutes 30
+} catch {
+    if ($_.Exception.Message -notlike 'GUI lock * still held*') { throw }
+    foreach ($s in $all) { Write-Output "SKIP $($s.Name): $($_.Exception.Message)" }
+    Write-Output "e2e: PASS 0, FAIL 0, SKIP $($all.Count) (desktop lock busy)"
+    exit 2
+}
 try {
     $env:GHOSTTY_E2E_LOCK_ID = $lockToken.Id
     # Whatever a killed scenario left behind in the keyboard layout list.
