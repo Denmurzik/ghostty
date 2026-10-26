@@ -4,21 +4,18 @@
 //! message so the core is never re-entered from inside OLE.
 //!
 //! An elevated Ghostty receives no drops from a non-elevated Explorer
-//! (UIPI blocks the drag); that is not worked around.
+//! (UIPI blocks the drag); that is not worked around. As on macOS there is
+//! no highlight: the copy cursor is the only feedback.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const configpkg = @import("../../config.zig");
 const Window = @import("Window.zig");
 const Surface = @import("Surface.zig");
-const geom = @import("geom.zig");
-const theme = @import("theme.zig");
-const util = @import("util.zig");
 const messages = @import("messages.zig");
 
 const ole32 = win32.ole32;
 const user32 = win32.user32;
-const gdi32 = win32.gdi32;
 const kernel32 = win32.kernel32;
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
@@ -29,15 +26,14 @@ const POINT = win32.foundation.POINT;
 
 const log = std.log.scoped(.win32_drop);
 
-const L = std.unicode.utf8ToUtf16LeStringLiteral;
-const highlight_class = L("GhosttyDropHighlight");
-
 pub const WM_GHOSTTY_DROP = messages.WM_GHOSTTY_DROP;
 
 pub const ShellKind = enum { msys, wsl, pwsh, cmd };
 
 /// The kind of shell a command starts, from the basename of its program.
 /// Unknown shells and the default (no command) use cmd-style quoting.
+/// A surface with no command yet (unresolved default) is classified as cmd; the
+/// finalized config always holds the resolved `.direct` default shell.
 pub fn shellKindFor(command: ?configpkg.Command) ShellKind {
     const cmd = command orelse return .cmd;
     const program: []const u8 = switch (cmd) {
@@ -307,15 +303,8 @@ const Target = struct {
 
     fn effectFor(self: *Target, pt: POINT, allowed: u32) u32 {
         const window = self.window orelse return ole32.DROPEFFECT_NONE;
-        if (!self.has_files or allowed & ole32.DROPEFFECT_COPY == 0) {
-            highlight.hide();
-            return ole32.DROPEFFECT_NONE;
-        }
-        const surface = surfaceAt(window, pt) orelse {
-            highlight.hide();
-            return ole32.DROPEFFECT_NONE;
-        };
-        highlight.show(window, surface);
+        if (!self.has_files or allowed & ole32.DROPEFFECT_COPY == 0) return ole32.DROPEFFECT_NONE;
+        if (surfaceAt(window, pt) == null) return ole32.DROPEFFECT_NONE;
         return ole32.DROPEFFECT_COPY;
     }
 
@@ -334,14 +323,12 @@ const Target = struct {
 
     fn dragLeave(this: *ole32.IDropTarget) callconv(.winapi) HRESULT {
         from(this).has_files = false;
-        highlight.hide();
         return win32.foundation.S_OK;
     }
 
     fn onDrop(this: *ole32.IDropTarget, data: ?*ole32.IDataObject, _: u32, pt: POINT, effect: *u32) callconv(.winapi) HRESULT {
         const self = from(this);
         self.has_files = false;
-        highlight.hide();
         effect.* = ole32.DROPEFFECT_NONE;
 
         const window = self.window orelse return win32.foundation.S_OK;
@@ -429,7 +416,6 @@ pub fn revoke(window: *Window) void {
         target.window = null;
         _ = ole32.RevokeDragDrop(window.hwnd);
         _ = targets.swapRemove(i);
-        highlight.hide();
         // The registration's reference; OLE may still hold its own.
         _ = Target.release(@ptrCast(&target.iface));
         return;
@@ -453,127 +439,6 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
     surface.core_surface.textCallback(payload.text) catch |err|
         log.warn("unable to paste the dropped paths err={}", .{err});
     return 0;
-}
-
-// -- The highlight ---------------------------------------------------------------
-
-/// One layered, click-through popup per process that outlines the surface a
-/// drop would land in.
-const highlight = struct {
-    var hwnd: ?HWND = null;
-    var shown_for: ?*Surface = null;
-
-    const border_dip = 2;
-    const alpha: u32 = 0x99;
-
-    fn show(window: *Window, surface: *Surface) void {
-        if (shown_for == surface and hwnd != null) return;
-        hide();
-
-        var rc: win32.foundation.RECT = undefined;
-        if (user32.GetWindowRect(surface.hwnd, &rc) == 0) return;
-        const w = rc.right - rc.left;
-        const h = rc.bottom - rc.top;
-        if (w <= 0 or h <= 0) return;
-
-        util.registerClass(&.{
-            .style = 0,
-            .lpfnWndProc = wndProc,
-            .hInstance = window.app.hinstance,
-            .lpszClassName = highlight_class,
-        }) catch return;
-
-        const popup = user32.CreateWindowExW(
-            user32.WS_EX_LAYERED | user32.WS_EX_TRANSPARENT | user32.WS_EX_NOACTIVATE | user32.WS_EX_TOOLWINDOW,
-            highlight_class,
-            null,
-            user32.WS_POPUP,
-            rc.left,
-            rc.top,
-            w,
-            h,
-            window.hwnd,
-            null,
-            window.app.hinstance,
-            null,
-        ) orelse {
-            log.warn("unable to create the drop highlight err={}", .{kernel32.GetLastError()});
-            return;
-        };
-
-        const pal = theme.palette(window);
-        if (!paint(popup, rc, w, h, geom.scale(border_dip, window.dpi), pal.text)) {
-            _ = user32.DestroyWindow(popup);
-            return;
-        }
-        _ = user32.ShowWindow(popup, user32.SW_SHOWNOACTIVATE);
-        hwnd = popup;
-        shown_for = surface;
-    }
-
-    fn hide() void {
-        const popup = hwnd orelse return;
-        hwnd = null;
-        shown_for = null;
-        _ = user32.DestroyWindow(popup);
-    }
-
-    /// A `border`-pixel frame in `color` at `alpha`, transparent inside, into
-    /// a premultiplied 32bpp DIB handed to the compositor.
-    fn paint(popup: HWND, rc: win32.foundation.RECT, w: i32, h: i32, border: i32, color: theme.Color) bool {
-        const screen = user32.GetDC(null) orelse return false;
-        defer _ = user32.ReleaseDC(null, screen);
-        const dc = gdi32.CreateCompatibleDC(screen) orelse return false;
-        defer _ = gdi32.DeleteDC(dc);
-
-        const info: gdi32.BITMAPINFO = .{ .bmiHeader = .{
-            .biWidth = w,
-            .biHeight = -h,
-            .biBitCount = 32,
-        } };
-        var bits: ?*anyopaque = null;
-        const bitmap = gdi32.CreateDIBSection(dc, &info, gdi32.DIB_RGB_COLORS, &bits, null, 0) orelse return false;
-        defer _ = gdi32.DeleteObject(@ptrCast(bitmap));
-        const old = gdi32.SelectObject(dc, @ptrCast(bitmap));
-        defer if (old) |o| {
-            _ = gdi32.SelectObject(dc, o);
-        };
-
-        const pixels: [*]u32 = @ptrCast(@alignCast(bits orelse return false));
-        const px = framePixel(color);
-        const uw: usize = @intCast(w);
-        const uh: usize = @intCast(h);
-        const ub: usize = @intCast(@min(border, @divFloor(@min(w, h), 2)));
-        for (0..uh) |y| {
-            for (0..uw) |x| {
-                const edge = x < ub or y < ub or x >= uw - ub or y >= uh - ub;
-                pixels[y * uw + x] = if (edge) px else 0;
-            }
-        }
-
-        const origin: POINT = .{ .x = rc.left, .y = rc.top };
-        const src: POINT = .{ .x = 0, .y = 0 };
-        const size: user32.SIZE = .{ .cx = w, .cy = h };
-        const blend: user32.BLENDFUNCTION = .{ .SourceConstantAlpha = 255, .AlphaFormat = user32.AC_SRC_ALPHA };
-        if (user32.UpdateLayeredWindow(popup, screen, &origin, &size, dc, &src, 0, &blend, user32.ULW_ALPHA) == 0) {
-            log.warn("UpdateLayeredWindow failed err={}", .{kernel32.GetLastError()});
-            return false;
-        }
-        return true;
-    }
-
-    fn wndProc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
-        return user32.DefWindowProcW(h, msg, wparam, lparam);
-    }
-};
-
-/// The premultiplied BGRA pixel of the frame: `color` at the highlight alpha.
-fn framePixel(color: theme.Color) u32 {
-    const a = highlight.alpha;
-    const r: u32 = @as(u32, color.r) * a / 255;
-    const g: u32 = @as(u32, color.g) * a / 255;
-    const b: u32 = @as(u32, color.b) * a / 255;
-    return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
 // -- Tests ----------------------------------------------------------------------
@@ -605,6 +470,20 @@ test "win32 drop: shell kind from the command" {
         try testing.expectEqual(case[1], shellKindFor(cmd));
     }
     try testing.expectEqual(ShellKind.cmd, shellKindFor(null));
+}
+
+test "win32 drop: shell kind of the resolved default shell" {
+    // The default shell is resolved to a `.direct` argv with an absolute path.
+    const git: configpkg.Command = .{ .direct = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" } };
+    const git_user: configpkg.Command = .{ .direct = &.{ "C:\\Users\\a b\\AppData\\Local\\Programs\\Git\\bin\\bash.exe", "--login", "-i" } };
+    const pwsh: configpkg.Command = .{ .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo" } };
+    const cmd: configpkg.Command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} };
+    const wsl: configpkg.Command = .{ .direct = &.{ "C:\\Windows\\System32\\wsl.exe", "~" } };
+    try testing.expectEqual(ShellKind.msys, shellKindFor(git));
+    try testing.expectEqual(ShellKind.msys, shellKindFor(git_user));
+    try testing.expectEqual(ShellKind.pwsh, shellKindFor(pwsh));
+    try testing.expectEqual(ShellKind.cmd, shellKindFor(cmd));
+    try testing.expectEqual(ShellKind.wsl, shellKindFor(wsl));
 }
 
 test "win32 drop: msys and wsl paths and quoting" {
@@ -693,9 +572,4 @@ test "win32 drop: unpaired surrogate becomes U+FFFD" {
 test "win32 drop: IDropTarget and IDataObject slot counts" {
     try testing.expectEqual(7 * @sizeOf(usize), @sizeOf(ole32.IDropTarget.VTable));
     try testing.expectEqual(12 * @sizeOf(usize), @sizeOf(ole32.IDataObject.VTable));
-}
-
-test "win32 drop: frame pixel is premultiplied" {
-    try testing.expectEqual(@as(u32, 0x99999999), framePixel(.{ .r = 255, .g = 255, .b = 255 }));
-    try testing.expectEqual(@as(u32, 0x99000000), framePixel(.{ .r = 0, .g = 0, .b = 0 }));
 }
