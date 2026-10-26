@@ -25,6 +25,7 @@ pub const PROCESS_MEMORY_COUNTERS_EX = extern struct {
 pub extern "kernel32" fn GetModuleHandleW(name: ?[*:0]const u16) callconv(.winapi) ?HMODULE;
 pub extern "kernel32" fn GlobalAlloc(flags: u32, bytes: usize) callconv(.winapi) ?HGLOBAL;
 pub extern "kernel32" fn GlobalLock(HGLOBAL) callconv(.winapi) ?*anyopaque;
+pub extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GlobalUnlock(HGLOBAL) callconv(.winapi) BOOL;
 /// Returns null on success, the handle on failure.
 pub extern "kernel32" fn GlobalFree(HGLOBAL) callconv(.winapi) ?HGLOBAL;
