@@ -150,12 +150,12 @@ function Start-LatencyGhostty([string]$Scenario) {
         if ($env:GHOSTTY_LAT_SHELL -eq 'cmd') {
             # cmd.exe edits its line inside conhost: the ConPTY stage without
             # a shell process of our own. input-latency and output-latency use it.
-            $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath 'cmd')
+            $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath 'cmd') -NoDump
             Set-WindowLayout $g.Hwnd '00000409'
             Start-Sleep -Seconds 3
             $script:LatVariant += '-cmd'
         } else {
-            $g = Start-BashE2e
+            $g = Start-BashE2e -NoDump
         }
     } finally {
         Remove-Item Env:\GHOSTTY_LATENCY_TRACE -ErrorAction SilentlyContinue

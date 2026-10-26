@@ -839,8 +839,8 @@ function Assert-ShellText([string]$Path, [string]$Expected, [string]$What) {
 
 # Starts Git Bash with the UTF-8 config and returns after the shell runs our
 # lines, with the window on the US layout.
-function Start-BashE2e([string]$ConfigName = 'gitbash-de') {
-    $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath $ConfigName)
+function Start-BashE2e([string]$ConfigName = 'gitbash-de', [switch]$NoDump) {
+    $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath $ConfigName) -NoDump:$NoDump
     Wait-BashReady $g
     $g
 }
