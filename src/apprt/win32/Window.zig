@@ -627,17 +627,9 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
 }
 
 /// Tell the visible surfaces whether the window is minimized.
-// TODO(task14): replace the loop below with activeTab().applyOcclusion(!minimized)
 fn setMinimized(self: *Window, minimized: bool) void {
     const tab = self.activeTab() orelse return;
-    var it = tab.tree.iterator();
-    while (it.next()) |entry| {
-        const s = entry.view;
-        if (s.minimized == minimized) continue;
-        s.minimized = minimized;
-        if (s.initialized) s.core_surface.occlusionCallback(!minimized) catch |err|
-            log.warn("occlusion callback failed err={}", .{err});
-    }
+    tab.applyOcclusion(!minimized);
 }
 
 /// Follow a new DPI: the window moves to the system's suggested rectangle
