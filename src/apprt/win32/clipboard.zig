@@ -156,7 +156,7 @@ pub fn setClipboard(
 
     if (!confirm) return write(surface.hwnd, text);
 
-    const alloc = surface.window.app.core_app.alloc;
+    const alloc = surface.app.core_app.alloc;
     const copy = try alloc.dupeSentinel(u8, text, 0);
     errdefer alloc.free(copy);
     try enqueue(surface, .{ .req = .{ .osc_52_write = t }, .text = copy });
@@ -165,7 +165,7 @@ pub fn setClipboard(
 /// Deny every clipboard request still pending for `surface`. Called before
 /// the core surface is torn down.
 pub fn cancelPending(surface: *Surface) void {
-    const alloc = surface.window.app.core_app.alloc;
+    const alloc = surface.app.core_app.alloc;
     surface.clipboard_state.cancelAll(alloc, &surface.core_surface, denyCore);
 }
 
@@ -174,7 +174,7 @@ fn denyCore(core: *CoreSurface, req: apprt.ClipboardRequest) void {
 }
 
 fn enqueue(surface: *Surface, p: Pending) !void {
-    const alloc = surface.window.app.core_app.alloc;
+    const alloc = surface.app.core_app.alloc;
     const state = &surface.clipboard_state;
     try state.queue.append(alloc, p);
     if (win32.user32.PostMessageW(surface.hwnd, WM_GHOSTTY_CLIPBOARD_READ, 0, 0) == 0) {
@@ -191,7 +191,7 @@ fn drain(surface: *Surface) void {
     if (state.abandoned != null) return;
 
     // Taken up front: after a dialog the surface may be gone.
-    const alloc = surface.window.app.core_app.alloc;
+    const alloc = surface.app.core_app.alloc;
     while (state.pop()) |p| {
         if (!process(surface, alloc, p)) return;
     }

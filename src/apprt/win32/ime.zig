@@ -68,7 +68,7 @@ fn composition(surface: *Surface, flags: u32) void {
     // string, so the result goes first.
     if (flags & imm32.GCS_RESULTSTR != 0) result: {
         const text = compositionString(surface, himc, imm32.GCS_RESULTSTR) orelse break :result;
-        defer surface.window.app.core_app.alloc.free(text);
+        defer surface.app.core_app.alloc.free(text);
 
         surface.core_surface.preeditCallback(null) catch |err|
             log.warn("clearing preedit failed err={}", .{err});
@@ -87,7 +87,7 @@ fn composition(surface: *Surface, flags: u32) void {
                 log.warn("clearing preedit failed err={}", .{err});
             break :preedit;
         };
-        defer surface.window.app.core_app.alloc.free(text);
+        defer surface.app.core_app.alloc.free(text);
 
         surface.core_surface.preeditCallback(if (text.len > 0) text else null) catch |err|
             log.warn("setting preedit failed err={}", .{err});
@@ -103,7 +103,7 @@ fn compositionString(
     index: u32,
 ) ?[]u8 {
     const imm32 = win32.imm32;
-    const alloc = surface.window.app.core_app.alloc;
+    const alloc = surface.app.core_app.alloc;
 
     const bytes = imm32.ImmGetCompositionStringW(himc, index, null, 0);
     if (bytes < 0) return null;
