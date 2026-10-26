@@ -40,8 +40,13 @@ Invoke-E2eScenario 'splits-basic' {
     Invoke-SplitAction $g 'goto_split:left'
     $focused = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
     if ($focused.Count -ne 1 -or $focused[0].Id -ne $a.Id) { throw "goto_split:left did not focus A (focused: $(($focused | ForEach-Object { $_.Id }) -join ','))" }
-    # Already leftmost: the result is the same surface, nothing happens.
-    Invoke-SplitAction $g 'goto_split:left' -ExpectNotPerformed
+    # Already leftmost: SplitTree.nearestWrapped wraps to the rightmost column.
+    Invoke-SplitAction $g 'goto_split:left'
+    $focused = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
+    if ($focused.Count -ne 1 -or $focused[0].Id -eq $a.Id) { throw 'goto_split:left from the leftmost pane did not wrap' }
+    Invoke-SplitAction $g 'goto_split:left'
+    $focused = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
+    if ($focused.Count -ne 1 -or $focused[0].Id -ne $a.Id) { throw 'goto_split:left after the wrap did not return to A' }
 
     # resize_split:right,100 -> A is 100 px wider (+-2).
     $aBefore = (Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Id -eq $a.Id }).W
@@ -52,14 +57,15 @@ Invoke-E2eScenario 'splits-basic' {
     if ([Math]::Abs(($aAfter - $aBefore) - 100) -gt 2) { throw "A grew by $($aAfter - $aBefore) px, expected 100 +-2" }
     Assert-NoOverlap (Get-SurfaceBoxes $st)
 
-    # equalize_splits weighs by leaf count (SplitTree.equalize): in A | (B / C)
-    # A gets a third of the width, not half.
+    # equalize_splits weighs by leaf count of same-layout children only
+    # (SplitTree.weight counts a nested split of the other layout as 1): in
+    # A | (B / C) A gets half the width.
     Invoke-SplitAction $g 'equalize_splits'
     $st = Get-SplitState $g
     $total = $content.R - $content.L - $gap
     $aEq = (Get-SurfaceBoxes $st | Where-Object { $_.Id -eq $a.Id }).W
-    Write-E2eInfo "A width after equalize $aEq of $total (a third is $([int]($total / 3)))"
-    if ([Math]::Abs($aEq - $total / 3) -gt 2) { throw "A is $aEq px after equalize, expected $([int]($total / 3)) +-2" }
+    Write-E2eInfo "A width after equalize $aEq of $total (half is $([int]($total / 2)))"
+    if ([Math]::Abs($aEq - $total / 2) -gt 2) { throw "A is $aEq px after equalize, expected $([int]($total / 2)) +-2" }
 
     # toggle_split_zoom -> one visible pane with the full content rect.
     Invoke-SplitAction $g 'toggle_split_zoom'

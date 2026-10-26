@@ -54,8 +54,7 @@ function Invoke-SplitAction($G, [string]$Action, [string]$Surface, [switch]$Expe
     $a = @{ Class = $G.Class; Action = $Action }
     if ($Surface) { $a.Surface = $Surface }
     $r = Invoke-GhosttyAction @a
-    $d = Get-IpcData $r
-    $performed = if ($null -ne $d -and $d.PSObject.Properties['performed']) { [bool]$d.performed } else { $true }
+    $performed = [bool]$r
     if ($ExpectNotPerformed) {
         if ($performed) { throw "action '$Action' was performed, expected not" }
     } elseif (-not $performed) {

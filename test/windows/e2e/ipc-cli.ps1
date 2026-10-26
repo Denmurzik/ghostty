@@ -9,6 +9,7 @@ function Invoke-Cli([string[]]$CliArgs) {
     $se = $so + '.err'
     $p = Start-Process -FilePath $script:Exe -ArgumentList $CliArgs -WorkingDirectory $script:Root `
         -PassThru -NoNewWindow -RedirectStandardOutput $so -RedirectStandardError $se
+    $null = $p.Handle
     if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch {}; throw "ghostty $($CliArgs -join ' ') did not exit within 15 s" }
     [pscustomobject]@{
         Code   = $p.ExitCode

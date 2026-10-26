@@ -3,6 +3,7 @@
 # dump that matches the client area and is clean at its edges, with no
 # `error` line in ghostty.log.
 . (Join-Path $PSScriptRoot '_common.ps1')
+. (Join-Path $PSScriptRoot '_splits.ps1')
 
 Invoke-E2eScenario 'resize' {
     $g = Start-E2eGhostty
@@ -10,7 +11,10 @@ Invoke-E2eScenario 'resize' {
 
     foreach ($size in @(@(400, 300), @(1200, 800), @(500, 350))) {
         Set-WindowSize $g.Hwnd $size[0] $size[1]
-        $client = Get-ClientSize $g.Hwnd
+        # Dump = surface rect (under the tab strip) in physical px; the test process is DPI-unaware, so ask the app.
+        Start-Sleep -Milliseconds 400
+        $sb = (Get-SurfaceBoxes (Get-SplitState $g))[0]
+        $client = [pscustomobject]@{ Width = $sb.W; Height = $sb.H }
         $d = Wait-Dump $g { param($d) $d.Width -eq $client.Width -and $d.Height -eq $client.Height } 10
         if (-not $d) {
             $last = Read-Dump $g.Dump

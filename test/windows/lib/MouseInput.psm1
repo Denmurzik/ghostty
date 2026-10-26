@@ -23,11 +23,14 @@ $script:ABSOLUTE = 0x8000
 $script:VIRTUALDESK = 0x4000
 
 function Send-MouseEvent([int]$Flags, [int]$Nx = 0, [int]$Ny = 0) {
+    # A nested struct is returned by value, so fill MOUSEINPUT first and assign it whole.
+    $mi = New-Object 'GhosttyE2e.Mouse+MOUSEINPUT'
+    $mi.dx = $Nx
+    $mi.dy = $Ny
+    $mi.dwFlags = [uint32]$Flags
     $i = New-Object 'GhosttyE2e.Mouse+INPUT'
     $i.type = 0
-    $i.mi.dx = $Nx
-    $i.mi.dy = $Ny
-    $i.mi.dwFlags = [uint32]$Flags
+    $i.mi = $mi
     $size = [Runtime.InteropServices.Marshal]::SizeOf([type]'GhosttyE2e.Mouse+INPUT')
     if ([GhosttyE2e.Mouse]::SendInput(1, @($i), $size) -ne 1) {
         throw "SendInput failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"

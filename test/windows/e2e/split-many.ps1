@@ -1,8 +1,8 @@
-# e2e: milestone=M2 timeout=300 order=250 surfaces=16
+# e2e: milestone=M2 timeout=420 order=250 surfaces=16
 # split-many: 15 alternating splits give 16 surfaces whose visible rects
 # neither overlap nor go negative, with no error in the log and a window
-# that still answers. Pacing (pre-flight 22): four panes stream while 20 keys
-# are typed into a fifth, with the latency tracer on. Close (pre-flight 13):
+# that still answers. Pacing (pre-flight 22): four panes stream while 100 keys
+# are typed into the largest pane, with the latency tracer on. Close (pre-flight 13):
 # `close_window` with the four streams still running hides the window
 # within 300 ms and a second window of the process stays responsive.
 #
@@ -10,7 +10,9 @@
 # a sample opened by the typed pane may be closed by a present of a
 # streaming pane. Rows are therefore filtered by the `surface` column (the
 # surface that presented) and only the typed pane's rows count: samples lost
-# to that cross-closing are missing, never wrongly attributed.
+# to that cross-closing are missing, never wrongly attributed. With four
+# streamers presenting at the refresh rate only about one sample in five
+# survives, so 100 keys are typed (20 gave 2, 60 gave 6).
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_splits.ps1')
 . (Join-Path $PSScriptRoot '_latency.ps1')
@@ -76,29 +78,38 @@ Invoke-E2eScenario 'split-many' {
     Assert-NoOverlap $back
     if (@($back | Where-Object { $_.Visible }).Count -ne $visible.Count) { throw 'the panes did not all return after the window grew back' }
 
-    # --- pacing: 4 streaming panes, 20 keys in a fifth ---------------------
-    $typed = @($boxes | Where-Object { $_.Focused })
-    if ($typed.Count -ne 1) { throw 'expected one focused pane for the typing' }
+    # --- pacing: 4 streaming panes, 100 keys in the largest pane ---------------------
+    # The newest pane is the smallest (1x3 cells); type into the largest one.
+    $boxes = $back
+    $biggest = @($boxes | Where-Object { $_.Visible } | Sort-Object { $_.W * $_.H } -Descending)[0]
+    for ($k = 0; $k -lt 16; $k++) {
+        $cur = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
+        if ($cur.Count -eq 1 -and $cur[0].Id -eq $biggest.Id) { break }
+        Invoke-SplitAction $g 'goto_split:next'
+    }
+    $typed = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
+    if ($typed.Count -ne 1 -or $typed[0].Id -ne $biggest.Id) { throw "could not focus the largest pane $($biggest.Id)" }
     $typed = $typed[0]
+    Write-E2eInfo "typed pane $($typed.Id) is $($typed.W)x$($typed.H) px"
     $streamers = @($boxes | Where-Object { $_.Visible -and $_.Id -ne $typed.Id } | Select-Object -First 4)
     if ($streamers.Count -lt 4) { throw "only $($streamers.Count) visible panes to stream into" }
 
     $null = New-CheckedStream (Join-Path $g.Sandbox.Tmp 'gt-stream.txt') 4
     foreach ($s in $streamers) {
-        Invoke-SplitAction $g 'text:while :; do cat "$TEMP/gt-stream.txt"; done\r' -Surface $s.CoreId
+        Invoke-SplitAction $g 'text:while :; do cat "$TEMP/gt-stream.txt"; done\r' -Surface $s.Id
     }
     Start-Sleep -Seconds 2
 
     $cursor = Enter-LatencyInput $g
     try {
-        $keys = @(for ($i = 0; $i -lt 20; $i++) { [string][char](97 + ($i % 26)) })
+        $keys = @(for ($i = 0; $i -lt 100; $i++) { [string][char](97 + ($i % 26)) })
         $since = Get-NowNs
         $stamps = Send-TimedKeys $g $keys 150
         $after = Get-AfterStamps
         Start-Sleep -Milliseconds 800
         $rows = @(Get-LatencyRows | Where-Object { $_.Surface -eq $typed.Id })
         $samples = @(Get-Samples $rows 'key' $since $stamps $after)
-        Write-E2eInfo "typed pane $($typed.Id): $($samples.Count) complete key samples of 20"
+        Write-E2eInfo "typed pane $($typed.Id): $($samples.Count) complete key samples of 100"
         if ($samples.Count -lt 5) { throw "only $($samples.Count) key samples of the typed pane closed" }
 
         $keyToPresent = @($samples | ForEach-Object { [double]$_.E2e } | Sort-Object)
@@ -129,7 +140,7 @@ Invoke-E2eScenario 'split-many' {
     $second = [IntPtr]$second
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    Invoke-SplitAction $g 'close_window' -Surface $streamers[0].CoreId
+    Invoke-SplitAction $g 'close_window' -Surface $streamers[0].Id
     $hiddenMs = -1
     $worst = 0L
     $slow = 0

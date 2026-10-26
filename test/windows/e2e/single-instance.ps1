@@ -29,6 +29,7 @@ function Start-Launch([string]$Class, [string[]]$LaunchArgs) {
     } finally {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
     }
+    $null = $proc.Handle
     Register-OwnGhostty -ProcessId $proc.Id
     $proc
 }

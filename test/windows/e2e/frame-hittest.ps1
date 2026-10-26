@@ -12,6 +12,16 @@ Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 $script:HaveIpc = Test-Path -LiteralPath (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1')
 if ($script:HaveIpc) { Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force }
 
+# Physical pixels: strip rects from `state` are physical and the client is
+# DPI-virtualized for a DPI-unaware process, so opt in before any window call.
+if (-not ('GhosttyE2e.TestDpi' -as [type])) {
+    Add-Type -Namespace GhosttyE2e -Name TestDpi -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+"@
+}
+# DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+[void][GhosttyE2e.TestDpi]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
 if (-not ('GhosttyE2e.Frame' -as [type])) {
     Add-Type -Namespace GhosttyE2e -Name Frame -MemberDefinition @"
 [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
@@ -57,14 +67,19 @@ function Get-FramePoints($G) {
     if ($script:HaveIpc) {
         try {
             $st = Get-GhosttyState -Class $G.Class
-            $strip = $st.strip
+            $strip = if ($st.windows) { $st.windows[0].strip } else { $st.strip }
             if ($strip -and $strip.close -and $strip.maximize -and $strip.minimize -and $strip.new_tab) {
                 return @{
                     close = Get-Centre $strip.close
                     maximize = Get-Centre $strip.maximize
                     minimize = Get-Centre $strip.minimize
                     new_tab = Get-Centre $strip.new_tab
-                    caption = Get-Centre $strip.caption
+                    # One tab: the strip shows the title and the caption rect is
+                    # empty, so use the title area left of the new-tab button.
+                    caption = if (($strip.caption[2] - $strip.caption[0]) -gt 8) { Get-Centre $strip.caption } else {
+                        , @([int]($strip.new_tab[0] / 2), [int](($strip.close[1] + $strip.close[3]) / 2))
+                    }
+                    close_h = $strip.close[3]
                     source = 'state'
                 }
             }
@@ -80,6 +95,7 @@ function Get-FramePoints($G) {
         minimize = @(($w - 2 * $btn - [int]($btn / 2)), $mid)
         new_tab = @(($w - 3 * $btn - [int](20 * $s)), $mid)
         caption = @([int]($w / 2), $mid)
+        close_h = [int][Math]::Round(40 * $s)
         source = 'metrics'
     }
 }
@@ -104,6 +120,17 @@ function Test-Responsive([IntPtr]$Hwnd) {
     [GhosttyE2e.Frame]::SendMessageTimeout($Hwnd, 0, [IntPtr]::Zero, [IntPtr]::Zero, 2, 2000, [ref]$r) -ne [IntPtr]::Zero
 }
 
+function Get-ScreenRegionPng([int]$X, [int]$Y, [int]$W, [int]$H) {
+    $bmp = New-Object Drawing.Bitmap $W, $H
+    try {
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H))
+        $g.Dispose()
+        $ms = New-Object IO.MemoryStream
+        $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png)
+        , $ms.ToArray()
+    } finally { $bmp.Dispose() }
+}
 function Get-ScreenPixel([int]$X, [int]$Y) {
     $bmp = New-Object Drawing.Bitmap 1, 1
     try {
@@ -119,10 +146,19 @@ Invoke-E2eScenario 'frame-hittest' {
     $g = Start-E2eGhostty -ConfigText "confirm-close-surface = false`nwindow-decoration = client`nkeybind = alt+x=new_tab`n"
     if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
     $h = $g.Hwnd
+    # The keys below are typed on the US layout (the shell window brings back the owner's).
+    Set-WindowLayout $h "00000409"
     $s = [GhosttyE2e.Frame]::GetDpiForWindow($h) / 96.0
     $w = Get-ClientWidth $h
+    # Two tabs: with one the strip shows an editable title (double click renames) and no caption.
+    if ($script:HaveIpc) {
+        [void](Invoke-GhosttyAction -Class $g.Class -Action "new_tab")
+        [void](Wait-GhosttyState -Class $g.Class -Predicate { @($_.windows[0].tabs).Count -eq 2 } -TimeoutSec 10)
+        Start-Sleep -Milliseconds 300
+    }
     $pt = Get-FramePoints $g
     Write-E2eInfo "probe points from $($pt.source)"
+    Write-E2eInfo ('probe points: ' + (($pt.GetEnumerator() | Where-Object { $_.Key -ne 'source' } | ForEach-Object { "$($_.Key)=$($_.Value -join ',')" }) -join ' ') + " client width $w")
 
     Assert-Hit $g $pt.close[0] $pt.close[1] 20 'close'
     Assert-Hit $g $pt.maximize[0] $pt.maximize[1] 9 'maximize'
@@ -156,7 +192,7 @@ Invoke-E2eScenario 'frame-hittest' {
     # Double click on the caption toggles maximize.
     [void](Set-ForegroundSafe -Hwnd $h)
     Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Double
-    if (-not (Wait-Until { [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { throw 'double click on the caption did not maximize' }
+    if (-not (Wait-Until { [GhosttyE2e.Frame]::IsZoomed($h) } 5)) { $cp = New-Object GhosttyE2e.Mouse+POINT; [void][GhosttyE2e.Mouse]::GetCursorPos([ref]$cp); $sp = New-Object GhosttyE2e.Mouse+POINT; $sp.X = $pt.caption[0]; $sp.Y = $pt.caption[1]; [void][GhosttyE2e.Mouse]::ClientToScreen($h, [ref]$sp); throw ('double click on the caption did not maximize: cursor {0},{1} wanted {2},{3} hit {4} dpiAware={5}' -f $cp.X, $cp.Y, $sp.X, $sp.Y, (Get-HitCode $h $pt.caption[0] $pt.caption[1]), [GhosttyE2e.Frame]::GetDpiForWindow($h)) }
     Start-Sleep -Milliseconds 300
     $pt = Get-FramePoints $g
     Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Double
@@ -170,6 +206,7 @@ Invoke-E2eScenario 'frame-hittest' {
     Close-SystemMenu $g 'Alt+Space'
 
     # Right click on the caption opens it too.
+    Start-Sleep -Milliseconds 300
     Send-MouseClick -Hwnd $h -X $pt.caption[0] -Y $pt.caption[1] -Button right
     if (-not (Wait-SystemMenu)) { throw 'caption right click did not open the system menu' }
     Close-SystemMenu $g 'caption right click'
@@ -191,24 +228,24 @@ Invoke-E2eScenario 'frame-hittest' {
     }
 
     # The inactive caption repaints: the shell window takes the focus, the
-    # strip background beside the title changes.
+    # ink of the tab titles and caption buttons changes (the background does
+    # not), so the strip bitmap differs.
     $origin = New-Object GhosttyE2e.Mouse+POINT
     [void][GhosttyE2e.Mouse]::ClientToScreen($h, [ref]$origin)
-    $sx = $origin.X + $pt.caption[0]
-    $sy = $origin.Y + $pt.caption[1]
-    $active = Get-ScreenPixel $sx $sy
-    [void][GhosttyE2e.Frame]::SetForegroundWindow([GhosttyE2e.Frame]::GetShellWindow())
+    $stripH = [int]$pt.close_h
+    $active = Get-ScreenRegionPng $origin.X $origin.Y $w $stripH
+    [void](Set-ForegroundSafe -Hwnd ([GhosttyE2e.Frame]::GetShellWindow()))
     Start-Sleep -Milliseconds 600
-    $inactive = Get-ScreenPixel $sx $sy
-    if (($active -join ',') -eq ($inactive -join ',')) {
-        throw "the caption did not repaint when inactive: pixel ($sx,$sy) stays $($active -join ',')"
-    }
-    [void](Set-ForegroundSafe -Hwnd $h)
+    $inactive = Get-ScreenRegionPng $origin.X $origin.Y $w $stripH
+    if ([Convert]::ToBase64String($active) -eq [Convert]::ToBase64String($inactive)) {
+        $fgNow = [GhosttyE2e.Frame]::GetForegroundWindow()
+        throw "the strip did not repaint when inactive (foreground is $(if ($fgNow -eq $h) { 'still ghostty' } else { 'another window' })): region ($($origin.X),$($origin.Y)) ${w}x$stripH is unchanged"
+    }    [void](Set-ForegroundSafe -Hwnd $h)
 
     # Alt+x reaches the terminal (keybind alt+x=new_tab): a second tab.
     if ($script:HaveIpc) {
         Invoke-SendInput -Hwnd $h -Keys 'alt+x'
-        [void](Wait-GhosttyState -Class $g.Class -Predicate { $_.tabs.Count -eq 2 } -TimeoutSec 10)
+        [void](Wait-GhosttyState -Class $g.Class -Predicate { @($_.windows[0].tabs).Count -eq 3 } -TimeoutSec 10)
     } else {
         Write-E2eInfo 'no IPC state: Alt+x delivery not checked'
     }
