@@ -1,8 +1,8 @@
 # e2e: milestone=M2 timeout=360 order=470
 # drop-files: files and folders dragged from an OLE source onto a surface are
 # pasted as shell-quoted, space-separated paths: msys paths in Git Bash, the
-# Windows paths in pwsh and cmd. Mid-drag a GhosttyDropHighlight window covers
-# the surface; the drop never presses Enter; in a two-split tab the text lands
+# Windows paths in pwsh and cmd. There is no highlight (as on macOS);
+# the drop never presses Enter; in a two-split tab the text lands
 # in the split under the pointer, which becomes focused; the tab strip refuses
 # the drop. Interactive desktop only (a real OLE drag with the real mouse).
 # Keep this file ASCII only (Windows PowerShell 5.1 reads a BOM-less script as ANSI).
@@ -43,29 +43,6 @@ function ConvertTo-MsysPath([string]$p) {
     $p.Replace('\', '/')
 }
 
-function Get-DropHighlight($G) {
-    @([GhosttyE2e.Win]::TopLevel([uint32]$G.Pid, 'GhosttyDropHighlight') | Where-Object { [GhosttyE2e.DropNative]::IsWindowVisible($_) }) | Select-Object -First 1
-}
-
-# Screen rectangle of a surface from the IPC state (its rect is window-client).
-function Get-SurfaceScreenRect($G, $Box) {
-    $p = New-Object GhosttyE2e.Mouse+POINT
-    $p.X = $Box.L; $p.Y = $Box.T
-    [void][GhosttyE2e.Mouse]::ClientToScreen($G.Hwnd, [ref]$p)
-    [pscustomobject]@{ L = $p.X; T = $p.Y; R = $p.X + $Box.W; B = $p.Y + $Box.H }
-}
-
-function Assert-HighlightCovers($G, $Box, [string]$What) {
-    $hl = Wait-Until -TimeoutSec 3 -PollMs 100 -Condition { Get-DropHighlight $G }
-    if (-not $hl) { throw "$What : no visible GhosttyDropHighlight window mid-drag" }
-    $want = Get-SurfaceScreenRect $G $Box
-    $got = Get-ScreenRect $hl
-    foreach ($k in 'L', 'T', 'R', 'B') {
-        if ([Math]::Abs($got.$k - $want.$k) -gt 2) {
-            throw "$What : highlight $k=$($got.$k), surface $k=$($want.$k) (more than 2 px apart)"
-        }
-    }
-}
 
 function Read-OracleLines([string]$Path) {
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -89,13 +66,12 @@ function Invoke-DropCase($G, [string]$Name, [string]$Prefix, [string]$Suffix, [s
 
     $drag = Start-OleFileDrag -Files $Files -ToHwnd $G.Hwnd -X $cx -Y $cy
     try {
-        Assert-HighlightCovers $G $box $Name
-        Save-Evidence "$Name-highlight" $G -Window
+        Start-Sleep -Milliseconds 200
+        Save-Evidence "$Name-middrag" $G -Window
     } finally {
         Stop-OleFileDrag $drag
     }
     Start-Sleep -Milliseconds 1200
-    if (Get-DropHighlight $G) { throw "$Name : the highlight is still visible after the drop" }
     if (Test-Path -LiteralPath $oracle) { throw "$Name : the oracle file exists before the line was completed (the drop pressed Enter)" }
     Save-Evidence "$Name-dropped" $G -Window
 
@@ -150,7 +126,7 @@ Invoke-E2eScenario 'drop-files' {
         Start-Sleep -Milliseconds 300
         $right = $boxes[1]
         $drag = Start-OleFileDrag -Files $files -ToHwnd $g.Hwnd -X ([int](($right.L + $right.R) / 2)) -Y ([int](($right.T + $right.B) / 2))
-        try { Assert-HighlightCovers $g $right 'split' } finally { Stop-OleFileDrag $drag }
+        try { Start-Sleep -Milliseconds 200 } finally { Stop-OleFileDrag $drag }
         $ok = Wait-Until -TimeoutSec 4 -PollMs 100 -Condition {
             $f = @(Get-SurfaceBoxes (Get-SplitState $g) | Where-Object { $_.Focused })
             $f.Count -eq 1 -and $f[0].Id -eq $right.Id
@@ -172,7 +148,6 @@ Invoke-E2eScenario 'drop-files' {
             $drag = Start-OleFileDrag -Files $files -ToHwnd $g.Hwnd -X ([int]($boxes[0].R)) -Y ([int]($top / 2))
             try {
                 Start-Sleep -Milliseconds 300
-                if (Get-DropHighlight $g) { throw 'the highlight is shown over the tab strip' }
             } finally { Stop-OleFileDrag $drag }
             Start-Sleep -Milliseconds 800
             Send-Typed $g.Hwnd ' > "$TEMP/gt-drop.txt"'
