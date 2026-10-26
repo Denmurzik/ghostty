@@ -12,7 +12,10 @@ const geom = @import("geom.zig");
 
 pub const Point = struct { x: i32, y: i32 };
 
-/// What lies under the pointer; `index` is the insertion slot of that strip.
+/// What lies under the pointer. In the source window's strip `index` is the
+/// tab the dragged tab would take (`TabStrip.dragUpdate`'s `to`, so it is
+/// already a destination index); in another window's strip it is the
+/// insertion slot (0...count).
 pub const Hit = union(enum) { none, strip: struct { window: u32, index: usize } };
 
 pub const Event = union(enum) {
@@ -44,6 +47,15 @@ pub fn detachMargin(dpi: u32) i32 {
     return geom.scale(24, dpi);
 }
 
+/// Geometry of the source strip, both required.
+pub const Config = struct {
+    /// Source strip bounds in screen px; the detach margin is measured from it.
+    strip: geom.Rect,
+    /// Where the strip's top-left sits inside its window, so that a torn-off
+    /// window keeps the tab under the pointer.
+    window_offset: Point,
+};
+
 const State = enum { pressed, in_strip, detached, finished };
 
 pub const Machine = struct {
@@ -55,13 +67,8 @@ pub const Machine = struct {
     tab_count: usize,
     press: Point,
     grab: Point,
-    strip_origin: Point,
-    /// Size of the source strip; the detach margin is measured from this
-    /// rectangle. Set with `withStripSize`; until then the strip is a point.
-    strip_size: Point = .{ .x = 0, .y = 0 },
-    /// Where the strip sits inside its window, so that a new window keeps the
-    /// tab under the pointer. Set with `withWindowOffset`.
-    window_offset: Point = .{ .x = 0, .y = 0 },
+    strip: geom.Rect,
+    window_offset: Point,
     threshold: i32,
     detach_margin: i32,
     state: State = .pressed,
@@ -74,7 +81,7 @@ pub const Machine = struct {
         tab_count: usize,
         press: Point,
         grab: Point,
-        strip_origin: Point,
+        config: Config,
         threshold: i32,
         detach_margin: i32,
     ) Machine {
@@ -85,23 +92,12 @@ pub const Machine = struct {
             .tab_count = tab_count,
             .press = press,
             .grab = grab,
-            .strip_origin = strip_origin,
+            .strip = config.strip,
+            .window_offset = config.window_offset,
             .threshold = threshold,
             .detach_margin = detach_margin,
             .last_pt = press,
         };
-    }
-
-    pub fn withStripSize(self: Machine, w: i32, h: i32) Machine {
-        var m = self;
-        m.strip_size = .{ .x = w, .y = h };
-        return m;
-    }
-
-    pub fn withWindowOffset(self: Machine, off: Point) Machine {
-        var m = self;
-        m.window_offset = off;
-        return m;
     }
 
     pub fn feed(self: *Machine, ev: Event) Feedback {
@@ -134,7 +130,10 @@ pub const Machine = struct {
                 const dy: i64 = pt.y - self.press.y;
                 const t: i64 = self.threshold;
                 if (dx * dx + dy * dy <= t * t) return .{};
-                self.state = if (self.ownStrip(hit) != null) .in_strip else .detached;
+                // Gaps of the own strip (right of the tabs) are not a way out.
+                const stays = self.ownStrip(hit) != null or
+                    (hit == .none and self.outsideBy(pt) <= self.detach_margin);
+                self.state = if (stays) .in_strip else .detached;
                 return self.move(pt, hit);
             },
             .in_strip => {
@@ -172,10 +171,10 @@ pub const Machine = struct {
 
     /// Distance of the point outside the source strip rectangle (0 inside).
     fn outsideBy(self: *const Machine, pt: Point) i32 {
-        const left = self.strip_origin.x;
-        const top = self.strip_origin.y;
-        const right = left + self.strip_size.x;
-        const bottom = top + self.strip_size.y;
+        const left = self.strip.x;
+        const top = self.strip.y;
+        const right = self.strip.right();
+        const bottom = self.strip.bottom();
         const dx = @max(left - pt.x, pt.x - right, 0);
         const dy = @max(top - pt.y, pt.y - bottom, 0);
         return @max(dx, dy);
@@ -210,8 +209,14 @@ fn own(index: usize) Hit {
 }
 
 fn testMachine(count: usize) Machine {
-    return Machine.begin(1, 0, count, .{ .x = 100, .y = 10 }, .{ .x = 20, .y = 8 }, .{ .x = 0, .y = 0 }, 4, 24)
-        .withStripSize(800, 40);
+    return testMachineAt(count, .{ .x = 0, .y = 0 });
+}
+
+fn testMachineAt(count: usize, window_offset: Point) Machine {
+    return Machine.begin(1, 0, count, .{ .x = 100, .y = 10 }, .{ .x = 20, .y = 8 }, .{
+        .strip = .{ .x = 0, .y = 0, .w = 800, .h = 40 },
+        .window_offset = window_offset,
+    }, 4, 24);
 }
 
 test "win32 tab drag: press and release without moving is a click" {
@@ -272,7 +277,7 @@ test "win32 tab drag: drop on another window's strip" {
 }
 
 test "win32 tab drag: drop outside tears off, single tab moves the window" {
-    var m = testMachine(3).withWindowOffset(.{ .x = 8, .y = 2 });
+    var m = testMachineAt(3, .{ .x = 8, .y = 2 });
     _ = m.feed(.{ .move = .{ .pt = .{ .x = 500, .y = 400 }, .hit = .none } });
     const t = m.feed(.release).done.?.tear_off;
     try testing.expectEqual(500 - 20 - 8, t.x);
@@ -292,4 +297,27 @@ test "win32 tab drag: Esc restores the original index" {
     try testing.expectEqual(0, done.cancelled.restore_index);
     // Finished: later events do nothing.
     try testing.expect(m.feed(.release).done == null);
+}
+
+test "win32 tab drag: moving right clamps the destination to the last tab" {
+    var m = testMachine(3);
+    var fb = m.feed(.{ .move = .{ .pt = .{ .x = 300, .y = 10 }, .hit = own(5) } });
+    try testing.expectEqual(0, fb.live_reorder.?.from);
+    try testing.expectEqual(2, fb.live_reorder.?.to);
+    fb = m.feed(.{ .move = .{ .pt = .{ .x = 200, .y = 10 }, .hit = own(1) } });
+    try testing.expectEqual(2, fb.live_reorder.?.from);
+    try testing.expectEqual(1, fb.live_reorder.?.to);
+}
+
+test "win32 tab drag: empty strip area is not a way out" {
+    var m = testMachine(3);
+    // Right of the tabs but inside the strip: no ghost, still reordering.
+    var fb = m.feed(.{ .move = .{ .pt = .{ .x = 700, .y = 20 }, .hit = .none } });
+    try testing.expect(fb.ghost == null);
+    fb = m.feed(.{ .move = .{ .pt = .{ .x = 300, .y = 10 }, .hit = own(1) } });
+    try testing.expectEqual(1, fb.live_reorder.?.to);
+    // Far away from the first move detaches at once.
+    var far = testMachine(3);
+    fb = far.feed(.{ .move = .{ .pt = .{ .x = 700, .y = 300 }, .hit = .none } });
+    try testing.expect(fb.ghost != null);
 }

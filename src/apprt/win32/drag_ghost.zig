@@ -4,6 +4,7 @@
 const std = @import("std");
 const win32 = @import("win32");
 const App = @import("App.zig");
+const Window = @import("Window.zig");
 const Chrome = @import("Chrome.zig");
 const geom = @import("geom.zig");
 const theme = @import("theme.zig");
@@ -22,7 +23,6 @@ const class_name = L("GhosttyDragGhost");
 const ghost_alpha = 0xD8;
 
 const State = struct {
-    app: *App,
     hwnd: win32.foundation.HWND,
     /// Chip size in pixels at `dpi`.
     size: geom.Rect,
@@ -30,14 +30,15 @@ const State = struct {
     title_buf: [256]u8 = undefined,
     title_len: usize = 0,
     pos: tab_drag.Point,
+    palette: theme.Palette,
 };
 
 var state: ?State = null;
 
-pub fn show(app: *App, title: []const u8, size: geom.Rect, at: tab_drag.Point) void {
+/// `source` is the window the tab comes from: its DPI and palette style the chip.
+pub fn show(app: *App, source: *const Window, title: []const u8, size: geom.Rect, at: tab_drag.Point) void {
     if (state != null) hide();
-    if (app.windows.items.len == 0) return;
-    const dpi = app.windows.items[0].dpi;
+    const dpi = source.dpi;
 
     util.registerClass(&.{
         .style = 0,
@@ -65,7 +66,7 @@ pub fn show(app: *App, title: []const u8, size: geom.Rect, at: tab_drag.Point) v
         return;
     };
 
-    var s: State = .{ .app = app, .hwnd = hwnd, .size = size, .dpi = dpi, .pos = at };
+    var s: State = .{ .hwnd = hwnd, .size = size, .dpi = dpi, .pos = at, .palette = theme.palette(source) };
     s.title_len = @min(title.len, s.title_buf.len);
     @memcpy(s.title_buf[0..s.title_len], title[0..s.title_len]);
     state = s;
@@ -118,8 +119,7 @@ fn repaint(s: *State) bool {
         _ = gdi32.SelectObject(dc, o);
     };
 
-    const pal = theme.palette(s.app.windows.items[0]);
-    Chrome.paintTabChip(dc, s.size, s.title_buf[0..s.title_len], pal, s.dpi);
+    if (!Chrome.paintTabChip(dc, s.size, s.title_buf[0..s.title_len], s.palette, s.dpi)) return false;
 
     const origin: win32.foundation.POINT = .{ .x = s.pos.x, .y = s.pos.y };
     const src: win32.foundation.POINT = .{ .x = 0, .y = 0 };

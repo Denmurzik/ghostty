@@ -488,11 +488,14 @@ fn drawChipBody(args: ChipArgs, p: *Painter) void {
     p.drawTab(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, .{ .title = args.title }, true, false, false, false);
 }
 
-/// One active-style tab into a premultiplied DIB (the drag ghost).
-pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme.Palette, dpi: u32) void {
+/// One active-style tab into a premultiplied DIB (the drag ghost). False
+/// when nothing was painted.
+pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme.Palette, dpi: u32) bool {
     withPainter(hdc, size.w, size.h, palette, dpi, ChipArgs{ .size = size, .title = title }, drawChipBody) catch |err| {
         logOnce(err);
+        return false;
     };
+    return true;
 }
 
 const LabelArgs = struct { size: geom.Rect, text: []const u16, pal: theme.Palette };
