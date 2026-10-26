@@ -144,6 +144,12 @@ fn present(self: *const Self) !void {
 /// sRGB encoded for `window-colorspace`/linear blending targets, with
 /// premultiplied alpha.
 ///
+/// Limitation: a frame of the same size inside `interval_ms` of the last dump
+/// is skipped, and an idle terminal draws no further frame, so the file may
+/// lack the last frame of a burst. A frame of a new size is always dumped.
+/// Scenarios that need a final frame wait at least `interval_ms` and trigger
+/// a repaint.
+///
 /// The read back (`capture`) happens under the device context lock; the
 /// file I/O (`flush`) runs after `drawFrameEnd` released it, so a slow disk
 /// never holds up the other surfaces.
@@ -709,6 +715,42 @@ test "d3d11 frame: dump hook writes a BMP" {
     const bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-0.bmp", testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(bytes);
     try testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, bytes[bmp_header_len..][0..4]);
+}
+
+test "d3d11 frame: a dump of a new size is not throttled" {
+    var fx: Fixture = try .init(.native, 5, 3);
+    defer fx.deinit();
+    var other = try fx.api.initTarget(8, 2);
+    defer other.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = path_buf[0..try tmp.dir.realPath(testing.io, &path_buf)];
+    const dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "dumps" });
+    defer testing.allocator.free(dir);
+    fx.api.dump = .{ .dir = dir, .index = 0, .interval_ms = 1000 * 60 * 60 };
+
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+
+    var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+    frame.complete(false);
+    cycleLock(&fx.api);
+    // Same size inside the interval: skipped.
+    frame.complete(false);
+    cycleLock(&fx.api);
+    var bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-0.bmp", testing.allocator, .limited(1 << 20));
+    try testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, bytes[18..22], .little));
+    testing.allocator.free(bytes);
+
+    // Another size inside the interval: dumped.
+    var resized = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &other);
+    resized.complete(false);
+    cycleLock(&fx.api);
+    bytes = try tmp.dir.readFileAlloc(testing.io, "dumps/surface-0.bmp", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, bytes[18..22], .little));
 }
 
 test "d3d11 frame: a failing dump does not fail the frame" {

@@ -124,7 +124,7 @@ try {
     foreach ($n in $vars.Keys) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
     try {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $vars[$n], 'Process') }
-        $proc = Start-Process -FilePath $Exe -WorkingDirectory $root -PassThru
+        $proc = Start-Process -FilePath $Exe -WorkingDirectory $root -ArgumentList "--class=$ramClass" -PassThru
     } finally {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
     }

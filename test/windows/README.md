@@ -106,6 +106,11 @@ another instance or the owner's. It also adds
 `GHOSTTY_WIN32_TEST_IPC=1` (`-NoTestIpc` omits it), and finds the window
 by class `GhosttyWindow` plus pid. Frame dumps are
 `surface-<surface id>.bmp` (`$G.Dump` is surface 1, `Get-DumpPath $G <id>`).
+A frame of the same size within 250 ms of the last dump may be skipped (an
+idle terminal draws no further frame), so a scenario that needs a final
+frame waits at least 250 ms and triggers a repaint; a new size is always
+dumped. The class also goes on the command line (`--class=<class>`), even
+with `-NoConfig`, and `Start-E2eGhostty` checks the process command line.
 
 ### launch.ps1
 

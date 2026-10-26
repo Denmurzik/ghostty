@@ -48,7 +48,9 @@ try {
     $env:XDG_CONFIG_HOME = $xdg
     [Environment]::SetEnvironmentVariable('GHOSTTY_D3D11_DRIVER', $Driver, 'Process')
     [Environment]::SetEnvironmentVariable('GHOSTTY_D3D11_DUMP', $DumpDir, 'Process')
-    $proc = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru
+    # An instance class of its own: never the owner's instance.
+    $class = 'ghostty-e2e-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $proc = Start-Process -FilePath $exe -WorkingDirectory $root -ArgumentList "--class=$class" -PassThru
 } finally {
     foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
 }

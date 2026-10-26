@@ -415,13 +415,19 @@ function Start-E2eGhostty {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $vars[$n], 'Process') }
+        # The class goes on the command line as well, so isolation never
+        # depends on the config file (-NoConfig writes none).
         $startArgs = @{ FilePath = $script:Exe; WorkingDirectory = $script:Root; PassThru = $true }
-        if ($ExtraArgs) { $startArgs.ArgumentList = $ExtraArgs }
+        $startArgs.ArgumentList = @("--class=$class") + @($ExtraArgs | Where-Object { $_ })
         $proc = Start-Process @startArgs
     } finally {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
     }
     Register-OwnGhostty -ProcessId $proc.Id
+
+    # No scenario may run on the default class.
+    $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)").CommandLine
+    if ($cmdLine -notlike "*--class=$class*") { throw "ghostty was not started with --class=${class}: $cmdLine" }
 
     $hwnd = [IntPtr]::Zero
     while ($sw.Elapsed.TotalSeconds -lt $WindowTimeoutSec) {
