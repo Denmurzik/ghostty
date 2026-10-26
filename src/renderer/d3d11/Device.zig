@@ -132,14 +132,25 @@ pub fn init(alloc: Allocator, options: Options) !*Device {
 const Factory = struct {
     create: *const fn (Allocator) anyerror!*Device,
     destroy: *const fn (Allocator, *Device) void,
+
+    /// Whether the device still works: a removal nobody has seen yet.
+    alive: *const fn (*Device) bool,
 };
 
-const real_factory: Factory = .{ .create = createShared, .destroy = destroyShared };
+const real_factory: Factory = .{ .create = createShared, .destroy = destroyShared, .alive = aliveShared };
+
+fn aliveShared(device: *Device) bool {
+    device.device.checkDeviceRemoved() catch return false;
+    return true;
+}
 
 fn createShared(alloc: Allocator) anyerror!*Device {
     const device = try Device.init(alloc, .{});
     // Only the first generation, so the replacement stays healthy.
-    if (next_generation == 1) device.simulate_lost_at_ns = simulateFromEnv(alloc);
+    if (next_generation == 1) {
+        device.simulate_lost_at_ns = simulateFromEnv(alloc);
+        if (device.simulate_lost_at_ns != 0) log.warn("d3d11 device loss simulation armed", .{});
+    }
     return device;
 }
 
@@ -167,11 +178,16 @@ pub fn acquire(alloc: Allocator) !*Shared {
     defer registry_mutex.unlock(global.io());
 
     if (current) |d| {
-        if (!d.isLost()) {
+        if (!d.isLost() and device_factory.alive(d)) {
             d.refs += 1;
             return d;
         }
-        // Lost, but `markLost` has not taken it out yet.
+        // Lost, or removed (a TDR or driver update while no window was
+        // open) without any renderer having seen it.
+        if (!d.lost.swap(true, .acq_rel)) {
+            d.lost_reason.store(removedReason(d), .monotonic);
+            log.warn("d3d11 device generation={d} found lost on acquire", .{d.generation});
+        }
         dropRegistryRef(d);
     }
 
@@ -212,8 +228,22 @@ pub fn markLost(shared: *Shared, reason: i32) void {
 
     registry_mutex.lockUncancelable(global.io());
     defer registry_mutex.unlock(global.io());
-    lost_seen.store(true, .monotonic);
+    // A healthy replacement may already be current: nothing is lost then.
+    if (current == shared or current == null) lost_seen.store(true, .monotonic);
     if (current == shared) dropRegistryRef(shared);
+}
+
+/// `markLost` with the reason the device reports itself.
+pub fn markLostFromDevice(shared: *Shared) void {
+    markLost(shared, removedReason(shared));
+}
+
+/// The HRESULT of `GetDeviceRemovedReason`, DEVICE_REMOVED when it
+/// reports none (simulated loss, or a lost swap chain).
+fn removedReason(d: *Device) i32 {
+    if (comptime builtin.is_test) return win32.foundation.DXGI_ERROR_DEVICE_REMOVED;
+    const hr = d.device.vtable.GetDeviceRemovedReason(d.device);
+    return if (hr == win32.foundation.S_OK) win32.foundation.DXGI_ERROR_DEVICE_REMOVED else hr;
 }
 
 pub fn isLost(shared: *const Shared) bool {
@@ -230,11 +260,11 @@ pub fn anyLost() bool {
 /// time (Debug builds) has come.
 pub fn checkLost(self: *Device) error{DeviceLost}!void {
     if (self.isLost()) return error.DeviceLost;
-    if (self.simulate_lost_at_ns != 0 and nowNs() >= self.simulate_lost_at_ns) {
+    if (comptime builtin.mode == .debug) if (self.simulate_lost_at_ns != 0 and nowNs() >= self.simulate_lost_at_ns) {
         log.warn("d3d11 simulating a device loss generation={d}", .{self.generation});
         self.markLost(win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
         return error.DeviceLost;
-    }
+    };
 }
 
 /// The registry no longer hands `d` out. Registry mutex held.
@@ -459,6 +489,7 @@ test "d3d11 device: context lock is released by unlock" {
 const FakeFactory = struct {
     var created: usize = 0;
     var destroyed: usize = 0;
+    var healthy: bool = true;
 
     fn create(alloc: Allocator) anyerror!*Device {
         const d = try alloc.create(Device);
@@ -468,6 +499,7 @@ const FakeFactory = struct {
         d.lost_reason = .init(0);
         d.simulate_lost_at_ns = 0;
         created += 1;
+        healthy = true;
         return d;
     }
 
@@ -476,10 +508,15 @@ const FakeFactory = struct {
         destroyed += 1;
     }
 
+    fn alive(_: *Device) bool {
+        return healthy;
+    }
+
     fn install() void {
         created = 0;
         destroyed = 0;
-        device_factory = .{ .create = create, .destroy = destroy };
+        healthy = true;
+        device_factory = .{ .create = create, .destroy = destroy, .alive = alive };
         current = null;
         next_generation = 1;
         lost_seen.store(false, .monotonic);
@@ -596,4 +633,36 @@ test "d3d11 device: concurrent acquire, markLost and release balance" {
 
     shutdown();
     try std.testing.expectEqual(FakeFactory.created, FakeFactory.destroyed);
+}
+
+test "d3d11 device: acquire after silent removal returns a new device" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const a = try acquire(alloc);
+    release(a);
+
+    // The device dies while no renderer holds it (tray, no window).
+    FakeFactory.healthy = false;
+    const b = try acquire(alloc);
+    try std.testing.expectEqual(@as(usize, 2), FakeFactory.created);
+    try std.testing.expect(!b.isLost());
+    try std.testing.expectEqual(@as(usize, 1), FakeFactory.destroyed);
+    release(b);
+}
+
+test "d3d11 device: a late markLost of a replaced device is not anyLost" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const a = try acquire(alloc);
+    // Found dead by a second renderer's acquire before a's own markLost.
+    FakeFactory.healthy = false;
+    const b = try acquire(alloc);
+    markLost(a, win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+    try std.testing.expect(!anyLost());
+    release(a);
+    release(b);
 }

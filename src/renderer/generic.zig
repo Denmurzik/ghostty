@@ -1741,13 +1741,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // A graphics API that paces the render thread on the display
             // waits before the mutex, so a sync draw (UI thread) is never
             // held up by that wait.
+            if (comptime @hasDecl(GraphicsAPI, "isLost")) {
+                if (self.api.isLost()) return;
+            }
             if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) {
                 if (!sync) self.api.waitFrameSlot();
             }
             const sync_display_link = locked: {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
-                break :locked try self.drawFrameLocked(sync);
+                break :locked self.drawFrameLocked(sync) catch |err| {
+                    if (comptime @hasDecl(GraphicsAPI, "frameFailed")) self.api.frameFailed(err);
+                    return err;
+                };
             };
 
             if (sync_display_link) self.syncDisplayLink(null, null);

@@ -298,6 +298,29 @@ pub fn setViewport(self: *D3D11, width: u32, height: u32) void {
     self.viewport = .{ .width = width, .height = height };
 }
 
+/// Marks the shared device lost with the reason it reports and logs it
+/// once for this renderer.
+pub fn noteDeviceLost(self: *D3D11) void {
+    self.device.markLostFromDevice();
+    if (self.device_lost_logged) return;
+    self.device_lost_logged = true;
+    log.err("d3d11 device lost reason=0x{x:0>8}, the surface will not draw", .{
+        @as(u32, @bitCast(self.device.lost_reason.load(.monotonic))),
+    });
+}
+
+/// Called by the generic renderer when drawing a frame failed, from any
+/// step before `Frame.complete`: a lost device is recorded.
+pub fn frameFailed(self: *D3D11, err: anyerror) void {
+    if (err == error.DeviceLost) return self.noteDeviceLost();
+    self.device.device.checkDeviceRemoved() catch self.noteDeviceLost();
+}
+
+/// Whether the device is lost: the renderer draws nothing more.
+pub fn isLost(self: *const D3D11) bool {
+    return self.device.isLost();
+}
+
 /// Actions taken before doing anything in `drawFrame`. The immediate
 /// context is not thread safe: it is ours until `drawFrameEnd`.
 pub fn drawFrameStart(self: *D3D11) void {

@@ -8,10 +8,16 @@ Invoke-E2eScenario 'device-lost' {
     $bg = 0x10, 0x20, 0x30
     $g = Start-E2eGhostty -Env @{ GHOSTTY_D3D11_SIMULATE_DEVICE_LOST = '3000' }
 
-    $lost = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
-        (Test-Path -LiteralPath $g.Log) -and (Select-String -LiteralPath $g.Log -Pattern 'simulating a device loss' -Quiet)
+    # Only Debug builds arm the simulation: no "armed" line means a
+    # build mode without it (SKIP); an armed one must lose its device.
+    $armed = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        (Test-Path -LiteralPath $g.Log) -and (Select-String -LiteralPath $g.Log -Pattern 'device loss simulation armed' -Quiet)
     }
-    if (-not $lost) { throw 'E2E-SKIP: no simulated device loss (not a Debug build)' }
+    if (-not $armed) { throw 'E2E-SKIP: the build does not simulate device loss (not a Debug build)' }
+    $lost = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        Select-String -LiteralPath $g.Log -Pattern 'simulating a device loss' -Quiet
+    }
+    if (-not $lost) { throw 'the armed device loss simulation never fired' }
 
     $r = Invoke-GhosttyIpc -Class $g.Class -Request @{ v = 1; op = 'new-window'; args = @() }
     if ($r.PSObject.Properties['code'] -and $r.code -ne 0) { throw "new-window failed: $($r.stderr)" }
