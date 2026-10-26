@@ -159,14 +159,25 @@ pub fn setVisible(self: *Tab, visible: bool) void {
     );
     if (visible) self.layout();
 
-    // A minimized window keeps its surfaces occluded whatever the tab does.
+    self.applyOcclusion(visible);
+}
+
+/// Tell core which surfaces are on screen. Only the leaves the layout shows
+/// are un-occluded, and only while `shown` (the tab is the active one);
+/// zoomed-out and empty-rect leaves stay occluded. A minimized window keeps
+/// every surface occluded.
+pub fn applyOcclusion(self: *Tab, shown: bool) void {
     const minimized = win32.user32.IsIconic(self.window.hwnd) != 0;
     var it = self.tree.iterator();
     while (it.next()) |entry| {
         const s = entry.view;
         s.minimized = minimized;
         if (!s.initialized) continue;
-        s.core_surface.occlusionCallback(visible and !minimized) catch |err|
+        const leaf_visible = if (self.split_layout) |l|
+            (if (l.leafFor(s)) |leaf| leaf.visible else true)
+        else
+            true;
+        s.core_surface.occlusionCallback(shown and !minimized and leaf_visible) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
     }
 }
@@ -202,6 +213,9 @@ pub fn layout(self: *Tab) void {
         SplitLayout.gapPx(self.window.dpi),
     ) catch |err| {
         log.warn("unable to lay out the split tree err={}", .{err});
+        // The cached pointers may be stale by now.
+        if (self.split_layout) |*l| l.deinit(alloc);
+        self.split_layout = null;
         return;
     };
 
@@ -212,8 +226,22 @@ pub fn layout(self: *Tab) void {
 
     // One batch, so the panes move together.
     var hdwp = win32.user32.BeginDeferWindowPos(@intCast(new.leaves.len));
-    for (new.leaves) |leaf| placeLeaf(&hdwp, leaf);
-    if (hdwp) |h| _ = win32.user32.EndDeferWindowPos(h);
+    if (hdwp != null) {
+        for (new.leaves) |leaf| {
+            const r = leaf.rect;
+            hdwp = win32.user32.DeferWindowPos(hdwp.?, leaf.view.hwnd, null, r.x, r.y, r.w, r.h, leafFlags(leaf));
+            if (hdwp == null) break;
+        }
+    }
+    if (hdwp) |h| {
+        _ = win32.user32.EndDeferWindowPos(h);
+    } else {
+        // The batch failed (and is gone): place every pane one by one.
+        for (new.leaves) |leaf| {
+            const r = leaf.rect;
+            _ = win32.user32.SetWindowPos(leaf.view.hwnd, null, r.x, r.y, r.w, r.h, leafFlags(leaf));
+        }
+    }
 
     if (self.split_layout) |*l| l.deinit(alloc);
     self.split_layout = new;
@@ -229,22 +257,14 @@ pub fn layout(self: *Tab) void {
     }
 }
 
-/// Move one pane. A hidden pane keeps its position and size: it must never
-/// be resized to nothing (core would shrink the pty to 0x0).
-fn placeLeaf(hdwp: *?win32.user32.HDWP, leaf: Layout.Leaf) void {
-    const hwnd = leaf.view.hwnd;
-    const flags: u32 = if (leaf.visible)
+/// Flags for placing one pane. A hidden pane keeps its position and size:
+/// it must never be resized to nothing (core would shrink the pty to 0x0).
+fn leafFlags(leaf: Layout.Leaf) u32 {
+    return if (leaf.visible)
         win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE | win32.user32.SWP_SHOWWINDOW
     else
         win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE | win32.user32.SWP_NOMOVE |
             win32.user32.SWP_NOSIZE | win32.user32.SWP_HIDEWINDOW;
-    const r = leaf.rect;
-    if (hdwp.*) |h| {
-        // A failed call invalidates the batch; the rest go one by one.
-        hdwp.* = win32.user32.DeferWindowPos(h, hwnd, null, r.x, r.y, r.w, r.h, flags);
-        if (hdwp.* != null) return;
-    }
-    _ = win32.user32.SetWindowPos(hwnd, null, r.x, r.y, r.w, r.h, flags);
 }
 
 const Layout = SplitLayout.Layout(Surface.Tree);

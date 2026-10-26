@@ -102,5 +102,7 @@ pub fn toggle_split_zoom(app: *App, target: apprt.Target, value: apprt.Action.Va
 
     tab.tree.zoom(if (tab.tree.zoomed == handle) null else handle);
     tab.layout();
+    tab.focused = surface;
+    if (tab.window.activeTab() == tab) tab.focus();
     return true;
 }

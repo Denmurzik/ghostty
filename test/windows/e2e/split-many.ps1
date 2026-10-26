@@ -40,6 +40,42 @@ Invoke-E2eScenario 'split-many' {
     $errors = @(Get-LogErrors $g)
     if ($errors.Count) { throw "error lines in ghostty.log after 16 splits: $($errors -join ' | ')" }
 
+    # --- tiny window: 16 panes in about 200x150 ------------------------------
+    # Panes that no longer fit are hidden and occluded but keep their size;
+    # the visible ones stay non-empty, and nothing is resized to 0x0.
+    $big = Get-ClientSize $g.Hwnd
+    $bigWin = New-Object GhosttyE2e.Win+RECT
+    [void][GhosttyE2e.Win]::GetWindowRect($g.Hwnd, [ref]$bigWin)
+    $before = @{}
+    foreach ($x in $boxes) { $before[$x.Id] = $x }
+    Set-WindowSize $g.Hwnd 200 150
+    Start-Sleep -Milliseconds 1000
+    $small = Get-SurfaceBoxes (Wait-SurfaceCount $g 16 10)
+    Assert-NoOverlap $small
+    $shown = @($small | Where-Object { $_.Visible })
+    $hidden = @($small | Where-Object { -not $_.Visible })
+    Write-E2eInfo "at 200x150: $($shown.Count) visible, $($hidden.Count) hidden"
+    foreach ($x in $shown) {
+        if ($x.W -le 0 -or $x.H -le 0) { throw "visible surface $($x.Id) is empty ($($x.W)x$($x.H)) in the small window" }
+    }
+    foreach ($x in $hidden) {
+        $was = $before[$x.Id]
+        if ($x.W -ne $was.W -or $x.H -ne $was.H) {
+            throw "hidden surface $($x.Id) was resized from $($was.W)x$($was.H) to $($x.W)x$($x.H)"
+        }
+    }
+    $zero = @(Select-String -LiteralPath $g.Log -Pattern 'size' | ForEach-Object { $_.Line } | Where-Object { $_ -match '(?<![0-9a-zA-Z])(0x[1-9][0-9]*|[0-9]+x0|0x0)(?![0-9a-zA-Z])' })
+    if ($zero.Count) { throw "zero-size resize in ghostty.log: $($zero -join ' | ')" }
+    $errors = @(Get-LogErrors $g)
+    if ($errors.Count) { throw "error lines in ghostty.log after the shrink: $($errors -join ' | ')" }
+    if (-not [GhosttyE2e.Win]::Responsive($g.Hwnd, 2000, [ref]$ms)) { throw 'the window did not answer WM_NULL in the small window' }
+    # Back to the original size; every pane returns.
+    Set-WindowSize $g.Hwnd ($bigWin.Right - $bigWin.Left) ($bigWin.Bottom - $bigWin.Top)
+    Start-Sleep -Milliseconds 1000
+    $back = Get-SurfaceBoxes (Wait-SurfaceCount $g 16 10)
+    Assert-NoOverlap $back
+    if (@($back | Where-Object { $_.Visible }).Count -ne $visible.Count) { throw 'the panes did not all return after the window grew back' }
+
     # --- pacing: 4 streaming panes, 20 keys in a fifth ---------------------
     $typed = @($boxes | Where-Object { $_.Focused })
     if ($typed.Count -ne 1) { throw 'expected one focused pane for the typing' }
