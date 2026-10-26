@@ -14,6 +14,7 @@ const renderer = @import("../../renderer.zig");
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Window = @import("Window.zig");
+const dialogs = @import("dialogs.zig");
 const mouse = @import("mouse.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
@@ -25,6 +26,9 @@ pub const WM_GHOSTTY_WAKEUP = win32.user32.WM_APP + 1;
 // WM_APP + 2 is reserved for the surface clipboard message (Task 26).
 /// Reserved for quit timer notifications on `msg_hwnd`.
 pub const WM_GHOSTTY_QUIT_TIMER = win32.user32.WM_APP + 3;
+/// Posted to `msg_hwnd` by the `quit` action: confirms (if needed) and
+/// quits from the message loop, never from inside the core call stack.
+pub const WM_GHOSTTY_QUIT = win32.user32.WM_APP + 4;
 
 /// Timer id on `msg_hwnd` for the delayed quit after the last window.
 const quit_timer_id: usize = 1;
@@ -44,6 +48,26 @@ windows: std.ArrayList(*Window) = .empty,
 /// True while a WM_GHOSTTY_WAKEUP is queued and not yet handled, so that
 /// bursts of `wakeup` calls from other threads post a single message.
 wakeup_pending: std.atomic.Value(bool) = .init(false),
+
+/// Guards the quit confirmation dialog against a second quit request
+/// (its message loop keeps dispatching).
+quit_gate: QuitGate = .{},
+
+/// Decides whether a quit request proceeds. The confirmation dialog runs a
+/// message loop, so further requests that arrive while it is up are dropped.
+const QuitGate = struct {
+    confirming: bool = false,
+
+    /// True if the app should quit. `asker` has `fn confirm() bool`, and is
+    /// only called when `needs_confirm` is set and no dialog is up already.
+    fn decide(self: *QuitGate, needs_confirm: bool, asker: anytype) bool {
+        if (self.confirming) return false;
+        if (!needs_confirm) return true;
+        self.confirming = true;
+        defer self.confirming = false;
+        return asker.confirm();
+    }
+};
 
 pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     _ = opts;
@@ -217,6 +241,11 @@ fn msgWndProc(
             return 0;
         },
 
+        WM_GHOSTTY_QUIT => {
+            self.handleQuit();
+            return 0;
+        },
+
         win32.user32.WM_TIMER => if (wparam == quit_timer_id) {
             self.stopQuitTimer();
             win32.user32.PostQuitMessage(0);
@@ -231,6 +260,28 @@ fn msgWndProc(
     return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
+/// Handle a `quit` request on the UI thread. Like GTK, ask first when a
+/// surface has a running process (`confirm-close-surface` is applied by
+/// `needsConfirmQuit`). The default answer is "No".
+fn handleQuit(self: *App) void {
+    const Asker = struct {
+        app: *App,
+        fn confirm(a: @This()) bool {
+            // Owner: the most recent window. Without one nothing can be lost.
+            if (a.app.windows.items.len == 0) return true;
+            return dialogs.confirm(
+                a.app.windows.items[a.app.windows.items.len - 1].hwnd,
+                "Quit Ghostty",
+                "A process is still running in at least one terminal. Quit anyway?",
+            );
+        }
+    };
+    if (self.quit_gate.decide(
+        self.core_app.needsConfirmQuit(),
+        Asker{ .app = self },
+    )) win32.user32.PostQuitMessage(0);
+}
+
 pub fn performAction(
     self: *App,
     target: apprt.Target,
@@ -239,7 +290,11 @@ pub fn performAction(
 ) !bool {
     switch (action) {
         .quit => {
-            win32.user32.PostQuitMessage(0);
+            // Confirmation (a modal loop) must not run inside the core tick.
+            if (win32.user32.PostMessageW(self.msg_hwnd, WM_GHOSTTY_QUIT, 0, 0) == 0) {
+                log.warn("unable to post quit request", .{});
+                return false;
+            }
             return true;
         },
 
@@ -355,6 +410,39 @@ test {
 
 test "win32 app: runtime is win32 on windows" {
     try std.testing.expect(build_config.app_runtime == .win32);
+}
+
+test "win32 app: quit gate asks only when confirmation is needed" {
+    const Asker = struct {
+        answer: bool,
+        calls: u32 = 0,
+        gate: ?*QuitGate = null,
+        reentrant: ?bool = null,
+        fn confirm(a: *@This()) bool {
+            a.calls += 1;
+            if (a.gate) |g| a.reentrant = g.decide(true, a);
+            return a.answer;
+        }
+    };
+
+    var gate: QuitGate = .{};
+    var none: Asker = .{ .answer = false };
+    try std.testing.expect(gate.decide(false, &none));
+    try std.testing.expectEqual(@as(u32, 0), none.calls);
+
+    var yes: Asker = .{ .answer = true };
+    try std.testing.expect(gate.decide(true, &yes));
+    try std.testing.expectEqual(@as(u32, 1), yes.calls);
+
+    var no: Asker = .{ .answer = false };
+    try std.testing.expect(!gate.decide(true, &no));
+    try std.testing.expect(!gate.confirming);
+
+    // A request arriving while the dialog is up is dropped, not stacked.
+    var nested: Asker = .{ .answer = true, .gate = &gate };
+    try std.testing.expect(gate.decide(true, &nested));
+    try std.testing.expectEqual(@as(u32, 1), nested.calls);
+    try std.testing.expectEqual(@as(?bool, false), nested.reentrant);
 }
 
 test "win32 app: wakeup coalesces" {
