@@ -16,22 +16,18 @@ const CoreSurface = @import("../../Surface.zig");
 const Window = @import("Window.zig");
 const actions = @import("actions.zig");
 const dialogs = @import("dialogs.zig");
+const messages = @import("messages.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
 
 const log = std.log.scoped(.win32_app);
 
-/// Posted to `msg_hwnd` by `wakeup` to have the core app ticked.
-pub const WM_GHOSTTY_WAKEUP = win32.user32.WM_APP + 1;
-// WM_APP + 2 is reserved for the surface clipboard message (Task 26).
-/// Reserved for quit timer notifications on `msg_hwnd`.
-pub const WM_GHOSTTY_QUIT_TIMER = win32.user32.WM_APP + 3;
-/// Posted to `msg_hwnd` by the `quit` action: confirms (if needed) and
-/// quits from the message loop, never from inside the core call stack.
-pub const WM_GHOSTTY_QUIT = win32.user32.WM_APP + 4;
+pub const WM_GHOSTTY_WAKEUP = messages.WM_GHOSTTY_WAKEUP;
+pub const WM_GHOSTTY_QUIT_TIMER = messages.WM_GHOSTTY_QUIT_TIMER;
+pub const WM_GHOSTTY_QUIT = messages.WM_GHOSTTY_QUIT;
 
 /// Timer id on `msg_hwnd` for the delayed quit after the last window.
-const quit_timer_id: usize = 1;
+const quit_timer_id: usize = messages.timers.msg_window.quit;
 
 const msg_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyMessageWindow");
 
