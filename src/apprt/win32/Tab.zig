@@ -453,11 +453,13 @@ pub fn needsConfirmClose(self: *const Tab) bool {
 
 /// Move the tab to another top-level window.
 pub fn setWindow(self: *Tab, window: *Window) void {
+    const rescale = self.window.dpi != window.dpi;
     self.window = window;
     _ = win32.user32.SetParent(self.hwnd, window.hwnd);
     var it = self.tree.iterator();
     while (it.next()) |entry| {
         entry.view.window = window;
+        if (rescale) entry.view.applyDpi();
         // The swap chain was made for the old parent chain.
         entry.view.bumpPresentTarget();
     }

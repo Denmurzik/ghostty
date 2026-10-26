@@ -367,7 +367,7 @@ pub fn gotoIndex(target: apprt.action.GotoTab, current: usize, count: usize) ?us
         .next => if (current < count - 1) current + 1 else 0,
         .last => count - 1,
         _ => n: {
-            const v = @intFromEnum(target);
+            const v = @backingInt(target);
             if (v <= 0) return null;
             break :n @min(@as(usize, @intCast(v)) - 1, count - 1);
         },
@@ -525,6 +525,53 @@ pub fn moveTabToNewWindow(self: *Window, tab: *Tab) !?*Window {
     new.selectTabFocus(0, false);
     new.showPlain();
     new.activate();
+    return new;
+}
+
+/// Put a detached tab into this window at `index` (clamped) and select it.
+/// The tab's `setWindow` has run; the caller reserved room with
+/// `tabs.ensureUnusedCapacity`.
+pub fn insertTab(self: *Window, tab: *Tab, index: usize) void {
+    self.tabs.insertAssumeCapacity(@min(index, self.tabs.items.len), tab);
+    self.selectTabFocus(self.tabIndex(tab) orelse 0, false);
+}
+
+/// A hidden window for a torn-off tab, `size` (outer, pixels at
+/// `source_dpi`) scaled to the DPI of the monitor `origin` is on. Call
+/// `showPlain` once the tab is in.
+pub fn createForTearOff(
+    app: *App,
+    origin: struct { x: i32, y: i32 },
+    size: struct { w: i32, h: i32 },
+    source_dpi: u32,
+) !*Window {
+    const alloc = app.core_app.alloc;
+    const new = try create(app, .{ .first_tab = false });
+    errdefer new.destroy();
+    try new.tabs.ensureTotalCapacity(alloc, 1);
+
+    // Position first: moving to another monitor may change the DPI
+    // (WM_DPICHANGED is handled before SetWindowPos returns).
+    _ = win32.user32.SetWindowPos(
+        new.hwnd,
+        null,
+        origin.x,
+        origin.y,
+        0,
+        0,
+        win32.user32.SWP_NOSIZE | win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
+    );
+    const w: i32 = @intCast(@divTrunc(@as(i64, size.w) * new.dpi, source_dpi));
+    const h: i32 = @intCast(@divTrunc(@as(i64, size.h) * new.dpi, source_dpi));
+    _ = win32.user32.SetWindowPos(
+        new.hwnd,
+        null,
+        origin.x,
+        origin.y,
+        w,
+        h,
+        win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
+    );
     return new;
 }
 
@@ -890,7 +937,16 @@ fn handleClose(self: *Window) void {
 }
 
 fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
-    var surface = self.findSurface(id) orelse return;
+    // The surface's tab may have moved to another window since the close
+    // was posted.
+    var surface = self.findSurface(id) orelse {
+        for (self.app.windows.items) |w| {
+            if (w == self or w.findSurface(id) == null) continue;
+            _ = win32.user32.PostMessageW(w.hwnd, messages.WM_GHOSTTY_CLOSE_SURFACE, id, @intFromBool(process_active));
+            break;
+        }
+        return;
+    };
 
     if (closeDecision(false, process_active) == .ask) {
         const kind: dialogs.CloseKind = if (!surface.tab.tree.isSplit())
