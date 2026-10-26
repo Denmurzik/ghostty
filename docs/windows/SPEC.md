@@ -203,8 +203,7 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
 - DXGI threading: `MakeWindowAssociation(hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER)` before the first
   `Present`; `SetFullscreenState` is never called. `ResizeBuffers` and all presents happen on the render thread; the
   UI thread never calls into DXGI. M1 e2e has a live-resize-while-streaming hang watchdog (acceptance timing on a
-  ReleaseFast build, see `test/windows/README.md`). UI-thread input callbacks and `Termio.resize` take the terminal
-  mutex with `lockDemand` so the IO thread's lock/unlock loop cannot starve them.
+  ReleaseFast build, see `test/windows/README.md`).
 - Teardown order: `Surface.destroy` = `core_surface.deinit()` (joins render + IO threads, releases the swap chain) →
   `DestroyWindow(child)` → free; `Window.destroy` destroys its surfaces before its own HWND. The surface WndProc ignores
   core callbacks until `initialized` is set (`WM_SIZE` arrives inside `CreateWindowExW`, before `core_surface.init`).

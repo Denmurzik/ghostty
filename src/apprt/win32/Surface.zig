@@ -345,13 +345,18 @@ pub fn applySize(self: *Surface, packed_size: u64) void {
     const size = renderer.D3D11.unpackSize(packed_size);
     // A zero-sized client (a collapsed parent) has nothing to lay out or draw.
     if (size.width == 0 or size.height == 0) return;
-    self.resize.applied = packed_size;
     if (!self.initialized) return;
 
     const io = global.io();
     const start = std.Io.Timestamp.now(io, .awake);
-    self.core_surface.sizeCallback(.{ .width = size.width, .height = size.height }) catch |err|
+    if (self.core_surface.sizeCallback(.{ .width = size.width, .height = size.height })) {
+        self.resize.applied = packed_size;
+    } else |err| {
+        // `take` already counted this size as applied: forget it, so the
+        // next WM_SIZE of the same size tries again.
+        self.resize.applied = 0;
         log.warn("size callback failed err={}", .{err});
+    }
     log.debug("size callback id={} {}x{} took {} ms", .{
         self.id,
         size.width,
