@@ -35,12 +35,10 @@ pub fn cell_size(app: *App, target: apprt.Target, value: apprt.Action.Value(.cel
     return true;
 }
 
-/// Stub until Task 13.
 pub fn set_window_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.set_window_title)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    try window.setTitleOverride(value.title);
+    return true;
 }
 
 /// Stub until Task 22.

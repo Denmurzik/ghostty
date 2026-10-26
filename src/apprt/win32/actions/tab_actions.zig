@@ -3,8 +3,20 @@ const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
+const Window = @import("../Window.zig");
+const clipboard = @import("../clipboard.zig");
+const messages = @import("../messages.zig");
 
 const log = std.log.scoped(.win32_actions);
+
+/// The window an action applies to: the target surface's, else (app
+/// target) the most recently active one.
+fn windowOf(app: *App, target: apprt.Target) ?*Window {
+    return switch (target) {
+        .surface => app.windowForTarget(target),
+        .app => app.last_active,
+    };
+}
 
 pub fn set_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.set_title)) !bool {
     const core = switch (target) {
@@ -17,64 +29,105 @@ pub fn set_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.set
         log.warn("unable to store title err={}", .{err});
         return false;
     };
-    surface.window.refreshTitle();
+    surface.window.surfaceTitleChanged(surface);
     return true;
 }
 
-/// Stub until Task 6a.
 pub fn new_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.new_tab)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    switch (target) {
+        .surface => |core| {
+            const window = app.windowFor(core) orelse return false;
+            _ = try window.addTab(.{ .parent = core, .context = .tab });
+        },
+        .app => if (app.last_active) |window| {
+            _ = try window.addTab(.{ .context = .tab });
+        } else {
+            const window = Window.create(app, .{}) catch |err| {
+                log.warn("unable to create a window err={}", .{err});
+                return false;
+            };
+            window.show();
+        },
+    }
+    return true;
 }
 
-/// Stub until Task 6a.
 pub fn close_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.close_tab)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const mode: Window.CloseTabMode = switch (value) {
+        .this => .this,
+        .other => .other,
+        .right => .right,
+    };
+    // The handler may ask a question, so it runs from the message loop.
+    return win32.user32.PostMessageW(
+        surface.window.hwnd,
+        messages.WM_GHOSTTY_CLOSE_TAB,
+        @intFromEnum(mode),
+        @as(isize, surface.tab.id),
+    ) != 0;
 }
 
-/// Stub until Task 6a.
 pub fn goto_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.goto_tab)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const window = windowOf(app, target) orelse return false;
+    const index = Window.gotoIndex(value, window.active_tab, window.tabs.items.len) orelse return false;
+    window.selectTab(index);
+    return true;
 }
 
-/// Stub until Task 6a.
 pub fn move_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.move_tab)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const window = surface.window;
+    const from = window.tabIndex(surface.tab) orelse return false;
+    const to = Window.moveIndex(value.amount, from, window.tabs.items.len) orelse return false;
+    if (to == from) return false;
+    window.moveTab(from, to);
+    return true;
 }
 
-/// Stub until Task 13.
 pub fn set_tab_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.set_tab_title)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    try surface.window.setTabTitle(surface.tab, value.title);
+    return true;
 }
 
-/// Stub until Task 13.
 pub fn copy_title_to_clipboard(app: *App, target: apprt.Target, value: apprt.Action.Value(.copy_title_to_clipboard)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const title = surface.getTitle() orelse return false;
+    if (title.len == 0) return false;
+    clipboard.write(surface.hwnd, title) catch |err| {
+        log.warn("unable to copy the title err={}", .{err});
+        return false;
+    };
+    return true;
 }
 
-/// Stub until Task 13.
 pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    try surface.window.setPwd(value.pwd);
+    return true;
 }
 
 /// Stub until Task 21.

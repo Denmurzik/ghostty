@@ -6,6 +6,7 @@ const Window = @This();
 const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
+const configpkg = @import("../../config.zig");
 const CoreSurface = @import("../../Surface.zig");
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
@@ -13,6 +14,7 @@ const Overrides = @import("Overrides.zig");
 const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
 const TabStrip = @import("TabStrip.zig");
+const bell = @import("bell.zig");
 const dialogs = @import("dialogs.zig");
 const dpi_mod = @import("dpi.zig");
 const drop = @import("drop.zig");
@@ -79,6 +81,10 @@ dpi: u32 = dpi_mod.default_dpi,
 
 /// A title set by the user; wins over the active tab's title.
 title_override: ?[:0]u8 = null,
+
+/// The working directory last reported by one of the window's surfaces,
+/// kept for `window-subtitle`.
+pwd: ?[:0]u8 = null,
 
 strip: TabStrip.Layout = .{},
 strip_input: strip_input_mod.State = .{},
@@ -204,6 +210,7 @@ pub fn destroy(self: *Window) void {
     self.strip.tabs.deinit(alloc);
     self.tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
+    if (self.pwd) |p| alloc.free(p);
     alloc.destroy(self);
 }
 
@@ -238,19 +245,89 @@ pub fn tabIndex(self: *const Window, tab: *const Tab) ?usize {
 
 /// Whether the tab strip lists tabs (rather than only the new-tab button).
 pub fn showTabs(self: *const Window) bool {
-    return self.tabs.items.len > 1;
+    return showTabsFor(self.app.config.@"window-show-tab-bar", self.tabs.items.len);
 }
 
-/// Create a tab with its first surface, append it and select it.
-pub fn addTab(self: *Window, opts: Tab.CreateOptions) !*Tab {
+/// `window-show-tab-bar` applied to a tab count.
+pub fn showTabsFor(setting: configpkg.Config.WindowShowTabBar, count: usize) bool {
+    return switch (setting) {
+        .always => true,
+        .never => false,
+        .auto => count > 1,
+    };
+}
+
+/// Where a new tab goes: after the active one, or at the end.
+pub fn newTabIndex(
+    position: configpkg.Config.WindowNewTabPosition,
+    active: usize,
+    count: usize,
+) usize {
+    return switch (position) {
+        .current => @min(active + 1, count),
+        .end => count,
+    };
+}
+
+/// The index a `goto_tab` target selects, or null when the selection does
+/// not change. Same semantics as the GTK window's `selectTab`: numbers are
+/// 1-based and clamp to the last tab.
+pub fn gotoIndex(target: apprt.action.GotoTab, current: usize, count: usize) ?usize {
+    if (count == 0) return null;
+    const goto: usize = switch (target) {
+        .previous => if (current > 0) current - 1 else count - 1,
+        .next => if (current < count - 1) current + 1 else 0,
+        .last => count - 1,
+        _ => n: {
+            const v = @intFromEnum(target);
+            if (v <= 0) return null;
+            break :n @min(@as(usize, @intCast(v)) - 1, count - 1);
+        },
+    };
+    if (goto == current) return null;
+    return goto;
+}
+
+/// The index a tab at `current` lands on when moved by `amount`, wrapping
+/// around the ends like the GTK window's `moveTab`; null with fewer than
+/// two tabs.
+pub fn moveIndex(amount: isize, current: usize, count: usize) ?usize {
+    if (count <= 1) return null;
+    const total: isize = @intCast(count);
+    const initial = @as(isize, @intCast(current)) +| amount;
+    return @intCast(@mod(initial, total));
+}
+
+/// Create a tab with its first surface, insert it where
+/// `window-new-tab-position` says and select it. The error set is spelled
+/// out: creating a surface can perform `new_tab`, which calls back here.
+pub fn addTab(self: *Window, opts: Tab.CreateOptions) anyerror!*Tab {
     const alloc = self.app.core_app.alloc;
 
     const tab = try Tab.create(self, opts);
     errdefer tab.destroy();
-    try self.tabs.append(alloc, tab);
+    const index = newTabIndex(
+        self.app.config.@"window-new-tab-position",
+        self.active_tab,
+        self.tabs.items.len,
+    );
+    try self.tabs.insert(alloc, index, tab);
 
-    self.selectTab(self.tabs.items.len - 1);
+    self.selectTab(index);
     return tab;
+}
+
+/// Move the tab at `from` to `to`; the active tab stays the same tab.
+pub fn moveTab(self: *Window, from: usize, to: usize) void {
+    const count = self.tabs.items.len;
+    if (from >= count or to >= count or from == to) return;
+
+    const active = self.activeTab();
+    const tab = self.tabs.orderedRemove(from);
+    self.tabs.insertAssumeCapacity(to, tab);
+    if (active) |a| self.active_tab = self.tabIndex(a) orelse self.active_tab;
+
+    self.layout();
 }
 
 /// Make the tab at `index` the visible one and give it the keyboard focus.
@@ -277,10 +354,10 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     const was_active = index == self.active_tab;
 
     _ = self.tabs.orderedRemove(index);
-    tab.destroy();
 
     if (self.tabs.items.len == 0) {
         self.active_tab = 0;
+        tab.destroy();
         self.requestClose(true);
         return;
     }
@@ -290,7 +367,11 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     } else if (index < self.active_tab) {
         self.active_tab -= 1;
     }
+
+    // The neighbour is on screen before the thread joins of the old tab
+    // begin, so the window never shows a hole.
     self.selectTab(self.active_tab);
+    tab.destroy();
 }
 
 /// Lay out the tab strip and the active tab below it.
@@ -336,12 +417,62 @@ pub fn refreshTitle(self: *Window) void {
     else
         default_title;
 
-    const wide = util.utf16z(alloc, text) catch |err| {
+    const decorated: ?[:0]u8 = if (self.activeTab()) |tab|
+        bell.decorateTitle(alloc, text, tab) catch |err| blk: {
+            log.warn("unable to decorate window title err={}", .{err});
+            break :blk null;
+        }
+    else
+        null;
+    defer if (decorated) |d| alloc.free(d);
+
+    const wide = util.utf16z(alloc, decorated orelse text) catch |err| {
         log.warn("unable to convert window title err={}", .{err});
         return;
     };
     defer alloc.free(wide);
     _ = win32.user32.SetWindowTextW(self.hwnd, wide);
+
+    // The strip shows the tab titles.
+    Chrome.invalidate(self);
+}
+
+/// A surface got a new title: the caption follows when it is the one the
+/// active tab shows, otherwise only the strip needs a repaint.
+pub fn surfaceTitleChanged(self: *Window, surface: *Surface) void {
+    if (self.activeTab()) |tab| {
+        if (tab == surface.tab and tab.focusedSurface() == surface) {
+            self.refreshTitle();
+            return;
+        }
+    }
+    Chrome.invalidate(self);
+}
+
+/// Set (or, when empty, clear) the window's own title.
+pub fn setTitleOverride(self: *Window, title: []const u8) !void {
+    const alloc = self.app.core_app.alloc;
+    const copy: ?[:0]u8 = if (title.len == 0) null else try alloc.dupeSentinel(u8, title, 0);
+    if (self.title_override) |old| alloc.free(old);
+    self.title_override = copy;
+    self.refreshTitle();
+}
+
+/// Set (or, when empty, clear) the user's title of a tab.
+pub fn setTabTitle(self: *Window, tab: *Tab, title: []const u8) !void {
+    const alloc = self.app.core_app.alloc;
+    const copy: ?[:0]u8 = if (title.len == 0) null else try alloc.dupeSentinel(u8, title, 0);
+    if (tab.title_override) |old| alloc.free(old);
+    tab.title_override = copy;
+    self.refreshTitle();
+}
+
+/// Remember the working directory a surface reported.
+pub fn setPwd(self: *Window, pwd: []const u8) !void {
+    const alloc = self.app.core_app.alloc;
+    const copy = try alloc.dupeSentinel(u8, pwd, 0);
+    if (self.pwd) |old| alloc.free(old);
+    self.pwd = copy;
 }
 
 /// Whether closing the window would kill a running process.
@@ -559,7 +690,10 @@ fn askClose(self: *Window, kind: dialogs.CloseKind) ?bool {
 }
 
 fn handleClose(self: *Window) void {
-    if (closeDecision(self.close_confirmed, self.needsConfirmClose()) == .ask) {
+    // A confirmation only covers the tabs the window had: one added since
+    // is asked about.
+    const confirmed = self.close_confirmed and self.tabs.items.len == 0;
+    if (closeDecision(confirmed, self.needsConfirmClose()) == .ask) {
         if (!(self.askClose(.window) orelse return)) return;
     }
 
@@ -587,8 +721,7 @@ fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
     if (self.nextCloseTarget(mode, anchor_id) == null) return;
 
     if (closeDecision(false, self.closeTargetsNeedConfirm(mode, anchor_id)) == .ask) {
-        const kind: dialogs.CloseKind = if (self.tabs.items.len == 1) .window else .tab;
-        if (!(self.askClose(kind) orelse return)) return;
+        if (!(self.askClose(.tab) orelse return)) return;
     }
 
     // Targets are looked up afresh each round. Closing the last tab posts
@@ -779,4 +912,59 @@ test "win32 window: hook chain stops at the first handler" {
         try std.testing.expectEqual(c.want, runHooks(window, &probes, 0, 0, 0));
         try std.testing.expectEqualSlices(u32, &c.calls, &HookProbe.calls);
     }
+}
+
+test "win32 window: new tab index" {
+    const expect = std.testing.expectEqual;
+    try expect(@as(usize, 2), newTabIndex(.current, 1, 3));
+    try expect(@as(usize, 3), newTabIndex(.current, 2, 3));
+    try expect(@as(usize, 0), newTabIndex(.current, 0, 0));
+    try expect(@as(usize, 3), newTabIndex(.end, 0, 3));
+    try expect(@as(usize, 0), newTabIndex(.end, 0, 0));
+}
+
+test "win32 window: show tabs setting" {
+    try std.testing.expect(showTabsFor(.always, 1));
+    try std.testing.expect(!showTabsFor(.never, 5));
+    try std.testing.expect(!showTabsFor(.auto, 1));
+    try std.testing.expect(showTabsFor(.auto, 2));
+}
+
+test "win32 window: goto tab index matches GTK" {
+    const expect = std.testing.expectEqual;
+    const G = apprt.action.GotoTab;
+    const n = struct {
+        fn at(v: c_int) G {
+            return @enumFromInt(v);
+        }
+    }.at;
+
+    // previous wraps 0 -> count - 1
+    try expect(@as(?usize, 3), gotoIndex(.previous, 0, 4));
+    try expect(@as(?usize, 0), gotoIndex(.previous, 1, 4));
+    // next wraps
+    try expect(@as(?usize, 0), gotoIndex(.next, 3, 4));
+    try expect(@as(?usize, 2), gotoIndex(.next, 1, 4));
+    // last
+    try expect(@as(?usize, 3), gotoIndex(.last, 0, 4));
+    try expect(@as(?usize, null), gotoIndex(.last, 3, 4));
+    // numbers are 1-based
+    try expect(@as(?usize, null), gotoIndex(n(0), 1, 4));
+    try expect(@as(?usize, 0), gotoIndex(n(1), 2, 4));
+    try expect(@as(?usize, 3), gotoIndex(n(9), 0, 4));
+    try expect(@as(?usize, null), gotoIndex(n(2), 1, 4));
+    // a single tab never changes
+    try expect(@as(?usize, null), gotoIndex(.next, 0, 1));
+    try expect(@as(?usize, null), gotoIndex(.next, 0, 0));
+}
+
+test "win32 window: move tab wraps" {
+    const expect = std.testing.expectEqual;
+    try expect(@as(?usize, 2), moveIndex(1, 1, 4));
+    try expect(@as(?usize, 0), moveIndex(1, 3, 4));
+    try expect(@as(?usize, 3), moveIndex(-1, 0, 4));
+    try expect(@as(?usize, 0), moveIndex(-2, 2, 4));
+    try expect(@as(?usize, 1), moveIndex(5, 0, 4));
+    try expect(@as(?usize, null), moveIndex(1, 0, 1));
+    try expect(@as(?usize, null), moveIndex(1, 0, 0));
 }

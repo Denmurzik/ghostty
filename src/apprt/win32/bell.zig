@@ -6,5 +6,5 @@ const Tab = @import("Tab.zig");
 
 pub fn decorateTitle(alloc: Allocator, title: []const u8, tab: *const Tab) ![:0]u8 {
     _ = tab;
-    return alloc.dupeZ(u8, title);
+    return alloc.dupeSentinel(u8, title, 0);
 }
