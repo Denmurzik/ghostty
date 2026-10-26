@@ -495,7 +495,10 @@ fn handleSize(self: *Surface, wparam: win32.foundation.WPARAM, lparam: win32.fou
 
 /// Follow the window's DPI, the single source of it.
 pub fn applyDpi(self: *Surface) void {
-    self.content_scale = dpi.contentScale(self.window.dpi);
+    const scale = dpi.contentScale(self.window.dpi);
+    // WM_DPICHANGED_AFTERPARENT repeats what the window already applied.
+    if (scale.x == self.content_scale.x and scale.y == self.content_scale.y) return;
+    self.content_scale = scale;
     if (!self.initialized) return;
     self.core_surface.contentScaleCallback(self.content_scale) catch |err|
         log.warn("content scale callback failed err={}", .{err});

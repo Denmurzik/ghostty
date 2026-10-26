@@ -869,12 +869,27 @@ fn setMinimized(self: *Window, minimized: bool) void {
     tab.applyOcclusion(!minimized);
 }
 
-/// Follow a new DPI: the window moves to the system's suggested rectangle
-/// and every surface gets the new content scale.
+/// Follow a new DPI. Every surface of every tab (hidden ones too) gets the
+/// new content scale first, so the size the move produces is already
+/// computed with it; then the window moves to the system's suggested
+/// rectangle (or a scaled one without a suggestion).
 pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) void {
+    const old_dpi = self.dpi;
     self.dpi = if (new_dpi == 0) dpi_mod.default_dpi else new_dpi;
 
-    if (suggested) |r| {
+    for (self.tabs.items) |tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| entry.view.applyDpi();
+    }
+
+    const zoomed = win32.user32.IsZoomed(self.hwnd) != 0;
+    const target: ?win32.foundation.RECT = suggested orelse blk: {
+        if (zoomed or self.placement.fullscreen or old_dpi == self.dpi) break :blk null;
+        var rc: win32.foundation.RECT = undefined;
+        if (win32.user32.GetWindowRect(self.hwnd, &rc) == 0) break :blk null;
+        break :blk dpi_mod.scaledWindowRect(geom.Rect.fromRECT(rc), old_dpi, self.dpi).toRECT();
+    };
+    if (target) |r| {
         _ = win32.user32.SetWindowPos(
             self.hwnd,
             null,
@@ -885,16 +900,20 @@ pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) 
             win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
         );
     }
+    // A maximized window fills the work area of the monitor it is on now.
+    if (zoomed and !self.placement.fullscreen) _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_MAXIMIZE);
     // The suggested rectangle is for a windowed frame; a fullscreen window
     // keeps covering its (possibly new) monitor. The saved placement
     // restores logically on that monitor when fullscreen ends.
     if (self.placement.fullscreen) placement_mod.coverMonitor(self);
 
+    self.layout();
+    // Core gets the scale and the new size in this tick, hidden surfaces
+    // included.
     for (self.tabs.items) |tab| {
         var it = tab.tree.iterator();
-        while (it.next()) |entry| entry.view.applyDpi();
+        while (it.next()) |entry| entry.view.flushSize();
     }
-    self.layout();
 }
 
 fn handleDpiChanged(self: *Window, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) void {
