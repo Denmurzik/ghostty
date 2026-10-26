@@ -153,6 +153,8 @@ pub const Dump = struct {
     index: usize,
     interval_ms: i64 = 250,
     last: ?std.Io.Timestamp = null,
+    last_width: usize = 0,
+    last_height: usize = 0,
     failed_logged: bool = false,
 
     /// The captured frame waiting for `flush`.
@@ -203,9 +205,14 @@ pub const Dump = struct {
         file_index: usize,
     ) error{DeviceLost}!void {
         const now = std.Io.Timestamp.now(global.io(), .awake);
+        // A new size always dumps: an idle terminal draws no further frame,
+        // so a throttled resize frame would leave the old size on disk.
+        const resized = target.width != self.last_width or target.height != self.last_height;
         if (self.last) |last| {
-            if (last.durationTo(now).toMilliseconds() < self.interval_ms) return;
+            if (!resized and last.durationTo(now).toMilliseconds() < self.interval_ms) return;
         }
+        self.last_width = target.width;
+        self.last_height = target.height;
         // Also set on failure, so a broken dump dir is not retried per frame.
         self.last = now;
 
