@@ -149,6 +149,13 @@ pub fn createFactory() Error!*ID2D1Factory {
     return @ptrCast(@alignCast(out orelse return error.ComFailure));
 }
 
+/// Maps an `EndDraw` HRESULT: a lost target is `error.DeviceLost`, anything
+/// else goes through `check`.
+pub fn checkEndDraw(hr: HRESULT) Error!void {
+    if (hr == D2DERR_RECREATE_TARGET) return error.DeviceLost;
+    try check(hr);
+}
+
 pub const ID2D1Resource = extern struct {
     vtable: *const VTable,
 
@@ -316,10 +323,9 @@ pub const ID2D1RenderTarget = extern struct {
         self.vtable.BeginDraw(self);
     }
 
-    /// `D2DERR_RECREATE_TARGET` surfaces as `error.ComFailure`; callers
-    /// that must tell it apart call the `EndDraw` slot directly.
+    /// `D2DERR_RECREATE_TARGET` surfaces as `error.DeviceLost` (not logged).
     pub inline fn endDraw(self: *ID2D1RenderTarget) Error!void {
-        try check(self.vtable.EndDraw(self, null, null));
+        try checkEndDraw(self.vtable.EndDraw(self, null, null));
     }
 };
 

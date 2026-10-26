@@ -78,6 +78,11 @@ test "win32 d2d: struct layouts" {
     try std.testing.expectEqual(32, @offsetOf(dwrite.DWRITE_TEXT_METRICS, "lineCount"));
 }
 
+test "win32 d2d: EndDraw maps RECREATE_TARGET to DeviceLost" {
+    try std.testing.expectError(error.DeviceLost, d2d1.checkEndDraw(d2d1.D2DERR_RECREATE_TARGET));
+    try d2d1.checkEndDraw(0);
+}
+
 test "win32 d2d: DC render target draws into a premultiplied DIB" {
     const width = 64;
     const height = 32;
