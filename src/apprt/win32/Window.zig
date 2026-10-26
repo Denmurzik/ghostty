@@ -350,7 +350,7 @@ pub fn gotoIndex(target: apprt.action.GotoTab, current: usize, count: usize) ?us
         .next => if (current < count - 1) current + 1 else 0,
         .last => count - 1,
         _ => n: {
-            const v = @backingInt(target);
+            const v = @intFromEnum(target);
             if (v <= 0) return null;
             break :n @min(@as(usize, @intCast(v)) - 1, count - 1);
         },
