@@ -144,6 +144,7 @@ pub const ERROR_ACCESS_DENIED = 5;
 pub const ERROR_BROKEN_PIPE = 109;
 pub const ERROR_SEM_TIMEOUT = 121;
 pub const ERROR_PIPE_BUSY = 231;
+pub const ERROR_NO_DATA = 232;
 pub const ERROR_PIPE_CONNECTED = 535;
 pub const ERROR_IO_PENDING = 997;
 
