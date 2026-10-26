@@ -111,18 +111,6 @@ test "win32 util: serviceSentMessages leaves the posted queue alone" {
 
 test "win32 util: serviceSentMessages answers a message sent from another thread" {
     const user32 = win32.user32;
-    const SendMessageTimeoutW = struct {
-        extern "user32" fn SendMessageTimeoutW(
-            win32.foundation.HWND,
-            u32,
-            win32.foundation.WPARAM,
-            win32.foundation.LPARAM,
-            flags: u32,
-            timeout: u32,
-            result: *usize,
-        ) callconv(.winapi) isize;
-    }.SendMessageTimeoutW;
-
     const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
     const hwnd = user32.CreateWindowExW(0, class, null, 0, 0, 0, 0, 0, user32.HWND_MESSAGE, null, null, null) orelse
         return error.SkipZigTest;
@@ -135,7 +123,7 @@ test "win32 util: serviceSentMessages answers a message sent from another thread
 
         fn run(self: *@This()) void {
             var result: usize = 0;
-            const ok = SendMessageTimeoutW(self.hwnd, user32.WM_NULL, 0, 0, 0, 5000, &result);
+            const ok = user32.SendMessageTimeoutW(self.hwnd, user32.WM_NULL, 0, 0, 0, 5000, &result);
             self.answered.store(ok != 0, .release);
             self.done.store(true, .release);
         }
@@ -145,8 +133,8 @@ test "win32 util: serviceSentMessages answers a message sent from another thread
     defer thread.join();
 
     // The probe is only delivered while this thread services its queue.
-    var spins: usize = 0;
-    while (!probe.done.load(.acquire) and spins < 5000) : (spins += 1) {
+    const deadline = win32.kernel32.GetTickCount64() + 5000;
+    while (!probe.done.load(.acquire) and win32.kernel32.GetTickCount64() < deadline) {
         serviceSentMessages();
         std.Thread.yield() catch {};
     }

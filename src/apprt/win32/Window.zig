@@ -308,8 +308,9 @@ pub fn destroy(self: *Window) void {
 /// before its container: core teardown still reads `window`, which must
 /// be alive until then.
 pub fn beginTeardown(self: *Window) void {
+    const was = self.tearing_down;
     self.tearing_down = true;
-    defer self.tearing_down = false;
+    defer self.tearing_down = was;
 
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
     for (self.tabs.items) |tab| tab.stopRenderThreads();
@@ -482,6 +483,13 @@ fn unlinkTab(self: *Window, tab: *Tab) bool {
 /// active; the last tab closes the window.
 pub fn removeTab(self: *Window, tab: *Tab) void {
     if (self.tabIndex(tab) == null) return;
+
+    // `Tab.destroy` answers sent messages; none may close this window
+    // while it is in between two tabs.
+    const was = self.tearing_down;
+    self.tearing_down = true;
+    defer self.tearing_down = was;
+
     if (!self.unlinkTab(tab)) {
         tab.destroy();
         self.requestClose(true);
@@ -1075,7 +1083,11 @@ fn wndProc(
 
     // Reached from `serviceSentMessages` mid-teardown: nothing may act on
     // the tabs, or close the window a second time.
-    if (self.tearing_down) return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+    if (self.tearing_down) {
+        // DefWindowProc would destroy the window behind the teardown.
+        if (msg == win32.user32.WM_CLOSE) return 0;
+        return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
 
     if (runHooks(self, &hooks, msg, wparam, lparam)) |result| return result;
 

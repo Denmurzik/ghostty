@@ -951,6 +951,8 @@ pub const TPM_RETURNCMD = 0x0100;
 pub const IMAGE_ICON = 1;
 pub const LR_DEFAULTCOLOR = 0x00000000;
 
+pub extern "user32" fn SendMessageTimeoutW(HWND, u32, WPARAM, LPARAM, flags: u32, timeout: u32, result: ?*usize) callconv(.winapi) LRESULT;
+
 /// PeekMessageW: handle only the messages sent from other threads (QS_SENDMESSAGE << 16).
 pub const PM_QS_SENDMESSAGE = 0x00400000;
 
