@@ -57,10 +57,11 @@ Invoke-E2eScenario 'tabs-basic' {
 
     # 4. The title of tab 0 comes from the shell (OSC 2) and reaches the
     # window caption. The shell stays in `sleep` so its prompt does not
-    # overwrite the title.
+    # overwrite the title. The escapes are doubled: the text: parser turns \ into
+    # one backslash and printf then makes the bytes (a raw ESC would reach readline).
     Invoke-Act 'goto_tab:1'
     [void](Wait-Win 'active 0 again' { param($w) $w.active_tab -eq 0 })
-    Invoke-Act 'text:printf "\033]2;tab-A\007"; sleep 60\r'
+    Invoke-Act 'text:printf "\x1b]2;tab-A\x07"; sleep 60\r'
     [void](Wait-Win 'tab 0 title tab-A' { param($w) @($w.tabs)[0].title -eq 'tab-A' })
     $caption = Wait-Until -TimeoutSec 5 -PollMs 100 -Condition {
         $t = [GhosttyE2e.Win]::TextOf($g.Hwnd)
