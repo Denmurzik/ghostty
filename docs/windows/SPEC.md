@@ -555,18 +555,26 @@ recorded; (8) no hang on close while output streams or during live resize; (9) `
 and ends the process ≤ 3 s; (10) `aarch64-windows-msvc` compiles (recorded, not gating). GUI scenarios that cannot run on
 a locked/non-interactive desktop are recorded as SKIP and re-run interactively before sign-off.
 
-**M2 — tabs, splits, multi-window, Mica, titlebar, DPI, keybind actions.** Custom frame + D2D tab strip + Mica, snap
-layouts, tabs (new/close/move/goto, titles, drag reorder), splits over core `SplitTree` (divider drag, zoom, equalize,
-goto), multiple windows, mixed-DPI polish, all tier-1/2 actions of [apprt §2] except M3 items, scrollbar, bell, taskbar
-progress, resize overlay (tooltip control), color-scheme detection, close confirmations, `performIpc` + single-instance
-plumbing. Exit: action-coverage test green; screenshots at 100/150/200% DPI; per-surface/window RAM rows within targets.
+**M2 — tabs, splits, multi-window, Mica, titlebar, DPI, keybind actions.** Custom frame (caption removed, DWM-extended,
+Mica under the titlebar/tab strip, own caption buttons, `HTMAXBUTTON` snap layouts, `window-decoration` client/server/none),
+Direct2D/DirectWrite tab strip (select, close, middle-click, new, drag reorder, overflow scroll, inline rename = `prompt_title`),
+tabs and splits over core `SplitTree` (one container HWND per tab, one child HWND per surface; divider drag, zoom, equalize,
+goto, resize), multiple windows (cascade, goto/present, move tab to new window), maximize/fullscreen/float/decorations toggles,
+per-monitor DPI incl. hidden tabs, theme (`window-theme`, titlebar colours, system colour scheme → conditional config), config
+reload (soft/hard) and `open_config`, native scrollbar, bell (title/attention/system/audio), taskbar progress, resize overlay
+(owned popup), TaskDialog close confirmations, named-pipe IPC + single-instance (`windows-single-instance`) + `performIpc` +
+test-only IPC ops, `quit-after-last-window-closed`. Every `Action.Key` is classified implemented / deferred (milestone) /
+unsupported by `apprt/win32/actions.zig`. Exit: action-coverage test green; M1+M2 e2e green on Debug and ReleaseFast;
+screenshots at 100/150/200% (simulated through the test DPI op; real multi-monitor checked by the owner); per-tab/split/window
+and close-10 RAM rows within §14 targets. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
 
 **M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
 AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),
-inspector (imgui win32+dx11), config reload + config-errors dialog, custom shaders (HLSL via SPIRV-Cross), Kitty graphics
+inspector (imgui win32+dx11), config-errors dialog, custom shaders (HLSL via SPIRV-Cross), Kitty graphics
 and background image verified, transparency + blur (DComp composition swap chains), DirectWrite discovery/fallback,
-device-loss recovery, key-sequence/table indicator, prompt-title dialog, export-terminal-io save dialog, vt-smoke
-screenshots. Exit: feature checklist (one line per cross-platform feature) all green with a test or screenshot each.
+device-loss recovery + renderer-health bar, key-sequence/table indicator, export-terminal-io save dialog, vt-smoke
+screenshots; from M2: unfocused-split dimming and `bell-features = border` (DComp overlay visuals), readonly badge, tab
+tear-off by drag, `toggle_visibility` (with global hotkeys), `toggle_background_opacity`. Exit: feature checklist (one line per cross-platform feature) all green with a test or screenshot each.
 
 **M4 — tmux shim + IPC + Claude Code e2e.** `tmux.exe`, IPC server, registry, all §12 semantics, DCS tmux unwrap,
 `SplitTree.replace`, PATH prepend + TMUX/TMUX_PANE in every surface. Exit: replay test green; real Claude Code agent-team
@@ -575,7 +583,8 @@ run (§15.6b) green twice in a row; tmux.exe ≤ 5 MB / ≤ 100 ms.
 **M5 — Windows extras.** Jump lists (new window/tab, profiles), shell-profiles dropdown (Git Bash, pwsh, cmd, WSL distros
 from `wsl.exe -l -q`), Explorer "Open Ghostty here" (`+install-explorer-integration` + installer), pwsh integration
 (OSC 133/7/title), Git Bash integration fixes, OSC 7 translation, compiled terminfo + `TERM=xterm-ghostty`, `+edit-config`,
-update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), crash minidumps, external tmux mode.
+update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), crash minidumps, external tmux mode,
+Windows analogs of macOS-only actions (`secure_input`, `undo`/`redo`), on-screen keyboard.
 Exit: each feature has a test or scripted screenshot; update check tested against a fake release JSON.
 
 **M6 — packaging, CI, release.** Zip + Inno Setup (x64 + ARM64), version resource, GitHub Actions (build + tests on x64
@@ -587,3 +596,30 @@ Claude Code run, owner smoke). Exit: owner sign-off.
 2. Mica: titlebar/tab strip only; terminal surfaces stay opaque by default (§7.5).
 3. Toasts: AUMID self-registered under HKCU; works for the installer and the portable zip (§13).
 4. Cache/state/logs/crash dumps: `%LOCALAPPDATA%\ghostty\` (D9); only config lives under `%USERPROFILE%\.config`.
+
+Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
+
+5. IPC wire format (amends §2, §12.1, §12.6): `src/apprt/win32/ipc/protocol.zig` (std only; `tmux.exe` imports it as a
+   module in M4). Frame = `u32` LE length + UTF-8 JSON, max 16 MiB. Request `{"v":1,"op":"…",…}`, response
+   `{"v":1,"code":N,"stdout":"…","stderr":"…","data":…}` (codes 0 ok, 1 failed, 2 bad request/unknown op, 3 version).
+   M2 ops `new-window`, `new-tab`, `toggle-quick-terminal`; M4 adds op `tmux` carrying the §12.1 fields. Per-user pipe
+   `\\.\pipe\ghostty-<user SID>-<session id>-<class>` (class = config `class` sanitized, default `com.mitchellh.ghostty`,
+   Debug builds `com.mitchellh.ghostty-debug`), so other sessions, builds and test instances never meet. Cost if wrong:
+   rename of a pipe constant.
+6. Single instance (amends §12.6): config `windows-single-instance = detect|true|false`, default `detect` = forward unless
+   the command line has anything besides `--working-directory=`, `--title=`, `--command=`, `--shell-integration=`, or uses
+   `-e`. The second process's cwd is not forwarded (Start-menu cwd is meaningless); Explorer passes `--working-directory`.
+   The first instance always serves the pipe when it can claim the name. Cost if wrong: one default flip.
+7. `quit-after-last-window-closed` defaults to `true` on Windows (as on Linux); `false` keeps a windowless process only
+   while it serves the pipe (reachable by the next launch), otherwise it quits with a log line. Cost if wrong: default flip.
+8. Test-only IPC ops `state`, `action`, `dpi`, `color-scheme` answer only when Ghostty was started with
+   `GHOSTTY_WIN32_TEST_IPC=1`; e2e uses them instead of system-wide DPI/theme changes (owner-machine safety). Cost if
+   wrong: none for users.
+9. Chrome painter backend is decided by M2 Task 12 (spike): software `ID2D1DCRenderTarget` on a buffered-paint DC
+   (expected), `ID2D1HwndRenderTarget`, or the R9 opaque fallback without Mica. The lead records the result here.
+10. One container child HWND per tab holds that tab's surfaces; hidden tabs are hidden containers (surfaces occluded);
+    split gaps are 4 px at 96 dpi painted with `split-divider-color` (theme default otherwise).
+11. Scrollbar = native `WS_VSCROLL` on the surface, always visible with `scrollbar = system` (`SIF_DISABLENOSCROLL`, no grid
+    reflow when scrollback first appears), dark via the `DarkMode_Explorer` theme; none with `scrollbar = never`.
+12. Frame dumps are named `surface-<apprt surface id>.bmp` (first surface = 1); headless renderers keep the index.
+13. `bell-features = audio` plays WAV files through `PlaySoundW`; `bell-audio-volume` is ignored on Windows in M2.
