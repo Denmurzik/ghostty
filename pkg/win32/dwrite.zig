@@ -242,7 +242,7 @@ pub const IDWriteFactory = extern struct {
 
     pub const VTable = extern struct {
         base: IUnknown.VTable,
-        GetSystemFontCollection: *const anyopaque,
+        GetSystemFontCollection: *const fn (*IDWriteFactory, *?*IDWriteFontCollection, foundation.BOOL) callconv(.winapi) HRESULT,
         CreateCustomFontCollection: *const anyopaque,
         RegisterFontCollectionLoader: *const anyopaque,
         UnregisterFontCollectionLoader: *const anyopaque,
@@ -298,3 +298,32 @@ pub const IDWriteFactory = extern struct {
         return out orelse error.ComFailure;
     }
 };
+
+pub const IDWriteFontCollection = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("a84cee02-3eea-4eee-a827-87c1a02a0fcc");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetFontFamilyCount: *const anyopaque,
+        GetFontFamily: *const anyopaque,
+        FindFamilyName: *const fn (*IDWriteFontCollection, [*:0]const u16, *u32, *foundation.BOOL) callconv(.winapi) HRESULT,
+        GetFontFromFontFace: *const anyopaque,
+    };
+
+    /// Whether the collection has a family called `name`.
+    pub inline fn hasFamily(self: *IDWriteFontCollection, name: [*:0]const u16) Error!bool {
+        var index: u32 = 0;
+        var exists: foundation.BOOL = 0;
+        try check(self.vtable.FindFamilyName(self, name, &index, &exists));
+        return exists != 0;
+    }
+};
+
+/// The system font collection; the caller releases it.
+pub inline fn getSystemFontCollection(factory: *IDWriteFactory) Error!*IDWriteFontCollection {
+    var out: ?*IDWriteFontCollection = null;
+    try check(factory.vtable.GetSystemFontCollection(factory, &out, 0));
+    return out orelse error.ComFailure;
+}

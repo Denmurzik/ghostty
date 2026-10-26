@@ -31,6 +31,7 @@ test "win32 d2d: vtable slot counts" {
     try std.testing.expectEqual(28, slots(dwrite.IDWriteTextFormat));
     try std.testing.expectEqual(67, slots(dwrite.IDWriteTextLayout));
     try std.testing.expectEqual(7, slots(dwrite.IDWriteInlineObject));
+    try std.testing.expectEqual(7, slots(dwrite.IDWriteFontCollection));
 }
 
 test "win32 d2d: typed slots sit at their header positions" {
@@ -54,6 +55,8 @@ test "win32 d2d: typed slots sit at their header positions" {
     try std.testing.expectEqual(14, slot(d2d1.ID2D1Factory, "CreateHwndRenderTarget"));
     try std.testing.expectEqual(16, slot(d2d1.ID2D1Factory, "CreateDCRenderTarget"));
 
+    try std.testing.expectEqual(3, slot(dwrite.IDWriteFactory, "GetSystemFontCollection"));
+    try std.testing.expectEqual(5, slot(dwrite.IDWriteFontCollection, "FindFamilyName"));
     try std.testing.expectEqual(15, slot(dwrite.IDWriteFactory, "CreateTextFormat"));
     try std.testing.expectEqual(18, slot(dwrite.IDWriteFactory, "CreateTextLayout"));
     try std.testing.expectEqual(20, slot(dwrite.IDWriteFactory, "CreateEllipsisTrimmingSign"));

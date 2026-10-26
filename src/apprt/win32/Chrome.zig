@@ -137,36 +137,12 @@ pub fn deinitShared() void {
     shared_state = null;
 }
 
-/// IDWriteFontCollection, only the slot needed to probe for a family.
-const FontCollection = extern struct {
-    vtable: *const VTable,
-
-    const VTable = extern struct {
-        base: com.IUnknown.VTable,
-        GetFontFamilyCount: *const anyopaque,
-        GetFontFamily: *const anyopaque,
-        FindFamilyName: *const fn (*FontCollection, [*:0]const u16, *u32, *win32.foundation.BOOL) callconv(.winapi) win32.foundation.HRESULT,
-    };
-};
-
-const GetSystemFontCollectionFn = *const fn (
-    *dwrite.IDWriteFactory,
-    *?*FontCollection,
-    win32.foundation.BOOL,
-) callconv(.winapi) win32.foundation.HRESULT;
-
 /// `preferred` if the system has that family, else `fallback`.
 fn pickFamily(dw: *dwrite.IDWriteFactory, preferred: [*:0]const u16, fallback: [*:0]const u16) [*:0]const u16 {
-    const get: GetSystemFontCollectionFn = @ptrCast(dw.vtable.GetSystemFontCollection);
-    var collection: ?*FontCollection = null;
-    if (get(dw, &collection, 0) < 0) return fallback;
-    const fonts = collection orelse return fallback;
+    const fonts = dwrite.getSystemFontCollection(dw) catch return fallback;
     defer com.release(fonts);
-
-    var index: u32 = 0;
-    var exists: win32.foundation.BOOL = 0;
-    if (fonts.vtable.FindFamilyName(fonts, preferred, &index, &exists) < 0) return fallback;
-    return if (exists != 0) preferred else fallback;
+    const exists = fonts.hasFamily(preferred) catch return fallback;
+    return if (exists) preferred else fallback;
 }
 
 // -- Pure helpers ---------------------------------------------------------------
@@ -511,6 +487,8 @@ pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme
 }
 
 var logged: bool = false;
+/// Whether the paint after the last device loss was already re-queued.
+var lost_retried: bool = false;
 
 fn logOnce(err: anyerror) void {
     if (logged) return;
@@ -539,6 +517,8 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
     const lay = &window.strip;
     const bounds = lay.bounds;
     if (lay.mode == .hidden or bounds.w <= 0 or bounds.h <= 0) return;
+    // The strip is bound to the buffered DC at the origin.
+    std.debug.assert(bounds.x == 0 and bounds.y == 0);
     if (dirty.w > 0 and dirty.h > 0 and dirty.y >= bounds.bottom()) return;
 
     const pal = theme.palette(window);
@@ -592,12 +572,18 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
     var mem: ?HDC = null;
     const hbp = uxtheme.BeginBufferedPaint(hdc, &rc, uxtheme.BPBF_TOPDOWNDIB, &params, &mem);
     const target_dc = mem orelse hdc;
-    paintInto(target_dc, bounds, in) catch |err| {
+    if (paintInto(target_dc, bounds, in)) {
+        lost_retried = false;
+    } else |err| {
         logOnce(err);
         fillFallback(target_dc, bounds, pal.strip_bg);
-        // A lost device is recreated by the next paint.
-        if (err == error.DeviceLost) invalidate(window);
-    };
+        // A lost device is recreated by the next paint; retry once per loss,
+        // a persistent failure must not re-queue paints forever.
+        if (err == error.DeviceLost and !lost_retried) {
+            lost_retried = true;
+            invalidate(window);
+        }
+    }
     if (hbp) |h| _ = uxtheme.EndBufferedPaint(h, 1);
 }
 
