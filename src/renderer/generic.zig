@@ -1162,6 +1162,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :kitty @max(next -| now_ms, draw_interval_ms);
             };
 
+            // A frame dump skipped by its throttle wants one more draw.
+            const dump_delay: ?u64 = dump: {
+                if (comptime !@hasDecl(GraphicsAPI, "dumpWakeMs")) break :dump null;
+                const d = self.api.dumpWakeMs() orelse break :dump null;
+                break :dump @max(d, draw_interval_ms);
+            };
+
             // An update wake includes a draw, so it wins ties.
             if (kitty_delay) |k| {
                 if (shader_delay == null or k <= shader_delay.?) {
@@ -1169,7 +1176,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            if (shader_delay) |s| return .{ .delay_ms = s, .kind = .draw };
+            if (shader_delay) |s| {
+                const delay = if (dump_delay) |d| @min(s, d) else s;
+                return .{ .delay_ms = delay, .kind = .draw };
+            }
+
+            if (dump_delay) |d| return .{ .delay_ms = d, .kind = .draw };
 
             return null;
         }

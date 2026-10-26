@@ -157,17 +157,16 @@ fn presentTo(sc: *SwapChain, target: *const Target, vsync: bool) !void {
 /// writes the target of a finished frame to `<dir>\surface-<n>.bmp`, `n`
 /// being its per-process renderer index (creation order, from 0). The file
 /// is replaced atomically, so a reader sees a whole frame, and at most
-/// every `interval_ms` — a frame inside the interval is skipped, not
-/// deferred. The BMP is a 32-bit BI_RGB top-down bitmap (54 byte header,
+/// every `interval_ms`. A frame skipped by the throttle leaves a trailing
+/// dump pending (`trailing`, a flag, no pixels): the renderer asks for a
+/// redraw once the interval elapsed (`trailingDelayMs`, via the animation
+/// wake) and that frame is dumped, so the last frame of a burst is never
+/// lost. The BMP is a 32-bit BI_RGB top-down bitmap (54 byte header,
 /// `width * height * 4` bytes of BGRA) holding the target's stored bytes:
 /// sRGB encoded for `window-colorspace`/linear blending targets, with
 /// premultiplied alpha.
 ///
-/// Limitation: a frame of the same size inside `interval_ms` of the last dump
-/// is skipped, and an idle terminal draws no further frame, so the file may
-/// lack the last frame of a burst. A frame of a new size is always dumped.
-/// Scenarios that need a final frame wait at least `interval_ms` and trigger
-/// a repaint.
+/// A frame of a new size is always dumped at once.
 ///
 /// The read back (`capture`) happens under the device context lock; the
 /// file I/O (`flush`) runs after `drawFrameEnd` released it, so a slow disk
@@ -181,6 +180,10 @@ pub const Dump = struct {
     last_width: usize = 0,
     last_height: usize = 0,
     failed_logged: bool = false,
+
+    /// A frame was skipped by the throttle: a redraw after the interval
+    /// must dump the then-current frame.
+    trailing: bool = false,
 
     /// The captured frame waiting for `flush`.
     pending: ?Pending = null,
@@ -234,8 +237,12 @@ pub const Dump = struct {
         // so a throttled resize frame would leave the old size on disk.
         const resized = target.width != self.last_width or target.height != self.last_height;
         if (self.last) |last| {
-            if (!resized and last.durationTo(now).toMilliseconds() < self.interval_ms) return;
+            if (!resized and last.durationTo(now).toMilliseconds() < self.interval_ms) {
+                self.trailing = true;
+                return;
+            }
         }
+        self.trailing = false;
         self.last_width = target.width;
         self.last_height = target.height;
         // Also set on failure, so a broken dump dir is not retried per frame.
@@ -253,6 +260,15 @@ pub const Dump = struct {
             .height = target.height,
             .file_index = file_index,
         };
+    }
+
+    /// Milliseconds until the skipped frame must be redrawn and dumped, null
+    /// if nothing is pending. Render thread.
+    pub fn trailingDelayMs(self: *const Dump, now: std.Io.Timestamp) ?u64 {
+        if (!self.trailing) return null;
+        const last = self.last orelse return 0;
+        const elapsed = last.durationTo(now).toMilliseconds();
+        return @intCast(@max(self.interval_ms - elapsed, 0));
     }
 
     /// Writes the captured frame, if any. Takes no device state, so it runs
@@ -916,4 +932,52 @@ test "d3d11 frame: bmp header" {
     try testing.expectEqual(@as(u32, bmp_header_len), std.mem.readInt(u32, out[10..14], .little));
     try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, out[34..38], .little));
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, out[bmp_header_len..]);
+}
+
+test "d3d11 frame: a throttled dump stays pending until the interval elapsed" {
+    var fx: Fixture = try .init(.native, 5, 3);
+    defer fx.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = path_buf[0..try tmp.dir.realPath(testing.io, &path_buf)];
+    const dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "dumps" });
+    defer testing.allocator.free(dir);
+    fx.api.dump = .{ .dir = dir, .index = 0, .interval_ms = 1000 * 60 * 60 };
+
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+
+    const dump = &fx.api.dump.?;
+    const now: std.Io.Timestamp = .now(testing.io, .awake);
+
+    // Nothing pending before any frame.
+    try testing.expectEqual(@as(?u64, null), dump.trailingDelayMs(now));
+
+    // The first frame dumps; nothing is pending.
+    try dump.capture(testing.allocator, &fx.target, 0);
+    try testing.expect(!dump.trailing);
+    try testing.expectEqual(@as(?u64, null), dump.trailingDelayMs(now));
+
+    // A same-size frame inside the interval is skipped but remembered,
+    // without a copy of its pixels.
+    dump.flush(testing.allocator);
+    try dump.capture(testing.allocator, &fx.target, 0);
+    try testing.expect(dump.trailing);
+    try testing.expect(dump.pending == null);
+    const delay = dump.trailingDelayMs(now).?;
+    try testing.expect(delay > 0 and delay <= dump.interval_ms);
+
+    // Once the interval is over the delay is zero.
+    const later = now.addDuration(.fromMilliseconds(dump.interval_ms + 1));
+    try testing.expectEqual(@as(?u64, 0), dump.trailingDelayMs(later));
+
+    // The redraw after the interval dumps and clears the pending flag.
+    dump.interval_ms = 0;
+    try dump.capture(testing.allocator, &fx.target, 0);
+    try testing.expect(!dump.trailing);
+    try testing.expect(dump.pending != null);
+    try testing.expectEqual(@as(?u64, null), dump.trailingDelayMs(later));
+    dump.flush(testing.allocator);
 }

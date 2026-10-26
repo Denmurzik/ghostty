@@ -302,6 +302,13 @@ pub fn drawFrameStart(self: *D3D11) void {
     self.device.lockContext();
 }
 
+/// Milliseconds until a frame skipped by the dump throttle has to be
+/// redrawn so that it gets dumped; null without a dump or a pending frame.
+pub fn dumpWakeMs(self: *const D3D11) ?u64 {
+    const d = self.dump orelse return null;
+    return d.trailingDelayMs(.now(global.io(), .awake));
+}
+
 /// Actions taken after `drawFrame` is done. Releases the context lock.
 pub fn drawFrameEnd(self: *D3D11) void {
     self.device.unlockContext();
