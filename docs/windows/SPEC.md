@@ -188,18 +188,23 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   surface rebuilds through `displayUnrealized()` + `displayRealized()` [renderer §1.4].
 
 ### 6.4 Resize, DPI, sync draws
-- UI thread on `WM_SIZE` of a surface child: store packed size in `PresentTarget.size`, then
-  `core.sizeCallback(.{w,h})`, then `core.draw()` (sync draw on the UI thread, required by `Surface.zig:925` comment) so
-  live resize shows correct content. `draw()` takes `draw_mutex` + context lock like any frame.
+- UI thread on `WM_SIZE` of a surface child: store the packed size in `PresentTarget.size` and nothing else - no
+  `core.draw()` (no sync draw) and no direct `core.sizeCallback`. Size changes are coalesced by `ResizeCoalescer`
+  (`apprt/win32/Surface.zig`): the first size of a burst arms a 16 ms `SetTimer` on the surface HWND; `WM_TIMER` and the
+  top-level `WM_EXITSIZEMOVE` hand only the newest size to `core.sizeCallback` and stop the timer. Zero sizes
+  (minimized, collapsed parent) cancel the pending size, and a size core already has never arms the timer. The renderer
+  thread picks the new size up from `PresentTarget.size` and presents on its own, so the UI thread never waits for
+  `draw_mutex` or a swap chain call during a live resize (this replaced the original sync-draw design, which hung
+  `resize-while-streaming`).
 - `surfaceSize()` reads `PresentTarget.size` (Metal-like pull) clamped to `max_texture_size`; headless returns the
   `setViewport` value.
 - Swap chain resize happens inside `Frame.complete` before the copy: if backbuffer size ≠ target size →
   `ResizeBuffers(0, w, h, UNKNOWN, flags)` (backbuffer reference released first).
 - DXGI threading: `MakeWindowAssociation(hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER)` before the first
-  `Present`; `SetFullscreenState` is never called. The UI thread may block on `draw_mutex` in `WM_SIZE` while the render
-  thread is inside `Present`; M1 e2e has a live-resize-while-streaming hang watchdog. If it ever hangs, the fallback is:
-  the UI thread only stores the size and wakes the renderer; `ResizeBuffers` and all presents happen on the render thread
-  (no sync draw).
+  `Present`; `SetFullscreenState` is never called. `ResizeBuffers` and all presents happen on the render thread; the
+  UI thread never calls into DXGI. M1 e2e has a live-resize-while-streaming hang watchdog (acceptance timing on a
+  ReleaseFast build, see `test/windows/README.md`). UI-thread input callbacks and `Termio.resize` take the terminal
+  mutex with `lockDemand` so the IO thread's lock/unlock loop cannot starve them.
 - Teardown order: `Surface.destroy` = `core_surface.deinit()` (joins render + IO threads, releases the swap chain) →
   `DestroyWindow(child)` → free; `Window.destroy` destroys its surfaces before its own HWND. The surface WndProc ignores
   core callbacks until `initialized` is set (`WM_SIZE` arrives inside `CreateWindowExW`, before `core_surface.init`).

@@ -94,3 +94,21 @@ Run standalone, the process keeps running: stop it yourself.
 `configs/cmd.ghostty` runs `cmd.exe` directly, which makes the child
 process easy to find with
 `Get-CimInstance Win32_Process -Filter 'ParentProcessId=<pid>'`.
+
+### Timing-sensitive scenarios: use a ReleaseFast exe
+
+`resize-while-streaming` (and any scenario with a response-time limit)
+gets its acceptance timing from a **ReleaseFast** build:
+
+```
+zig build -j2 -Doptimize=ReleaseFast --prefix zig-out-rf
+$env:GHOSTTY_E2E_EXE = "$PWD\zig-out-rf\bin\ghostty.exe"
+powershell -NoProfile -File test/windows/e2e-m1.ps1 -Only resize-while-streaming
+```
+
+A Debug build is reference only. Upstream's `slow_runtime_safety`
+(`Page.assertIntegrity`) makes terminal parsing orders of magnitude slower
+there, so the terminal lock is held much longer and the UI thread (mouse
+callbacks wait for that lock) answers slowly. Measured: ReleaseFast
+200 resizes in under 1 s with WM_NULL answered in 1-3 ms; Debug 10-30 s and
+WM_NULL answers of 0.6-1.5 s.
