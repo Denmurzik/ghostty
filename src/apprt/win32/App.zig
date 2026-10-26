@@ -10,6 +10,7 @@ const apprt = @import("../../apprt.zig");
 const build_config = @import("../../build_config.zig");
 const configpkg = @import("../../config.zig");
 const global = @import("../../global.zig");
+const renderer = @import("../../renderer.zig");
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Window = @import("Window.zig");
@@ -73,6 +74,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     const window = try Window.create(self);
     errdefer window.destroy();
     window.show();
+    renderer.Device.logPrivateUsage("first surface");
 }
 
 /// Run the message loop until WM_QUIT.

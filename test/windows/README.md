@@ -112,3 +112,22 @@ there, so the terminal lock is held much longer and the UI thread (mouse
 callbacks wait for that lock) answers slowly. Measured: ReleaseFast
 200 resizes in under 1 s with WM_NULL answered in 1-3 ms; Debug 10-30 s and
 WM_NULL answers of 0.6-1.5 s.
+
+
+## measure-ram.ps1
+
+```
+zig build -j2 -Doptimize=ReleaseFast --prefix zig-out-rf
+powershell -NoProfile -File test/windows/measure-ram.ps1 [-Driver hardware|warp] [-Scenario one-surface|scrollback] [-Optimize ReleaseFast|Debug]
+```
+
+Starts `ghostty.exe` (`zig-out-rf\bin\ghostty.exe` for ReleaseFast, `zig-out\bin\ghostty.exe` for
+Debug; `-Exe` overrides) in a sandbox with `command = direct:cmd.exe /k`,
+idles 10 s and appends one row to `docs/windows/ram-baseline.csv`:
+`date,commit,optimize,adapter,scenario,private_mb,ws_mb`. Only ghostty.exe is
+measured (Private Bytes is the budgeted number). `scrollback` first runs
+`for /L %i in (1,1,200000) do @echo %i` in the surface, so it types into the
+window and needs a usable foreground. The run holds the desktop lock. Only
+`-Optimize ReleaseFast` rows are gated (M1: one surface <= 110 MB); a Debug
+build also logs `private usage after Device.init / first surface / first
+frame` (`-LogCopy <file>` keeps the log), and logs `d3d11 adapter=` at info.

@@ -97,7 +97,78 @@ pub fn init(alloc: Allocator, options: Options) !*Device {
         opts.debug_layer,
         self.tearing_supported,
     });
+    logAdapter(created.device);
+    logPrivateUsage("Device.init");
     return self;
+}
+
+/// DXGI_ADAPTER_DESC.
+const AdapterDesc = extern struct {
+    description: [128]u16,
+    vendor_id: u32,
+    device_id: u32,
+    sub_sys_id: u32,
+    revision: u32,
+    dedicated_video_memory: usize,
+    dedicated_system_memory: usize,
+    shared_system_memory: usize,
+    luid: u64,
+};
+
+/// Logs the adapter the device runs on. `test/windows/measure-ram.ps1` reads the
+/// name from the `adapter=` field. Failures are not worth reporting.
+fn logAdapter(device: *d3d11.ID3D11Device) void {
+    const GetAdapterFn = *const fn (*dxgi.IDXGIDevice, *?*dxgi.IDXGIAdapter) callconv(.winapi) win32.foundation.HRESULT;
+    const GetDescFn = *const fn (*dxgi.IDXGIAdapter, *AdapterDesc) callconv(.winapi) win32.foundation.HRESULT;
+
+    const dxgi_device = com.queryInterface(device, dxgi.IDXGIDevice) catch return;
+    defer com.release(dxgi_device);
+
+    var adapter: ?*dxgi.IDXGIAdapter = null;
+    const get_adapter: GetAdapterFn = @ptrCast(@alignCast(dxgi_device.vtable.GetAdapter));
+    if (!win32.foundation.succeeded(get_adapter(dxgi_device, &adapter))) return;
+    const a = adapter orelse return;
+    defer com.release(a);
+
+    var desc: AdapterDesc = undefined;
+    const get_desc: GetDescFn = @ptrCast(@alignCast(a.vtable.GetDesc));
+    if (!win32.foundation.succeeded(get_desc(a, &desc))) return;
+
+    var name: [128 * 3]u8 = undefined;
+    const len = std.mem.indexOfScalar(u16, &desc.description, 0) orelse desc.description.len;
+    const n = std.unicode.utf16LeToUtf8(&name, desc.description[0..len]) catch 0;
+    log.info("d3d11 adapter={s} vendor=0x{x:0>4} device=0x{x:0>4} dedicated_mb={d}", .{
+        name[0..n],
+        desc.vendor_id,
+        desc.device_id,
+        desc.dedicated_video_memory / (1024 * 1024),
+    });
+}
+
+/// Debug log of the process' private bytes (`PrivateUsage`) after a start-up
+/// stage, for the RAM baseline. Costs nothing when debug logging is off.
+pub fn logPrivateUsage(comptime stage: []const u8) void {
+    if (comptime !std.log.logEnabled(.debug, .d3d11)) return;
+
+    var counters: win32.kernel32.PROCESS_MEMORY_COUNTERS_EX = .{};
+    if (win32.kernel32.K32GetProcessMemoryInfo(
+        win32.kernel32.GetCurrentProcess(),
+        &counters,
+        @sizeOf(win32.kernel32.PROCESS_MEMORY_COUNTERS_EX),
+    ) == 0) return;
+
+    log.debug("private usage after " ++ stage ++ ": {d} KiB (working set {d} KiB)", .{
+        counters.PrivateUsage / 1024,
+        counters.WorkingSetSize / 1024,
+    });
+}
+
+var first_frame_logged: std.atomic.Value(bool) = .init(false);
+
+/// `logPrivateUsage` for the first presented frame of the process.
+pub fn logFirstFramePrivateUsage() void {
+    if (first_frame_logged.swap(true, .monotonic)) return;
+    logPrivateUsage("first frame");
 }
 
 pub fn deinit(self: *Device, alloc: Allocator) void {
