@@ -3,6 +3,7 @@
 # shared D3D11 device lost a while after start. The log reports it once; a
 # window opened afterwards gets a fresh device and shows the background.
 . (Join-Path $PSScriptRoot '_common.ps1')
+Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
 Invoke-E2eScenario 'device-lost' {
     $bg = 0x10, 0x20, 0x30
@@ -20,6 +21,8 @@ Invoke-E2eScenario 'device-lost' {
     }
     if (-not $armed) { throw 'Debug build did not arm the device loss simulation' }
     $lost = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        # The loss is noticed by the next frame; an idle terminal draws none, so keep it drawing.
+        [void](Invoke-GhosttyAction -Class $g.Class -Action 'text:\r')
         Select-String -LiteralPath $g.Log -Pattern 'simulating a device loss' -Quiet
     }
     if (-not $lost) { throw 'the armed device loss simulation never fired' }
