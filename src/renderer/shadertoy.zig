@@ -544,7 +544,7 @@ test "shadertoy hlsl: crt and focus test shaders convert" {
         const hlsl = try testHlsl(alloc, toy);
         defer alloc.free(hlsl);
 
-        inline for (.{ "register(b1)", "register(t0)", "register(s0)", "SV_Position", "SV_Target" }) |needle| {
+        inline for (.{ "register(b1)", "register(t0)", "register(s0)", ": SV_Position", ": SV_Target0" }) |needle| {
             try testing.expect(std.mem.indexOf(u8, hlsl, needle) != null);
         }
         try testing.expect(std.mem.indexOf(u8, hlsl, "#version") == null);
