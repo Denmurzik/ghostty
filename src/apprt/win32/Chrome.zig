@@ -102,7 +102,7 @@ pub const Shared = struct {
         try icons.setTextAlignment(.CENTER);
         try icons.setParagraphAlignment(.CENTER);
 
-        const label = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, 16 * scale, L("en-us"));
+        const label = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, 13 * scale, L("en-us"));
         errdefer com.release(label);
         try label.setWordWrapping(.NO_WRAP);
         try label.setTextAlignment(.CENTER);
@@ -504,10 +504,17 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
     p.drawText(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, args.text, p.fm.label, args.pal.text);
 }
 
-/// A centred text label on an opaque `tab_active_bg` fill (the resize overlay).
+/// A centred text label on an opaque fill (the resize overlay). As on macOS
+/// the fill is the system window background (`.background`), not the
+/// terminal's; high contrast keeps the system window colour.
 pub fn paintLabel(hdc: HDC, size: geom.Rect, text: []const u16, palette: theme.Palette, dpi: u32) !void {
     var pal = palette;
-    pal.strip_bg = palette.tab_active_bg;
+    if (theme.highContrast()) {
+        pal.strip_bg = palette.tab_active_bg;
+    } else {
+        pal.strip_bg = if (pal.dark) .{ .r = 0x32, .g = 0x32, .b = 0x32 } else .{ .r = 0xEC, .g = 0xEC, .b = 0xEC };
+        pal.text = if (pal.dark) .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } else .{ .r = 0, .g = 0, .b = 0 };
+    }
     pal.strip_bg.a = 255;
     try withPainter(hdc, size.w, size.h, pal, dpi, LabelArgs{ .size = size, .text = text, .pal = pal }, drawLabelBody);
 }

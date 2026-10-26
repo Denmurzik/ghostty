@@ -20,12 +20,12 @@ const class_name = L("GhosttyResizeOverlay");
 /// `WM_MOUSEACTIVATE` result: do not activate, and eat the click.
 const ma_noactivate = 3;
 
-/// Sizes at 96 DPI.
-const margin_px = 8;
-const pad_x = 14;
-const char_w = 10;
-const height_px = 38;
-const corner_px = 6;
+/// Sizes at 96 DPI, from macOS `SurfaceResizeOverlay`: 5 pt padding, 13 pt text, no margin to the edge.
+const margin_px = 0;
+const pad_x = 5;
+const char_w = 8;
+const height_px = 26;
+const corner_px = 4;
 
 pub const State = struct {
     hwnd: ?win32.foundation.HWND = null,
@@ -107,7 +107,7 @@ fn show(surface: *Surface, state: *State, config: *const configpkg.Config, cols:
     if (user32.IsIconic(window.hwnd) != 0 or user32.IsWindowVisible(surface.hwnd) == 0) return;
 
     var buf: [32]u8 = undefined;
-    const text = try std.fmt.bufPrint(&buf, "{d} x {d}", .{ cols, rows });
+    const text = try std.fmt.bufPrint(&buf, "{d} \u{2A2F} {d}", .{ cols, rows });
     var wide: [32]u16 = undefined;
     const n = try std.unicode.utf8ToUtf16Le(&wide, text);
     @memcpy(state.text[0..n], wide[0..n]);
