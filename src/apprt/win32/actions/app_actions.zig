@@ -7,6 +7,7 @@ const App = @import("../App.zig");
 const Chrome = @import("../Chrome.zig");
 const theme = @import("../theme.zig");
 const util = @import("../util.zig");
+const link_policy = @import("../link_policy.zig");
 
 const Config = configpkg.Config;
 
@@ -139,6 +140,38 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
     if (rc2 <= 32) {
         log.warn("unable to open the config file in notepad rc={}", .{rc2});
         return false;
+    }
+    return true;
+}
+
+/// Links come from terminal output, so nothing here may run a program: web
+/// and mail URLs go to the shell, local paths are only selected in Explorer
+/// (see `link_policy`). Always true so the core never falls back to
+/// `os.open`.
+pub fn open_url(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url)) !bool {
+    _ = target;
+    const alloc = app.core_app.alloc;
+
+    var buf: [link_policy.max_len]u8 = undefined;
+    switch (link_policy.classify(&buf, value.url)) {
+        .refuse => |why| log.warn("refusing to open link kind={t} why={s}", .{ value.kind, why }),
+        .open => |url| {
+            const wide = util.utf16z(alloc, url) catch return true;
+            defer alloc.free(wide);
+            const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
+            const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
+            if (rc <= 32) log.warn("unable to open link rc={}", .{rc});
+        },
+        .reveal => |path| {
+            const params = std.fmt.allocPrint(alloc, "/select,\"{s}\"", .{path}) catch return true;
+            defer alloc.free(params);
+            const wide = util.utf16z(alloc, params) catch return true;
+            defer alloc.free(wide);
+            const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
+            const explorer = std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe");
+            const rc = win32.shell32.ShellExecuteW(null, open, explorer, wide.ptr, null, win32.user32.SW_SHOWNORMAL);
+            if (rc <= 32) log.warn("unable to reveal link rc={}", .{rc});
+        },
     }
     return true;
 }

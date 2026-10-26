@@ -25,12 +25,12 @@ pub const Status = union(enum) {
 /// new `Action.Key` does not compile until it is classified here.
 pub fn status(comptime key: apprt.Action.Key) Status {
     return switch (key) {
-        .quit, .new_window, .close_all_windows, .goto_window, .present_terminal, .reload_config, .config_change, .open_config, .color_change, .quit_timer => .implemented,
+        .quit, .new_window, .close_all_windows, .goto_window, .present_terminal, .reload_config, .config_change, .open_config, .color_change, .quit_timer, .open_url => .implemented,
         .close_window, .initial_size, .size_limit, .cell_size, .set_window_title, .toggle_maximize, .toggle_fullscreen, .toggle_window_decorations, .float_window, .reset_window_size, .resize_window, .prompt_title, .ring_bell, .progress_report => .implemented,
         .new_tab, .close_tab, .goto_tab, .move_tab, .set_tab_title, .set_title, .copy_title_to_clipboard, .pwd, .move_tab_to_new_window => .implemented,
         .new_split, .goto_split, .resize_split, .equalize_splits, .toggle_split_zoom => .implemented,
         .mouse_shape, .mouse_visibility, .render, .show_child_exited, .scrollbar => .implemented,
-        .toggle_quick_terminal, .toggle_command_palette, .inspector, .render_inspector, .export_terminal_io, .desktop_notification, .command_finished, .mouse_over_link, .open_url, .start_search, .end_search, .search_total, .search_selected, .key_sequence, .key_table, .renderer_health, .readonly, .toggle_background_opacity, .toggle_visibility => .{ .deferred = .{
+        .toggle_quick_terminal, .toggle_command_palette, .inspector, .render_inspector, .export_terminal_io, .desktop_notification, .command_finished, .mouse_over_link, .start_search, .end_search, .search_total, .search_selected, .key_sequence, .key_table, .renderer_health, .readonly, .toggle_background_opacity, .toggle_visibility => .{ .deferred = .{
             .milestone = "M3",
             .reason = "SPEC section 17 M3 list",
         } },
@@ -76,6 +76,7 @@ pub fn perform(
         .open_config => handlers.app_actions.open_config(app, target, value),
         .color_change => handlers.app_actions.color_change(app, target, value),
         .quit_timer => handlers.app_actions.quit_timer(app, target, value),
+        .open_url => handlers.app_actions.open_url(app, target, value),
         .close_window => handlers.window_actions.close_window(app, target, value),
         .initial_size => handlers.window_actions.initial_size(app, target, value),
         .size_limit => handlers.window_actions.size_limit(app, target, value),
@@ -133,8 +134,8 @@ test "win32 actions: M2 scope list matches the plan" {
             .unsupported => unsupported += 1,
         }
     }
-    try std.testing.expectEqual(43, implemented);
-    try std.testing.expectEqual(25, deferred);
+    try std.testing.expectEqual(44, implemented);
+    try std.testing.expectEqual(24, deferred);
     try std.testing.expectEqual(2, unsupported);
 
     const m3 = comptime status(.start_search).deferred;

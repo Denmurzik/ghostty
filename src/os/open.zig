@@ -16,7 +16,7 @@ const log = std.log.scoped(.@"os-open");
 /// way to open URLs. If you are implementing an apprt for Ghostty, you should
 /// consider doing something special-cased for your platform.
 ///
-/// On macOS, untrusted kinds (`unknown`, `osc8`) return `error.UntrustedLink`
+/// On macOS and Windows, untrusted kinds (`unknown`, `osc8`) return `error.UntrustedLink`
 /// because the apprt must check them first.
 pub fn open(
     kind: apprt.action.OpenUrl.Kind,
@@ -24,7 +24,7 @@ pub fn open(
 ) !void {
     // If an embedder declines an untrusted URL, refuse it rather than skip
     // the apprt's safety checks by passing it to `open`.
-    if (comptime builtin.target.os.tag == .macos) {
+    if (comptime builtin.target.os.tag == .macos or builtin.target.os.tag == .windows) {
         switch (kind) {
             .unknown, .osc8 => return error.UntrustedLink,
             .text, .html => {},
@@ -69,6 +69,19 @@ pub fn open(
 
     const thread = try std.Thread.spawn(.{}, openThread, .{ global.io(), exe });
     thread.detach();
+}
+
+test "Windows untrusted links have no generic opener fallback" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectError(
+        error.UntrustedLink,
+        open(.osc8, "C:\\payload.bat"),
+    );
+    try std.testing.expectError(
+        error.UntrustedLink,
+        open(.unknown, "file:///C:/payload.bat"),
+    );
 }
 
 test "macOS untrusted links have no generic opener fallback" {
