@@ -304,6 +304,7 @@ pub fn destroy(self: *Window) void {
 /// be alive until then.
 pub fn beginTeardown(self: *Window) void {
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
+    for (self.tabs.items) |tab| tab.stopThreads();
     while (self.tabs.pop()) |tab| tab.destroy();
 }
 

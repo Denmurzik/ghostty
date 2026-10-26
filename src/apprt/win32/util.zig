@@ -21,6 +21,19 @@ pub fn utf8(alloc: Allocator, s: []const u16) ![]u8 {
 
 /// The object pointer stored in a window's GWLP_USERDATA, or null if
 /// none has been stored (yet, or any more).
+/// `PM_QS_SENDMESSAGE`: PeekMessage handles only the messages sent from
+/// other threads.
+const PM_QS_SENDMESSAGE: u32 = 0x0040 << 16;
+
+/// Answer what other threads have sent to this thread's windows (a
+/// `WM_NULL` liveness probe, `WM_COPYDATA`, ...) without taking anything
+/// off the posted queue. Called between the slices of a long teardown on
+/// the UI thread, so that the other windows are not reported as hung.
+pub fn serviceSentMessages() void {
+    var msg: win32.user32.MSG = undefined;
+    _ = win32.user32.PeekMessageW(&msg, null, 0, 0, win32.user32.PM_NOREMOVE | PM_QS_SENDMESSAGE);
+}
+
 pub fn fromUserData(comptime T: type, hwnd: win32.foundation.HWND) ?*T {
     const value = win32.user32.GetWindowLongPtrW(hwnd, win32.user32.GWLP_USERDATA);
     if (value == 0) return null;
@@ -86,4 +99,14 @@ test "win32 util: utf16 rejects unpaired surrogate" {
         error.DanglingSurrogateHalf,
         utf8(alloc, &.{ 'a', 0xD83D }),
     );
+}
+
+test "win32 util: serviceSentMessages leaves the posted queue alone" {
+    const user32 = win32.user32;
+    // A posted thread message stays queued: only sent messages are handled.
+    _ = user32.PostMessageW(null, user32.WM_APP + 1, 0, 0);
+    serviceSentMessages();
+    var msg: user32.MSG = undefined;
+    try std.testing.expect(user32.PeekMessageW(&msg, null, 0, 0, user32.PM_REMOVE) != 0);
+    try std.testing.expectEqual(@as(u32, user32.WM_APP + 1), msg.message);
 }

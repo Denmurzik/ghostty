@@ -135,6 +135,9 @@ io: termio.Termio,
 io_thread: termio.Thread,
 io_thr: std.Thread,
 
+/// Set once `stopThreads` has asked the renderer and IO threads to quit.
+threads_stopping: bool = false,
+
 /// Terminal inspector
 inspector: ?*inspectorpkg.Inspector = null,
 
@@ -830,23 +833,28 @@ pub fn init(
     app.first = false;
 }
 
+/// Ask the renderer and IO threads to quit without waiting for them.
+/// `deinit` does this itself; a runtime tearing down many surfaces calls it
+/// on all of them first so that the joins in `deinit` overlap instead of
+/// running one after another. Safe to call more than once.
+pub fn stopThreads(self: *Surface) void {
+    if (self.threads_stopping) return;
+    self.threads_stopping = true;
+
+    self.renderer_thread.stop.notify() catch |err|
+        log.err("error notifying renderer thread to stop, may stall err={}", .{err});
+    self.io_thread.stop.notify() catch |err|
+        log.err("error notifying io thread to stop, may stall err={}", .{err});
+}
+
 pub fn deinit(self: *Surface) void {
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
-    // Stop rendering thread
-    {
-        self.renderer_thread.stop.notify() catch |err|
-            log.err("error notifying renderer thread to stop, may stall err={}", .{err});
-        self.renderer_thr.join();
-    }
-
-    // Stop our IO thread
-    {
-        self.io_thread.stop.notify() catch |err|
-            log.err("error notifying io thread to stop, may stall err={}", .{err});
-        self.io_thr.join();
-    }
+    // Stop the rendering and IO threads
+    self.stopThreads();
+    self.renderer_thr.join();
+    self.io_thr.join();
 
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.

@@ -152,17 +152,33 @@ pub fn create(window: *Window, opts: CreateOptions) !*Tab {
     return self;
 }
 
+/// Ask the core threads of every surface to quit without waiting, so the
+/// joins in `destroy` overlap instead of adding up.
+pub fn stopThreads(self: *Tab) void {
+    var it = self.tree.iterator();
+    while (it.next()) |entry| {
+        const s = entry.view;
+        if (s.initialized) s.core_surface.stopThreads();
+    }
+}
+
 /// Destroy the tab and free it. Joins the core threads of every surface.
 pub fn destroy(self: *Tab) void {
     const alloc = self.window.app.core_app.alloc;
+    self.stopThreads();
 
     // Hidden first: joining the threads of many surfaces takes a moment,
     // and the panes should not sit frozen on screen meanwhile.
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
 
-    // Every surface goes first: core teardown still reads `window`.
-    self.tree.deinit();
+    // Every surface goes first: core teardown still reads `window`. The
+    // tree is taken out of the tab: each surface answers the other windows'
+    // sent messages when it is gone (see `Surface.deinit`), and those may
+    // reach this tab.
+    var tree = self.tree;
+    self.tree = .empty;
     self.focused = null;
+    tree.deinit();
     if (self.split_layout) |*l| l.deinit(alloc);
 
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
