@@ -39,3 +39,8 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - R3: Target ABI = MSVC (upstream default; VS 18 Build Tools present locally and on GitHub runners). Cost if wrong: switch to `-gnu`.
 - R4: Builtin renderer shaders are hand-written HLSL ported from `shaders.metal` (D3D11 is Y-down like Metal); only user custom shaders go through SPIRV-Cross. Runtime `D3DCompile` via `d3dcompiler_47.dll` first; build-time precompile is a later optimization.
 - R5: Native Zig apprt (not the embedded C API host).
+
+## Owner decisions (2026-10-26, morning review)
+- Single instance: `detect` — a launch without arguments opens a new window in the running process; a launch with arguments (`--font-size=…`, `-e …`) starts a separate process.
+- Last window closed: Ghostty stays running in the notification area (tray icon); `quit-after-last-window-closed = false` is the Windows default; the tray menu offers New Window / Quit.
+- Closing a tab: Windows Terminal semantics — terminate the shell and the console processes attached to that tab's pseudo-console; separate console windows (`start cmd`, `start python x.py`), detached processes and GUI apps survive. (Supersedes lead ruling on Task 19's job-object kill-all-console policy.)
