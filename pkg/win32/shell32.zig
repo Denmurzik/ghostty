@@ -1,5 +1,6 @@
 //! shell32 bindings (shell execute, notification icons, drag and drop). Filled by the tasks that first call them.
 
+const std = @import("std");
 const foundation = @import("foundation.zig");
 const com = @import("com.zig");
 
@@ -72,7 +73,6 @@ pub const ITaskbarList3 = extern struct {
 };
 
 test "win32 shell32: ITaskbarList3 slot count" {
-    const std = @import("std");
     try std.testing.expectEqual(21 * @sizeOf(usize), @sizeOf(ITaskbarList3.VTable));
 }
 
@@ -93,4 +93,73 @@ pub const DROPFILES = extern struct {
 test "win32 shell32: DROPFILES size" {
     const std = @import("std");
     try std.testing.expectEqual(20, @sizeOf(DROPFILES));
+
+// Notification area (shellapi.h)
+
+/// `Shell_NotifyIconW` message.
+pub const NIM_ADD = 0x0;
+pub const NIM_MODIFY = 0x1;
+pub const NIM_DELETE = 0x2;
+pub const NIM_SETFOCUS = 0x3;
+pub const NIM_SETVERSION = 0x4;
+
+/// `NOTIFYICONDATAW.uFlags`.
+pub const NIF_MESSAGE = 0x1;
+pub const NIF_ICON = 0x2;
+pub const NIF_TIP = 0x4;
+pub const NIF_STATE = 0x8;
+pub const NIF_INFO = 0x10;
+pub const NIF_GUID = 0x20;
+pub const NIF_REALTIME = 0x40;
+/// With version 4 the standard tooltip is only shown when this is set.
+pub const NIF_SHOWTIP = 0x80;
+
+/// `NOTIFYICONDATAW.uVersion`: the callback gets the event in `LOWORD(lParam)`,
+/// the icon id in `HIWORD(lParam)` and the anchor point in `wParam`.
+pub const NOTIFYICON_VERSION_4 = 4;
+
+/// Version 4 events (`WM_USER + n`): selection by mouse or by keyboard.
+pub const NIN_SELECT = 0x400;
+pub const NINF_KEY = 0x1;
+pub const NIN_KEYSELECT = NIN_SELECT | NINF_KEY;
+
+pub const NOTIFYICONDATAW = extern struct {
+    cbSize: u32 = @sizeOf(NOTIFYICONDATAW),
+    hWnd: ?foundation.HWND = null,
+    uID: u32 = 0,
+    uFlags: u32 = 0,
+    uCallbackMessage: u32 = 0,
+    hIcon: ?*anyopaque = null,
+    szTip: [128]u16 = @splat(0),
+    dwState: u32 = 0,
+    dwStateMask: u32 = 0,
+    szInfo: [256]u16 = @splat(0),
+    /// A union with `uTimeout` in the header.
+    uVersion: u32 = 0,
+    szInfoTitle: [64]u16 = @splat(0),
+    dwInfoFlags: u32 = 0,
+    guidItem: foundation.GUID = std.mem.zeroes(foundation.GUID),
+    hBalloonIcon: ?*anyopaque = null,
+};
+
+/// `message` is a `NIM_*` value. Returns TRUE on success.
+pub extern "shell32" fn Shell_NotifyIconW(message: u32, data: *NOTIFYICONDATAW) callconv(.winapi) foundation.BOOL;
+
+// Sizes from a throwaway `zig cc -target x86_64-windows-msvc` program against
+// Windows SDK 10.0.26100 headers (sizeof and offsetof of NOTIFYICONDATAW).
+test "win32 shell32: NOTIFYICONDATAW layout" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(976, @sizeOf(NOTIFYICONDATAW));
+    try std.testing.expectEqual(8, @offsetOf(NOTIFYICONDATAW, "hWnd"));
+    try std.testing.expectEqual(16, @offsetOf(NOTIFYICONDATAW, "uID"));
+    try std.testing.expectEqual(24, @offsetOf(NOTIFYICONDATAW, "uCallbackMessage"));
+    try std.testing.expectEqual(32, @offsetOf(NOTIFYICONDATAW, "hIcon"));
+    try std.testing.expectEqual(40, @offsetOf(NOTIFYICONDATAW, "szTip"));
+    try std.testing.expectEqual(296, @offsetOf(NOTIFYICONDATAW, "dwState"));
+    try std.testing.expectEqual(304, @offsetOf(NOTIFYICONDATAW, "szInfo"));
+    try std.testing.expectEqual(816, @offsetOf(NOTIFYICONDATAW, "uVersion"));
+    try std.testing.expectEqual(820, @offsetOf(NOTIFYICONDATAW, "szInfoTitle"));
+    try std.testing.expectEqual(948, @offsetOf(NOTIFYICONDATAW, "dwInfoFlags"));
+    try std.testing.expectEqual(952, @offsetOf(NOTIFYICONDATAW, "guidItem"));
+    try std.testing.expectEqual(968, @offsetOf(NOTIFYICONDATAW, "hBalloonIcon"));
 }

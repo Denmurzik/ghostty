@@ -26,6 +26,7 @@ const ipc = struct {
     const Server = @import("ipc/Server.zig");
 };
 const messages = @import("messages.zig");
+const tray_mod = @import("tray.zig");
 const util = @import("util.zig");
 const Config = configpkg.Config;
 
@@ -67,6 +68,9 @@ server: ?*ipc.Server = null,
 /// = false` next to a running instance) has no tray icon and quits after
 /// its last window.
 pipe_owner: bool = false,
+
+/// The notification-area icon; only a pipe owner has one.
+tray: tray_mod.State = .{},
 
 /// This launch was handed to the running instance: no window is created and
 /// `run` returns at once, so the process exits 0.
@@ -133,6 +137,10 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     errdefer window.destroy();
     window.show();
     renderer.Device.logPrivateUsage("first surface");
+
+    if (self.pipe_owner) tray_mod.init(self) catch |err| {
+        log.warn("unable to create the notification icon err={}", .{err});
+    };
 }
 
 /// Run the message loop until WM_QUIT.
@@ -152,6 +160,8 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
+    tray_mod.deinit(self);
+
     // The message loop is over: no WM_GHOSTTY_IPC can touch a freed request.
     self.stopServer();
 
@@ -261,24 +271,39 @@ pub fn wakeup(self: *App) void {
     }
 }
 
+/// What happens when the last window is gone. A process that does not own
+/// the IPC pipe cannot be reached again, so it always ends. A pipe owner
+/// stays when `quit-after-last-window-closed` is off (the tray icon and the
+/// pipe keep it reachable), and otherwise quits after the delay, if any.
+pub fn lastWindowAction(
+    quit_after: bool,
+    delay_ms: ?u32,
+    pipe_owner: bool,
+) enum { quit_now, quit_timer, stay } {
+    if (!pipe_owner) return .quit_now;
+    if (!quit_after) return .stay;
+    if ((delay_ms orelse 0) == 0) return .quit_now;
+    return .quit_timer;
+}
+
+/// `quit-after-last-window-closed-delay` in timer milliseconds; null if unset.
+fn quitDelayMs(self: *const App) ?u32 {
+    const d = self.config.@"quit-after-last-window-closed-delay" orelse return null;
+    return @intCast(@min(
+        d.duration / std.time.ns_per_ms,
+        0x7FFFFFFF, // USER_TIMER_MAXIMUM
+    ));
+}
+
 /// Start the delayed quit that follows the last window closing. Called at
-/// startup (before any surface exists) and when the core reports that its
-/// last surface is gone. Only has an effect when no windows are open and
-/// `quit-after-last-window-closed` is set; closing the last window itself
-/// quits immediately.
+/// startup (before any surface exists), when the core reports that its last
+/// surface is gone and when the last window is destroyed. Only has an effect
+/// when no windows are open and `quit-after-last-window-closed` is set.
 pub fn startQuitTimer(self: *App) void {
     if (self.windows.items.len > 0) return;
     if (!self.config.@"quit-after-last-window-closed") return;
 
-    const delay_ns: u64 = if (self.config.@"quit-after-last-window-closed-delay") |d|
-        d.duration
-    else
-        0;
-    const delay_ms: u32 = @intCast(@min(
-        delay_ns / std.time.ns_per_ms,
-        0x7FFFFFFF, // USER_TIMER_MAXIMUM
-    ));
-    if (win32.user32.SetTimer(self.msg_hwnd, quit_timer_id, delay_ms, null) == 0) {
+    if (win32.user32.SetTimer(self.msg_hwnd, quit_timer_id, self.quitDelayMs() orelse 0, null) == 0) {
         log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
     }
 }
@@ -301,7 +326,16 @@ pub fn unregisterWindow(self: *App, window: *Window) bool {
 /// Called from the window procedure when a top-level window goes away.
 pub fn windowDestroyed(self: *App, window: *Window) void {
     _ = self.unregisterWindow(window);
-    if (self.windows.items.len == 0) win32.user32.PostQuitMessage(0);
+    if (self.windows.items.len > 0) return;
+    switch (lastWindowAction(
+        self.config.@"quit-after-last-window-closed",
+        self.quitDelayMs(),
+        self.pipe_owner,
+    )) {
+        .quit_now => win32.user32.PostQuitMessage(0),
+        .quit_timer => self.startQuitTimer(),
+        .stay => {},
+    }
 }
 
 /// The apprt surface of a core surface.
@@ -516,9 +550,20 @@ fn exitImmediately(self: *const App) bool {
 
 test {
     _ = util;
+    _ = tray_mod;
     _ = Window;
     _ = actions;
     _ = ipc.ops;
+}
+
+test "win32 app: last window policy" {
+    const Action = @typeInfo(@TypeOf(lastWindowAction)).@"fn".return_type.?;
+    try std.testing.expectEqual(Action.quit_now, lastWindowAction(true, null, true));
+    try std.testing.expectEqual(Action.quit_timer, lastWindowAction(true, 1000, true));
+    try std.testing.expectEqual(Action.stay, lastWindowAction(false, null, true));
+    try std.testing.expectEqual(Action.stay, lastWindowAction(false, 1000, true));
+    try std.testing.expectEqual(Action.quit_now, lastWindowAction(false, null, false));
+    try std.testing.expectEqual(Action.quit_now, lastWindowAction(true, 1000, false));
 }
 
 test "win32 app: runtime is win32 on windows" {

@@ -345,7 +345,7 @@ pub fn settingChanged(app: *App, lparam: LPARAM) void {
     settingChangedMsg(app, 0, lparam);
 }
 
-fn settingChangedMsg(app: *App, wparam: WPARAM, lparam: LPARAM) void {
+pub fn settingChangedMsg(app: *App, wparam: WPARAM, lparam: LPARAM) void {
     const name: ?[]const u16 = if (lparam == 0) null else std.mem.span(@as([*:0]const u16, @ptrFromInt(@as(usize, @bitCast(lparam)))));
     if (recent_settings.seen(.{
         .time = win32.user32.GetMessageTime(),

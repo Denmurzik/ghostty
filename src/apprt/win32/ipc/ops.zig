@@ -271,6 +271,13 @@ fn writeState(w: *std.Io.Writer, app: *App) !void {
     try jw.write(app.serving());
     try jw.objectField("elevated");
     try jw.write(instance.isElevated());
+    try jw.objectField("pipe_owner");
+    try jw.write(app.pipe_owner);
+    try jw.objectField("tray");
+    try jw.beginObject();
+    try jw.objectField("visible");
+    try jw.write(app.tray.visible);
+    try jw.endObject();
     try jw.objectField("windows");
     try jw.beginArray();
     for (app.windows.items) |window| try writeWindow(&jw, window);

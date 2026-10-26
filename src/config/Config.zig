@@ -2637,7 +2637,9 @@ keybind: Keybinds = .{},
 ///
 /// This defaults to `false` on macOS since that is standard behavior for
 /// a macOS application. On Linux, this defaults to `true` since that is
-/// generally expected behavior.
+/// generally expected behavior. On Windows, this defaults to `false`:
+/// Ghostty keeps running in the notification area, where its icon offers
+/// New Window and Quit.
 ///
 /// On Linux, if this is `true`, Ghostty can delay quitting fully until a
 /// configurable amount of time has passed after the last window is closed.

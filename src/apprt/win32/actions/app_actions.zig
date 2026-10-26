@@ -8,6 +8,7 @@ const Chrome = @import("../Chrome.zig");
 const Window = @import("../Window.zig");
 const messages = @import("../messages.zig");
 const theme = @import("../theme.zig");
+const tray = @import("../tray.zig");
 const util = @import("../util.zig");
 const link_policy = @import("../link_policy.zig");
 
@@ -134,7 +135,10 @@ fn updateTarget(app: *App, target: apprt.Target, config: *const Config) !void {
 /// chrome follows it. A surface-level change has nothing for the chrome.
 pub fn config_change(app: *App, target: apprt.Target, value: apprt.Action.Value(.config_change)) !bool {
     switch (target) {
-        .app => theme.configChanged(app, value.config),
+        .app => {
+            theme.configChanged(app, value.config);
+            tray.syncTo(app, value.config.@"quit-after-last-window-closed");
+        },
         .surface => {},
     }
     return true;
