@@ -4,6 +4,7 @@ const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
 const title_edit = @import("../title_edit.zig");
+const placement = @import("../placement.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -42,52 +43,39 @@ pub fn set_window_title(app: *App, target: apprt.Target, value: apprt.Action.Val
     return true;
 }
 
-/// Stub until Task 22.
 pub fn toggle_maximize(app: *App, target: apprt.Target, value: apprt.Action.Value(.toggle_maximize)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.toggleMaximize(window);
 }
 
-/// Stub until Task 22.
+/// The `macos_non_native*` variants behave like `native`.
 pub fn toggle_fullscreen(app: *App, target: apprt.Target, value: apprt.Action.Value(.toggle_fullscreen)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.toggleFullscreen(window);
 }
 
-/// Stub until Task 22.
 pub fn toggle_window_decorations(app: *App, target: apprt.Target, value: apprt.Action.Value(.toggle_window_decorations)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.toggleDecorations(window);
 }
 
-/// Stub until Task 22.
 pub fn float_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.float_window)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.setFloat(window, value);
 }
 
-/// Stub until Task 22.
 pub fn reset_window_size(app: *App, target: apprt.Target, value: apprt.Action.Value(.reset_window_size)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.resetSize(window);
 }
 
-/// Stub until Task 22.
 pub fn resize_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.resize_window)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse return false;
+    return placement.resizeClient(window, value.width, value.height);
 }
 
 pub fn prompt_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt_title)) !bool {

@@ -344,7 +344,12 @@ fn buildMenu() ?user32.HMENU {
 /// Bring the window's frame in line with the config: decorations, system
 /// menu style, Mica and the extended frame.
 pub fn apply(window: *Window) void {
-    const decorations = decorationsFor(window.app.config.@"window-decoration");
+    applyDecorations(window, decorationsFor(window.app.config.@"window-decoration"));
+}
+
+/// `apply` with explicit decorations: the `toggle_window_decorations`
+/// action overrides the config.
+pub fn applyDecorations(window: *Window, decorations: Decorations) void {
     window.frame.decorations = decorations;
 
     const style: usize = @bitCast(user32.GetWindowLongPtrW(window.hwnd, user32.GWL_STYLE));

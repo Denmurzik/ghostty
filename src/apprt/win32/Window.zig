@@ -571,6 +571,7 @@ fn runHooks(
 /// Resize the window so that its content area is `width` x `height`
 /// physical pixels.
 pub fn setInitialSize(self: *Window, width: u32, height: u32) void {
+    self.placement.initial_size = .{ .width = width, .height = height };
     const size = windowSizeFor(
         .{ .w = clampPixels(width), .h = clampPixels(height) },
         frame_mod.nonClientSize(self),
