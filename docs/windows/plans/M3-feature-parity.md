@@ -1020,3 +1020,9 @@ Review: `docs/windows/plans/M3-preflight-review.md` (2 BLOCKER, 13 IMPORTANT, 17
 | 30 | MINOR | Applied: R-M3-2 and Task 15 — hwnd-mode toggle is a logged no-op; backdrop-table row. |
 | 31 | MINOR | Applied: Task 15 `Tab.zig` paints alpha 0 (black brush in the extended frame). |
 | 32 | MINOR | Applied: Task 2 Step 0 re-checks hook sites and names against landed M2 (incl. 34.4) and reports diffs before Step 1. |
+
+## Lead addendum (2026-10-27, owner style rule "follow Ghostty for macOS")
+- New Task 29 (W5, light review): **macOS-like tab bar look.** Ghostty for macOS uses native AppKit window tabs, so `macos/Sources` has no constants; reproduce AppKit tab-bar metrics in `TabStrip.Metrics`/`Chrome.zig`: equal-width tabs filling the strip, centred 13 pt title, close button only on hover (left side), 1 px separators, active tab = lighter fill, new-tab button at the right end; keep Windows caption buttons/Mica/snap. Screenshot comparison in the report.
+- Task 6 (decor-pass) must implement `unfocused-split-opacity` dimming and the bell border exactly as macOS (`rgb(1,0.8,0)` at 0.5 alpha, 3 pt, 0.3 s).
+- Message ids: M2 Task 21 took `WM_APP+11` (`WM_GHOSTTY_CLOSE_ALL`); M3's reserved ids start at `+12`.
+- M2 Task 25's native scrollbar is interim: M3 overlay work adds a macOS-style overlay scroller (no width, auto-hide).
