@@ -48,3 +48,5 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - File drag-and-drop: dropping files/folders from Explorer onto a terminal surface inserts their paths (shell-quoted for the running shell, space-separated) as if typed/pasted — M2.
 - Input latency: the owner reports heavy input lag ("вообще не отзывчивый") while testing the M1 Debug build. M2 must measure keypress-to-frame latency on ReleaseFast AND Debug, find the causes (frame pacing wait, WM_CHAR handling, renderer wakeups, Debug-only costs) and make typing feel immediate; acceptance threshold set in the M2 plan.
 - Input latency (update 2026-10-26): lag reproduces on ReleaseFast too; HIGH lag in TUI apps on mouse-wheel scroll and interaction. Highest priority in M2 (first task).
+- Drops into Git Bash insert POSIX msys paths ('/c/Users/…'); unknown shells use cmd-style double quotes.
+- Latency gate: whole path ≤16 ms p95 ReleaseFast; if ConPTY+shell alone exceed it, try ConPTY passthrough / bundled OpenConsole like Windows Terminal; Ghostty-owned stages ≤6 ms; plus the owner's hands-on comparison against Windows Terminal. Debug may stay slower; daily use is ReleaseFast.
