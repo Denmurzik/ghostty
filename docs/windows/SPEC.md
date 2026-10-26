@@ -628,8 +628,18 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
 8. Test-only IPC ops `state`, `action`, `dpi`, `color-scheme` answer only when Ghostty was started with
    `GHOSTTY_WIN32_TEST_IPC=1`; e2e uses them instead of system-wide DPI/theme changes (owner-machine safety). Cost if
    wrong: none for users.
-9. Chrome painter backend is decided by M2 Task 12 (spike): software `ID2D1DCRenderTarget` on a buffered-paint DC
-   (expected), `ID2D1HwndRenderTarget`, or the R9 opaque fallback without Mica. The lead records the result here.
+9. Chrome painter backend (decided by M2 Task 12 spike, 2026-10-26): software `ID2D1DCRenderTarget` on a buffered-paint
+   DC over Mica (`dc`). RAM +2.91 MB over a window without D2D (budget 3 MB for the D2D painter, borderline; overall RAM
+   is gated at G1). Condition: the top-level is created WITHOUT `WS_SYSMENU` — with it DWM paints its own min/max/close
+   over the extended frame ("ghost" buttons). Task 17 therefore shows the system menu itself (Alt+Space and right-click
+   on the caption: `GetSystemMenu` + `TrackPopupMenuEx` → `WM_SYSCOMMAND`), swallows a lone-Alt `SC_KEYMENU` (it froze
+   the UI thread in the spike) and must verify: Alt+Space menu, taskbar/thumbnail context menu, Alt+F4, caption
+   double-click maximize, Win+Up/Down, drag-to-top snap, snap-flyout layout selection, Alt+key reaching the terminal,
+   inactive-window caption. If any of these cannot be restored without `WS_SYSMENU`, Task 17 falls back to the R9 opaque
+   painter (no Mica) with `WS_SYSMENU`. Maximized: `WM_NCCALCSIZE` adds the frame inset back to the client top.
+   Re-parenting: `SetParent` keeps a presenting FLIP_DISCARD swap chain working (same size; and after the source window
+   is destroyed and the target resized) → Task 30 keeps only the defensive generation bump. Not proven: cross-DPI /
+   cross-monitor moves, another UI thread. Spike evidence: `test/windows/chrome-spike/`.
 10. One container child HWND per tab holds that tab's surfaces; hidden tabs are hidden containers (surfaces occluded);
     split gaps are 4 px at 96 dpi painted with `split-divider-color` (theme default otherwise).
 11. Scrollbar = native `WS_VSCROLL` on the surface, always visible with `scrollbar = system` (`SIF_DISABLENOSCROLL`, no grid
