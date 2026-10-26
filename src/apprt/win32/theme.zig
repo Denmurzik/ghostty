@@ -120,8 +120,32 @@ var high_contrast: ?bool = null;
 /// conditional (light/dark theme) state applied, which `App.config` is not.
 var applied: ?Inputs = null;
 
-/// Message time of the last `WM_SETTINGCHANGE` that was acted on.
-var last_setting_time: ?i32 = null;
+/// The `WM_SETTINGCHANGE` broadcasts acted on last. A broadcast reaches
+/// every top-level window, and two settings may arrive in the same tick
+/// (ImmersiveColorSet and high contrast), so the message time alone is not
+/// a key. A few slots: windows interleave the broadcasts.
+var recent_settings: RecentSettings = .{};
+
+const SettingKey = struct {
+    time: i32,
+    wparam: usize,
+    name_hash: u64,
+};
+
+const RecentSettings = struct {
+    keys: [4]?SettingKey = @splat(null),
+    next: usize = 0,
+
+    /// True if `key` was seen before; otherwise it is remembered.
+    fn seen(self: *RecentSettings, key: SettingKey) bool {
+        for (self.keys) |k| {
+            if (k) |v| if (std.meta.eql(v, key)) return true;
+        }
+        self.keys[self.next] = key;
+        self.next = (self.next + 1) % self.keys.len;
+        return false;
+    }
+};
 
 pub fn highContrast() bool {
     if (high_contrast) |hc| return hc;
@@ -258,14 +282,15 @@ pub fn configChanged(app: *App, config: *const configpkg.Config) void {
     applied = .from(config);
     for (app.windows.items) |window| {
         applyToWindow(window);
-        window.layout();
+        // A window still being created is in the list without tabs; its
+        // creation lays it out itself.
+        if (window.tabs.items.len > 0) window.layout();
     }
 }
 
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
-    _ = wparam;
     switch (msg) {
-        win32.user32.WM_SETTINGCHANGE => settingChanged(window.app, lparam),
+        win32.user32.WM_SETTINGCHANGE => settingChangedMsg(window.app, wparam, lparam),
         win32.user32.WM_ACTIVATE => Chrome.invalidate(window),
         else => {},
     }
@@ -294,13 +319,18 @@ pub fn schemeChanged(app: *App, scheme: apprt.ColorScheme) void {
 /// `WM_SETTINGCHANGE`; `lparam` is the name of the changed setting, if any.
 /// A broadcast reaches every top-level window, only the first one acts.
 pub fn settingChanged(app: *App, lparam: LPARAM) void {
-    const time = win32.user32.GetMessageTime();
-    if (last_setting_time) |t| if (t == time) return;
-    last_setting_time = time;
+    settingChangedMsg(app, 0, lparam);
+}
 
-    if (lparam != 0) {
-        const name: [*:0]const u16 = @ptrFromInt(@as(usize, @bitCast(lparam)));
-        const wide = std.mem.span(name);
+fn settingChangedMsg(app: *App, wparam: WPARAM, lparam: LPARAM) void {
+    const name: ?[]const u16 = if (lparam == 0) null else std.mem.span(@as([*:0]const u16, @ptrFromInt(@as(usize, @bitCast(lparam)))));
+    if (recent_settings.seen(.{
+        .time = win32.user32.GetMessageTime(),
+        .wparam = wparam,
+        .name_hash = if (name) |n| std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(n)) else 0,
+    })) return;
+
+    if (name) |wide| {
         if (std.mem.eql(u16, wide, std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet"))) {
             const dark = util.systemUsesDarkTheme();
             if (system_dark != dark) schemeChanged(app, if (dark) .dark else .light);
@@ -423,4 +453,19 @@ test "win32 theme: high contrast disables mica" {
 
 test "win32 theme: colorref channel order" {
     try std.testing.expectEqual(Color{ .r = 0x11, .g = 0x22, .b = 0x33 }, fromColorRef(0x00332211));
+}
+
+test "win32 theme: settings broadcast dedup keys on time, wparam and name" {
+    var r: RecentSettings = .{};
+    const color: SettingKey = .{ .time = 100, .wparam = 0, .name_hash = 1 };
+    const contrast: SettingKey = .{ .time = 100, .wparam = 0x43, .name_hash = 0 };
+
+    try std.testing.expect(!r.seen(color));
+    // A different setting in the same tick is not a duplicate.
+    try std.testing.expect(!r.seen(contrast));
+    // The same broadcasts arriving at the next window are.
+    try std.testing.expect(r.seen(color));
+    try std.testing.expect(r.seen(contrast));
+    // Same name, later tick: a new change.
+    try std.testing.expect(!r.seen(.{ .time = 101, .wparam = 0, .name_hash = 1 }));
 }
