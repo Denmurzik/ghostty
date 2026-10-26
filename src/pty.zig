@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = @import("os/main.zig").windows;
+const thread_spawn_config = @import("os/main.zig").thread.spawn_config;
 const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
@@ -558,7 +559,7 @@ const WindowsPty = struct {
         if (self.console_closed.swap(true, .acq_rel)) return;
 
         const hpc = self.pseudo_console;
-        const thread = std.Thread.spawn(.{}, closeConsole, .{hpc}) catch |err| {
+        const thread = std.Thread.spawn(thread_spawn_config, closeConsole, .{hpc}) catch |err| {
             log.warn("error spawning pseudo console close thread err={}, closing inline", .{err});
             closeConsole(hpc);
             return;

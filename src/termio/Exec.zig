@@ -153,11 +153,11 @@ pub fn threadEnter(
 
     // Start our read thread
     const read_thread = if (comptime is_windows) try std.Thread.spawn(
-        .{},
+        internal_os.thread.spawn_config,
         ReadThread.threadMainWindows,
         .{ pty_fds.read, io, events.quit, events.drained },
     ) else try std.Thread.spawn(
-        .{},
+        internal_os.thread.spawn_config,
         ReadThread.threadMainPosix,
         .{ pty_fds.read, io, pipe[0] },
     );

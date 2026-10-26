@@ -32,6 +32,7 @@ pub const windows_cmdline = @import("windows_cmdline.zig");
 pub const windows_latency = @import("windows_latency.zig");
 pub const macos = @import("macos.zig");
 pub const shell = @import("shell.zig");
+pub const thread = @import("thread.zig");
 pub const stderr = @import("stderr.zig");
 pub const uri = @import("uri.zig");
 
@@ -71,6 +72,7 @@ test {
     _ = shell;
     _ = windows_shell;
     _ = windows_latency;
+    _ = thread;
 
     if (comptime builtin.target.os.tag == .linux) {
         _ = kernel_info;
