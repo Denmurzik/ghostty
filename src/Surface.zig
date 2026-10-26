@@ -561,8 +561,12 @@ pub fn init(
         break :size size;
     };
 
+    // Devices that can be lost are shared through acquire/release, which
+    // `Renderer.init` takes over; the others live in the app.
+    const shared_device = comptime @hasDecl(rendererpkg.Device, "acquire");
+
     // Initialize the render device if it hasn't been initialized already
-    const render_device = app.device orelse device: {
+    const render_device: ?*rendererpkg.Device = if (shared_device) null else app.device orelse device: {
         const device_options = try rt_surface.renderDeviceOptions();
         const device: *rendererpkg.Device = try .init(alloc, device_options);
         app.device = device;
@@ -578,7 +582,7 @@ pub fn init(
         errdefer renderer_config.deinit();
 
         break :renderer try Renderer.init(alloc, .{
-            .device = render_device,
+            .device = if (shared_device) try rendererpkg.Device.acquire(alloc) else render_device.?,
             .config = renderer_config,
             .font_grid = font_grid,
             .size = size,

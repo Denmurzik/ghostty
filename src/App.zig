@@ -149,6 +149,9 @@ pub fn deinit(self: *App) void {
     // Clean up our render device. This must happen after all surfaces
     // are gone since their renderers borrow it.
     if (self.device) |dev| dev.deinit(self.alloc);
+
+    // Devices shared through acquire/release drop the app's own reference.
+    if (comptime @hasDecl(renderer.Device, "shutdown")) renderer.Device.shutdown();
 }
 
 pub fn destroy(self: *App) void {

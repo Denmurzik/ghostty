@@ -5,9 +5,15 @@
 //! (creating and releasing resources needs no lock) but the immediate
 //! context is not: everything that touches it (`Map`, `UpdateSubresource`,
 //! draws, ...) must run between `lockContext` and `unlockContext`.
+//!
+//! Surfaces take the shared device with `acquire` and give it back with
+//! `release`. A renderer that sees `DXGI_ERROR_DEVICE_REMOVED/RESET` calls
+//! `markLost`; the next `acquire` then creates a fresh device (a new
+//! generation) and the lost one is freed when its last renderer releases it.
 const Device = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const com = win32.com;
@@ -43,6 +49,10 @@ const track_owner = std.debug.runtime_safety;
 /// Sentinel for "no thread holds the context lock"; no real thread has id 0.
 const no_owner: std.Thread.Id = 0;
 
+/// The shared device, as `acquire` hands it out. Same type as the device
+/// itself: the bookkeeping lives in the fields below.
+pub const Shared = Device;
+
 /// The options this device was created with, after env overrides.
 options: Options,
 
@@ -66,6 +76,22 @@ context_mutex: std.Io.Mutex = .init,
 /// The thread that holds `context_mutex`, if tracked.
 context_owner: if (track_owner) std.atomic.Value(std.Thread.Id) else void =
     if (track_owner) .init(no_owner) else {},
+
+/// Sharing state, set by `acquire`; devices made by `init` are unshared.
+/// `refs` is guarded by `registry_mutex`.
+refs: usize = 0,
+generation: u32 = 0,
+pool_alloc: ?Allocator = null,
+
+/// Set once a renderer saw the device removed or reset.
+lost: std.atomic.Value(bool) = .init(false),
+
+/// The first reason reported with `markLost` (an HRESULT).
+lost_reason: std.atomic.Value(i32) = .init(0),
+
+/// Debug builds: `GHOSTTY_D3D11_SIMULATE_DEVICE_LOST=<ms>` makes the device
+/// report itself lost that many ms after it was created (0 = never).
+simulate_lost_at_ns: u64 = 0,
 
 pub fn init(alloc: Allocator, options: Options) !*Device {
     const opts = applyEnv(alloc, options);
@@ -100,6 +126,144 @@ pub fn init(alloc: Allocator, options: Options) !*Device {
     logAdapter(created.device);
     logPrivateUsage("Device.init");
     return self;
+}
+
+/// Creates and frees the devices `acquire` shares. Replaced in tests.
+const Factory = struct {
+    create: *const fn (Allocator) anyerror!*Device,
+    destroy: *const fn (Allocator, *Device) void,
+};
+
+const real_factory: Factory = .{ .create = createShared, .destroy = destroyShared };
+
+fn createShared(alloc: Allocator) anyerror!*Device {
+    const device = try Device.init(alloc, .{});
+    // Only the first generation, so the replacement stays healthy.
+    if (next_generation == 1) device.simulate_lost_at_ns = simulateFromEnv(alloc);
+    return device;
+}
+
+fn destroyShared(alloc: Allocator, device: *Device) void {
+    device.deinit(alloc);
+}
+
+var device_factory: Factory = real_factory;
+
+/// Guards `current`, `next_generation` and every `refs`.
+var registry_mutex: std.Io.Mutex = .init;
+
+/// The device `acquire` hands out; the registry holds one reference to it.
+var current: ?*Device = null;
+
+var next_generation: u32 = 1;
+
+/// Whether a device was lost and no healthy one has been created since.
+var lost_seen: std.atomic.Value(bool) = .init(false);
+
+/// The current healthy shared device, or a new one when there is none or
+/// the current one was lost. Release it with `release`.
+pub fn acquire(alloc: Allocator) !*Shared {
+    registry_mutex.lockUncancelable(global.io());
+    defer registry_mutex.unlock(global.io());
+
+    if (current) |d| {
+        if (!d.isLost()) {
+            d.refs += 1;
+            return d;
+        }
+        // Lost, but `markLost` has not taken it out yet.
+        dropRegistryRef(d);
+    }
+
+    const d = try device_factory.create(alloc);
+    d.pool_alloc = alloc;
+    d.generation = next_generation;
+    next_generation +%= 1;
+    // One for the registry, one for the caller.
+    d.refs = 2;
+    current = d;
+    lost_seen.store(false, .monotonic);
+    if (d.generation > 1) log.info("d3d11 device generation={d} created after a device loss", .{d.generation});
+    return d;
+}
+
+/// Gives a reference from `acquire` back. The last reference of a lost
+/// device frees it.
+pub fn release(shared: *Shared) void {
+    registry_mutex.lockUncancelable(global.io());
+    defer registry_mutex.unlock(global.io());
+    unref(shared);
+}
+
+/// Drops the registry's own reference, at the end of the process. Devices
+/// still referenced by renderers stay until those release them.
+pub fn shutdown() void {
+    registry_mutex.lockUncancelable(global.io());
+    defer registry_mutex.unlock(global.io());
+    if (current) |d| dropRegistryRef(d);
+}
+
+/// Records that `shared` was removed or reset (`reason` is the HRESULT) and
+/// stops handing it out. Safe from any thread, idempotent. The caller must
+/// hold a reference.
+pub fn markLost(shared: *Shared, reason: i32) void {
+    if (shared.lost.swap(true, .acq_rel)) return;
+    shared.lost_reason.store(reason, .monotonic);
+
+    registry_mutex.lockUncancelable(global.io());
+    defer registry_mutex.unlock(global.io());
+    lost_seen.store(true, .monotonic);
+    if (current == shared) dropRegistryRef(shared);
+}
+
+pub fn isLost(shared: *const Shared) bool {
+    return shared.lost.load(.acquire);
+}
+
+/// Whether a device was lost and no healthy one exists yet. The app quits
+/// instead of staying in the tray when this holds with no window left.
+pub fn anyLost() bool {
+    return lost_seen.load(.monotonic);
+}
+
+/// `error.DeviceLost` once the device is lost, or once its simulated loss
+/// time (Debug builds) has come.
+pub fn checkLost(self: *Device) error{DeviceLost}!void {
+    if (self.isLost()) return error.DeviceLost;
+    if (self.simulate_lost_at_ns != 0 and nowNs() >= self.simulate_lost_at_ns) {
+        log.warn("d3d11 simulating a device loss generation={d}", .{self.generation});
+        self.markLost(win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+        return error.DeviceLost;
+    }
+}
+
+/// The registry no longer hands `d` out. Registry mutex held.
+fn dropRegistryRef(d: *Device) void {
+    if (current == d) current = null;
+    unref(d);
+}
+
+/// Registry mutex held.
+fn unref(d: *Device) void {
+    std.debug.assert(d.refs > 0);
+    d.refs -= 1;
+    if (d.refs > 0) return;
+    log.info("d3d11 device generation={d} released", .{d.generation});
+    device_factory.destroy(d.pool_alloc.?, d);
+}
+
+fn nowNs() u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(global.io(), .awake).toNanoseconds()));
+}
+
+/// The loss time of `GHOSTTY_D3D11_SIMULATE_DEVICE_LOST`, Debug builds only.
+fn simulateFromEnv(alloc: Allocator) u64 {
+    if (builtin.mode != .debug) return 0;
+    const v = global.environ().getAlloc(alloc, "GHOSTTY_D3D11_SIMULATE_DEVICE_LOST") catch return 0;
+    defer alloc.free(v);
+    const ms = std.fmt.parseInt(u32, v, 10) catch return 0;
+    if (ms == 0) return 0;
+    return nowNs() + @as(u64, ms) * std.time.ns_per_ms;
 }
 
 /// DXGI_ADAPTER_DESC.
@@ -288,4 +452,148 @@ test "d3d11 device: context lock is released by unlock" {
     // Taking it again proves unlock released it.
     device.lockContext();
     device.unlockContext();
+}
+
+/// Stands in for the real device factory so the generation logic runs
+/// without a GPU.
+const FakeFactory = struct {
+    var created: usize = 0;
+    var destroyed: usize = 0;
+
+    fn create(alloc: Allocator) anyerror!*Device {
+        const d = try alloc.create(Device);
+        d.* = undefined;
+        d.refs = 0;
+        d.lost = .init(false);
+        d.lost_reason = .init(0);
+        d.simulate_lost_at_ns = 0;
+        created += 1;
+        return d;
+    }
+
+    fn destroy(alloc: Allocator, d: *Device) void {
+        alloc.destroy(d);
+        destroyed += 1;
+    }
+
+    fn install() void {
+        created = 0;
+        destroyed = 0;
+        device_factory = .{ .create = create, .destroy = destroy };
+        current = null;
+        next_generation = 1;
+        lost_seen.store(false, .monotonic);
+    }
+
+    fn uninstall() void {
+        shutdown();
+        device_factory = real_factory;
+    }
+};
+
+test "d3d11 device: acquire shares the healthy device" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const a = try acquire(alloc);
+    const b = try acquire(alloc);
+    try std.testing.expectEqual(a, b);
+    try std.testing.expectEqual(@as(usize, 1), FakeFactory.created);
+    release(a);
+    release(b);
+    // The registry keeps the healthy device for the next window.
+    try std.testing.expectEqual(@as(usize, 0), FakeFactory.destroyed);
+}
+
+test "d3d11 device: acquire after markLost returns a new device" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const a = try acquire(alloc);
+    markLost(a, win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+    try std.testing.expect(a.isLost());
+    try std.testing.expect(anyLost());
+
+    const b = try acquire(alloc);
+    try std.testing.expect(a != b);
+    try std.testing.expect(!b.isLost());
+    try std.testing.expect(b.generation > a.generation);
+    try std.testing.expect(!anyLost());
+    release(b);
+    release(a);
+}
+
+test "d3d11 device: the lost device is freed after its last release" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const a1 = try acquire(alloc);
+    const a2 = try acquire(alloc);
+    markLost(a1, win32.foundation.DXGI_ERROR_DEVICE_RESET);
+    markLost(a2, win32.foundation.DXGI_ERROR_DEVICE_REMOVED); // idempotent
+    try std.testing.expectEqual(win32.foundation.DXGI_ERROR_DEVICE_RESET, a1.lost_reason.load(.monotonic));
+
+    release(a1);
+    try std.testing.expectEqual(@as(usize, 0), FakeFactory.destroyed);
+    release(a2);
+    try std.testing.expectEqual(@as(usize, 1), FakeFactory.destroyed);
+}
+
+test "d3d11 device: renderers on the healthy device are unaffected" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const old = try acquire(alloc);
+    markLost(old, win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+    const fresh = try acquire(alloc);
+    const fresh2 = try acquire(alloc);
+    try std.testing.expectEqual(fresh, fresh2);
+
+    // The old device going away leaves the fresh one alone.
+    release(old);
+    try std.testing.expectEqual(@as(usize, 1), FakeFactory.destroyed);
+    try std.testing.expect(!fresh.isLost());
+    try fresh.checkLost();
+    release(fresh);
+    release(fresh2);
+    try std.testing.expectEqual(@as(usize, 1), FakeFactory.destroyed);
+}
+
+test "d3d11 device: simulated loss marks the device lost once its time came" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+
+    const d = try acquire(std.testing.allocator);
+    defer release(d);
+    d.simulate_lost_at_ns = nowNs() + 60 * std.time.ns_per_s;
+    try d.checkLost();
+    d.simulate_lost_at_ns = nowNs() -| 1;
+    try std.testing.expectError(error.DeviceLost, d.checkLost());
+    try std.testing.expect(d.isLost());
+}
+
+test "d3d11 device: concurrent acquire, markLost and release balance" {
+    FakeFactory.install();
+    defer FakeFactory.uninstall();
+    const alloc = std.testing.allocator;
+
+    const Worker = struct {
+        fn run(a: Allocator) void {
+            for (0..200) |i| {
+                const d = acquire(a) catch return;
+                if (i % 50 == 0) markLost(d, win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+                release(d);
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{alloc});
+    for (threads) |t| t.join();
+
+    shutdown();
+    try std.testing.expectEqual(FakeFactory.created, FakeFactory.destroyed);
 }

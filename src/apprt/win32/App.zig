@@ -337,7 +337,8 @@ pub fn windowDestroyed(self: *App, window: *Window) void {
         self.config.@"quit-after-last-window-closed",
         quitDelayMs(&self.config),
         // Without an icon nothing could bring a staying process back.
-        self.pipe_owner and self.tray.hwnd != null,
+        // After a GPU device loss the process quits rather than stay resident.
+        self.pipe_owner and self.tray.hwnd != null and !renderer.Device.anyLost(),
     )) {
         .quit_now => win32.user32.PostQuitMessage(0),
         .quit_timer => self.startQuitTimer(),

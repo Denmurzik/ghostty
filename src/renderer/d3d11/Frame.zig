@@ -89,6 +89,7 @@ pub fn complete(self: *const Self, sync: bool) void {
     self.submit() catch |err| switch (err) {
         error.DeviceLost => {
             health = .unhealthy;
+            api.device.markLost(win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
             if (!api.device_lost_logged) {
                 api.device_lost_logged = true;
                 log.err("d3d11 device lost, the surface will not draw", .{});
@@ -105,6 +106,9 @@ pub fn complete(self: *const Self, sync: bool) void {
 /// if requested.
 fn submit(self: *const Self) error{DeviceLost}!void {
     const api = self.api;
+
+    // A lost device draws nothing more; a new one serves new surfaces.
+    try api.device.checkLost();
 
     if (api.present_target != null) self.present() catch |err| switch (err) {
         error.DeviceLost => return error.DeviceLost,

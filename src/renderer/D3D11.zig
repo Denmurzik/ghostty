@@ -159,6 +159,8 @@ fn pacingLogFromEnv(alloc: Allocator) bool {
 
 pub fn deinit(self: *D3D11) void {
     if (self.dump) |*d| d.deinit(self.alloc);
+    // The GPU resources were released on the render thread already.
+    if (self.device.pool_alloc != null) Device.release(self.device);
     self.* = undefined;
 }
 
