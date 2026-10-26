@@ -28,7 +28,7 @@ const log = std.log.scoped(.win32_drop);
 
 pub const WM_GHOSTTY_DROP = messages.WM_GHOSTTY_DROP;
 
-pub const ShellKind = enum { msys, wsl, pwsh, cmd };
+pub const ShellKind = enum { msys, cygwin, wsl, pwsh, cmd };
 
 /// The kind of shell a command starts, from the basename of its program.
 /// Unknown shells and the default (no command) use cmd-style quoting.
@@ -61,13 +61,27 @@ fn programOf(line: []const u8) []const u8 {
     return s[0..end];
 }
 
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |i| {
+        if (std.ascii.eqlIgnoreCase(haystack[i..][0..needle.len], needle)) return true;
+    }
+    return false;
+}
+
 fn shellKindOfProgram(program: []const u8) ShellKind {
     const base_start = if (std.mem.lastIndexOfAny(u8, program, "/\\")) |i| i + 1 else 0;
     var base = program[base_start..];
     if (base.len > 4 and std.ascii.eqlIgnoreCase(base[base.len - 4 ..], ".exe")) base = base[0 .. base.len - 4];
 
     const msys_shells = [_][]const u8{ "bash", "sh", "zsh", "fish", "dash", "ksh", "busybox" };
-    for (msys_shells) |name| if (std.ascii.eqlIgnoreCase(base, name)) return .msys;
+    for (msys_shells) |name| if (std.ascii.eqlIgnoreCase(base, name)) {
+        // System32\bash.exe is the WSL launcher, not Git Bash.
+        if (containsIgnoreCase(program, "\\windows\\system32\\") or
+            containsIgnoreCase(program, "\\windows\\sysnative\\")) return .wsl;
+        if (containsIgnoreCase(program, "\\cygwin")) return .cygwin;
+        return .msys;
+    };
     if (std.ascii.eqlIgnoreCase(base, "wsl")) return .wsl;
     if (std.ascii.eqlIgnoreCase(base, "pwsh") or std.ascii.eqlIgnoreCase(base, "powershell")) return .pwsh;
     return .cmd;
@@ -132,8 +146,12 @@ pub fn quote(alloc: Allocator, kind: ShellKind, paths: []const []const u8) ![]u8
     for (paths, 0..) |path, i| {
         if (i > 0) try out.append(alloc, ' ');
         switch (kind) {
-            .msys, .wsl => {
-                const conv = if (kind == .msys) try msysPath(alloc, path) else try wslPath(alloc, path);
+            .msys, .cygwin, .wsl => {
+                const conv = switch (kind) {
+                    .msys => try msysPath(alloc, path),
+                    .cygwin => try convert(alloc, path, "/cygdrive/"),
+                    else => try wslPath(alloc, path),
+                };
                 defer alloc.free(conv);
                 if (plain(conv, "_./:@%+=,-")) {
                     try out.appendSlice(alloc, conv);
@@ -248,15 +266,37 @@ fn utf16ToUtf8Lossy(alloc: Allocator, bytes: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+/// Whether a dropped path is a plausible Windows path. The text is pasted
+/// without the unsafe-paste prompt and a drag source can send any string, so
+/// a path with a control character (CR runs a command) or one of `"<>|*?`
+/// (breaks quoting, redirects) is refused. A `\\?\` prefix may carry `?`.
+pub fn pathIsSafe(path: []const u8) bool {
+    var rest = path;
+    if (std.mem.startsWith(u8, rest, "\\\\?\\")) rest = rest[4..];
+    for (rest) |c| {
+        if (c < 0x20 or c == 0x7F) return false;
+        if (std.mem.indexOfScalar(u8, "\"<>|*?", c) != null) return false;
+    }
+    return true;
+}
+
 // -- The drop target ----------------------------------------------------------
 
 const gpa = std.heap.smp_allocator;
 
 /// Posted by `Drop`; owned by the message handler.
 const Payload = struct {
+    id: u32,
+    window: *Window,
     surface_id: u32,
     text: []u8,
 };
+
+/// Drops waiting for their `WM_GHOSTTY_DROP` (UI thread only). The message
+/// carries just an id: any process of the same integrity level can post
+/// `WM_APP + 10`, so an unknown id is ignored and no pointer is trusted.
+var pending: std.ArrayList(Payload) = .empty;
+var next_payload_id: u32 = 1;
 
 const Target = struct {
     /// First, as COM requires.
@@ -339,15 +379,17 @@ const Target = struct {
             log.warn("unable to read the dropped files err={}", .{err});
             return win32.foundation.S_OK;
         };
-        const payload = gpa.create(Payload) catch {
+        const id = next_payload_id;
+        next_payload_id +%= 1;
+        if (next_payload_id == 0) next_payload_id = 1;
+        pending.append(gpa, .{ .id = id, .window = window, .surface_id = surface.id, .text = text }) catch {
             gpa.free(text);
             return win32.foundation.S_OK;
         };
-        payload.* = .{ .surface_id = surface.id, .text = text };
-        if (user32.PostMessageW(window.hwnd, WM_GHOSTTY_DROP, 0, @bitCast(@intFromPtr(payload))) == 0) {
+        if (user32.PostMessageW(window.hwnd, WM_GHOSTTY_DROP, 0, @intCast(id)) == 0) {
             log.warn("unable to post the drop err={}", .{kernel32.GetLastError()});
-            gpa.free(text);
-            gpa.destroy(payload);
+            const dropped = pending.pop().?;
+            gpa.free(dropped.text);
             return win32.foundation.S_OK;
         }
         effect.* = ole32.DROPEFFECT_COPY;
@@ -373,6 +415,10 @@ fn textFromData(data: *ole32.IDataObject, kind: ShellKind) ![]u8 {
 
     const paths = try pathsFromDropFiles(gpa, ptr[0..size]);
     defer freePaths(gpa, paths);
+    for (paths) |p| if (!pathIsSafe(p)) {
+        log.warn("refusing a drop with a path that has control or shell characters", .{});
+        return error.UnsafePath;
+    };
     const views: []const []const u8 = @ptrCast(paths);
     return quote(gpa, kind, views);
 }
@@ -411,11 +457,19 @@ pub fn register(window: *Window) void {
 }
 
 pub fn revoke(window: *Window) void {
-    for (targets.items, 0..) |target, i| {
+    // Drops posted to this window will never be delivered.
+    var i: usize = 0;
+    while (i < pending.items.len) {
+        if (pending.items[i].window == window) {
+            gpa.free(pending.items[i].text);
+            _ = pending.swapRemove(i);
+        } else i += 1;
+    }
+    for (targets.items, 0..) |target, ti| {
         if (target.window != window) continue;
         target.window = null;
         _ = ole32.RevokeDragDrop(window.hwnd);
-        _ = targets.swapRemove(i);
+        _ = targets.swapRemove(ti);
         // The registration's reference; OLE may still hold its own.
         _ = Target.release(@ptrCast(&target.iface));
         return;
@@ -426,11 +480,12 @@ pub fn revoke(window: *Window) void {
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
     _ = wparam;
     if (msg != WM_GHOSTTY_DROP) return null;
-    const payload: *Payload = @ptrFromInt(@as(usize, @bitCast(lparam)));
-    defer {
-        gpa.free(payload.text);
-        gpa.destroy(payload);
-    }
+    const id = std.math.cast(u32, lparam) orelse return 0;
+    const index = for (pending.items, 0..) |p, i| {
+        if (p.id == id and p.window == window) break i;
+    } else return 0; // not ours (a foreign post) or already gone
+    const payload = pending.swapRemove(index);
+    defer gpa.free(payload.text);
 
     // The surface may be gone by now: drop silently.
     const surface = window.findSurface(payload.surface_id) orelse return 0;
@@ -572,4 +627,34 @@ test "win32 drop: unpaired surrogate becomes U+FFFD" {
 test "win32 drop: IDropTarget and IDataObject slot counts" {
     try testing.expectEqual(7 * @sizeOf(usize), @sizeOf(ole32.IDropTarget.VTable));
     try testing.expectEqual(12 * @sizeOf(usize), @sizeOf(ole32.IDataObject.VTable));
+}
+
+test "win32 drop: unsafe paths are refused" {
+    try testing.expect(!pathIsSafe("x\r calc\r"));
+    try testing.expect(!pathIsSafe("a\nb"));
+    try testing.expect(!pathIsSafe("a\x00b"));
+    try testing.expect(!pathIsSafe("a\x7Fb"));
+    try testing.expect(!pathIsSafe("C:\\a\"&calc&\"b"));
+    try testing.expect(!pathIsSafe("C:\\a|b"));
+    try testing.expect(!pathIsSafe("C:\\a<b"));
+    try testing.expect(!pathIsSafe("C:\\a>b"));
+    try testing.expect(!pathIsSafe("C:\\a*b"));
+    try testing.expect(!pathIsSafe("C:\\a?b"));
+    try testing.expect(!pathIsSafe("\\\\?\\C:\\a?b"));
+}
+
+test "win32 drop: ordinary paths are accepted" {
+    try testing.expect(pathIsSafe("C:\\Рабочая папка\\файл.txt"));
+    try testing.expect(pathIsSafe("C:\\it's & (x) 100% !.txt"));
+    try testing.expect(pathIsSafe("\\\\?\\C:\\long\\path"));
+    try testing.expect(pathIsSafe("\\\\?\\UNC\\srv\\share\\x"));
+    try testing.expect(pathIsSafe("\\\\srv\\share\\a b"));
+}
+
+test "win32 drop: System32 bash is WSL, Cygwin bash has /cygdrive" {
+    const wsl_bash: configpkg.Command = .{ .direct = &.{"C:\\Windows\\System32\\bash.exe"} };
+    const cyg: configpkg.Command = .{ .direct = &.{"C:\\cygwin64\\bin\\bash.exe"} };
+    try testing.expectEqual(ShellKind.wsl, shellKindFor(wsl_bash));
+    try testing.expectEqual(ShellKind.cygwin, shellKindFor(cyg));
+    try expectQuoted(.cygwin, &.{"C:\\a b"}, "'/cygdrive/c/a b'");
 }
