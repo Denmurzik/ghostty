@@ -30,11 +30,6 @@ const user32 = win32.user32;
 
 const test_ops_var = "GHOSTTY_WIN32_TEST_IPC";
 
-extern "kernel32" fn SetEnvironmentVariableW(
-    name: [*:0]const u16,
-    value: ?[*:0]const u16,
-) callconv(.winapi) win32.foundation.BOOL;
-
 /// Test hook: replaces the answer of `testOpsEnabled`.
 pub var test_ops_override: ?bool = null;
 
@@ -50,7 +45,7 @@ pub fn cacheTestOps(alloc: Allocator) void {
         break :blk std.mem.eql(u8, value, "1");
     } else |_| false;
     test_ops_cache.store(if (on) 2 else 1, .release);
-    _ = SetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral(test_ops_var), null);
+    _ = kernel32.SetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral(test_ops_var), null);
 }
 
 /// Whether the test ops are served: `GHOSTTY_WIN32_TEST_IPC` was `1` at
