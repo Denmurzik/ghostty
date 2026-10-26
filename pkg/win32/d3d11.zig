@@ -586,7 +586,7 @@ pub const ID3D11DeviceContext = extern struct {
         CSGetShader: *const anyopaque,
         CSGetSamplers: *const anyopaque,
         CSGetConstantBuffers: *const anyopaque,
-        ClearState: *const anyopaque,
+        ClearState: *const fn (*ID3D11DeviceContext) callconv(.winapi) void,
         Flush: *const fn (*ID3D11DeviceContext) callconv(.winapi) void,
         GetType: *const anyopaque,
         GetContextFlags: *const anyopaque,
@@ -657,6 +657,12 @@ pub const ID3D11DeviceContext = extern struct {
 
     pub inline fn rsSetState(self: *ID3D11DeviceContext, state: ?*ID3D11RasterizerState) void {
         self.vtable.RSSetState(self, state);
+    }
+
+    /// Unbinds every object from the pipeline, dropping the context's
+    /// references to them (back buffers included).
+    pub inline fn clearState(self: *ID3D11DeviceContext) void {
+        self.vtable.ClearState(self);
     }
 
     /// Submits the queued commands to the GPU without waiting for them.

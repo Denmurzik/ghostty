@@ -58,8 +58,13 @@ const resize_interval_ms: u32 = 16;
 var next_id: std.atomic.Value(u32) = .init(1);
 
 hwnd: win32.foundation.HWND,
-/// The window of `tab`, kept in step by `Tab.setWindow`.
+/// The window of `tab`, kept in step by `Tab.setWindow`. UI thread only:
+/// `Tab.setWindow` rewrites it while the renderer and IO threads run, so
+/// those go through `app`.
 window: *Window,
+/// The app, which outlives every window and never changes. The only
+/// path to the app and its allocator that is safe off the UI thread.
+app: *App,
 tab: *Tab,
 core_surface: CoreSurface,
 
@@ -87,6 +92,9 @@ content_scale: apprt.ContentScale,
 
 /// Owned copy of the last title set by core, if any.
 title: ?[:0]const u8,
+
+/// Bumped by `bumpPresentTarget` after the window changed parents.
+present_generation: std.atomic.Value(u32) = .init(0),
 
 /// Whether the top-level window is minimized (a WM_SIZE of 0x0).
 minimized: bool = false,
@@ -135,6 +143,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     self.* = .{
         .hwnd = undefined,
         .window = window,
+        .app = app,
         .tab = tab,
         .core_surface = undefined,
         .initialized = false,
@@ -217,14 +226,14 @@ pub fn eql(a: *const Surface, b: *const Surface) bool {
 /// Tear the surface down and free it. Joins the core threads, so it must
 /// not be called from one of them.
 pub fn destroy(self: *Surface) void {
-    self.window.app.core_app.deleteSurface(self);
+    self.app.core_app.deleteSurface(self);
     self.deinit();
 }
 
 /// Like `destroy` for a surface the core app has already dropped from its
 /// list; core's `App.deinit` calls this on whatever is left.
 pub fn deinit(self: *Surface) void {
-    const alloc = self.window.app.core_app.alloc;
+    const alloc = self.app.core_app.alloc;
 
     clipboard.cancelPending(self);
     self.initialized = false;
@@ -243,7 +252,7 @@ pub fn core(self: *Surface) *CoreSurface {
 }
 
 pub fn rtApp(self: *const Surface) *App {
-    return self.window.app;
+    return self.app;
 }
 
 /// Close the surface, asking first when `process_active`. Both the
@@ -265,7 +274,7 @@ pub fn getTitle(self: *Surface) ?[:0]const u8 {
 
 /// Remember the title core asked for. The window caption is set separately.
 pub fn setTitle(self: *Surface, title: []const u8) Allocator.Error!void {
-    const alloc = self.window.app.core_app.alloc;
+    const alloc = self.app.core_app.alloc;
     const copy = try alloc.dupeSentinel(u8, title, 0);
     if (self.title) |old| alloc.free(old);
     self.title = copy;
@@ -325,7 +334,22 @@ pub fn renderDeviceOptions(self: *const Surface) !renderer.Device.Options {
 
 /// Where the D3D11 renderer presents.
 pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
-    return .{ .hwnd = self.hwnd, .size = &self.size, .id = self.id };
+    return .{
+        .hwnd = self.hwnd,
+        .size = &self.size,
+        .id = self.id,
+        .generation = &self.present_generation,
+    };
+}
+
+/// Tell the render thread that the window changed parents. UI thread, after
+/// `SetParent`. Never touches DXGI: the render thread recreates the swap
+/// chain if the next present fails (`renderer.D3D11.PresentTarget.generation`).
+pub fn bumpPresentTarget(self: *Surface) void {
+    _ = self.present_generation.fetchAdd(1, .release);
+    if (!self.initialized) return;
+    self.core_surface.refreshCallback() catch |err|
+        log.warn("refresh after re-parent failed err={}", .{err});
 }
 
 /// Decode a WM_SIZE message. A minimized window reports 0x0, which must

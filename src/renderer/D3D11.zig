@@ -65,6 +65,13 @@ pub const PresentTarget = struct {
 
     /// The surface's id, tagging latency trace samples.
     id: u32 = 0,
+
+    /// Bumped by the apprt (UI thread) after the window changed parents.
+    /// `SetParent` normally keeps a flip-model swap chain presenting, so a
+    /// bump alone changes nothing: the render thread recreates the swap
+    /// chain only when a present then fails (see `recreateOnPresentFailure`).
+    /// Null: never bumped.
+    generation: ?*const std.atomic.Value(u32) = null,
 };
 
 /// Pack a size into one word so it can be read and written atomically.
@@ -97,6 +104,11 @@ present_target: ?PresentTarget = null,
 /// window had no size yet, by the first frame; released by `threadExit`.
 /// Only touched under the device context lock.
 swap_chain: ?SwapChain = null,
+
+/// The window and the `PresentTarget.generation` `swap_chain` was created
+/// (or last presented successfully) with. Same locking as `swap_chain`.
+swap_chain_hwnd: ?*anyopaque = null,
+swap_chain_generation: u32 = 0,
 
 /// Whether presents wait for the vertical blank (config `window-vsync`).
 vsync: bool = true,
@@ -198,15 +210,66 @@ pub fn threadExit(self: *D3D11) void {
 /// does not exist yet. Failure is logged once and returned. The caller
 /// holds the context lock.
 pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
-    if (self.swap_chain) |*sc| return sc;
-
     const target = self.present_target orelse return error.InvalidArgument;
+    if (self.swap_chain) |*sc| {
+        if (self.swap_chain_hwnd == target.hwnd) return sc;
+        // The apprt handed over another window: the chain belongs to the old one.
+        self.dropSwapChain();
+    }
+
+    self.swap_chain_hwnd = target.hwnd;
+    self.swap_chain_generation = currentGeneration(target);
     self.swap_chain = SwapChain.init(self.device, target.hwnd, width, height, .hwnd) catch |err| {
         self.logSwapChainFailure("create", err);
         return err;
     };
     self.swap_chain.?.surface_id = target.id;
     return &self.swap_chain.?;
+}
+
+fn currentGeneration(target: PresentTarget) u32 {
+    return if (target.generation) |g| g.load(.acquire) else 0;
+}
+
+/// Releases the swap chain so the next `swapChain` creates a new one: the
+/// context is cleared and flushed first, because DXGI destroys a swap chain
+/// lazily while the context still references its back buffers, which makes
+/// `CreateSwapChainForHwnd` on the same window fail with E_ACCESSDENIED.
+/// `SwapChain.deinit` closes the frame latency waitable; the new chain
+/// starts with a fresh `Pacer`. The caller holds the context lock.
+pub fn dropSwapChain(self: *D3D11) void {
+    self.device.assertContextLocked();
+    const sc = if (self.swap_chain) |*sc| sc else return;
+    self.device.context.clearState();
+    self.device.context.flush();
+    sc.deinit();
+    self.swap_chain = null;
+}
+
+/// Whether a failed present may come from a window that changed parents
+/// since the swap chain was bound to it. Only then is the chain recreated:
+/// a bump alone does not break presenting. Returns true when the chain was
+/// dropped and the present is worth retrying. The caller holds the lock.
+pub fn recreateOnPresentFailure(self: *D3D11, err: anyerror) bool {
+    switch (err) {
+        // INVALID_CALL / E_ACCESSDENIED arrive as the unmapped `ComFailure`.
+        error.ComFailure, error.InvalidArgument => {},
+        else => return false,
+    }
+    const target = self.present_target orelse return false;
+    if (self.swap_chain == null) return false;
+    if (currentGeneration(target) == self.swap_chain_generation) return false;
+
+    log.info("d3d11 present failed after the window changed parents, recreating the swap chain err={}", .{err});
+    self.dropSwapChain();
+    return true;
+}
+
+/// Called after a successful present: the chain works with the current
+/// window state, so older generation bumps need no recreation.
+pub fn presentSucceeded(self: *D3D11) void {
+    const target = self.present_target orelse return;
+    self.swap_chain_generation = currentGeneration(target);
 }
 
 /// Logs a swap chain failure the first time only.
@@ -587,6 +650,114 @@ test "d3d11 pacing: sync draws never block on the slot" {
     const start = std.Io.Timestamp.now(io, .awake);
     api.waitForFrameSlot(true);
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < frame_slot_wait_ms);
+}
+
+test "d3d11 swapchain: no recreation without a bump" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var generation: std.atomic.Value(u32) = .init(0);
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .generation = &generation };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const first = try api.swapChain(32, 32);
+    for (0..5) |_| try std.testing.expectEqual(first, try api.swapChain(32, 32));
+    // Even a failed present does not recreate while the generation is unchanged.
+    try std.testing.expect(!api.recreateOnPresentFailure(error.ComFailure));
+    try std.testing.expectEqual(first, try api.swapChain(32, 32));
+}
+
+test "d3d11 swapchain: a bump alone keeps the swap chain, a failed present after it recreates" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var parent_a: SwapChain.TestWindow = try .init();
+    defer parent_a.deinit();
+    var parent_b: SwapChain.TestWindow = try .init();
+    defer parent_b.deinit();
+    var child: SwapChain.TestWindow = try .init();
+    defer child.deinit();
+    _ = win32.user32.SetParent(child.hwnd, parent_a.hwnd);
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var generation: std.atomic.Value(u32) = .init(0);
+    api.present_target = .{ .hwnd = child.hwnd, .size = &packed_size, .generation = &generation };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const first = try api.swapChain(32, 32);
+    try first.present(true);
+    first.pacer.presented(0);
+    const old_chain = first.chain;
+
+    _ = win32.user32.SetParent(child.hwnd, parent_b.hwnd);
+    _ = generation.fetchAdd(1, .release);
+
+    // The bump alone changes nothing, other errors never recreate.
+    try std.testing.expectEqual(old_chain, (try api.swapChain(32, 32)).chain);
+    try std.testing.expect(!api.recreateOnPresentFailure(error.OutOfMemory));
+    try std.testing.expectEqual(old_chain, api.swap_chain.?.chain);
+
+    // A failed present after the bump drops the chain; the next one is new,
+    // presents, and starts with a fresh pacer.
+    try std.testing.expect(api.recreateOnPresentFailure(error.ComFailure));
+    try std.testing.expect(api.swap_chain == null);
+    const second = try api.swapChain(32, 32);
+    try std.testing.expectEqual(@as(u32, 0), second.pacer.pending);
+    try second.present(true);
+    api.presentSucceeded();
+    try std.testing.expect(!api.recreateOnPresentFailure(error.ComFailure));
+}
+
+test "d3d11 swapchain: recreation releases every back-buffer reference first" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    _ = try api.swapChain(32, 32);
+
+    // Dropping first (ClearState + Flush + release) must let the same
+    // window get a new chain, repeatedly.
+    for (0..3) |_| {
+        api.dropSwapChain();
+        const sc = try api.swapChain(32, 32);
+        try sc.present(true);
+    }
+}
+
+test "d3d11 swapchain: a different window recreates the swap chain" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var a: SwapChain.TestWindow = try .init();
+    defer a.deinit();
+    var b: SwapChain.TestWindow = try .init();
+    defer b.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    api.present_target = .{ .hwnd = a.hwnd, .size = &packed_size };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    _ = try api.swapChain(32, 32);
+    try std.testing.expectEqual(a.hwnd, @as(@TypeOf(a.hwnd), @ptrCast(api.swap_chain_hwnd.?)));
+    api.present_target.?.hwnd = b.hwnd;
+    const sc = try api.swapChain(32, 32);
+    // A released COM object's address may be reused, so the binding is the proof.
+    try std.testing.expectEqual(b.hwnd, @as(@TypeOf(b.hwnd), @ptrCast(api.swap_chain_hwnd.?)));
+    try sc.present(true);
 }
 
 test "d3d11 api: blending selects the target and texture formats" {

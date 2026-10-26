@@ -131,8 +131,23 @@ fn present(self: *const Self) !void {
         @intCast(self.target.width),
         @intCast(self.target.height),
     );
-    try sc.copyToBackbuffer(api.device.context, self.target);
-    try sc.present(api.vsync);
+    const first = presentTo(sc, self.target, api.vsync);
+    first catch |err| {
+        // A window that changed parents may have broken the chain: build a
+        // new one and present the same frame once more.
+        if (!api.recreateOnPresentFailure(err)) return err;
+        const fresh = try api.swapChain(
+            @intCast(self.target.width),
+            @intCast(self.target.height),
+        );
+        try presentTo(fresh, self.target, api.vsync);
+    };
+    api.presentSucceeded();
+}
+
+fn presentTo(sc: *SwapChain, target: *const Target, vsync: bool) !void {
+    try sc.copyToBackbuffer(sc.device.context, target);
+    try sc.present(vsync);
 }
 
 /// The frame dump hook: with env `GHOSTTY_D3D11_DUMP=<dir>` every renderer
