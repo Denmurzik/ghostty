@@ -456,7 +456,11 @@ pub fn setWindow(self: *Tab, window: *Window) void {
     self.window = window;
     _ = win32.user32.SetParent(self.hwnd, window.hwnd);
     var it = self.tree.iterator();
-    while (it.next()) |entry| entry.view.window = window;
+    while (it.next()) |entry| {
+        entry.view.window = window;
+        // The swap chain was made for the old parent chain.
+        entry.view.bumpPresentTarget();
+    }
 }
 
 /// The surface to focus once `at` is removed: the previous leaf, else the

@@ -33,6 +33,9 @@ const messages = @import("messages.zig");
 const log = std.log.scoped(.win32_window);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
+
+/// `ID_ICON_GHOSTTY` in `dist/windows/ghostty.rc`.
+const icon_resource_id = 1;
 const default_title = "Ghostty";
 
 /// A feature module's window message handler: a non-null result ends the
@@ -118,7 +121,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
         .style = win32.user32.CS_HREDRAW | win32.user32.CS_VREDRAW | win32.user32.CS_DBLCLKS,
         .lpfnWndProc = wndProc,
         .hInstance = app.hinstance,
-        .hIcon = win32.user32.LoadIconW(null, win32.user32.IDI_APPLICATION),
+        .hIcon = loadClassIcon(app.hinstance),
         .hCursor = win32.user32.LoadCursorW(null, win32.user32.IDC_ARROW),
         // Black rather than the default white so a dark terminal does not
         // flash white before the first frame.
@@ -179,6 +182,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
     drop.register(self);
     self.layout();
 
+    const parent_window: ?*Window = if (opts.parent) |core| app.windowFor(core) else null;
     if (opts.first_tab) {
         // Core's start-up actions (initial size, title, ...) reach this
         // window through the new surface's `tab`.
@@ -191,9 +195,74 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
             self.destroy();
             return err;
         };
+        // Core's `initial_size` has set the size by now.
+        self.placeInitial(parent_window);
     }
 
     return self;
+}
+
+/// The icon of the exe (resource 1); the generic one when the binary
+/// carries no resources (tests).
+fn loadClassIcon(hinstance: win32.foundation.HINSTANCE) ?win32.user32.HICON {
+    const id: *const anyopaque = @ptrFromInt(icon_resource_id);
+    return win32.user32.LoadIconW(hinstance, id) orelse
+        win32.user32.LoadIconW(null, win32.user32.IDI_APPLICATION);
+}
+
+/// Where a cascaded window goes: the parent's origin moved by `step` on
+/// both axes, back to the work area's origin once that would push the
+/// window past its right or bottom edge.
+pub fn cascadeOrigin(
+    parent: geom.Rect,
+    work: geom.Rect,
+    step: i32,
+    size: struct { w: i32, h: i32 },
+) struct { x: i32, y: i32 } {
+    const x = parent.x + step;
+    const y = parent.y + step;
+    if (x + size.w > work.right() or y + size.h > work.bottom()) return .{ .x = work.x, .y = work.y };
+    return .{ .x = x, .y = y };
+}
+
+/// Position a new window. The first one goes where `window-position-x/y`
+/// say (the system picks otherwise); later ones cascade by the caption
+/// height from `parent`, else from the window that was active last.
+pub fn placeInitial(self: *Window, parent: ?*Window) void {
+    const user32 = win32.user32;
+    const anchor = parent orelse self.app.last_active;
+    if (anchor == null or anchor.? == self) {
+        const x = self.app.config.@"window-position-x" orelse return;
+        const y = self.app.config.@"window-position-y" orelse return;
+        _ = user32.SetWindowPos(self.hwnd, null, x, y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+        return;
+    }
+    const a = anchor.?;
+
+    // A maximized, minimized or fullscreen anchor cascades from where it
+    // would be restored to.
+    var placed: user32.WINDOWPLACEMENT = .{};
+    var rc: win32.foundation.RECT = undefined;
+    const restored = user32.IsZoomed(a.hwnd) != 0 or user32.IsIconic(a.hwnd) != 0 or a.placement.fullscreen;
+    if (restored) {
+        if (user32.GetWindowPlacement(a.hwnd, &placed) == 0) return;
+        rc = placed.rcNormalPosition;
+    } else if (user32.GetWindowRect(a.hwnd, &rc) == 0) return;
+
+    const monitor = user32.MonitorFromWindow(a.hwnd, user32.MONITOR_DEFAULTTONEAREST) orelse return;
+    var info: user32.MONITORINFO = .{};
+    if (user32.GetMonitorInfoW(monitor, &info) == 0) return;
+
+    var own: win32.foundation.RECT = undefined;
+    if (user32.GetWindowRect(self.hwnd, &own) == 0) return;
+
+    const origin = cascadeOrigin(
+        geom.Rect.fromRECT(rc),
+        geom.Rect.fromRECT(info.rcWork),
+        user32.GetSystemMetricsForDpi(user32.SM_CYCAPTION, a.dpi),
+        .{ .w = own.right - own.left, .h = own.bottom - own.top },
+    );
+    _ = user32.SetWindowPos(self.hwnd, null, origin.x, origin.y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
 }
 
 /// Destroy the window and free it. Closing the last window quits the app.
@@ -281,7 +350,7 @@ pub fn gotoIndex(target: apprt.action.GotoTab, current: usize, count: usize) ?us
         .next => if (current < count - 1) current + 1 else 0,
         .last => count - 1,
         _ => n: {
-            const v = @intFromEnum(target);
+            const v = @backingInt(target);
             if (v <= 0) return null;
             break :n @min(@as(usize, @intCast(v)) - 1, count - 1);
         },
@@ -334,6 +403,12 @@ pub fn moveTab(self: *Window, from: usize, to: usize) void {
 
 /// Make the tab at `index` the visible one and give it the keyboard focus.
 pub fn selectTab(self: *Window, index: usize) void {
+    self.selectTabFocus(index, true);
+}
+
+/// `selectTab`, optionally without the focus move: `SetFocus` on a child of
+/// a background window activates that window.
+pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     if (index >= self.tabs.items.len) return;
 
     const old = self.activeTab();
@@ -345,14 +420,14 @@ pub fn selectTab(self: *Window, index: usize) void {
 
     self.layout();
     new.setVisible(true);
-    new.focus();
+    if (focus) new.focus();
     self.refreshTitle();
 }
 
-/// Take a tab out of the window and destroy it. The neighbour becomes
-/// active; the last tab closes the window.
-pub fn removeTab(self: *Window, tab: *Tab) void {
-    const index = self.tabIndex(tab) orelse return;
+/// Unlink a tab from the list and keep `active_tab` pointing at the right
+/// one. False if no tab is left.
+fn unlinkTab(self: *Window, tab: *Tab) bool {
+    const index = self.tabIndex(tab) orelse return self.tabs.items.len != 0;
     const was_active = index == self.active_tab;
     title_edit.cancelForTab(self, tab);
 
@@ -360,9 +435,7 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
 
     if (self.tabs.items.len == 0) {
         self.active_tab = 0;
-        tab.destroy();
-        self.requestClose(true);
-        return;
+        return false;
     }
 
     if (was_active) {
@@ -370,11 +443,99 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     } else if (index < self.active_tab) {
         self.active_tab -= 1;
     }
+    return true;
+}
+
+/// Take a tab out of the window and destroy it. The neighbour becomes
+/// active; the last tab closes the window.
+pub fn removeTab(self: *Window, tab: *Tab) void {
+    if (self.tabIndex(tab) == null) return;
+    if (!self.unlinkTab(tab)) {
+        tab.destroy();
+        self.requestClose(true);
+        return;
+    }
 
     // The neighbour is on screen before the thread joins of the old tab
     // begin, so the window never shows a hole.
     self.selectTab(self.active_tab);
     tab.destroy();
+}
+
+/// Take a tab out of the window without destroying it (it goes to another
+/// window). The neighbour becomes active; the caller keeps the window from
+/// ending up empty.
+pub fn detachTab(self: *Window, tab: *Tab) void {
+    if (self.tabIndex(tab) == null) return;
+    if (!self.unlinkTab(tab)) return;
+    const foreground = win32.user32.GetForegroundWindow();
+    self.selectTabFocus(self.active_tab, foreground != null and foreground.? == self.hwnd);
+}
+
+/// Move `tab` into a new window of the same content size, cascaded from
+/// this one. Null if the window has only this tab.
+pub fn moveTabToNewWindow(self: *Window, tab: *Tab) !?*Window {
+    const alloc = self.app.core_app.alloc;
+    if (self.tabs.items.len < 2 or self.tabIndex(tab) == null) return null;
+
+    const new = try create(self.app, .{ .first_tab = false });
+    errdefer new.destroy();
+    try new.tabs.ensureTotalCapacity(alloc, 1);
+
+    const content = self.contentRect();
+    const size = windowSizeFor(.{ .w = content.w, .h = content.h }, frame_mod.nonClientSize(new));
+    _ = win32.user32.SetWindowPos(
+        new.hwnd,
+        null,
+        0,
+        0,
+        size.w,
+        size.h,
+        win32.user32.SWP_NOMOVE | win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
+    );
+    new.placeInitial(self);
+
+    self.detachTab(tab);
+    tab.setWindow(new);
+    new.tabs.appendAssumeCapacity(tab);
+    new.selectTabFocus(0, false);
+    new.show();
+    new.activate();
+    return new;
+}
+
+/// Bring the window to the front, restoring it if minimized, and give the
+/// active tab the keyboard focus once it is the foreground window.
+pub fn activate(self: *Window) void {
+    if (win32.user32.IsIconic(self.hwnd) != 0) _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_RESTORE);
+    _ = win32.user32.SetForegroundWindow(self.hwnd);
+    const foreground = win32.user32.GetForegroundWindow();
+    if (foreground != null and foreground.? == self.hwnd) {
+        if (self.activeTab()) |tab| tab.focus();
+    }
+}
+
+/// Take every window of the app down, asking once if a process is running
+/// somewhere. Runs from the message loop, like the other confirmations.
+fn handleCloseAll(self: *Window) void {
+    const app = self.app;
+    var needs = false;
+    for (app.windows.items) |w| {
+        if (w.needsConfirmClose()) needs = true;
+    }
+    if (needs and !(self.askClose(.all_windows) orelse return)) return;
+
+    // The question ran a message loop: look at the windows afresh.
+    const alloc = app.core_app.alloc;
+    const all = alloc.dupe(*Window, app.windows.items) catch |err| {
+        log.warn("unable to close all windows err={}", .{err});
+        return;
+    };
+    defer alloc.free(all);
+    for (all) |w| {
+        w.beginTeardown();
+        w.requestClose(true);
+    }
 }
 
 /// Lay out the tab strip and the active tab below it.
@@ -763,6 +924,11 @@ fn wndProc(
             return 0;
         },
 
+        messages.WM_GHOSTTY_CLOSE_ALL => {
+            self.handleCloseAll();
+            return 0;
+        },
+
         messages.WM_GHOSTTY_CLOSE_TAB => {
             const mode = std.enums.fromInt(CloseTabMode, wparam) orelse return 0;
             self.handleCloseTab(mode, @truncate(@as(usize, @bitCast(lparam))));
@@ -822,6 +988,29 @@ fn wndProc(
     }
 
     return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+test "win32 window: cascade wraps inside the work area" {
+    const work: geom.Rect = .{ .x = 0, .y = 0, .w = 1920, .h = 1040 };
+
+    const a = cascadeOrigin(.{ .x = 100, .y = 80, .w = 800, .h = 600 }, work, 31, .{ .w = 800, .h = 600 });
+    try std.testing.expectEqual(@as(i32, 131), a.x);
+    try std.testing.expectEqual(@as(i32, 111), a.y);
+
+    // Past the bottom edge: back to the origin of the work area.
+    const b = cascadeOrigin(.{ .x = 100, .y = 450, .w = 800, .h = 600 }, work, 31, .{ .w = 800, .h = 600 });
+    try std.testing.expectEqual(@as(i32, 0), b.x);
+    try std.testing.expectEqual(@as(i32, 0), b.y);
+
+    // Past the right edge, on a work area that does not start at 0.
+    const off: geom.Rect = .{ .x = -1920, .y = 0, .w = 1920, .h = 1040 };
+    const c = cascadeOrigin(.{ .x = -500, .y = 10, .w = 800, .h = 600 }, off, 31, .{ .w = 800, .h = 600 });
+    try std.testing.expectEqual(@as(i32, -1920), c.x);
+    try std.testing.expectEqual(@as(i32, 0), c.y);
+
+    // Exactly fitting still cascades.
+    const d = cascadeOrigin(.{ .x = 1089, .y = 0, .w = 800, .h = 600 }, work, 31, .{ .w = 800, .h = 600 });
+    try std.testing.expectEqual(@as(i32, 1120), d.x);
 }
 
 test "win32 window: content size round-trips through nonClientSize" {
@@ -937,7 +1126,7 @@ test "win32 window: goto tab index matches GTK" {
     const G = apprt.action.GotoTab;
     const n = struct {
         fn at(v: c_int) G {
-            return @enumFromInt(v);
+            return @fromBackingInt(@intCast(v));
         }
     }.at;
 

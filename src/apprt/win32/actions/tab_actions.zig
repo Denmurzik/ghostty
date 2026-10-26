@@ -130,10 +130,17 @@ pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bo
     return true;
 }
 
-/// Stub until Task 21.
+/// False when the window has only this tab.
 pub fn move_tab_to_new_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.move_tab_to_new_window)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const moved = surface.window.moveTabToNewWindow(surface.tab) catch |err| {
+        log.warn("unable to move the tab to a new window err={}", .{err});
+        return false;
+    };
+    return moved != null;
 }

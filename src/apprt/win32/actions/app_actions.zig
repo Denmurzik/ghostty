@@ -5,6 +5,8 @@ const apprt = @import("../../../apprt.zig");
 const configpkg = @import("../../../config.zig");
 const App = @import("../App.zig");
 const Chrome = @import("../Chrome.zig");
+const Window = @import("../Window.zig");
+const messages = @import("../messages.zig");
 const theme = @import("../theme.zig");
 const util = @import("../util.zig");
 const link_policy = @import("../link_policy.zig");
@@ -34,36 +36,69 @@ pub fn quit_timer(app: *App, target: apprt.Target, value: apprt.Action.Value(.qu
     return true;
 }
 
-/// Stub until Task 21.
+/// A surface target is the parent of the new window (its working directory
+/// and cascade origin); the app target has none.
 pub fn new_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.new_window)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const parent = switch (target) {
+        .app => null,
+        .surface => |core| core,
+    };
+    const window = Window.create(app, .{ .parent = parent }) catch |err| {
+        log.warn("unable to create a window err={}", .{err});
+        return false;
+    };
+    window.show();
+    window.activate();
+    return true;
 }
 
-/// Stub until Task 21.
+/// The question runs from the message loop of a window, not the core tick.
 pub fn close_all_windows(app: *App, target: apprt.Target, value: apprt.Action.Value(.close_all_windows)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const window = app.windowForTarget(target) orelse
+        app.last_active orelse
+        (if (app.windows.items.len == 0) return false else app.windows.items[app.windows.items.len - 1]);
+    return win32.user32.PostMessageW(window.hwnd, messages.WM_GHOSTTY_CLOSE_ALL, 0, 0) != 0;
 }
 
-/// Stub until Task 21.
+/// Previous or next window in creation order, wrapping around.
 pub fn goto_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.goto_window)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const windows = app.windows.items;
+    const from = app.windowForTarget(target) orelse app.last_active orelse return false;
+    const index = for (windows, 0..) |w, i| {
+        if (w == from) break i;
+    } else return false;
+    const to = gotoWindowIndex(value, index, windows.len) orelse return false;
+    windows[to].activate();
+    return true;
 }
 
-/// Stub until Task 21.
+/// The window `goto_window` lands on; null when there is no other one.
+pub fn gotoWindowIndex(direction: apprt.action.GotoWindow, current: usize, count: usize) ?usize {
+    if (count < 2) return null;
+    return switch (direction) {
+        .next => (current + 1) % count,
+        .previous => (current + count - 1) % count,
+    };
+}
+
+/// Restore the window if minimized, bring it to the front and focus the
+/// surface in its tab.
 pub fn present_terminal(app: *App, target: apprt.Target, value: apprt.Action.Value(.present_terminal)) !bool {
-    _ = app;
-    _ = target;
     _ = value;
-    return false;
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const window = surface.window;
+    const index = window.tabIndex(surface.tab) orelse return false;
+
+    surface.tab.focused = surface;
+    window.selectTabFocus(index, false);
+    window.activate();
+    return true;
 }
 
 /// Soft: the config in memory is applied again (a new colour scheme, a
@@ -215,4 +250,12 @@ pub fn color_change(app: *App, target: apprt.Target, value: apprt.Action.Value(.
         .surface => if (app.windowForTarget(target)) |window| Chrome.invalidate(window),
     }
     return true;
+}
+
+test "win32 window: goto_window wraps over the window list" {
+    try std.testing.expectEqual(@as(?usize, null), gotoWindowIndex(.next, 0, 1));
+    try std.testing.expectEqual(@as(?usize, 1), gotoWindowIndex(.next, 0, 3));
+    try std.testing.expectEqual(@as(?usize, 0), gotoWindowIndex(.next, 2, 3));
+    try std.testing.expectEqual(@as(?usize, 2), gotoWindowIndex(.previous, 0, 3));
+    try std.testing.expectEqual(@as(?usize, 0), gotoWindowIndex(.previous, 1, 3));
 }

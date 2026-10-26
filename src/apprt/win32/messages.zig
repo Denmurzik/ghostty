@@ -29,7 +29,9 @@ pub const WM_GHOSTTY_TITLE_EDIT_DONE = win32.user32.WM_APP + 8;
 pub const WM_GHOSTTY_TRAY = win32.user32.WM_APP + 9;
 /// Posted to a top-level window after an OLE drop; lparam is a `*Payload`.
 pub const WM_GHOSTTY_DROP = win32.user32.WM_APP + 10;
-// WM_APP + 11 ... WM_APP + 15 are reserved for M3.
+/// Posted to a top-level window to close every window of the app.
+pub const WM_GHOSTTY_CLOSE_ALL = win32.user32.WM_APP + 11;
+// WM_APP + 12 ... WM_APP + 15 are reserved for M3.
 
 /// `WM_TIMER` ids, unique per window class (a timer id is only meaningful
 /// to the window that owns the timer).
@@ -64,6 +66,7 @@ test "win32 skeleton: private message ids are unique and keep M1's values" {
         WM_GHOSTTY_TITLE_EDIT_DONE,
         WM_GHOSTTY_TRAY,
         WM_GHOSTTY_DROP,
+        WM_GHOSTTY_CLOSE_ALL,
     };
     for (ids, 0..) |id, i| {
         try std.testing.expect(id > win32.user32.WM_APP);
