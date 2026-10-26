@@ -151,6 +151,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
         0,
         class_name,
         std.unicode.utf8ToUtf16LeStringLiteral(default_title),
+        // TODO(task17): frame_mod.windowStyle(frame_mod.decorationsFor(app.config.@"window-decoration"))
         win32.user32.WS_OVERLAPPEDWINDOW | win32.user32.WS_CLIPCHILDREN,
         win32.user32.CW_USEDEFAULT,
         win32.user32.CW_USEDEFAULT,
@@ -626,6 +627,7 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
 }
 
 /// Tell the visible surfaces whether the window is minimized.
+// TODO(task14): replace the loop below with activeTab().applyOcclusion(!minimized)
 fn setMinimized(self: *Window, minimized: bool) void {
     const tab = self.activeTab() orelse return;
     var it = tab.tree.iterator();
