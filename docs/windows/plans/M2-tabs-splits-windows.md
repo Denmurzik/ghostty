@@ -542,7 +542,7 @@ Split from revision 1's Task 6 (about 900 lines; pre-flight 15). 6a builds the o
 - Produces: real `Metrics.forDpi` (at 96 dpi: `height 40, tab_min_w 72, tab_max_w 240, tab_pad 10, close_w 28, new_tab_w 40, caption_btn_w 46, min_drag_w 48, resize_band 6, drag_threshold 4`, each `geom.scale`d), `Layout.compute`, `Layout.hitTest`, and
   ```zig
   pub fn scrollBy(self: *Layout, delta: i32) void;                         // clamp to [0, overflow]
-  pub fn dragUpdate(drag: *Drag, layout: *const Layout, x: i32) ?struct { from: usize, to: usize }; // activates after drag_threshold; target = slot whose centre range holds x - grab_dx + w/2
+  pub fn dragUpdate(drag: *Drag, layout: *const Layout, m: Metrics, x: i32) ?struct { from: usize, to: usize }; // activates after drag_threshold; target = slot whose centre range holds x - grab_dx + w/2
   pub fn dragOffset(drag: *const Drag, layout: *const Layout, x: i32) i32;   // painter x for the dragged tab
   ```
   Rules: caption buttons (titlebar mode only) at the right edge, close rightmost; `available = width - tab_pad - new_tab_w - min_drag_w - buttons`; tab width `clamp(available / count, tab_min_w, tab_max_w)`; overflow → `tab_min_w`, `scroll` keeps the active tab inside `clip`; `new_tab` follows the last tab (or sits at the clip end on overflow); `caption` = the gap between `new_tab` and the buttons; with `show_tabs == false` in titlebar mode: no tab rects, `title` = `[tab_pad, new_tab.x)`, `new_tab` just left of the buttons. `tab_close` is the right `close_w` of a tab and only hit for the active or hovered tab, and only when the tab is ≥ 2×`close_w` wide. `resize_top` when not maximized and `y < resize_band` (titlebar mode).
@@ -767,7 +767,7 @@ Split from revision 1's Task 6 (about 900 lines; pre-flight 15). 6a builds the o
 - Produces:
   ```zig
   // strip_input.handle: WM_LBUTTONDOWN (tab → selectTab + begin drag; tab_close → post WM_GHOSTTY_CLOSE_TAB this; new_tab → addTab(parent = active surface)),
-  // WM_MOUSEMOVE (hover + TrackMouseEvent leave; dragUpdate → window.moveTab), WM_LBUTTONUP (end drag, focus active surface),
+  // WM_MOUSEMOVE (hover + TrackMouseEvent leave; dragUpdate(drag, layout, metrics, x) → window.moveTab), WM_LBUTTONUP (end drag, focus active surface),
   // WM_MBUTTONUP on a tab → close that tab, WM_LBUTTONDBLCLK on a tab → title_edit.begin(.tab), WM_MOUSEWHEEL over the strip → strip.scrollBy,
   // WM_MOUSELEAVE → hover nowhere; every handled message ends with the active surface focused
   // title_edit.zig
