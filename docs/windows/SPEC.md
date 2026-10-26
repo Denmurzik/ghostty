@@ -241,8 +241,8 @@ Implements every member of [apprt §1.3, §1.4]. Notes on non-obvious ones:
   classes, create message-only window, load config (`Config.load`), `core_app.updateConfig`, create the first window.
 - `App.run()`: `while (GetMessageW(&msg, null, 0, 0) > 0) { TranslateMessage; DispatchMessageW }`. Quit = `PostQuitMessage(0)`.
 - `performAction`: an exhaustive `switch` over `Action.Key`; unimplemented actions `log.debug` and return `false`.
-  `render` returns `true` and does nothing (D2). `apprt/win32/actions_test.zig` (M2) asserts every key is either
-  implemented or in an explicit `unsupported` list.
+  `render` returns `true` and does nothing (D2). `apprt/win32/actions.zig` (M2) holds the coverage test: every key is
+  implemented, deferred to a named milestone, or in an explicit `unsupported` list.
 - `performIpc`: `false` until M2 (§12.6).
 - `Surface.defaultTermioEnv()`: `global.environMap()` copy, then (M4) `TMUX`, `TMUX_PANE`, PATH prepend (§10).
 - `Surface.close(process_active)`: if `process_active` and config `confirm-close-surface` ≠ false → confirmation dialog
@@ -394,8 +394,8 @@ FreeType + HarfBuzz.
 ### 12.1 Processes and transport
 - `tmux.exe` (console subsystem, no SharedDeps, target startup < 50 ms, private bytes < 5 MB). Steps: parse global flags
   (`-S <path>`, `-L <name>`, `-V`); `-V` → print `tmux 3.5a\n`, exit 0 (no IPC); `load-buffer … -` → read all stdin; resolve
-  the pipe: `-S` value, else first field of `TMUX`, else (external mode) the per-user pipe `\\.\pipe\ghostty-<user SID>`
-  (M5); connect with `WaitNamedPipeW` ≤ 1000 ms; send one request; print `stdout`/`stderr` verbatim (LF only, no BOM);
+  the pipe: `-S` value, else first field of `TMUX`, else (external mode) the per-user pipe named by §18.5
+  (`ghostty-<user SID>-<session>-<class>[-admin]`, M5); connect with `WaitNamedPipeW` ≤ 1000 ms; send one request; print `stdout`/`stderr` verbatim (LF only, no BOM);
   exit with `code`. Connection failure → stderr `no server running on <path>\n`, exit 1.
 - Server (`src/apprt/win32/tmux/Server.zig`): pipe `\\.\pipe\ghostty-tmux-<ghostty pid>`, `PIPE_TYPE_BYTE`,
   `PIPE_REJECT_REMOTE_CLIENTS`, `PIPE_UNLIMITED_INSTANCES`, DACL `D:P(A;;GA;;;<current user SID>)`. One IPC thread
@@ -447,9 +447,10 @@ FreeType + HarfBuzz.
 apprt-level replay test that runs the exact spawn sequence of [tmux §4 notes] against a headless registry and asserts
 stdout bytes, exit codes and resulting tree shape.
 ### 12.6 Single instance / `performIpc`
-M2 adds a per-user pipe `\\.\pipe\ghostty-<user SID>` served by the same IPC thread for `+new-window`/`+new-tab`/
-`+toggle-quick-terminal`. Single-instance is ON by default (ruling, §18): a second launch forwards `new_window` (with its
-`--working-directory`) to the running instance and exits; an opt-out config follows the GTK `gtk-single-instance` pattern.
+M2 adds a per-user pipe (name in §18.5) served by the same IPC thread for `+new-window`/`+new-tab`/
+`+toggle-quick-terminal`. Single-instance is ON by default (§18.6): a launch without arguments (or with only
+`--working-directory`) forwards `new_window` to the running instance and exits; any other argument starts a separate
+process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` pattern).
 
 ## 13. Packaging (M6)
 - Portable zip `ghostty-<ver>-windows-<arch>.zip`: `ghostty.exe`, `tmux.exe`, `share\ghostty\…` (themes, shell-integration,
@@ -470,7 +471,7 @@ Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CON
 (defaults + `command = direct:cmd.exe /k`), waits until the window is visible + 10 s idle, samples
 `Get-Process -Id <pid>` → `PrivateMemorySize64` (**Private Bytes**, the budgeted number) and `WorkingSet64` (reported),
 ghostty.exe only (conhost/OpenConsole and shells are reported separately, not budgeted). Steps for extra tabs/splits/windows
-are driven by keybind `SendInput` (M2+). Output: one CSV row per scenario appended to `docs/windows/ram-baseline.csv`
+are driven by the test-only IPC `action` op (§18.8; M2+), never by keyboard input. Output: one CSV row per scenario appended to `docs/windows/ram-baseline.csv`
 (date, commit, optimize, adapter, scenario, private_mb, ws_mb). Budgeted numbers are measured on `-Doptimize=ReleaseFast`
 builds (Debug numbers may be recorded with `optimize=Debug` but are never gated). The scrollback scenario uses
 `cmd /c "for /L %i in (1,1,200000) do @echo %i"` (there is no `seq` in cmd).
@@ -482,6 +483,7 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | each extra window (1 surface) | ≤ +15 MB | measured from M2 |
 | surface after `seq 1 200000` (scrollback full at default `scrollback-limit` 10 MB) | ≤ surface cost + 15 MB | recorded |
 | close 10 extra surfaces, wait 30 s | back within +10% of the pre-open value | from M2 |
+| 0 windows, resident in the notification area (§18.15) | recorded | from M2 |
 | tmux.exe per invocation | ≤ 5 MB, ≤ 100 ms wall | M4 |
 Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit` (user),
 `EmptyWorkingSet` is NOT used (it only hides private bytes).
@@ -565,10 +567,12 @@ per-monitor DPI incl. hidden tabs, theme (`window-theme`, titlebar colours, syst
 reload (soft/hard) and `open_config`, native scrollbar, bell (title/attention/system/audio), taskbar progress, resize overlay
 (owned popup), TaskDialog close confirmations, named-pipe IPC + single-instance (`windows-single-instance`) + `performIpc` +
 test-only IPC ops, notification-area icon with Ghostty staying alive after the last window (Windows default
-`quit-after-last-window-closed = false`, §18.7/§18.15), Windows Terminal tab-close process semantics (§18.14). Every `Action.Key` is classified implemented / deferred (milestone) /
+`quit-after-last-window-closed = false`, §18.7/§18.15), Windows Terminal tab-close process semantics (§18.14), file drag-and-drop from Explorer as shell-quoted paths (§18.17),
+keypress→present latency measured and fixed (§18.18), new surfaces survive a GPU device loss while the process stays
+resident (§18.19; full recovery M3). Every `Action.Key` is classified implemented / deferred (milestone) /
 unsupported by `apprt/win32/actions.zig`. Exit: action-coverage test green; M1+M2 e2e green on Debug and ReleaseFast;
 screenshots at 100/150/200% (simulated through the test DPI op; real multi-monitor checked by the owner); per-tab/split/window
-and close-10 RAM rows within §14 targets. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
+and close-10 RAM rows within §14 targets; `input-latency` p95 ≤ 16 ms ReleaseFast and ≤ 50 ms Debug. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
 
 **M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
 AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),
@@ -605,13 +609,18 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
    module in M4). Frame = `u32` LE length + UTF-8 JSON, max 16 MiB. Request `{"v":1,"op":"…",…}`, response
    `{"v":1,"code":N,"stdout":"…","stderr":"…","data":…}` (codes 0 ok, 1 failed, 2 bad request/unknown op, 3 version).
    M2 ops `new-window`, `new-tab`, `toggle-quick-terminal`; M4 adds op `tmux` carrying the §12.1 fields. Per-user pipe
-   `\\.\pipe\ghostty-<user SID>-<session id>-<class>` (class = config `class` sanitized, default `com.mitchellh.ghostty`,
-   Debug builds `com.mitchellh.ghostty-debug`), so other sessions, builds and test instances never meet. Cost if wrong:
-   rename of a pipe constant.
-6. Single instance (amends §12.6): config `windows-single-instance = detect|true|false`, default `detect` = forward unless
-   the command line has anything besides `--working-directory=`, `--title=`, `--command=`, `--shell-integration=`, or uses
-   `-e`. The second process's cwd is not forwarded (Start-menu cwd is meaningless); Explorer passes `--working-directory`.
-   The first instance always serves the pipe when it can claim the name. Cost if wrong: one default flip.
+   `\\.\pipe\ghostty-<user SID>-<session id>-<class>[-admin]` (class = config `class` sanitized, default
+   `com.mitchellh.ghostty`, Debug builds `com.mitchellh.ghostty-debug`; `-admin` when the process is elevated), so other
+   sessions, builds, integrity levels and test instances never meet. An elevated server's security descriptor carries the
+   high mandatory label; both ends check that the peer has the same user SID and elevation (M2 plan revision 2). Every
+   request carries `deadline_ms` (`GetTickCount64`); the server does nothing for an expired request. M2 servers accept
+   requests of at most 64 KiB. Cost if wrong: rename of a pipe constant.
+6. Single instance (amends §12.6): config `windows-single-instance = detect|true|false`, default `detect` = forward only when
+   the command line is empty or holds nothing but `--working-directory=` (owner decision 2026-10-26: a launch with arguments
+   starts a separate process; revision 2 dropped `--title=`/`--command=`/`--shell-integration=`, so no request can make
+   another process run a command). The second process's cwd is not forwarded (Start-menu cwd is meaningless); Explorer
+   passes `--working-directory`, absolutized before forwarding. The pipe is claimed in `App.init` before any window; the
+   claimer is the primary. A process that does not own the pipe never shows a tray icon and quits after its last window. Cost if wrong: one default flip.
 7. Owner decision (DECISIONS, 2026-10-26): `quit-after-last-window-closed` defaults to `false` on Windows — closing the last
    window leaves Ghostty running in the notification area (§18.15), reachable from the tray icon and by the next launch
    (single instance). `true` restores quit-on-last-window, honouring `quit-after-last-window-closed-delay` and core's
@@ -643,3 +652,16 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
     `GA_ROOT` (the layered drag ghost is `WS_EX_TRANSPARENT`); other Ghostty processes are never targets. A drop outside
     every strip creates a new window under the cursor (a single-tab source window just moves); an emptied source window
     closes; a dpi change between windows rescales the moved surfaces.
+17. Owner requirement (2026-10-26, M2 Task 38): files dropped from Explorer onto a surface are inserted as their paths,
+    space-separated, quoted for the surface's shell (from the launched command: bash/sh/zsh/fish → POSIX single quotes,
+    pwsh/powershell → PowerShell single quotes, cmd and unknown → double quotes when needed), delivered like macOS Ghostty's
+    drop: a paste through `textCallback` (bracketed when the program enabled it), never followed by Enter. One OLE
+    `IDropTarget` per top-level window (OLE is initialised for it); the target surface is highlighted during the drag.
+    Text drops are M3. An elevated Ghostty gets no drops from a non-elevated Explorer (UIPI), as in Windows Terminal.
+18. Owner requirement (2026-10-26, M2 Tasks 36–37): keypress→present latency is measured by a std-only tracer
+    (`src/os/windows_latency.zig`, active only with `GHOSTTY_LATENCY_TRACE=<csv>`) with stages input → pty write → pty
+    output → present, and gated in e2e: p95 ≤ 16 ms ReleaseFast, ≤ 50 ms Debug for a single key echo in an idle shell
+    (adjusted only with a written stage-table justification when ConPTY + shell alone exceed the budget).
+19. M2 Task 39: the shared D3D11 device has a generation; after `DEVICE_REMOVED/RESET` new surfaces get a fresh device and
+    the lost one is freed with its last renderer; a resident process with a lost device and no window quits. Existing
+    surfaces stay blank until closed; full recovery and the renderer-health bar remain M3.
