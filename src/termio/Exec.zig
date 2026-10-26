@@ -2922,3 +2922,354 @@ test "windows exec: quit is honoured within a bound while a large stream is proc
     try testing.expect(testElapsedMs(start) < 1000);
     try testing.expectEqual(ReadLoopEnd.quit, end);
 }
+
+/// The byte at `offset` of the test stream used by the stream integrity
+/// tests: a function of the offset alone, so any split of the stream into
+/// writes or reads produces the same bytes, and a lost, repeated or
+/// reordered byte shows up at the offset it happened.
+fn testStreamByte(offset: usize) u8 {
+    var x: u64 = @as(u64, offset / 8) +% 0x9E3779B97F4A7C15;
+    x = (x ^ (x >> 30)) *% 0xBF58476D1CE4E5B9;
+    x = (x ^ (x >> 27)) *% 0x94D049BB133111EB;
+    x ^= x >> 31;
+    return @truncate(x >> @intCast((offset % 8) * 8));
+}
+
+/// Checks a received stream against `testStreamByte` as it arrives.
+const TestStreamCheck = struct {
+    received: usize = 0,
+    first_mismatch: ?usize = null,
+
+    fn feed(self: *TestStreamCheck, buf: []const u8) void {
+        for (buf, self.received..) |b, offset| {
+            if (self.first_mismatch == null and b != testStreamByte(offset)) {
+                self.first_mismatch = offset;
+            }
+        }
+        self.received += buf.len;
+    }
+};
+
+test "windows exec: sliced processing delivers every byte in order" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    const quit = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(quit);
+
+    const Sink = struct {
+        check: TestStreamCheck = .{},
+        slices: usize = 0,
+        bad_slice: bool = false,
+
+        fn process(self: *@This(), slice: []const u8) void {
+            if (slice.len == 0 or slice.len > PROCESS_SLICE_LEN) self.bad_slice = true;
+            self.slices += 1;
+            self.check.feed(slice);
+        }
+    };
+
+    // The edge sizes around the slice length and the read buffer, then
+    // random sizes up to a full read.
+    const edges = [_]usize{
+        0,                         1,                     PROCESS_SLICE_LEN - 1,
+        PROCESS_SLICE_LEN,         PROCESS_SLICE_LEN + 1, 2 * PROCESS_SLICE_LEN,
+        2 * PROCESS_SLICE_LEN + 1, 64 * 1024 - 1,         64 * 1024,
+    };
+    var prng: std.Random.DefaultPrng = .init(0x30b);
+    const random = prng.random();
+
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    var sink: Sink = .{};
+    var expected_slices: usize = 0;
+    var offset: usize = 0;
+    for (0..edges.len + 2000) |i| {
+        const len = if (i < edges.len) edges[i] else switch (random.uintLessThan(u8, 4)) {
+            0 => random.uintLessThan(usize, 16),
+            1 => PROCESS_SLICE_LEN - 2 + random.uintLessThan(usize, 5),
+            else => random.uintAtMost(usize, 64 * 1024),
+        };
+        try src.resize(testing.allocator, len);
+        for (src.items, offset..) |*b, o| b.* = testStreamByte(o);
+        processSlicedWindows(quit, &sink, src.items, Sink.process);
+        expected_slices += std.math.divCeil(usize, len, PROCESS_SLICE_LEN) catch unreachable;
+        offset += len;
+    }
+
+    try testing.expect(!sink.bad_slice);
+    try testing.expectEqual(expected_slices, sink.slices);
+    try testing.expectEqual(offset, sink.check.received);
+    try testing.expectEqual(@as(?usize, null), sink.check.first_mismatch);
+}
+
+test "windows exec: read loop delivers a 50 MB stream of random write sizes intact" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    const total = 50 * 1024 * 1024;
+
+    // The writer splits the stream into writes of random sizes, from zero
+    // bytes (which completes a pending read with nothing) to more than the
+    // pipe and the read buffer hold, then closes its end to produce EOF.
+    const Writer = struct {
+        fn run(handle: windows.HANDLE, failed: *bool) void {
+            defer _ = k32.CloseHandle(handle);
+            const buf = std.heap.page_allocator.alloc(u8, 192 * 1024) catch {
+                failed.* = true;
+                return;
+            };
+            defer std.heap.page_allocator.free(buf);
+
+            var prng: std.Random.DefaultPrng = .init(0x50);
+            const random = prng.random();
+            var offset: usize = 0;
+            while (offset < total) {
+                const want: usize = switch (random.uintLessThan(u8, 8)) {
+                    0 => 0,
+                    1 => 1 + random.uintLessThan(usize, 16),
+                    2 => PROCESS_SLICE_LEN - 1 + random.uintLessThan(usize, 3),
+                    3 => 64 * 1024 - 1 + random.uintLessThan(usize, 3),
+                    else => 1 + random.uintLessThan(usize, buf.len),
+                };
+                const len = @min(want, total - offset);
+                for (buf[0..len], offset..) |*b, o| b.* = testStreamByte(o);
+                var written: windows.DWORD = 0;
+                if (k32.WriteFile(handle, buf.ptr, @intCast(len), &written, null) == windows.FALSE or
+                    written != len)
+                {
+                    failed.* = true;
+                    return;
+                }
+                offset += len;
+            }
+        }
+    };
+
+    // The reader hands every read through the same slicing as the read
+    // thread does.
+    const Sink = struct {
+        quit: windows.HANDLE,
+        check: TestStreamCheck = .{},
+
+        fn process(self: *@This(), slice: []const u8) void {
+            self.check.feed(slice);
+        }
+
+        fn onData(self: *@This(), buf: []const u8) void {
+            processSlicedWindows(self.quit, self, buf, process);
+        }
+    };
+
+    const Reader = struct {
+        fn run(handle: windows.HANDLE, sink: *Sink, end: *ReadLoopEnd, done: windows.HANDLE) void {
+            end.* = readLoopWindows(handle, sink.quit, sink, Sink.onData);
+            _ = k32.SetEvent(done);
+        }
+    };
+
+    const pipe = try Pty.createOutPipe();
+    // Until the threads own the pipe and the cleanup defer below is
+    // armed, setup failures clean up here.
+    var armed = false;
+    errdefer if (!armed) {
+        _ = k32.CloseHandle(pipe.read);
+        _ = k32.CloseHandle(pipe.write);
+    };
+
+    const quit = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(quit);
+    const done = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(done);
+
+    var sink: Sink = .{ .quit = quit };
+    var end: ReadLoopEnd = .err;
+    var write_failed = false;
+    const reader = try std.Thread.spawn(.{}, Reader.run, .{ pipe.read, &sink, &end, done });
+    errdefer if (!armed) {
+        _ = k32.SetEvent(quit);
+        reader.join();
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ pipe.write, &write_failed });
+    armed = true;
+
+    // Generous: a Debug build checks every byte on both sides.
+    const finished = k32.WaitForSingleObject(done, 120_000) == windows.WAIT_OBJECT_0;
+
+    // Stop the reader first, then close its pipe: that also fails the
+    // writer's pending write if the reader stopped early.
+    _ = k32.SetEvent(quit);
+    reader.join();
+    _ = k32.CloseHandle(pipe.read);
+    writer.join();
+
+    try testing.expect(finished);
+    try testing.expect(!write_failed);
+    try testing.expectEqual(ReadLoopEnd.eof, end);
+    try testing.expectEqual(@as(?usize, null), sink.check.first_mismatch);
+    try testing.expectEqual(@as(usize, total), sink.check.received);
+}
+
+/// Line `i` of a checked text stream (no newline): an 8-digit index, a
+/// printable ASCII payload of 16 to 60 characters and the CRC-32 of the two,
+/// at most 78 characters in all. The same lines as `New-CheckedStream` in
+/// test/windows/e2e/_stream.ps1.
+fn testCheckedLine(buf: *[80]u8, i: u64) []const u8 {
+    var x: u64 = i *% 0x9E3779B97F4A7C15 +% 0x30B;
+    const len: usize = @intCast(16 + x % 45);
+    var w: std.Io.Writer = .fixed(buf);
+    w.print("{d:0>8} ", .{i}) catch unreachable;
+    for (0..len) |k| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        var c: u8 = @intCast(0x21 + x % 94);
+        if (k > 0 and k < len - 1 and (x >> 40) % 7 == 0) c = ' ';
+        w.writeByte(c) catch unreachable;
+    }
+    const crc = std.hash.Crc32.hash(w.buffered());
+    w.print(" {x:0>8}", .{crc}) catch unreachable;
+    return w.buffered();
+}
+
+test "windows exec: checked lines typed through the pseudo console reach the terminal intact" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const k32 = windows.exp.kernel32;
+
+    // About 1 MB: the terminal parses slowly in a Debug build.
+    const line_count = 18_000;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(testing.io, "stream.txt", .{});
+        defer file.close(testing.io);
+        var buf: [64 * 1024]u8 = undefined;
+        var file_writer = file.writer(testing.io, &buf);
+        var line_buf: [80]u8 = undefined;
+        for (0..line_count) |i| {
+            try file_writer.interface.writeAll(testCheckedLine(&line_buf, i));
+            try file_writer.interface.writeByte('\n');
+        }
+        try file_writer.interface.flush();
+    }
+    const path = try tmp.dir.realPathFileAlloc(testing.io, "stream.txt", alloc);
+    defer alloc.free(path);
+    const path_z = try alloc.dupeSentinel(u8, path, 0);
+    defer alloc.free(path_z);
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
+        .cols = 100,
+        .rows = 30,
+        .max_scrollback_bytes = null,
+    });
+    defer t.deinit(alloc);
+
+    // The read thread's path: overlapped reads, sliced, into a VT stream.
+    const Sink = struct {
+        quit: windows.HANDLE,
+        stream: terminal.TerminalStream,
+
+        fn process(self: *@This(), slice: []const u8) void {
+            self.stream.nextSlice(slice);
+        }
+
+        fn onData(self: *@This(), buf: []const u8) void {
+            processSlicedWindows(self.quit, self, buf, process);
+        }
+    };
+    const Reader = struct {
+        fn run(handle: windows.HANDLE, sink: *Sink, end: *ReadLoopEnd, done: windows.HANDLE) void {
+            end.* = readLoopWindows(handle, sink.quit, sink, Sink.onData);
+            _ = k32.SetEvent(done);
+        }
+    };
+
+    var pty = try Pty.open(.{ .ws_row = 30, .ws_col = 100, .ws_xpixel = 0, .ws_ypixel = 0 });
+    defer pty.deinit();
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/c", "type", path_z },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(alloc);
+    defer _ = k32.CloseHandle(cmd.pid.?);
+    pty.closeChildSide();
+
+    const quit = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(quit);
+    const done = k32.CreateEventW(null, windows.TRUE, windows.FALSE, null) orelse
+        return error.CreateEventFailed;
+    defer _ = k32.CloseHandle(done);
+
+    var sink: Sink = .{ .quit = quit, .stream = t.vtStream() };
+    defer sink.stream.deinit();
+    var end: ReadLoopEnd = .err;
+    const reader = try std.Thread.spawn(.{}, Reader.run, .{ pty.out_pipe, &sink, &end, done });
+    defer {
+        _ = k32.SetEvent(quit);
+        reader.join();
+    }
+
+    // The child ends once the pseudo console took all of its output; the
+    // pipe ends once the console is closed and flushed its last frame.
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(cmd.pid.?, 120_000),
+    );
+    pty.closeConsoleAsync();
+    try testing.expect(k32.WaitForSingleObject(done, 120_000) == windows.WAIT_OBJECT_0);
+    try testing.expectEqual(ReadLoopEnd.eof, end);
+
+    // What the terminal holds, as write_screen_file dumps it.
+    var dump: std.Io.Writer.Allocating = .init(alloc);
+    defer dump.deinit();
+    {
+        const screen = t.screens.active;
+        const sel: terminal.Selection = .init(
+            screen.pages.getTopLeft(.screen),
+            screen.pages.getBottomRight(.screen).?,
+            false,
+        );
+        var formatter: terminal.formatter.ScreenFormatter = .init(screen, .{
+            .emit = .plain,
+            .unwrap = true,
+            .trim = false,
+        });
+        formatter.content = .{ .selection = sel.ordered(screen, .forward) };
+        try formatter.format(&dump.writer);
+    }
+
+    // Every line, in order, from the first one on.
+    var lines = std.mem.splitScalar(u8, dump.written(), '\n');
+    var next: usize = 0;
+    var bad: usize = 0;
+    var line_buf: [80]u8 = undefined;
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \r");
+        if (next == 0 and !std.mem.startsWith(u8, line, "00000000 ")) continue;
+        if (next == line_count) break;
+        const want = testCheckedLine(&line_buf, next);
+        if (!std.mem.eql(u8, line, want)) {
+            bad += 1;
+            if (bad <= 10) std.log.err("stream line {d}: want '{s}' got '{s}'", .{ next, want, line });
+        }
+        next += 1;
+    }
+    try testing.expectEqual(@as(usize, line_count), next);
+    try testing.expectEqual(@as(usize, 0), bad);
+}

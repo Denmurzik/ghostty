@@ -113,6 +113,38 @@ callbacks wait for that lock) answers slowly. Measured: ReleaseFast
 200 resizes in under 1 s with WM_NULL answered in 1-3 ms; Debug 10-30 s and
 WM_NULL answers of 0.6-1.5 s.
 
+### stream-integrity: is every byte of a large output kept?
+
+`e2e/stream-integrity.ps1` checks the whole output path (ConPTY, the pty
+read thread, the VT parser, the scrollback) with what the terminal really
+holds, not with pixels:
+
+1. `e2e/_stream.ps1` (`New-CheckedStream`) writes a file of numbered lines
+   (`00000042 <printable ASCII payload> <CRC-32>`, at most 78 characters,
+   line `i` is a function of `i` alone) into the sandbox `TEMP`:
+   50 MB by default, `GHOSTTY_E2E_STREAM_MB` to change it.
+2. Git Bash runs `cat` on it, then prints an end marker.
+3. `ctrl+shift+f12` is bound to `write_screen_file:paste`
+   (`configs/stream-integrity.ghostty`, with `scrollback-limit-bytes =
+   unlimited`): Ghostty writes the screen and scrollback as plain text to a
+   `screen.txt` in the sandbox `TEMP`.
+4. `Test-CheckedStream` regenerates every line and reports each missing,
+   changed or extra line with its line number and the first column that
+   differs; any of them, or a missing end marker, FAILs.
+
+The throughput of the `cat` is reported as an INFO line. Run it on a
+ReleaseFast build (a Debug build parses far too slowly for 50 MB; use
+`GHOSTTY_E2E_STREAM_MB=2` there):
+
+```
+$env:GHOSTTY_E2E_EXE = "$PWD\zig-out-rf\bin\ghostty.exe"
+powershell -NoProfile -File test/windows/e2e-m1.ps1 -Only stream-integrity
+```
+
+Below the GUI, the `windows exec:` tests in `src/termio/Exec.zig` cover
+the same path in parts: the 2 KiB slicing of a read, a 50 MB stream of
+random write sizes through the overlapped pipe read loop, and checked lines
+from `cmd /c type` through a pseudo console into a terminal.
 
 ## measure-ram.ps1
 

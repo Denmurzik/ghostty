@@ -1,0 +1,11 @@
+background = #102030
+foreground = #e0e0e0
+confirm-close-surface = false
+# Git Bash with a UTF-8 locale, as in gitbash-de.ghostty.
+env = LC_ALL=en_US.UTF-8
+env = LANG=en_US.UTF-8
+# The whole stream must stay in the scrollback to be checked.
+scrollback-limit-bytes = unlimited
+# The scenario reads back what the terminal holds through this binding: the
+# screen and scrollback as plain text in a temporary file under %TEMP%.
+keybind = ctrl+shift+f12=write_screen_file:paste

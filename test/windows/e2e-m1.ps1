@@ -63,6 +63,7 @@ $all = @(
     @{ Name = 'vim-less'; Timeout = 180 }
     @{ Name = 'close-while-streaming'; Timeout = 150 }
     @{ Name = 'resize-while-streaming'; Timeout = 420 }
+    @{ Name = 'stream-integrity'; Timeout = 900 }
 )
 if ($Only) {
     # `powershell -File` hands over `a,b` as one string.
