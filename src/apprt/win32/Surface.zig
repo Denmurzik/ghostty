@@ -546,6 +546,8 @@ fn wndProc(
             return 0;
         },
 
+        // Only reached if DefWindowProc handles WM_DPICHANGED; the window
+        // returns 0 there and applies the scale itself.
         WM_DPICHANGED_AFTERPARENT => {
             self.applyDpi();
             return 0;

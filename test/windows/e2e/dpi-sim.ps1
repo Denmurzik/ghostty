@@ -3,7 +3,8 @@
 # (the second hidden) and a zoomed split in tab 1: at 144 every surface,
 # hidden ones included, reports scale 1.5, the strip is 60 px high and the
 # cell height is about 1.5x; 192 gives 2.0; back at 96 the original cell size
-# returns. Surfaces created after the change (new_tab, new_split) start at
+# returns; maximized and fullscreen windows refit to the work area / monitor
+# and the visible surface fills the content rect. Surfaces created after the change (new_tab, new_split) start at
 # the current scale. Screenshots at 96/144/192 are kept as evidence.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
@@ -32,6 +33,21 @@ Invoke-E2eScenario 'dpi-sim' {
         if ($r.code -ne 0) { throw "ipc dpi ${Dpi}: code $($r.code): $($r.stderr)" }
     }
     function Get-AllSurfaces($w) { foreach ($t in @($w.tabs)) { foreach ($s in @($t.surfaces)) { $s } } }
+
+    # The visible surface fills the content rect (client below the strip).
+    function Assert-Fills($w, [string]$What) {
+        $vis = @(Get-AllSurfaces $w | Where-Object { $_.visible })
+        if ($vis.Count -ne 1) { throw "${What}: $($vis.Count) visible surfaces, want 1 (zoomed)" }
+        $r = @($vis[0].rect)
+        $cw = $w.client[2] - $w.client[0]
+        $ch = $w.client[3] - $w.client[1]
+        $top = @($w.strip.bounds)[3]
+        if ($r[0] -ne 0 -or $r[2] -ne $cw -or $r[1] -ne $top -or $r[3] -ne $ch) {
+            throw "${What}: surface rect [$($r -join ',')] != content rect [0,$top,$cw,$ch]"
+        }
+    }
+    Add-Type -AssemblyName System.Windows.Forms
+    function Get-Screen($w) { [Windows.Forms.Screen]::FromHandle([IntPtr][Convert]::ToInt64(([string]$w.hwnd).Substring(2), 16)) }
     function Assert-Scale($w, [double]$Scale, [string]$What) {
         foreach ($s in Get-AllSurfaces $w) {
             if ([math]::Abs([double]$s.scale - $Scale) -gt 0.001) { throw "${What}: surface $($s.id) scale $($s.scale), want $Scale" }
@@ -87,6 +103,39 @@ Invoke-E2eScenario 'dpi-sim' {
     Set-Dpi 96
     $w = Assert-Dpi 96 1.0 $baseStrip
     if ([int]$w.cell[1] -ne $baseCell) { throw "cell height back at 96: $($w.cell[1]), want $baseCell" }
+
+    # Maximized: the dpi change refits the window to the work area.
+    Invoke-Act 'toggle_maximize'
+    [void](Wait-Win 'maximized' { param($w) $w.maximized })
+    foreach ($dpi in 144, 96) {
+        Set-Dpi $dpi
+        $w = Wait-Win "maximized at $dpi" { param($w) $w.dpi -eq $dpi -and $w.maximized }
+        $wa = (Get-Screen $w).WorkingArea
+        $cw = $w.client[2] - $w.client[0]
+        $ch = $w.client[3] - $w.client[1]
+        if ($cw -gt $wa.Width -or $ch -gt $wa.Height -or $cw -lt $wa.Width - 40 -or $ch -lt $wa.Height - 40) {
+            throw "maximized at ${dpi}: client ${cw}x${ch} does not fill the work area $($wa.Width)x$($wa.Height)"
+        }
+        if ($w.window[0] -gt $wa.Left -or $w.window[2] -lt $wa.Right) { throw "maximized at ${dpi}: window [$($w.window -join ',')] does not cover the work area" }
+        Assert-Fills $w "maximized at $dpi"
+    }
+    Invoke-Act 'toggle_maximize'
+    [void](Wait-Win 'restored' { param($w) -not $w.maximized })
+
+    # Fullscreen: the client covers the monitor after a dpi change.
+    Invoke-Act 'toggle_fullscreen'
+    [void](Wait-Win 'fullscreen' { param($w) $w.fullscreen })
+    foreach ($dpi in 144, 96) {
+        Set-Dpi $dpi
+        $w = Wait-Win "fullscreen at $dpi" { param($w) $w.dpi -eq $dpi -and $w.fullscreen }
+        $mon = (Get-Screen $w).Bounds
+        $cw = $w.client[2] - $w.client[0]
+        $ch = $w.client[3] - $w.client[1]
+        if ($cw -ne $mon.Width -or $ch -ne $mon.Height) { throw "fullscreen at ${dpi}: client ${cw}x${ch}, monitor $($mon.Width)x$($mon.Height)" }
+        Assert-Fills $w "fullscreen at $dpi"
+    }
+    Invoke-Act 'toggle_fullscreen'
+    [void](Wait-Win 'windowed again' { param($w) -not $w.fullscreen })
 
     $errors = @(Get-LogErrors $g)
     if ($errors.Count) { throw "ghostty.log has $($errors.Count) error line(s), first: $($errors[0])" }

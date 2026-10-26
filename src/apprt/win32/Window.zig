@@ -436,6 +436,11 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     }
 
     self.layout();
+    // A DPI change while the tab was hidden left its size stale.
+    {
+        var it = new.tree.iterator();
+        while (it.next()) |entry| entry.view.flushSize();
+    }
     new.setVisible(true);
     if (focus) new.focus();
     self.refreshTitle();
@@ -869,12 +874,16 @@ fn setMinimized(self: *Window, minimized: bool) void {
     tab.applyOcclusion(!minimized);
 }
 
-/// Follow a new DPI. Every surface of every tab (hidden ones too) gets the
-/// new content scale first, so the size the move produces is already
-/// computed with it; then the window moves to the system's suggested
-/// rectangle (or a scaled one without a suggestion).
+/// Follow a new DPI. Every surface of every tab gets the new content scale
+/// first, so the size the move produces is already computed with it; then
+/// the window moves to the system's suggested rectangle (or one computed
+/// from its client size without a suggestion). Hidden surfaces get the
+/// scale now and their size when their tab is shown.
 pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) void {
     const old_dpi = self.dpi;
+    const iconic = win32.user32.IsIconic(self.hwnd) != 0;
+    // The content size at the old DPI, before the frame metrics change.
+    const old_nc = frame_mod.nonClientSize(self);
     self.dpi = if (new_dpi == 0) dpi_mod.default_dpi else new_dpi;
 
     for (self.tabs.items) |tab| {
@@ -883,37 +892,69 @@ pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) 
     }
 
     const zoomed = win32.user32.IsZoomed(self.hwnd) != 0;
-    const target: ?win32.foundation.RECT = suggested orelse blk: {
-        if (zoomed or self.placement.fullscreen or old_dpi == self.dpi) break :blk null;
-        var rc: win32.foundation.RECT = undefined;
-        if (win32.user32.GetWindowRect(self.hwnd, &rc) == 0) break :blk null;
-        break :blk dpi_mod.scaledWindowRect(geom.Rect.fromRECT(rc), old_dpi, self.dpi).toRECT();
-    };
-    if (target) |r| {
-        _ = win32.user32.SetWindowPos(
-            self.hwnd,
-            null,
-            r.left,
-            r.top,
-            r.right - r.left,
-            r.bottom - r.top,
-            win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
-        );
+    if (self.placement.fullscreen) {
+        // The suggested rectangle is for a windowed frame; a fullscreen
+        // window keeps covering its (possibly new) monitor. The saved
+        // placement restores logically on that monitor when fullscreen ends.
+        placement_mod.coverMonitor(self);
+    } else if (zoomed) {
+        self.refitMaximized();
+    } else if (!iconic) {
+        if (suggested) |r| {
+            self.setOuterRect(geom.Rect.fromRECT(r));
+        } else if (old_dpi != self.dpi) {
+            var rc: win32.foundation.RECT = undefined;
+            if (win32.user32.GetWindowRect(self.hwnd, &rc) != 0) {
+                const outer = geom.Rect.fromRECT(rc);
+                const content = dpi_mod.scaledWindowRect(
+                    .{ .x = outer.x, .y = outer.y, .w = outer.w - old_nc.w, .h = outer.h - old_nc.h },
+                    old_dpi,
+                    self.dpi,
+                );
+                const size = windowSizeFor(.{ .w = content.w, .h = content.h }, frame_mod.nonClientSize(self));
+                self.setOuterRect(.{ .x = outer.x, .y = outer.y, .w = size.w, .h = size.h });
+            }
+        }
     }
-    // A maximized window fills the work area of the monitor it is on now.
-    if (zoomed and !self.placement.fullscreen) _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_MAXIMIZE);
-    // The suggested rectangle is for a windowed frame; a fullscreen window
-    // keeps covering its (possibly new) monitor. The saved placement
-    // restores logically on that monitor when fullscreen ends.
-    if (self.placement.fullscreen) placement_mod.coverMonitor(self);
 
     self.layout();
-    // Core gets the scale and the new size in this tick, hidden surfaces
-    // included.
+    // Core gets the scale and the new size in this tick.
     for (self.tabs.items) |tab| {
         var it = tab.tree.iterator();
         while (it.next()) |entry| entry.view.flushSize();
     }
+}
+
+fn setOuterRect(self: *Window, r: geom.Rect) void {
+    _ = win32.user32.SetWindowPos(
+        self.hwnd,
+        null,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
+    );
+}
+
+/// Fit a maximized window to the work area of the monitor it is on now,
+/// keeping it maximized: the frame overhangs the work area as the system
+/// does it.
+fn refitMaximized(self: *Window) void {
+    const monitor = win32.user32.MonitorFromWindow(self.hwnd, win32.user32.MONITOR_DEFAULTTONEAREST) orelse return;
+    var info: win32.user32.MONITORINFO = .{};
+    if (win32.user32.GetMonitorInfoW(monitor, &info) == 0) return;
+    const ins = frame_mod.frameInsets(self.dpi, true, self.frame.decorations);
+    const w = info.rcWork;
+    _ = win32.user32.SetWindowPos(
+        self.hwnd,
+        null,
+        w.left - ins.left,
+        w.top - ins.top,
+        (w.right - w.left) + ins.left + ins.right,
+        (w.bottom - w.top) + ins.top + ins.bottom,
+        win32.user32.SWP_FRAMECHANGED | win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
+    );
 }
 
 fn handleDpiChanged(self: *Window, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) void {
