@@ -15,6 +15,7 @@ const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const Chrome = @import("Chrome.zig");
 const actions = @import("actions.zig");
 const dialogs = @import("dialogs.zig");
 const instance = @import("instance.zig");
@@ -89,6 +90,8 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     try win32.foundation.check(win32.ole32.OleInitialize(null));
     errdefer win32.ole32.OleUninitialize();
 
+    _ = win32.uxtheme.BufferedPaintInit();
+
     const hinstance = win32.kernel32.GetModuleHandleW(null) orelse
         return error.GetModuleHandleFailed;
 
@@ -142,6 +145,9 @@ pub fn terminate(self: *App) void {
     self.last_active = null;
     while (self.windows.pop()) |window| window.destroy();
     self.windows.deinit(self.core_app.alloc);
+
+    Chrome.deinitShared();
+    _ = win32.uxtheme.BufferedPaintUnInit();
 
     _ = win32.user32.DestroyWindow(self.msg_hwnd);
     self.config.deinit();
