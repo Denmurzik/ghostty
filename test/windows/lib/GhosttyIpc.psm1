@@ -9,7 +9,17 @@ Set-StrictMode -Version Latest
 
 $script:ProtocolVersion = 1
 
+# The server compares deadline_ms with kernel32!GetTickCount64, so the same
+# clock is used here ([Environment]::TickCount64 is .NET Core only).
+if (-not ('GhosttyIpc.Clock' -as [type])) {
+    Add-Type -Namespace GhosttyIpc -Name Clock -MemberDefinition @"
+[DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
+"@
+}
+
 # Mirrors protocol.sanitizeClass: [A-Za-z0-9._-] kept, the rest '_', at most 80.
+# The server sanitizes UTF-8 bytes, so only an ASCII class maps the same way:
+# keep test classes ASCII.
 function ConvertTo-GhosttyPipeClass([string]$Class) {
     if ($Class.Length -gt 80) { $Class = $Class.Substring(0, 80) }
     [regex]::Replace($Class, '[^A-Za-z0-9._-]', '_')
@@ -52,7 +62,7 @@ function Invoke-GhosttyIpc {
     )
     $req = @{} + $Request
     $req['v'] = $script:ProtocolVersion
-    $req['deadline_ms'] = [int64][Environment]::TickCount64 + $TimeoutMs
+    $req['deadline_ms'] = [int64][GhosttyIpc.Clock]::GetTickCount64() + $TimeoutMs
     $json = $req | ConvertTo-Json -Compress -Depth 8
     $payload = [Text.Encoding]::UTF8.GetBytes($json)
 
