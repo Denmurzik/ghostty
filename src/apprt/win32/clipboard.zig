@@ -440,8 +440,6 @@ fn testWindow() !win32.foundation.HWND {
     ) orelse error.CreateWindowFailed;
 }
 
-extern "user32" fn EnumClipboardFormats(format: u32) callconv(.winapi) u32;
-
 /// Skips the calling test when the clipboard holds anything but text
 /// (images, files, HTML, app-private formats): the tests empty the
 /// clipboard, and only its text could be put back afterwards. The text
@@ -454,7 +452,7 @@ fn skipUnlessOnlyText(hwnd: win32.foundation.HWND) !void {
     const cf_locale = 16;
     var format: u32 = 0;
     while (true) {
-        format = EnumClipboardFormats(format);
+        format = win32.user32.EnumClipboardFormats(format);
         if (format == 0) return;
         switch (format) {
             win32.user32.CF_TEXT, cf_oemtext, win32.user32.CF_UNICODETEXT, cf_locale => {},

@@ -9,6 +9,11 @@ pub const imm32 = @import("imm32.zig");
 pub const dwmapi = @import("dwmapi.zig");
 pub const gdi32 = @import("gdi32.zig");
 pub const ole32 = @import("ole32.zig");
+pub const advapi32 = @import("advapi32.zig");
+pub const shell32 = @import("shell32.zig");
+pub const comctl32 = @import("comctl32.zig");
+pub const uxtheme = @import("uxtheme.zig");
+pub const winmm = @import("winmm.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

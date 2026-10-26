@@ -53,29 +53,17 @@ const ERROR_CLASS_ALREADY_EXISTS = 1410;
 pub fn systemUsesDarkTheme() bool {
     var data: u32 = 1;
     var size: u32 = @sizeOf(u32);
-    const rc = RegGetValueW(
-        HKEY_CURRENT_USER,
+    const rc = win32.advapi32.RegGetValueW(
+        win32.advapi32.HKEY_CURRENT_USER,
         std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
         std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme"),
-        RRF_RT_REG_DWORD,
+        win32.advapi32.RRF_RT_REG_DWORD,
         null,
         &data,
         &size,
     );
     return rc == 0 and data == 0;
 }
-
-const HKEY_CURRENT_USER: ?*anyopaque = @ptrFromInt(0x80000001);
-const RRF_RT_REG_DWORD = 0x00000010;
-extern "advapi32" fn RegGetValueW(
-    hkey: ?*anyopaque,
-    subkey: [*:0]const u16,
-    value: [*:0]const u16,
-    flags: u32,
-    type_out: ?*u32,
-    data: *u32,
-    size: *u32,
-) callconv(.winapi) i32;
 
 test "win32 util: utf16 roundtrip with non-BMP" {
     const alloc = std.testing.allocator;

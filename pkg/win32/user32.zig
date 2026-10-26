@@ -19,8 +19,12 @@ pub const HCURSOR = *opaque {};
 pub const HBRUSH = *opaque {};
 pub const HMENU = *opaque {};
 pub const HDC = *opaque {};
+pub const HMONITOR = *opaque {};
+pub const HRGN = *opaque {};
+pub const HDWP = *opaque {};
 
 pub const WNDPROC = *const fn (HWND, u32, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+pub const WNDENUMPROC = *const fn (HWND, LPARAM) callconv(.winapi) BOOL;
 pub const TIMERPROC = *const fn (?HWND, u32, usize, u32) callconv(.winapi) void;
 
 pub const WNDCLASSEXW = extern struct {
@@ -118,6 +122,83 @@ pub const PAINTSTRUCT = extern struct {
     rgbReserved: [32]u8,
 };
 
+pub const SIZE = extern struct {
+    cx: i32,
+    cy: i32,
+};
+
+pub const WINDOWPOS = extern struct {
+    hwnd: ?HWND,
+    hwndInsertAfter: ?HWND,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+};
+
+pub const WINDOWPLACEMENT = extern struct {
+    length: u32 = @sizeOf(WINDOWPLACEMENT),
+    flags: u32 = 0,
+    showCmd: u32 = 0,
+    ptMinPosition: POINT = .{ .x = 0, .y = 0 },
+    ptMaxPosition: POINT = .{ .x = 0, .y = 0 },
+    rcNormalPosition: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+};
+
+pub const MONITORINFO = extern struct {
+    cbSize: u32 = @sizeOf(MONITORINFO),
+    rcMonitor: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+    rcWork: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+    dwFlags: u32 = 0,
+};
+
+pub const SCROLLINFO = extern struct {
+    cbSize: u32 = @sizeOf(SCROLLINFO),
+    fMask: u32 = 0,
+    nMin: i32 = 0,
+    nMax: i32 = 0,
+    nPage: u32 = 0,
+    nPos: i32 = 0,
+    nTrackPos: i32 = 0,
+};
+
+pub const FLASHWINFO = extern struct {
+    cbSize: u32 = @sizeOf(FLASHWINFO),
+    hwnd: ?HWND,
+    dwFlags: u32,
+    uCount: u32 = 0,
+    dwTimeout: u32 = 0,
+};
+
+pub const NCCALCSIZE_PARAMS = extern struct {
+    rgrc: [3]RECT,
+    lppos: ?*WINDOWPOS,
+};
+
+pub const BLENDFUNCTION = extern struct {
+    BlendOp: u8 = AC_SRC_OVER,
+    BlendFlags: u8 = 0,
+    SourceConstantAlpha: u8 = 255,
+    AlphaFormat: u8 = 0,
+};
+
+pub const HIGHCONTRASTW = extern struct {
+    cbSize: u32 = @sizeOf(HIGHCONTRASTW),
+    dwFlags: u32 = 0,
+    lpszDefaultScheme: ?[*:0]u16 = null,
+};
+
+pub const CHANGEFILTERSTRUCT = extern struct {
+    cbSize: u32 = @sizeOf(CHANGEFILTERSTRUCT),
+    ExtStatus: u32 = 0,
+};
+
+pub const TPMPARAMS = extern struct {
+    cbSize: u32 = @sizeOf(TPMPARAMS),
+    rcExclude: RECT,
+};
+
 // -- Windows and messages --------------------------------------------------
 
 pub extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(.winapi) ATOM;
@@ -189,6 +270,69 @@ pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 pub extern "user32" fn AllowSetForegroundWindow(process_id: u32) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClassNameW(HWND, buf: [*]u16, max: i32) callconv(.winapi) i32;
 pub extern "user32" fn SystemParametersInfoW(action: u32, param: u32, pv: ?*anyopaque, win_ini: u32) callconv(.winapi) BOOL;
+
+// -- Window tree, placement and monitors ----------------------------------
+
+pub extern "user32" fn SetParent(child: HWND, new_parent: ?HWND) callconv(.winapi) ?HWND;
+pub extern "user32" fn GetParent(HWND) callconv(.winapi) ?HWND;
+pub extern "user32" fn GetAncestor(HWND, flags: u32) callconv(.winapi) ?HWND;
+pub extern "user32" fn IsZoomed(HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn IsIconic(HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn IsWindowVisible(HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn GetWindowPlacement(HWND, *WINDOWPLACEMENT) callconv(.winapi) BOOL;
+pub extern "user32" fn SetWindowPlacement(HWND, *const WINDOWPLACEMENT) callconv(.winapi) BOOL;
+pub extern "user32" fn MonitorFromWindow(HWND, flags: u32) callconv(.winapi) ?HMONITOR;
+pub extern "user32" fn MonitorFromPoint(POINT, flags: u32) callconv(.winapi) ?HMONITOR;
+pub extern "user32" fn GetMonitorInfoW(HMONITOR, *MONITORINFO) callconv(.winapi) BOOL;
+pub extern "user32" fn BeginDeferWindowPos(count: i32) callconv(.winapi) ?HDWP;
+/// Returns the (possibly moved) handle, null on failure.
+pub extern "user32" fn DeferWindowPos(HDWP, HWND, insert_after: ?HWND, x: i32, y: i32, cx: i32, cy: i32, flags: u32) callconv(.winapi) ?HDWP;
+pub extern "user32" fn EndDeferWindowPos(HDWP) callconv(.winapi) BOOL;
+pub extern "user32" fn MapWindowPoints(from: ?HWND, to: ?HWND, points: [*]POINT, count: u32) callconv(.winapi) i32;
+pub extern "user32" fn GetDC(?HWND) callconv(.winapi) ?HDC;
+pub extern "user32" fn ReleaseDC(?HWND, HDC) callconv(.winapi) i32;
+pub extern "user32" fn GetWindowTextW(HWND, buf: [*]u16, max: i32) callconv(.winapi) i32;
+pub extern "user32" fn GetWindowTextLengthW(HWND) callconv(.winapi) i32;
+pub extern "user32" fn RedrawWindow(?HWND, ?*const RECT, ?HRGN, flags: u32) callconv(.winapi) BOOL;
+pub extern "user32" fn ShowWindowAsync(HWND, cmd: i32) callconv(.winapi) BOOL;
+pub extern "user32" fn FlashWindowEx(*const FLASHWINFO) callconv(.winapi) BOOL;
+pub extern "user32" fn RegisterWindowMessageW([*:0]const u16) callconv(.winapi) u32;
+pub extern "user32" fn GetSystemMetrics(index: i32) callconv(.winapi) i32;
+pub extern "user32" fn SystemParametersInfoForDpi(action: u32, param: u32, pv: ?*anyopaque, win_ini: u32, dpi: u32) callconv(.winapi) BOOL;
+pub extern "user32" fn ChildWindowFromPointEx(HWND, POINT, flags: u32) callconv(.winapi) ?HWND;
+pub extern "user32" fn ChangeWindowMessageFilterEx(HWND, msg: u32, action: u32, ?*CHANGEFILTERSTRUCT) callconv(.winapi) BOOL;
+pub extern "user32" fn EnumWindows(WNDENUMPROC, LPARAM) callconv(.winapi) BOOL;
+pub extern "user32" fn GetWindowThreadProcessId(HWND, process_id: ?*u32) callconv(.winapi) u32;
+pub extern "user32" fn UpdateLayeredWindow(
+    HWND,
+    dst: ?HDC,
+    pt_dst: ?*const POINT,
+    size: ?*const SIZE,
+    src: ?HDC,
+    pt_src: ?*const POINT,
+    key: u32,
+    blend: ?*const BLENDFUNCTION,
+    flags: u32,
+) callconv(.winapi) BOOL;
+pub extern "user32" fn GetCapture() callconv(.winapi) ?HWND;
+
+// -- Scroll bars ------------------------------------------------------------
+
+pub extern "user32" fn SetScrollInfo(HWND, bar: i32, *const SCROLLINFO, redraw: BOOL) callconv(.winapi) i32;
+pub extern "user32" fn GetScrollInfo(HWND, bar: i32, *SCROLLINFO) callconv(.winapi) BOOL;
+pub extern "user32" fn ShowScrollBar(HWND, bar: i32, show: BOOL) callconv(.winapi) BOOL;
+
+// -- Menus and icons ----------------------------------------------------------
+
+pub extern "user32" fn CreatePopupMenu() callconv(.winapi) ?HMENU;
+/// `id` is the command id, or an `HMENU` for `MF_POPUP`.
+pub extern "user32" fn AppendMenuW(HMENU, flags: u32, id: usize, item: ?[*:0]const u16) callconv(.winapi) BOOL;
+/// With `TPM_RETURNCMD` the return value is the chosen command id (0 = none).
+pub extern "user32" fn TrackPopupMenuEx(HMENU, flags: u32, x: i32, y: i32, HWND, ?*const TPMPARAMS) callconv(.winapi) BOOL;
+pub extern "user32" fn DestroyMenu(HMENU) callconv(.winapi) BOOL;
+pub extern "user32" fn LoadImageW(?HINSTANCE, name: ?*const anyopaque, kind: u32, cx: i32, cy: i32, flags: u32) callconv(.winapi) ?HANDLE;
+pub extern "user32" fn DestroyIcon(HICON) callconv(.winapi) BOOL;
+pub extern "user32" fn EnumClipboardFormats(format: u32) callconv(.winapi) u32;
 
 // -- Keyboard --------------------------------------------------------------
 
@@ -686,3 +830,127 @@ pub const SM_CYCAPTION = 4;
 pub const SM_CXSIZEFRAME = 32;
 pub const SM_CYSIZEFRAME = 33;
 pub const SM_CXPADDEDBORDER = 92;
+
+pub const SM_CXFRAME = 32;
+pub const SM_CYFRAME = 33;
+pub const SM_CXSMICON = 49;
+
+// -- Non-client, scroll, window-state and menu constants ----------------------
+
+pub const WM_VSCROLL = 0x0115;
+pub const WM_NCRBUTTONUP = 0x00A5;
+
+// WM_NCHITTEST results (continued)
+pub const HTSYSMENU = 3;
+pub const HTGROWBOX = 4;
+pub const HTSIZE = HTGROWBOX;
+pub const HTMENU = 5;
+pub const HTHSCROLL = 6;
+pub const HTVSCROLL = 7;
+pub const HTMINBUTTON = 8;
+pub const HTMAXBUTTON = 9;
+pub const HTLEFT = 10;
+pub const HTRIGHT = 11;
+pub const HTTOP = 12;
+pub const HTTOPLEFT = 13;
+pub const HTTOPRIGHT = 14;
+pub const HTBOTTOM = 15;
+pub const HTBOTTOMLEFT = 16;
+pub const HTBOTTOMRIGHT = 17;
+pub const HTBORDER = 18;
+pub const HTREDUCE = HTMINBUTTON;
+pub const HTZOOM = HTMAXBUTTON;
+pub const HTSIZEFIRST = HTLEFT;
+pub const HTSIZELAST = HTBOTTOMRIGHT;
+pub const HTOBJECT = 19;
+pub const HTCLOSE = 20;
+pub const HTHELP = 21;
+
+// WM_SYSCOMMAND wParam (the low 4 bits are used by the system)
+pub const SC_MINIMIZE = 0xF020;
+pub const SC_MAXIMIZE = 0xF030;
+pub const SC_CLOSE = 0xF060;
+pub const SC_RESTORE = 0xF120;
+
+// Scroll bar selectors, WM_VSCROLL codes, SCROLLINFO masks, EnableScrollBar flags
+pub const SB_HORZ = 0;
+pub const SB_VERT = 1;
+pub const SB_CTL = 2;
+pub const SB_BOTH = 3;
+
+pub const SB_LINEUP = 0;
+pub const SB_LINELEFT = 0;
+pub const SB_LINEDOWN = 1;
+pub const SB_LINERIGHT = 1;
+pub const SB_PAGEUP = 2;
+pub const SB_PAGELEFT = 2;
+pub const SB_PAGEDOWN = 3;
+pub const SB_PAGERIGHT = 3;
+pub const SB_THUMBPOSITION = 4;
+pub const SB_THUMBTRACK = 5;
+pub const SB_TOP = 6;
+pub const SB_LEFT = 6;
+pub const SB_BOTTOM = 7;
+pub const SB_RIGHT = 7;
+pub const SB_ENDSCROLL = 8;
+
+pub const SIF_RANGE = 0x0001;
+pub const SIF_PAGE = 0x0002;
+pub const SIF_POS = 0x0004;
+pub const SIF_DISABLENOSCROLL = 0x0008;
+pub const SIF_TRACKPOS = 0x0010;
+pub const SIF_ALL = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_TRACKPOS;
+
+pub const ESB_ENABLE_BOTH = 0x0000;
+pub const ESB_DISABLE_LTUP = 0x0001;
+pub const ESB_DISABLE_RTDN = 0x0002;
+pub const ESB_DISABLE_BOTH = 0x0003;
+
+pub const FLASHW_STOP = 0;
+pub const FLASHW_CAPTION = 0x00000001;
+pub const FLASHW_TRAY = 0x00000002;
+pub const FLASHW_ALL = FLASHW_CAPTION | FLASHW_TRAY;
+pub const FLASHW_TIMER = 0x00000004;
+pub const FLASHW_TIMERNOFG = 0x0000000C;
+
+pub const MONITOR_DEFAULTTONULL = 0;
+pub const MONITOR_DEFAULTTOPRIMARY = 1;
+pub const MONITOR_DEFAULTTONEAREST = 2;
+
+pub const RDW_INVALIDATE = 0x0001;
+pub const RDW_ERASE = 0x0004;
+pub const RDW_ALLCHILDREN = 0x0080;
+pub const RDW_UPDATENOW = 0x0100;
+pub const RDW_FRAME = 0x0400;
+
+pub const ES_AUTOHSCROLL = 0x0080;
+
+pub const GA_PARENT = 1;
+pub const GA_ROOT = 2;
+pub const GA_ROOTOWNER = 3;
+
+pub const CWP_ALL = 0x0000;
+pub const CWP_SKIPINVISIBLE = 0x0001;
+pub const CWP_SKIPDISABLED = 0x0002;
+pub const CWP_SKIPTRANSPARENT = 0x0004;
+
+pub const MSGFLT_RESET = 0;
+pub const MSGFLT_ALLOW = 1;
+pub const MSGFLT_DISALLOW = 2;
+
+pub const SPI_GETHIGHCONTRAST = 0x0042;
+pub const SPI_GETWHEELSCROLLLINES = 0x0068;
+pub const HCF_HIGHCONTRASTON = 0x00000001;
+
+pub const MF_STRING = 0x00000000;
+pub const MF_SEPARATOR = 0x00000800;
+pub const TPM_RIGHTBUTTON = 0x0002;
+pub const TPM_BOTTOMALIGN = 0x0020;
+pub const TPM_RETURNCMD = 0x0100;
+
+pub const IMAGE_ICON = 1;
+pub const LR_DEFAULTCOLOR = 0x00000000;
+
+pub const ULW_ALPHA = 0x00000002;
+pub const AC_SRC_OVER = 0x00;
+pub const AC_SRC_ALPHA = 0x01;
