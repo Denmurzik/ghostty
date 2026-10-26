@@ -572,7 +572,7 @@ input and output latency measured and fixed incl. TUI wheel scrolling and ConPTY
 resident (§18.19; full recovery M3). Every `Action.Key` is classified implemented / deferred (milestone) /
 unsupported by `apprt/win32/actions.zig`. Exit: action-coverage test green; M1+M2 e2e green on Debug and ReleaseFast;
 screenshots at 100/150/200% (simulated through the test DPI op; real multi-monitor checked by the owner); per-tab/split/window
-and close-10 RAM rows within §14 targets; the latency thresholds of §18.18 met on ReleaseFast and Debug. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
+and close-10 RAM rows within §14 targets; the ReleaseFast latency gates of §18.18 met. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
 
 **M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
 AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),
@@ -653,18 +653,20 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
     every strip creates a new window under the cursor (a single-tab source window just moves); an emptied source window
     closes; a dpi change between windows rescales the moved surfaces.
 17. Owner requirement (2026-10-26, M2 Task 38): files dropped from Explorer onto a surface are inserted as their paths,
-    space-separated, quoted for the surface's shell (from the launched command: bash/sh/zsh/fish → POSIX single quotes,
-    pwsh/powershell → PowerShell single quotes, cmd and unknown → double quotes when needed), delivered like macOS Ghostty's
+    space-separated, quoted for the surface's shell (from the launched command: Git Bash/MSYS shells → msys paths
+    `/c/Users/…` in POSIX single quotes (owner decision 2026-10-26), wsl → `/mnt/c/…`, pwsh/powershell → PowerShell
+    single quotes, cmd and unknown shells → double quotes when needed), delivered like macOS Ghostty's
     drop: a paste through `textCallback` (bracketed when the program enabled it), never followed by Enter. One OLE
     `IDropTarget` per top-level window (OLE is initialised for it); the target surface is highlighted during the drag.
     Text drops are M3. An elevated Ghostty gets no drops from a non-elevated Explorer (UIPI), as in Windows Terminal.
 18. Owner requirement (2026-10-26, M2 Tasks 36, 37, 40; the owner sees lag in ReleaseFast too, worst when scrolling
     TUIs): latency is measured first (Task 36 is the first M2 task) by a std-only tracer (`src/os/windows_latency.zig`,
     active only with `GHOSTTY_LATENCY_TRACE=<csv>`) with stages input (`WM_KEYDOWN`/`WM_MOUSEWHEEL`) → pty write →
-    pty output → parse → render start → frame-slot wait → present. Gates, p95 ReleaseFast / Debug: key echo ≤ 16 / 50 ms;
-    TUI key navigation and wheel scrolling (`less`, `vim`) ≤ 25 / 60 ms; a 30-notch wheel burst settles ≤ 50 / 120 ms
-    after the last notch; output → present ≤ 8 / 25 ms idle. Changed only with a stage table and the lead's written
-    sign-off. Wheel input is coalesced per message-loop turn. When ConPTY itself is the floor, Task 40 switches to the
+    pty output → parse → render start → frame-slot wait → present. Gates on ReleaseFast (owner decision 2026-10-26: whole
+    path ≤ 16 ms p95, Ghostty-owned stages ≤ 6 ms; Debug may stay slower and is recorded, not gated): key echo, TUI key
+    navigation and wheel scrolling (`less`, `vim`) ≤ 16 ms; a 30-notch wheel burst settles ≤ 50 ms after the last notch;
+    output → present ≤ 8 ms idle; plus the owner's hands-on comparison with Windows Terminal. Changed only with a stage
+    table and the lead's written sign-off. Wheel input is coalesced per message-loop turn. When ConPTY itself is the floor, Task 40 switches to the
     best measured variant — inbox `PSEUDOCONSOLE_PASSTHROUGH_MODE` where supported, or `conpty.dll` + `OpenConsole.exe`
     from Microsoft's pinned NuGet package shipped next to `ghostty.exe` (as Windows Terminal does), with fallback to the
     inbox conhost; the lead records the chosen variant here.

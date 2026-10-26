@@ -28,7 +28,7 @@ Carried from M1 (every task implicitly includes these):
 New or changed for M2:
 
 - **Builds `-j2`** (lead ruling, M1 ledger; `-j1` for a full `zig build` that OOMs). Strictly one build/test at a time through the test-lock. Bash timeout 600000 on every build/test command. Check free RAM before a full-suite run; prefer focused `-Dtest-filter`.
-- **Timing acceptance only on ReleaseFast** (`--prefix zig-out-rf`, `$env:GHOSTTY_E2E_EXE`); Debug timings are reference only. One exception: the owner tests Debug builds, so Tasks 37/40 also gate the Debug latency thresholds.
+- **Timing acceptance only on ReleaseFast** (`--prefix zig-out-rf`, `$env:GHOSTTY_E2E_EXE`); Debug timings are reference only. Debug latency is recorded against Task 36's target column, not gated (owner decision 2026-10-26: daily use is ReleaseFast).
 - **GUI tests only through the runner** `test/windows/e2e.ps1` (or `Invoke-GuiScenario`) holding the shared desktop lock `%TEMP%\gui-e2e.lock`. Never send input, take focus, or capture the screen outside a scenario.
 - **Never start `ghostty.exe` outside the harness** (`Start-E2eGhostty`, `measure-ram.ps1`, the spike's `run.ps1`, all of which write `class` through the one Harness config writer of Task 4). A bare `zig-out\bin\ghostty.exe` run shares the Debug pipe with the owner's Debug Ghostty once Task 11 lands, and the owner's next launch would open inside an agent process that the agent later kills.
 - **RAM in GUI runs:** a scenario with more than 4 surfaces checks free physical memory ≥ 2.5 GB first and SKIPs otherwise (`Assert-FreeRam 2.5` in `_common.ps1`, Task 4); Debug runs of such scenarios also take the test-lock.
@@ -172,8 +172,8 @@ Timer ids (`messages.zig`, per window class): msg window `1` quit timer (M1); `G
   // bell.zig (Task 26)
   pub fn decorateTitle(alloc: Allocator, title: []const u8, tab: *const Tab) ![:0]u8;  // stub: dupeZ(title); Task 13's refreshTitle calls it
   // drop.zig (Task 38)
-  pub const ShellKind = enum { posix, pwsh, cmd };
-  pub fn shellKindFor(command: ?configpkg.Command) ShellKind;     // stub: .posix
+  pub const ShellKind = enum { msys, wsl, pwsh, cmd };
+  pub fn shellKindFor(command: ?configpkg.Command) ShellKind;     // stub: .cmd
   pub fn register(window: *Window) void;                          // stub: no-op (Task 6a calls it after CreateWindowExW)
   pub fn revoke(window: *Window) void;                            // stub: no-op (Task 6a calls it before DestroyWindow)
   pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT;  // stub: null (Task 6b dispatch chain)
@@ -1119,18 +1119,19 @@ Runs in W7, before Task 21 (`move_tab_to_new_window`) and Task 32 re-parent pres
 
 Owner requirement (DECISIONS, 2026-10-26) and owner update the same day: typing lags in Debug **and** in ReleaseFast (`C:\D\den4ik\Ghostty-try\release\bin\ghostty.exe`), and input lag is high in TUI apps when scrolling with the mouse wheel and navigating. This task measures before anything is changed and names the causes; Task 37 fixes what is inside Ghostty, Task 40 what is in ConPTY. It runs in W1 next to Tasks 2 and 3 (file-disjoint: it owns the renderer, `Surface.zig`, `keyboard.zig`, `mouse.zig` and the Windows pty/termio files in this wave).
 
-**Acceptance thresholds** (lead, 2026-10-26; gated in Task 37/40, recorded here). p95 over the stated sample, primary monitor at its native refresh rate, Git Bash:
+**Acceptance thresholds** (owner decision 2026-10-26: whole path ≤ 16 ms p95 on ReleaseFast; Ghostty-owned stages ≤ 6 ms; Debug may stay slower, daily use is ReleaseFast; gated in Tasks 37/40, recorded here). p95 over the stated sample, primary monitor at its native refresh rate, Git Bash. Debug numbers are recorded against the target column, not gated:
 
-| Scenario | Measured span | ReleaseFast | Debug |
+| Scenario | Measured span | ReleaseFast gate | Debug target (recorded) |
 |---|---|---|---|
 | (a) key echo, idle shell, 200 keys 120 ms apart | keypress → present of the echo | ≤ 16 ms | ≤ 50 ms |
-| (b1) key navigation in `less` (`j`, `k`, `Space`, `b`) and `vim` (`j`, `Ctrl-E`, `Ctrl-D`) on a 50 000-line file, 100 keys 150 ms apart | keypress → present of the changed screen | ≤ 25 ms | ≤ 60 ms |
-| (b2) mouse wheel in `less` and `vim` (mouse mode on), 60 notches 50 ms apart | notch → present of the scrolled screen | ≤ 25 ms | ≤ 60 ms |
+| (b1) key navigation in `less` (`j`, `k`, `Space`, `b`) and `vim` (`j`, `Ctrl-E`, `Ctrl-D`) on a 50 000-line file, 100 keys 150 ms apart | keypress → present of the changed screen | ≤ 16 ms | ≤ 60 ms |
+| (b2) mouse wheel in `less` and `vim` (mouse mode on), 60 notches 50 ms apart | notch → present of the scrolled screen | ≤ 16 ms | ≤ 60 ms |
 | (b3) wheel burst: 30 notches 8 ms apart | last notch → last present (no backlog) | ≤ 50 ms | ≤ 120 ms |
 | (c) output → present, idle: `while :; do date +%s%N; sleep 0.1; done`, 200 lines | pty read → present | ≤ 8 ms | ≤ 25 ms |
 | (c2) output → present with 3 other panes streaming (Task 14 adds it to `split-many`) | pty read → present | ≤ 20 ms | recorded |
+| all of (a)–(c) | Ghostty-owned stages: input → pty write + pty output → present | ≤ 6 ms | recorded |
 
-A threshold may change only with the stage table and the lead's written sign-off. The ConPTY stage (pty write → pty output) is reported separately: when its p95 alone exceeds 8 ms in (a) or 12 ms in (b), ConPTY is the floor and Task 40 is mandatory; otherwise the lead may mark Task 40 N/A.
+A threshold may change only with the stage table and the lead's written sign-off. The ConPTY stage (pty write → pty output) is reported separately: when ConPTY + shell alone make (a) or (b1)/(b2) exceed 16 ms, Task 40 is mandatory (passthrough mode or bundled OpenConsole, as Windows Terminal does); otherwise the lead may mark Task 40 N/A. The owner also compares Ghostty against Windows Terminal by hand on the same machine (exit checklist).
 
 **Files:**
 - Create: `src/os/windows_latency.zig` (std only; core touch point), `test/windows/e2e/input-latency.ps1`, `test/windows/e2e/tui-latency.ps1`, `test/windows/e2e/output-latency.ps1`, `test/windows/e2e/_latency.ps1` (shared helpers: CSV parse, percentiles, baseline row), `docs/windows/latency-baseline.csv`
@@ -1187,7 +1188,7 @@ A threshold may change only with the stage table and the lead's written sign-off
   - Output path: if (4) is confirmed, the Windows read loop parses one read in larger slices (bounded so a quit request is still seen within the M1 bound) and yields to the renderer at most once per read instead of per slice; `stream-integrity` and `close-while-streaming` stay green.
   - Debug: if C dependencies dominate Debug CPU time, build them `ReleaseFast` in Debug on Windows (SharedDeps, gated); if Zig code under `slow_runtime_safety` dominates, record it.
   - `GHOSTTY_D3D11_PACING_LOG=1` (diagnostic): one `log.debug` line per frame with slot-wait and build durations.
-- Acceptance: the Task 36 table for (a), (b1), (b2), (b3), (c) on ReleaseFast and Debug, measured with the inbox ConPTY — except that a scenario whose ConPTY stage alone breaks its budget is gated on the Ghostty-owned stages (input→write + output→present ≤ 6 ms p95 RF / ≤ 30 ms Debug) here and on the full span in Task 40. No regression: idle CPU of a 1-surface window unchanged (±0.5 % over 30 s), `stream-integrity`, `resize-while-streaming`, `close-while-streaming`, `vim-less` PASS.
+- Acceptance: the Task 36 ReleaseFast gates for (a), (b1), (b2), (b3), (c) and the Ghostty-owned ≤ 6 ms row, measured with the inbox ConPTY — except that a scenario whose ConPTY stage alone breaks its budget is gated here on the Ghostty-owned row only and on the full span in Task 40; Debug numbers recorded against the target column. No regression: idle CPU of a 1-surface window unchanged (±0.5 % over 30 s), `stream-integrity`, `resize-while-streaming`, `close-while-streaming`, `vim-less` PASS.
 - [ ] **Step 1: Failing tests**
   ```zig
   test "d3d11 swapchain: pending presents are counted, not a bool" { // 2 presents, 1 successful wait → 1 pending; timed-out waits never underflow }
@@ -1198,7 +1199,7 @@ A threshold may change only with the stage table and the lead's written sign-off
   ```
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="d3d11 "` and `LOCK ZIG build test -j2 -Dtest-filter="win32 mouse"` → FAIL.
 - [ ] **Step 3: Implement** in the order of the Task 36 ranking, re-measuring after each.
-- [ ] **Step 4: Verify** unit PASS; `grep -rn 'extern "' src/apprt/win32 src/renderer/d3d11` → no output; the three latency scenarios gate on ReleaseFast and Debug as above; `E2E -Milestone M1` PASS; baseline rows appended (after-fix).
+- [ ] **Step 4: Verify** unit PASS; `grep -rn 'extern "' src/apprt/win32 src/renderer/d3d11` → no output; the three latency scenarios gate on ReleaseFast as above and record Debug; `E2E -Milestone M1` PASS; baseline rows appended (after-fix).
 - [ ] **Step 5: Commit(s)** `git commit -m "perf(win32): <cause> — <scenario> p95 <before> → <after> ms (RF)"`; final `git commit -m "test(windows): latency gates on ReleaseFast and Debug"`.
 
 ### Task 40: ConPTY latency mitigation (W5; mandatory when Task 36 shows ConPTY is the floor)
@@ -1220,7 +1221,7 @@ Windows Terminal does not use the inbox conhost for its tabs: it ships `conpty.d
 - [ ] **Step 1: Failing test** `"windows pty: conpty variant choice"` (pure `chooseVariant`: bundled present + auto → bundled; absent → inbox; build below the passthrough minimum → no passthrough; `inbox` setting wins).
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dapp-runtime=none -Dtest-filter="windows pty"` → FAIL.
 - [ ] **Step 3: Implement** the chosen outcome; `conpty-variant` scenario (order 153): state which variant is active (log line at surface creation) and run (a)/(b1) on it.
-- [ ] **Step 4: Verify** full-span gates of Task 36 on ReleaseFast and Debug; `E2E -Milestone M1` PASS; `E2E -Only input-latency,tui-latency,output-latency,conpty-variant` PASS.
+- [ ] **Step 4: Verify** full-span ReleaseFast gates of Task 36 (Debug recorded); `E2E -Milestone M1` PASS; `E2E -Only input-latency,tui-latency,output-latency,conpty-variant` PASS.
 - [ ] **Step 5: Commit** `git commit -m "perf(windows): <variant> ConPTY — key echo p95 <before> → <after> ms (RF)"`.
 
 ### Task 38: File drag-and-drop from Explorer
@@ -1238,13 +1239,15 @@ Owner requirement (DECISIONS, 2026-10-26): dropping files/folders onto a surface
 - Consumes: Task 2 stub signatures, Task 6a (`register/revoke`, `Surface.shell_kind`), Task 6b (`drop.handle` in the hook chain), Task 11 oracle, `theme.palette` (highlight colour), messages `WM_GHOSTTY_DROP` (`+10`).
 - Produces:
   ```zig
-  pub const ShellKind = enum { posix, pwsh, cmd };
+  pub const ShellKind = enum { msys, wsl, pwsh, cmd };
   pub fn shellKindFor(command: ?configpkg.Command) ShellKind;  // argv[0] basename, case-insensitive, ".exe" stripped:
-      // bash/sh/zsh/fish/dash/ksh/busybox → posix; pwsh/powershell → pwsh; cmd → cmd; wsl → posix (paths not translated — WSL profiles are M5);
-      // unknown or null → cmd (Windows-native quoting is the safe default for Windows programs)
+      // bash/sh/zsh/fish/dash/ksh/busybox → msys (Git Bash/MSYS2); wsl → wsl; pwsh/powershell → pwsh; cmd → cmd;
+      // unknown or null → cmd (owner decision 2026-10-26: unknown shells use cmd-style double quotes)
+  pub fn msysPath(alloc: Allocator, win: []const u8) ![]u8;  // pure (owner decision 2026-10-26: Git Bash gets msys paths): C:\a\b → /c/a/b (drive
+      // lower-cased); a "\\?\" prefix is dropped first; "\\?\UNC\srv\share\x" and UNC "\\srv\share\x" → //srv/share/x; every '\' → '/'
+  pub fn wslPath(alloc: Allocator, win: []const u8) ![]u8;   // pure: C:\a\b → /mnt/c/a/b; UNC paths kept in msys form (//srv/share/x)
   pub fn quote(alloc: Allocator, kind: ShellKind, paths: []const []const u8) ![]u8;  // pure; joined with one space, no trailing space (macOS Ghostty behaviour)
-      // posix: a path made only of [A-Za-z0-9_./:@%+=,-] is left as is; otherwise single quotes, ' → '\'' ; backslashes stay literal (Git Bash and native
-      //        programs both accept C:\… inside single quotes)
+      // msys/wsl: path converted first (msysPath/wslPath); a result made only of [A-Za-z0-9_./:@%+=,-] is left as is; otherwise single quotes, ' → '\''
       // pwsh:  a path made only of [A-Za-z0-9_.\\:/-] is left as is; otherwise single quotes, each ' (and U+2018, U+2019, U+201A, U+201B) doubled
       // cmd:   double quotes when the path has a space or any of &()[]{}^=;!'+,`~ or a non-ASCII char; '"' cannot occur in Windows paths; % is not escapable
       //        inside quotes in an interactive cmd and is left as is (documented, same as Windows Terminal)
@@ -1271,8 +1274,8 @@ Owner requirement (DECISIONS, 2026-10-26): dropping files/folders onto a surface
   Multiple files and folders: one path each, in the order of the `DROPFILES` list. Text drops (`CF_UNICODETEXT` from a browser) are deferred to M3 (they need the unsafe-paste confirmation path); `DROPEFFECT_NONE` for them.
 - [ ] **Step 1: Failing tests** in `drop.zig`:
   ```zig
-  test "win32 drop: shell kind from the command" { // "C:\\Program Files\\Git\\bin\\bash.exe --login -i" → posix; "pwsh.exe -NoLogo" → pwsh; "C:\\WINDOWS\\system32\\cmd.exe" → cmd; "direct:wsl.exe ~" → posix; null → cmd; "foo.exe" → cmd }
-  test "win32 drop: posix quoting" { // C:\a b\c.txt → 'C:\a b\c.txt'; it's → 'it'\''s'; /tmp/x → /tmp/x; two paths joined by one space }
+  test "win32 drop: shell kind from the command" { // "C:\\Program Files\\Git\\bin\\bash.exe --login -i" → msys; "pwsh.exe -NoLogo" → pwsh; "C:\\WINDOWS\\system32\\cmd.exe" → cmd; "direct:wsl.exe ~" → wsl; null → cmd; "foo.exe" → cmd }
+  test "win32 drop: msys and wsl paths and quoting" { // msys: C:\a b\c.txt → '/c/a b/c.txt'; D:\x\y.txt → /d/x/y.txt (unquoted); \\?\C:\long → /c/long; \\srv\share\f → //srv/share/f; it's → '.../it'\''s'; wsl: C:\a b → '/mnt/c/a b'; two paths joined by one space }
   test "win32 drop: pwsh quoting" { // C:\a b → 'C:\a b'; O'Brien → 'O''Brien'; U+2019 doubled; C:\plain\x.txt unquoted; $x → '$x' }
   test "win32 drop: cmd quoting" { // C:\a b → "C:\a b"; a&b → "a&b"; C:\plain\x.txt unquoted; Рабочая\ф.txt → quoted }
   test "win32 drop: DROPFILES parse" { // synthesized wide block with 3 paths incl. Cyrillic, a 300-char path, "\\\\?\\C:\\long" and a UNC path → exact UTF-8 strings }
@@ -1280,7 +1283,7 @@ Owner requirement (DECISIONS, 2026-10-26): dropping files/folders onto a surface
   test "win32 drop: IDropTarget and IDataObject slot counts" { // 7 and 12 (oleidl.h / objidl.h of SDK 10.0.26100) }
   ```
 - [ ] **Step 2: Run** `LOCK ZIG build test -j2 -Dtest-filter="win32 drop"` → FAIL.
-- [ ] **Step 3: Implement**; `_drop.ps1` provides `Start-OleFileDrag -Files <string[]> -ToHwnd <h> -X -Y`: a small WinForms source window (in the scenario's PowerShell, STA) whose `MouseDown` calls `DoDragDrop` with a `DataObject` built by `SetFileDropList` (paths need not exist in Explorer; the helper creates them in the sandbox), driven by `Send-MouseDown/Move/Up` from `MouseInput.psm1` (real OLE path end to end; interactive only, SKIP otherwise). Scenario `drop-files` (order 470, milestone M2): sandbox files `a b.txt`, `it's & (x).txt`, `Рабочая папка\файл.txt`, a folder `dir with space`, and a 300-char path created with the `\\?\` prefix; for each shell config — Git Bash (SKIP without it), `pwsh` (SKIP without it), `cmd` — type the oracle prefix (`printf '%s\n' ` / `Write-Output ` / `for %f in (` … `) do @echo %~f`), drop all five onto the surface, check mid-drag that a visible `GhosttyDropHighlight` window of the pid covers the surface rect ±2 px, release, check that nothing ran yet (oracle file absent: the drop did not press Enter), then complete the line with `> %TEMP%\gt-drop.txt` + Enter → the file lists the five original paths exactly (UTF-8 compare); drop onto the second split of a two-split tab → the text lands in that split and it becomes focused; drop onto the tab strip → refused (`DROPEFFECT_NONE`, nothing typed).
+- [ ] **Step 3: Implement**; `_drop.ps1` provides `Start-OleFileDrag -Files <string[]> -ToHwnd <h> -X -Y`: a small WinForms source window (in the scenario's PowerShell, STA) whose `MouseDown` calls `DoDragDrop` with a `DataObject` built by `SetFileDropList` (paths need not exist in Explorer; the helper creates them in the sandbox), driven by `Send-MouseDown/Move/Up` from `MouseInput.psm1` (real OLE path end to end; interactive only, SKIP otherwise). Scenario `drop-files` (order 470, milestone M2): sandbox files `a b.txt`, `it's & (x).txt`, `Рабочая папка\файл.txt`, a folder `dir with space`, and a 300-char path created with the `\\?\` prefix; for each shell config — Git Bash (SKIP without it), `pwsh` (SKIP without it), `cmd` — type the oracle prefix (`printf '%s\n' ` / `Write-Output ` / `for %f in (` … `) do @echo %~f`), drop all five onto the surface, check mid-drag that a visible `GhosttyDropHighlight` window of the pid covers the surface rect ±2 px, release, check that nothing ran yet (oracle file absent: the drop did not press Enter), then complete the line with `> %TEMP%\gt-drop.txt` + Enter → the file lists the five paths exactly (UTF-8 compare): in Git Bash as msys paths (`/c/…`, computed by the script with the same rules and cross-checked with `cygpath -u`), in pwsh and cmd as the original Windows paths; drop onto the second split of a two-split tab → the text lands in that split and it becomes focused; drop onto the tab strip → refused (`DROPEFFECT_NONE`, nothing typed).
 - [ ] **Step 4: Verify** unit PASS; `E2E -Only drop-files,paste-confirm,typing-ru` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "feat(win32): drop files from Explorer as shell-quoted paths (OLE IDropTarget)"`
 
@@ -1351,8 +1354,8 @@ Pre-flight 12 / M1 final review M6: once the tray keeps the process alive, a TDR
 4. Single instance: second launch exits 0 ≤ 2 s and the new window shows ≤ 1.5 s (ReleaseFast); two launches 50 ms apart end in one process; a launch with other arguments runs separately and ends with its last window; `+new-window` works; e2e instances never touched the owner's Ghostty (class isolation); an elevated instance uses the `-admin` pipe.
 5. RAM rows `tabs`, `splits`, `windows`, `close-10` within SPEC §14 targets (gate G1 decision recorded); `zero-windows` recorded.
 6. Screenshot set (Task 35 Step 3) inspected by the lead.
-7. Latency (Tasks 36, 37, 40): every row of the Task 36 threshold table met on ReleaseFast and Debug — key echo, TUI key navigation, TUI wheel scrolling, wheel burst without backlog, output→present (or the lead's written adjustment with the stage table); ConPTY variant decision recorded in SPEC §18.18; rows in `docs/windows/latency-baseline.csv` before and after.
-8. Owner manual checklist (record PASS/FAIL per line): typing in the Debug and the ReleaseFast build feels immediate; wheel scrolling and navigation in `less`/`vim` (and the owner's usual TUIs, e.g. Claude Code) feel immediate; dragging files from Explorer into Git Bash, pwsh and cmd inserts correctly quoted paths and highlights the target pane; tray icon present after closing the last window, left click opens a window, menu New Window / Quit work, icon returns after restarting Explorer; `start cmd` from a tab survives closing that tab; dragging a tab to a window on a monitor with another scale renders it at that scale; snap layouts flyout on hovering maximize; Aero snap by dragging the caption to an edge; moving a window between monitors of different scale; Mica visible behind the strip with "Transparency effects" on and solid with it off; switching Windows light/dark in Settings repaints the strip and conditional themes (also with all windows closed, then opening one from the tray); Alt+Tab/taskbar titles follow the active tab; taskbar progress during a `winget`-style OSC 9;4 run; a "Run as administrator" Ghostty and a normal one run side by side without forwarding to each other.
+7. Latency (Tasks 36, 37, 40): every ReleaseFast gate of the Task 36 table met — key echo, TUI key navigation, TUI wheel scrolling (whole path ≤ 16 ms p95), wheel burst without backlog, output→present, Ghostty-owned stages ≤ 6 ms (or the lead's written adjustment with the stage table); Debug recorded; ConPTY variant decision recorded in SPEC §18.18; rows in `docs/windows/latency-baseline.csv` before and after.
+8. Owner manual checklist (record PASS/FAIL per line): typing in the Debug and the ReleaseFast build feels immediate; wheel scrolling and navigation in `less`/`vim` (and the owner's usual TUIs, e.g. Claude Code) feel immediate; side-by-side with Windows Terminal on the same machine, typing and TUI scrolling are not noticeably slower (owner decision 2026-10-26); dragging files from Explorer into Git Bash, pwsh and cmd inserts correctly quoted paths and highlights the target pane; tray icon present after closing the last window, left click opens a window, menu New Window / Quit work, icon returns after restarting Explorer; `start cmd` from a tab survives closing that tab; dragging a tab to a window on a monitor with another scale renders it at that scale; snap layouts flyout on hovering maximize; Aero snap by dragging the caption to an edge; moving a window between monitors of different scale; Mica visible behind the strip with "Transparency effects" on and solid with it off; switching Windows light/dark in Settings repaints the strip and conditional themes (also with all windows closed, then opening one from the tray); Alt+Tab/taskbar titles follow the active tab; taskbar progress during a `winget`-style OSC 9;4 run; a "Run as administrator" Ghostty and a normal one run side by side without forwarding to each other.
 9. Upstream rebase of `windows` onto upstream main (lead), M2 changelog for the owner (incl. known gaps: Git Bash cwd inheritance until M5 OSC 7 translation; no drops into an elevated Ghostty from a normal Explorer; tab context menu and tab tooltips in M3; existing windows stay blank after a GPU device loss until M3 recovery).
 
 ## M1 carry-over assignment
@@ -1427,9 +1430,8 @@ Review: `docs/windows/plans/M2-preflight-review.md` (2 BLOCKER, 14 IMPORTANT, 13
 
 The owner reported noticeable typing lag in the ReleaseFast build too, and high lag when scrolling with the mouse wheel and navigating in TUI apps. Applied: Task 36 is the first task of M2 (W1; Task 1 moved to W2 and the present-target id seam moved from Task 2 to Task 36 to keep W1 file-disjoint); it measures key echo, TUI key navigation and wheel scrolling (`less`, `vim`), wheel bursts and output→present, instruments the input path (`WM_KEYDOWN`/`WM_MOUSEWHEEL` → core → pty write) and the output path (ConPTY read → parse → renderer wakeup → frame-slot wait → `Present`), and compares ConPTY variants (inbox flags incl. `PSEUDOCONSOLE_PASSTHROUGH_MODE`, bundled `conpty.dll` + `OpenConsole.exe`); per-scenario thresholds are in its table. Task 37 fixes causes inside Ghostty (frame-slot wait, wheel coalescing, `WM_CHAR` draining, 2 KiB slicing + `yieldToDemand`, Debug costs); new Task 40 (W5) applies the ConPTY mitigation when ConPTY is the floor. Task 29 moved to W7 as a side effect of the re-layout.
 
+Owner answers (DECISIONS, 2026-10-26, applied): drops into Git Bash insert msys paths (`'/c/Users/…'`), unknown shells get cmd-style double quotes (Task 38); the latency gate is the whole path ≤ 16 ms p95 on ReleaseFast with Ghostty-owned stages ≤ 6 ms, ConPTY passthrough / bundled OpenConsole when ConPTY is the floor, plus a hands-on comparison with Windows Terminal; Debug may stay slower (Tasks 36, 37, 40).
+
 ## Open owner questions
 
-1. Drop quoting in Git Bash: paths are inserted in Windows form inside single quotes (`'C:\Users\a b\f.txt'`), which both msys and native programs accept. Alternative: msys form (`'/c/Users/a b/f.txt'`). Default chosen: Windows form.
-2. Unknown shells (a `command` that is not bash/pwsh/cmd, e.g. `nu`, `python`): paths use cmd-style double quotes (Windows Terminal's behaviour). Alternative: POSIX single quotes.
-3. Latency thresholds (Task 36 table): key echo ≤ 16 ms, TUI key/wheel ≤ 25 ms, wheel burst settles ≤ 50 ms, output→present ≤ 8 ms (ReleaseFast). Accept these numbers? If ConPTY is the floor, Task 40 may ship Microsoft's `conpty.dll` + `OpenConsole.exe` (MIT, pinned NuGet version) next to `ghostty.exe`, as Windows Terminal does — acceptable to bundle them?
-4. Daily use: Debug builds keep runtime safety checks; the plan targets ≤ 50 ms there, but the owner's daily build is recommended to be ReleaseFast. Fine?
+None open. Recorded defaults the owner may still overturn: TUI wheel-burst settle ≤ 50 ms and idle output→present ≤ 8 ms on ReleaseFast (Task 36 table); a user-facing `windows-conpty = auto|inbox|bundled` option is added only if Task 40 ships the bundled variant and the lead approves it.
