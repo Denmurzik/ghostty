@@ -97,6 +97,7 @@ pub fn complete(self: *const Self, sync: bool) void {
     };
 
     Device.logFirstFramePrivateUsage();
+    api.logPacing();
     self.sink.completed(self.sink.ptr, health);
 }
 

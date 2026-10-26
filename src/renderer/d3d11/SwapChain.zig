@@ -19,21 +19,14 @@ const com = win32.com;
 const d3d11 = win32.d3d11;
 const dxgi = win32.dxgi;
 const foundation = win32.foundation;
+const kernel32 = win32.kernel32;
 const Device = @import("Device.zig");
 const Target = @import("Target.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.d3d11);
 
-extern "kernel32" fn WaitForSingleObjectEx(
-    handle: foundation.HANDLE,
-    milliseconds: u32,
-    alertable: foundation.BOOL,
-) callconv(.winapi) u32;
-extern "kernel32" fn CloseHandle(handle: foundation.HANDLE) callconv(.winapi) foundation.BOOL;
-
-const wait_object_0 = 0;
-const wait_timeout = 0x102;
+const ns_per_ms = std.time.ns_per_ms;
 
 pub const Mode = enum {
     /// A swap chain on a window handle.
@@ -64,9 +57,8 @@ height: u32,
 /// Flags the swap chain was created with, repeated by `ResizeBuffers`.
 flags: u32,
 
-/// Whether `present` ran since the last `waitForSlot`. A slot is only
-/// consumed by a present, so a wait without one would block for nothing.
-presented_since_wait: bool = false,
+/// Presents not yet matched by a wait (see `Pacer`).
+pacer: Pacer = .{},
 
 /// The id of the surface this chain presents for (latency trace tag).
 surface_id: u32 = 0,
@@ -118,7 +110,7 @@ pub fn init(
     try chain.setMaximumFrameLatency(1);
     const waitable = chain.getFrameLatencyWaitableObject();
     errdefer if (waitable) |h| {
-        _ = CloseHandle(h);
+        _ = kernel32.CloseHandle(h);
     };
 
     log.info("d3d11 swap chain created size={d}x{d} tearing={}", .{
@@ -139,43 +131,110 @@ pub fn init(
 
 /// Releases the swap chain. The caller holds the context lock.
 pub fn deinit(self: *Self) void {
-    if (self.waitable) |h| _ = CloseHandle(h);
+    if (self.waitable) |h| _ = kernel32.CloseHandle(h);
     // The back buffers may still be queued on the context.
     self.device.context.flush();
     com.release(self.chain);
     self.* = undefined;
 }
 
-/// Blocks until the swap chain can take another frame, for at most
-/// `timeout_ms`. Does nothing unless a frame was presented since the last
-/// wait. Returns whether a slot is free. A timed out wait leaves the slot
-/// pending (the next wait still has to consume it), so the waitable's
-/// count does not drift. Does not touch the context: the caller may have
-/// released the context lock for it.
+/// Waits until the swap chain can take another frame, for at most
+/// `timeout_ms` (0 polls). Does nothing unless a present is waiting to be
+/// matched, and never blocks after the chain sat idle (`Pacer.idle_ns`).
+/// Returns whether a slot is free. A timed out wait leaves the present
+/// pending (the next wait still has to consume it), so the waitable's count
+/// does not drift. Does not touch the context: the caller may have released
+/// the context lock for it.
 pub fn waitForSlot(self: *Self, timeout_ms: u32) bool {
-    if (!self.presented_since_wait) return true;
-
     const handle = self.waitable orelse {
-        self.presented_since_wait = false;
+        self.pacer.pending = 0;
         return true;
     };
-    switch (WaitForSingleObjectEx(handle, timeout_ms, 0)) {
-        wait_object_0 => {
-            self.presented_since_wait = false;
-            return true;
-        },
-        wait_timeout => return false,
-        else => {
-            // A broken handle would fail every frame: give up on pacing.
-            if (!self.wait_failed_logged) {
-                self.wait_failed_logged = true;
-                log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
-            }
-            self.presented_since_wait = false;
-            return true;
-        },
-    }
+    const waiter: HandleWaiter = .{ .handle = handle, .owner = self };
+    return self.pacer.wait(nowNs(), timeout_ms, waiter);
 }
+
+/// Whether a present is waiting to be matched by a wait.
+pub fn waitArmed(self: *const Self) bool {
+    return self.pacer.pending > 0;
+}
+
+/// Whether the chain has been idle long enough that no frame of it can
+/// still be queued.
+pub fn idle(self: *const Self) bool {
+    return self.pacer.isIdle(nowNs());
+}
+
+fn nowNs() u64 {
+    const io = @import("../../global.zig").io();
+    return @intCast(@max(0, std.Io.Timestamp.now(io, .awake).toNanoseconds()));
+}
+
+const HandleWaiter = struct {
+    handle: foundation.HANDLE,
+    owner: *Self,
+
+    pub fn wait(self: HandleWaiter, timeout_ms: u32) Pacer.WaitResult {
+        return switch (kernel32.WaitForSingleObjectEx(self.handle, timeout_ms, 0)) {
+            kernel32.WAIT_OBJECT_0 => .signaled,
+            kernel32.WAIT_TIMEOUT => .timeout,
+            else => {
+                // A broken handle would fail every frame: give up on pacing.
+                if (!self.owner.wait_failed_logged) {
+                    self.owner.wait_failed_logged = true;
+                    log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
+                }
+                return .failed;
+            },
+        };
+    }
+};
+
+/// Book-keeping for the frame latency waitable object: a slot is only
+/// consumed by a present, so a wait without one would block for nothing.
+/// Presents are counted, not flagged: two presents between waits leave one
+/// pending after one wait.
+pub const Pacer = struct {
+    pub const WaitResult = enum { signaled, timeout, failed };
+
+    /// A chain that presented nothing for this long has no frame queued;
+    /// the vblank is 16.7 ms at 60 Hz and the compositor may add frames.
+    pub const idle_ns: u64 = 50 * ns_per_ms;
+
+    /// Presents that no wait consumed yet; never more than the back
+    /// buffers, which bound the frames in flight.
+    pending: u32 = 0,
+
+    /// When the last present returned.
+    last_present_ns: u64 = 0,
+
+    pub fn presented(self: *Pacer, now: u64) void {
+        self.pending = @min(self.pending + 1, buffer_count);
+        self.last_present_ns = now;
+    }
+
+    pub fn isIdle(self: *const Pacer, now: u64) bool {
+        return self.pending > 0 and now -| self.last_present_ns >= idle_ns;
+    }
+
+    /// `waiter.wait(timeout_ms)` returns a `WaitResult`. An idle chain is
+    /// only polled: its frame is long gone, blocking would be for nothing.
+    pub fn wait(self: *Pacer, now: u64, timeout_ms: u32, waiter: anytype) bool {
+        if (self.pending == 0) return true;
+        const effective = if (self.isIdle(now)) 0 else timeout_ms;
+        switch (waiter.wait(effective)) {
+            .signaled => {
+                self.pending -= 1;
+                return true;
+            },
+            .timeout => return false,
+            .failed => {
+                self.pending = 0;
+                return true;
+            },
+        }
+    }
+};
 
 /// Copies `target` into the back buffer, resizing the swap chain first if
 /// its size differs. The caller holds the context lock.
@@ -213,7 +272,7 @@ pub fn present(self: *Self, vsync: bool) Error!void {
     latency.markPresent(self.surface_id);
 
     // An occluded present queues nothing, so there is no slot to wait for.
-    if (hr != dxgi.STATUS_OCCLUDED) self.presented_since_wait = true;
+    if (hr != dxgi.STATUS_OCCLUDED) self.pacer.presented(nowNs());
 }
 
 /// Resizes the back buffers, repeating the creation flags. No reference to
@@ -376,10 +435,10 @@ test "d3d11 swapchain: waitForSlot only waits after a present" {
     try testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 1000);
 
     // A present arms the wait, and the wait disarms it.
-    chain.presented_since_wait = true;
+    chain.pacer.presented(nowNs());
     const acquired = chain.waitForSlot(0);
     // Only a consumed slot disarms the wait; a timeout leaves it pending.
-    try testing.expectEqual(!acquired, chain.presented_since_wait);
+    try testing.expectEqual(@as(u32, if (acquired) 0 else 1), chain.pacer.pending);
 }
 
 test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
@@ -425,4 +484,79 @@ test "d3d11 swapchain: zero size is rejected" {
     defer window.deinit();
 
     try testing.expectError(error.InvalidArgument, init(device, window.hwnd, 0, 10, .hwnd));
+}
+
+/// A waitable that signals from a script, recording the timeouts it saw.
+const FakeWaiter = struct {
+    results: []const Pacer.WaitResult,
+    calls: usize = 0,
+    timeouts: [8]u32 = undefined,
+
+    pub fn wait(self: *FakeWaiter, timeout_ms: u32) Pacer.WaitResult {
+        self.timeouts[self.calls] = timeout_ms;
+        defer self.calls += 1;
+        return self.results[self.calls];
+    }
+};
+
+const FakeRef = struct {
+    inner: *FakeWaiter,
+
+    pub fn wait(self: FakeRef, timeout_ms: u32) Pacer.WaitResult {
+        return self.inner.wait(timeout_ms);
+    }
+};
+
+test "d3d11 swapchain: pending presents are counted, not a bool" {
+    var p: Pacer = .{};
+    p.presented(0);
+    p.presented(1);
+    try testing.expectEqual(@as(u32, 2), p.pending);
+
+    var w: FakeWaiter = .{ .results = &.{ .signaled, .timeout, .timeout, .signaled } };
+    try testing.expect(p.wait(2, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(u32, 1), p.pending);
+
+    // Timed out waits keep the present pending and never underflow.
+    try testing.expect(!p.wait(3, 100, FakeRef{ .inner = &w }));
+    try testing.expect(!p.wait(4, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(u32, 1), p.pending);
+    try testing.expect(p.wait(5, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(u32, 0), p.pending);
+
+    // Nothing pending: the waiter is not even asked.
+    try testing.expect(p.wait(6, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(usize, 4), w.calls);
+
+    // Capped at the back buffers.
+    for (0..10) |i| p.presented(i);
+    try testing.expectEqual(@as(u32, buffer_count), p.pending);
+}
+
+test "d3d11 frame slot: no wait after an idle interval" {
+    var p: Pacer = .{};
+    p.presented(1_000);
+
+    // Just presented: the wait may block for its whole timeout.
+    var busy: FakeWaiter = .{ .results = &.{.timeout} };
+    try testing.expect(!p.wait(1_000 + ns_per_ms, 100, FakeRef{ .inner = &busy }));
+    try testing.expectEqual(@as(u32, 100), busy.timeouts[0]);
+
+    // Idle for longer than the threshold: only a poll, never a block.
+    var idle_w: FakeWaiter = .{ .results = &.{ .timeout, .signaled } };
+    const later = 1_000 + Pacer.idle_ns;
+    try testing.expect(p.isIdle(later));
+    try testing.expect(!p.wait(later, 100, FakeRef{ .inner = &idle_w }));
+    try testing.expectEqual(@as(u32, 0), idle_w.timeouts[0]);
+    try testing.expect(p.wait(later, 100, FakeRef{ .inner = &idle_w }));
+    try testing.expectEqual(@as(u32, 0), idle_w.timeouts[1]);
+    try testing.expect(!p.isIdle(later));
+}
+
+test "d3d11 frame slot: a failing waitable gives up on pacing" {
+    var p: Pacer = .{};
+    p.presented(0);
+    var w: FakeWaiter = .{ .results = &.{.failed} };
+    try testing.expect(p.wait(0, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(u32, 0), p.pending);
 }

@@ -112,6 +112,12 @@ viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
 /// Draws from any other thread are the synchronous (UI thread) kind.
 render_thread: std.atomic.Value(std.Thread.Id) = .init(no_thread),
 
+/// `GHOSTTY_D3D11_PACING_LOG=1`: log the slot wait and build time of every
+/// frame. `frame_begin_ns` and `frame_slot_ns` belong to the frame in flight.
+pacing_log: bool = false,
+frame_begin_ns: u64 = 0,
+frame_slot_ns: u64 = 0,
+
 /// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
 dump: ?Frame.Dump = null,
 
@@ -132,11 +138,18 @@ pub fn init(
         .blending = opts.config.blending,
         .vsync = opts.config.vsync,
         .device = device,
+        .pacing_log = pacingLogFromEnv(alloc),
         .dump = Frame.Dump.initFromEnv(
             alloc,
             next_renderer_index.fetchAdd(1, .monotonic),
         ),
     };
+}
+
+fn pacingLogFromEnv(alloc: Allocator) bool {
+    const v = global.environ().getAlloc(alloc, "GHOSTTY_D3D11_PACING_LOG") catch return false;
+    defer alloc.free(v);
+    return std.mem.eql(u8, v, "1");
 }
 
 pub fn deinit(self: *D3D11) void {
@@ -239,28 +252,47 @@ pub fn drawFrameEnd(self: *D3D11) void {
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for
 /// until a swap chain exists and a frame was presented.
 ///
-/// The render thread waits without the context lock, so one surface
-/// pacing itself does not hold up the others. A synchronous draw (UI
-/// thread, e.g. during resize) never waits: it must not stall the window.
+/// The render thread polls first: a free slot, or a chain idle for longer
+/// than a refresh interval, costs one syscall under the context lock. Only a
+/// busy chain is waited on, without the lock, so one surface pacing itself
+/// does not hold up the others. A synchronous draw (UI thread, e.g. during
+/// resize) never waits: it must not stall the window.
 fn waitForFrameSlot(self: *D3D11, sync: bool) void {
     const sc = if (self.swap_chain) |*sc| sc else return;
-    if (!sc.presented_since_wait) return;
+    if (!sc.waitArmed()) return;
 
     if (sync) {
         _ = sc.waitForSlot(0);
         return;
     }
+    if (sc.waitForSlot(0) or sc.idle()) return;
 
     self.device.unlockContext();
     defer self.device.lockContext();
-    if (!latency.enabled()) {
+    if (!latency.enabled() and !self.pacing_log) {
         _ = sc.waitForSlot(frame_slot_wait_ms);
         return;
     }
-    const start = std.Io.Timestamp.now(global.io(), .awake);
+    const start = nowNs();
     _ = sc.waitForSlot(frame_slot_wait_ms);
-    const waited = start.durationTo(std.Io.Timestamp.now(global.io(), .awake)).toNanoseconds();
-    latency.markSlotWait(@intCast(@max(0, waited)));
+    const waited = nowNs() -| start;
+    self.frame_slot_ns += waited;
+    latency.markSlotWait(waited);
+}
+
+fn nowNs() u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(global.io(), .awake).toNanoseconds()));
+}
+
+/// `GHOSTTY_D3D11_PACING_LOG=1`: one line per frame, from the end of the
+/// slot wait to the end of the present.
+pub fn logPacing(self: *const D3D11) void {
+    if (!self.pacing_log) return;
+    const build = nowNs() -| self.frame_begin_ns;
+    log.debug("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3}", .{
+        @as(f64, @floatFromInt(self.frame_slot_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(build)) / std.time.ns_per_ms,
+    });
 }
 
 pub fn initShaders(
@@ -379,11 +411,11 @@ pub inline fn beginFrame(
     /// The target is presented via the provided renderer's API when completed.
     target: *Target,
 ) !Frame {
-    latency.markRenderStart();
-
     // Draws off the render thread are the synchronous UI thread ones.
     const sync = self.render_thread.load(.acquire) != std.Thread.getCurrentId();
+    self.frame_slot_ns = 0;
     self.waitForFrameSlot(sync);
+    if (self.pacing_log) self.frame_begin_ns = nowNs();
     return try Frame.begin(.{ .api = self }, renderer, target);
 }
 
@@ -512,7 +544,7 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
     const sc = &api.swap_chain.?;
     // A hidden window may be reported occluded, which queues nothing.
     // Model a queued frame either way.
-    sc.presented_since_wait = true;
+    sc.pacer.pending = 1;
 
     // Draws that return before `beginFrame` (zero size, nothing changed)
     // only take and release the lock: they must not wait or touch the slot.
@@ -522,7 +554,7 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
         api.drawFrameEnd();
     }
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 20);
-    try std.testing.expect(sc.presented_since_wait);
+    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending);
 
     // The first real frame takes the slot, on the render thread (waits at
     // most `frame_slot_wait_ms`) and holds the lock again afterwards.
@@ -549,7 +581,7 @@ test "d3d11 pacing: sync draws never block on the slot" {
     api.drawFrameStart();
     defer api.drawFrameEnd();
     const sc = try api.swapChain(16, 16);
-    sc.presented_since_wait = true;
+    sc.pacer.presented(0);
 
     const io = @import("../global.zig").io();
     const start = std.Io.Timestamp.now(io, .awake);
