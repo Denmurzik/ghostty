@@ -42,7 +42,7 @@ pub const Uniforms = extern struct {
 };
 
 /// The target to load shaders for.
-pub const Target = enum { glsl, msl };
+pub const Target = enum { glsl, msl, hlsl };
 
 /// Load a set of shaders from files and convert them to the target
 /// format. The shader order is preserved.
@@ -137,6 +137,7 @@ pub fn loadFromFile(
         // is the final result that will be returned to the caller.
         .glsl => try glslFromSpv(alloc_gpa, spirv),
         .msl => try mslFromSpv(alloc_gpa, spirv),
+        .hlsl => try hlslFromSpv(alloc_gpa, spirv),
     };
 }
 
@@ -268,6 +269,31 @@ pub fn glslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
                 options,
                 c.SPVC_COMPILER_OPTION_GLSL_VERSION,
                 GLSL_VERSION,
+            ) != c.SPVC_SUCCESS) {
+                return error.SpvcFailed;
+            }
+        }
+    }).setOptions);
+}
+
+/// Convert SPIR-V binary to HLSL (shader model 5.0) for the D3D11 renderer.
+/// The HLSL backend is only compiled in on Windows.
+///
+/// Resource registers come from the SPIR-V binding decorations of the
+/// shadertoy prefix: the Globals UBO lands in b1 and iChannel0 is split
+/// into a Texture2D in t0 plus a SamplerState in s0.
+pub fn hlslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
+    if (comptime builtin.os.tag != .windows) return error.UnsupportedTarget;
+
+    const SHADER_MODEL = 50;
+
+    const c = spvcross.c;
+    return try spvCross(alloc, c.SPVC_BACKEND_HLSL, spv, (struct {
+        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
+            if (c.spvc_compiler_options_set_uint(
+                options,
+                c.SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL,
+                SHADER_MODEL,
             ) != c.SPVC_SUCCESS) {
                 return error.SpvcFailed;
             }
@@ -487,6 +513,143 @@ test "shadertoy to glsl" {
     defer alloc.free(glsl);
 
     // log.warn("glsl={s}", .{glsl});
+}
+/// Convert ShaderToy source to HLSL for testing.
+fn testHlsl(alloc: Allocator, src_toy: []const u8) ![:0]const u8 {
+    const src = try testGlslZ(alloc, src_toy);
+    defer alloc.free(src);
+
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try spirvFromGlsl(&buf.writer, null, src);
+
+    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
+    defer spvlist.deinit(alloc);
+    try spvlist.appendSlice(alloc, buf.written());
+
+    return try hlslFromSpv(alloc, spvlist.items);
+}
+
+test "shadertoy hlsl: unsupported off Windows" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try std.testing.expectError(error.UnsupportedTarget, hlslFromSpv(std.testing.allocator, ""));
+}
+
+test "shadertoy hlsl: crt and focus test shaders convert" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    inline for (.{ test_crt, test_focus }) |toy| {
+        const hlsl = try testHlsl(alloc, toy);
+        defer alloc.free(hlsl);
+
+        inline for (.{ "register(b1)", "register(t0)", "register(s0)", "SV_Position", "SV_Target" }) |needle| {
+            try testing.expect(std.mem.indexOf(u8, hlsl, needle) != null);
+        }
+        try testing.expect(std.mem.indexOf(u8, hlsl, "#version") == null);
+    }
+}
+
+test "shadertoy hlsl: uniform packoffsets match shadertoy.Uniforms" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Reference every uniform so none is optimized out of the block.
+    const hlsl = try testHlsl(alloc,
+        \\void mainImage(out vec4 color, in vec2 pixel) {
+        \\    color = vec4(iResolution + vec3(iTime, iTimeDelta, iFrameRate), float(iFrame));
+        \\    color += vec4(iChannelTime[3] + iChannelResolution[3], iMouse.x + iDate.x + iSampleRate);
+        \\    color += iCurrentCursor + iPreviousCursor + iCurrentCursorColor + iPreviousCursorColor;
+        \\    color += vec4(float(iCurrentCursorStyle + iPreviousCursorStyle + iCursorVisible + iFocus));
+        \\    color += vec4(iTimeCursorChange + iTimeFocus);
+        \\    color += vec4(iPalette[255] + iBackgroundColor + iForegroundColor + iCursorColor + iCursorText, 1.0);
+        \\    color += vec4(iSelectionForegroundColor + iSelectionBackgroundColor, 1.0);
+        \\}
+    );
+    defer alloc.free(hlsl);
+
+    const map = .{
+        .{ "iResolution", "resolution" },
+        .{ "iTime", "time" },
+        .{ "iTimeDelta", "time_delta" },
+        .{ "iFrameRate", "frame_rate" },
+        .{ "iFrame", "frame" },
+        .{ "iChannelTime", "channel_time" },
+        .{ "iChannelResolution", "channel_resolution" },
+        .{ "iMouse", "mouse" },
+        .{ "iDate", "date" },
+        .{ "iSampleRate", "sample_rate" },
+        .{ "iCurrentCursor", "current_cursor" },
+        .{ "iPreviousCursor", "previous_cursor" },
+        .{ "iCurrentCursorColor", "current_cursor_color" },
+        .{ "iPreviousCursorColor", "previous_cursor_color" },
+        .{ "iCurrentCursorStyle", "current_cursor_style" },
+        .{ "iPreviousCursorStyle", "previous_cursor_style" },
+        .{ "iCursorVisible", "cursor_visible" },
+        .{ "iTimeCursorChange", "cursor_change_time" },
+        .{ "iTimeFocus", "time_focus" },
+        .{ "iFocus", "focus" },
+        .{ "iPalette", "palette" },
+        .{ "iBackgroundColor", "background_color" },
+        .{ "iForegroundColor", "foreground_color" },
+        .{ "iCursorColor", "cursor_color" },
+        .{ "iCursorText", "cursor_text" },
+        .{ "iSelectionForegroundColor", "selection_foreground_color" },
+        .{ "iSelectionBackgroundColor", "selection_background_color" },
+    };
+    comptime std.debug.assert(map.len == std.meta.fieldNames(Uniforms).len);
+
+    var seen: [map.len]bool = @splat(false);
+    var lines = std.mem.splitScalar(u8, hlsl, '\n');
+    while (lines.next()) |line| {
+        const marker = ": packoffset(c";
+        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+
+        // "    float3 iResolution : packoffset(c0);" / "(c0.w)" / "[256]"
+        var decl = std.mem.trim(u8, line[0..at], " \t");
+        if (std.mem.indexOfScalar(u8, decl, '[')) |i| decl = decl[0..i];
+        var name = decl[std.mem.lastIndexOfAny(u8, decl, " \t").? + 1 ..];
+        // SPIRV-Cross prefixes block members with the block id ("_36_iTime").
+        if (name[0] == '_') name = name[std.mem.indexOfScalarPos(u8, name, 1, '_').? + 1 ..];
+
+        const rest = line[at + marker.len ..];
+        const end = std.mem.indexOfScalar(u8, rest, ')').?;
+        const reg = rest[0..end];
+        const dot = std.mem.indexOfScalar(u8, reg, '.');
+        const row = try std.fmt.parseInt(usize, reg[0 .. dot orelse reg.len], 10);
+        const comp: usize = if (dot) |d| switch (reg[d + 1]) {
+            'x' => 0,
+            'y' => 1,
+            'z' => 2,
+            'w' => 3,
+            else => return error.TestUnexpectedResult,
+        } else 0;
+        const offset = row * 16 + comp * 4;
+
+        inline for (map, 0..) |entry, i| {
+            if (std.mem.eql(u8, name, entry[0])) {
+                try testing.expectEqual(@offsetOf(Uniforms, entry[1]), offset);
+                seen[i] = true;
+            }
+        }
+    }
+    for (seen) |s| try testing.expect(s);
+}
+
+test "shadertoy hlsl: invalid shader fails cleanly" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_invalid);
+    defer alloc.free(src);
+
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    var errlog: SpirvLog = .{ .alloc = alloc };
+    defer errlog.deinit();
+    try testing.expectError(error.GlslangFailed, spirvFromGlsl(&buf.writer, &errlog, src));
 }
 
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");

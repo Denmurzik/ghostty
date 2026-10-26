@@ -80,6 +80,10 @@ fn buildSpirvCross(
         "-fno-sanitize-trap=undefined",
     });
 
+    // The HLSL backend is only needed by the D3D11 renderer on Windows.
+    const hlsl = target.result.os.tag == .windows;
+    if (hlsl) try flags.append(b.allocator, "-DSPIRV_CROSS_C_API_HLSL=1");
+
     if (target.result.os.tag == .freebsd or target.result.abi == .musl) {
         try flags.append(b.allocator, "-fPIC");
     }
@@ -106,6 +110,11 @@ fn buildSpirvCross(
                 // MSL
                 "spirv_msl.cpp",
             },
+        });
+        if (hlsl) lib.root_module.addCSourceFiles(.{
+            .root = upstream.path(""),
+            .flags = flags.items,
+            .files = &.{"spirv_hlsl.cpp"},
         });
 
         lib.installHeadersDirectory(
