@@ -25,14 +25,37 @@ const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
 
+const messages = @import("messages.zig");
+
 const log = std.log.scoped(.win32_window);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
 const default_title = "Ghostty";
 
-/// `wparam` of a WM_CLOSE whose confirmation has already been taken care
-/// of. A WM_CLOSE from the system (close button, Alt+F4) carries zero.
-const close_confirmed_wparam: usize = 1;
+/// A feature module's window message handler: a non-null result ends the
+/// message's processing.
+pub const Hook = *const fn (
+    *Window,
+    u32,
+    win32.foundation.WPARAM,
+    win32.foundation.LPARAM,
+) ?win32.foundation.LRESULT;
+
+/// The feature hooks, in dispatch order. Each one sees a message before
+/// the window's own cases.
+const hooks = [_]Hook{
+    frame_mod.handle,
+    strip_input_mod.handle,
+    theme.handle,
+    taskbar_mod.handle,
+    drop.handle,
+};
+
+/// What `WM_GHOSTTY_CLOSE_TAB` closes (wparam), relative to the tab whose
+/// id is in lparam.
+pub const CloseTabMode = enum(usize) { this, other, right };
+
+pub const CloseDecision = enum { close, ask };
 
 /// Source of `id`, for log correlation and IPC.
 var next_id: std.atomic.Value(u32) = .init(1);
@@ -75,7 +98,8 @@ cell_size: ?apprt.action.CellSize = null,
 /// requests do not stack more dialogs.
 confirming_close: bool = false,
 
-/// True once a close was confirmed and is under way.
+/// True once closing the window was confirmed: the next WM_CLOSE goes
+/// through without asking.
 close_confirmed: bool = false,
 
 /// Create a hidden top-level window and register it with the app. With
@@ -169,10 +193,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
 pub fn destroy(self: *Window) void {
     const alloc = self.app.core_app.alloc;
 
-    // Tabs go first, each taking its surfaces down before its container:
-    // core teardown joins the render and IO threads and still reads
-    // `window`, which must be alive until then.
-    while (self.tabs.pop()) |tab| tab.destroy();
+    self.beginTeardown();
 
     drop.revoke(self);
     resize_overlay.deinit(&self.overlay);
@@ -184,6 +205,16 @@ pub fn destroy(self: *Window) void {
     self.tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
     alloc.destroy(self);
+}
+
+/// Hide the window, then take the tabs down. Joining the render and IO
+/// threads of a big split tree takes a while; the window must not sit on
+/// screen, frozen, meanwhile. Tabs go first, each taking its surfaces down
+/// before its container: core teardown still reads `window`, which must
+/// be alive until then.
+pub fn beginTeardown(self: *Window) void {
+    _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
+    while (self.tabs.pop()) |tab| tab.destroy();
 }
 
 /// Show the window at its start-up placement.
@@ -250,7 +281,7 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
 
     if (self.tabs.items.len == 0) {
         self.active_tab = 0;
-        self.requestClose();
+        self.requestClose(true);
         return;
     }
 
@@ -331,17 +362,76 @@ pub fn findSurface(self: *Window, id: u32) ?*Surface {
     return null;
 }
 
-/// Close the window without asking: the caller has already confirmed, or
-/// nothing needs confirming. Deferred through the message queue, so it is
-/// safe to call while the window's own surface is still on the stack.
-pub fn requestClose(self: *Window) void {
-    _ = win32.user32.PostMessageW(self.hwnd, win32.user32.WM_CLOSE, close_confirmed_wparam, 0);
+/// Close the window through the message queue, so it is safe to call
+/// while the window's own surface is still on the stack. With `confirmed`
+/// the caller has already taken care of any question; otherwise the
+/// WM_CLOSE handler asks when a surface has a running process. The flag is
+/// window state, not a message parameter: nothing else can post a
+/// pre-confirmed close.
+pub fn requestClose(self: *Window, confirmed: bool) void {
+    if (confirmed) self.close_confirmed = true;
+    _ = win32.user32.PostMessageW(self.hwnd, win32.user32.WM_CLOSE, 0, 0);
 }
 
-/// Close the window as if the user had pressed the close button: asks
-/// first when a surface has a running process.
+/// Close the window as if the user had pressed the close button.
 pub fn requestCloseWithConfirm(self: *Window) void {
-    _ = win32.user32.PostMessageW(self.hwnd, win32.user32.WM_CLOSE, 0, 0);
+    self.requestClose(false);
+}
+
+/// Whether a close goes ahead or has to ask first.
+pub fn closeDecision(confirmed: bool, needs_confirm: bool) CloseDecision {
+    if (confirmed or !needs_confirm) return .close;
+    return .ask;
+}
+
+/// Whether the tab at index `i` is closed by `mode` with the anchor tab
+/// at index `anchor`.
+fn closeModeMatches(mode: CloseTabMode, anchor: usize, i: usize) bool {
+    return switch (mode) {
+        .this => i == anchor,
+        .other => i != anchor,
+        .right => i > anchor,
+    };
+}
+
+fn findTab(self: *const Window, id: u32) ?*Tab {
+    for (self.tabs.items) |tab| {
+        if (tab.id == id) return tab;
+    }
+    return null;
+}
+
+/// The first tab `mode` closes with the anchor tab `anchor_id`; null once
+/// none is left or the anchor is gone.
+fn nextCloseTarget(self: *const Window, mode: CloseTabMode, anchor_id: u32) ?*Tab {
+    const anchor = self.tabIndex(self.findTab(anchor_id) orelse return null) orelse return null;
+    for (self.tabs.items, 0..) |tab, i| {
+        if (closeModeMatches(mode, anchor, i)) return tab;
+    }
+    return null;
+}
+
+fn closeTargetsNeedConfirm(self: *const Window, mode: CloseTabMode, anchor_id: u32) bool {
+    const anchor = self.tabIndex(self.findTab(anchor_id) orelse return false) orelse return false;
+    for (self.tabs.items, 0..) |tab, i| {
+        if (closeModeMatches(mode, anchor, i) and tab.needsConfirmClose()) return true;
+    }
+    return false;
+}
+
+/// Run `list` over a message; the first non-null result wins and later
+/// hooks do not see the message.
+fn runHooks(
+    window: *Window,
+    list: []const Hook,
+    msg: u32,
+    wparam: win32.foundation.WPARAM,
+    lparam: win32.foundation.LPARAM,
+) ?win32.foundation.LRESULT {
+    for (list) |hook| {
+        if (hook(window, msg, wparam, lparam)) |result| return result;
+    }
+    return null;
 }
 
 /// Resize the window so that its content area is `width` x `height`
@@ -452,26 +542,58 @@ fn handleMinMaxInfo(self: *const Window, lparam: win32.foundation.LPARAM) void {
     applySizeLimit(info, limit, frame_mod.nonClientSize(self));
 }
 
-fn handleClose(self: *Window, wparam: win32.foundation.WPARAM) void {
+/// Ask `kind`'s question unless a dialog is up already. Null: another
+/// dialog is up, nothing is asked. False: the answer was "no", or the
+/// window went away behind the dialog (its message loop keeps running), in
+/// which case `self` must not be touched again. The caller re-checks what
+/// it meant to close.
+fn askClose(self: *Window, kind: dialogs.CloseKind) ?bool {
+    if (self.confirming_close) return null;
+
     const hwnd = self.hwnd;
-    if (wparam != close_confirmed_wparam) {
-        if (self.confirming_close) return;
+    self.confirming_close = true;
+    const yes = dialogs.confirmCloseKind(hwnd, kind);
+    if (util.fromUserData(Window, hwnd) != self) return false;
+    self.confirming_close = false;
+    return yes;
+}
 
-        if (self.needsConfirmClose()) {
-            self.confirming_close = true;
-            const close = dialogs.confirmClose(hwnd);
-
-            // The dialog runs a message loop: the window may have been
-            // closed behind it (the shell exited), freeing `self`.
-            if (util.fromUserData(Window, hwnd) == null) return;
-            self.confirming_close = false;
-            if (!close) return;
-        }
+fn handleClose(self: *Window) void {
+    if (closeDecision(self.close_confirmed, self.needsConfirmClose()) == .ask) {
+        if (!(self.askClose(.window) orelse return)) return;
     }
 
     // `self` is freed here; nothing may touch it afterwards.
     self.close_confirmed = true;
     self.destroy();
+}
+
+fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
+    var surface = self.findSurface(id) orelse return;
+
+    if (closeDecision(false, process_active) == .ask) {
+        const kind: dialogs.CloseKind = if (!surface.tab.tree.isSplit())
+            (if (self.tabs.items.len == 1) .window else .tab)
+        else
+            .surface;
+        if (!(self.askClose(kind) orelse return)) return;
+        // Closed behind the dialog (the shell exited).
+        surface = self.findSurface(id) orelse return;
+    }
+    surface.tab.removeSurface(surface);
+}
+
+fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
+    if (self.nextCloseTarget(mode, anchor_id) == null) return;
+
+    if (closeDecision(false, self.closeTargetsNeedConfirm(mode, anchor_id)) == .ask) {
+        const kind: dialogs.CloseKind = if (self.tabs.items.len == 1) .window else .tab;
+        if (!(self.askClose(kind) orelse return)) return;
+    }
+
+    // Targets are looked up afresh each round. Closing the last tab posts
+    // the window's close; the loop ends as the tab list empties.
+    while (self.nextCloseTarget(mode, anchor_id)) |tab| self.removeTab(tab);
 }
 
 fn wndProc(
@@ -493,9 +615,31 @@ fn wndProc(
     const self = util.fromUserData(Window, hwnd) orelse
         return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
+    if (runHooks(self, &hooks, msg, wparam, lparam)) |result| return result;
+
     switch (msg) {
         win32.user32.WM_CLOSE => {
-            self.handleClose(wparam);
+            self.handleClose();
+            return 0;
+        },
+
+        messages.WM_GHOSTTY_CLOSE_SURFACE => {
+            self.handleCloseSurface(@truncate(wparam), lparam != 0);
+            return 0;
+        },
+
+        messages.WM_GHOSTTY_CLOSE_TAB => {
+            const mode = std.enums.fromInt(CloseTabMode, wparam) orelse return 0;
+            self.handleCloseTab(mode, @truncate(@as(usize, @bitCast(lparam))));
+            return 0;
+        },
+
+        win32.user32.WM_PAINT => {
+            var ps: win32.user32.PAINTSTRUCT = undefined;
+            if (win32.user32.BeginPaint(hwnd, &ps)) |hdc| {
+                Chrome.paint(self, hdc, geom.Rect.fromRECT(ps.rcPaint));
+                _ = win32.user32.EndPaint(hwnd, &ps);
+            }
             return 0;
         },
 
@@ -574,4 +718,65 @@ test "win32 window: size limit adds the frame and ignores zero" {
     try std.testing.expectEqual(@as(i32, 816), info.ptMaxTrackSize.x);
     try std.testing.expectEqual(@as(i32, 639), info.ptMaxTrackSize.y);
     try std.testing.expectEqual(@as(i32, 216), info.ptMinTrackSize.x);
+}
+
+test "win32 window: close decision" {
+    try std.testing.expectEqual(CloseDecision.close, closeDecision(true, true));
+    try std.testing.expectEqual(CloseDecision.ask, closeDecision(false, true));
+    try std.testing.expectEqual(CloseDecision.close, closeDecision(false, false));
+    try std.testing.expectEqual(CloseDecision.close, closeDecision(true, false));
+}
+
+test "win32 window: close tab modes pick their targets" {
+    // Tabs 0..3 with the anchor at 1.
+    const expect = std.testing.expectEqual;
+    try expect(false, closeModeMatches(.this, 1, 0));
+    try expect(true, closeModeMatches(.this, 1, 1));
+    try expect(true, closeModeMatches(.other, 1, 0));
+    try expect(false, closeModeMatches(.other, 1, 1));
+    try expect(true, closeModeMatches(.other, 1, 3));
+    try expect(false, closeModeMatches(.right, 1, 1));
+    try expect(true, closeModeMatches(.right, 1, 2));
+    try expect(false, closeModeMatches(.right, 1, 0));
+}
+
+const HookProbe = struct {
+    var calls: [3]u32 = .{ 0, 0, 0 };
+    var results: [3]?win32.foundation.LRESULT = .{ null, null, null };
+
+    fn reset(r: [3]?win32.foundation.LRESULT) void {
+        calls = .{ 0, 0, 0 };
+        results = r;
+    }
+
+    fn hook(comptime n: usize) Hook {
+        return struct {
+            fn f(_: *Window, _: u32, _: win32.foundation.WPARAM, _: win32.foundation.LPARAM) ?win32.foundation.LRESULT {
+                calls[n] += 1;
+                return results[n];
+            }
+        }.f;
+    }
+};
+
+test "win32 window: hook chain stops at the first handler" {
+    const probes = [_]Hook{ HookProbe.hook(0), HookProbe.hook(1), HookProbe.hook(2) };
+    const window: *Window = undefined;
+
+    const Case = struct {
+        results: [3]?win32.foundation.LRESULT,
+        want: ?win32.foundation.LRESULT,
+        calls: [3]u32,
+    };
+    const cases = [_]Case{
+        .{ .results = .{ null, null, null }, .want = null, .calls = .{ 1, 1, 1 } },
+        .{ .results = .{ null, 7, 9 }, .want = 7, .calls = .{ 1, 1, 0 } },
+        .{ .results = .{ 5, 7, 9 }, .want = 5, .calls = .{ 1, 0, 0 } },
+        .{ .results = .{ null, null, 0 }, .want = 0, .calls = .{ 1, 1, 1 } },
+    };
+    for (cases) |c| {
+        HookProbe.reset(c.results);
+        try std.testing.expectEqual(c.want, runHooks(window, &probes, 0, 0, 0));
+        try std.testing.expectEqualSlices(u32, &c.calls, &HookProbe.calls);
+    }
 }

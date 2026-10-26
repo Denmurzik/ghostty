@@ -116,10 +116,10 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
-    // Each window unregisters itself while being destroyed.
-    while (self.windows.items.len > 0) {
-        self.windows.items[self.windows.items.len - 1].destroy();
-    }
+    // Popped before they are destroyed: a window whose DestroyWindow fails
+    // never gets to unregister itself, and must not be retried forever.
+    self.last_active = null;
+    while (self.windows.pop()) |window| window.destroy();
     self.windows.deinit(self.core_app.alloc);
 
     _ = win32.user32.DestroyWindow(self.msg_hwnd);

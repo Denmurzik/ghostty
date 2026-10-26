@@ -26,6 +26,7 @@ const dpi = @import("dpi.zig");
 const drop = @import("drop.zig");
 const ime = @import("ime.zig");
 const keyboard = @import("keyboard.zig");
+const messages = @import("messages.zig");
 const mouse = @import("mouse.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const scrollbar_mod = @import("scrollbar.zig");
@@ -250,11 +251,12 @@ pub fn rtApp(self: *const Surface) *App {
 /// core calls this from inside a key callback or a mailbox tick, and the
 /// dialog's message loop must not run in there.
 pub fn close(self: *Surface, process_active: bool) void {
-    if (process_active) {
-        self.window.requestCloseWithConfirm();
-    } else {
-        self.window.requestClose();
-    }
+    _ = win32.user32.PostMessageW(
+        self.window.hwnd,
+        messages.WM_GHOSTTY_CLOSE_SURFACE,
+        self.id,
+        @intFromBool(process_active),
+    );
 }
 
 pub fn getTitle(self: *Surface) ?[:0]const u8 {

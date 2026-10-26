@@ -116,6 +116,10 @@ pub fn create(window: *Window, opts: CreateOptions) !*Tab {
 pub fn destroy(self: *Tab) void {
     const alloc = self.window.app.core_app.alloc;
 
+    // Hidden first: joining the threads of many surfaces takes a moment,
+    // and the panes should not sit frozen on screen meanwhile.
+    _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
+
     // Every surface goes first: core teardown still reads `window`.
     self.tree.deinit();
     self.focused = null;
@@ -148,11 +152,14 @@ pub fn setVisible(self: *Tab, visible: bool) void {
     );
     if (visible) self.layout();
 
+    // A minimized window keeps its surfaces occluded whatever the tab does.
+    const minimized = win32.user32.IsIconic(self.window.hwnd) != 0;
     var it = self.tree.iterator();
     while (it.next()) |entry| {
         const s = entry.view;
+        s.minimized = minimized;
         if (!s.initialized) continue;
-        s.core_surface.occlusionCallback(visible) catch |err|
+        s.core_surface.occlusionCallback(visible and !minimized) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
     }
 }
@@ -203,11 +210,13 @@ pub fn removeSurface(self: *Tab, s: *Surface) void {
     const alloc = self.window.app.core_app.alloc;
     const at = self.tree.locate(s) orelse return;
 
+    // The new focus is picked in the old tree but only taken once the
+    // removal went through.
+    var next_focus: ?*Surface = null;
     if (self.focused == s) {
-        self.focused = null;
         if (focusAfterRemove(Surface.Tree, &self.tree, at, alloc) catch null) |h| {
             switch (self.tree.nodes[h.idx()]) {
-                .leaf => |v| self.focused = v,
+                .leaf => |v| next_focus = v,
                 .split => {},
             }
         }
@@ -221,8 +230,13 @@ pub fn removeSurface(self: *Tab, s: *Surface) void {
         self.window.removeTab(self);
         return;
     }
+    if (self.focused == s) self.focused = next_focus;
+
+    // Hidden before the last reference goes: the surface's threads are
+    // joined as the old tree is released.
+    _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_HIDE);
     self.replaceTree(new_tree);
-    self.focus();
+    if (self.window.activeTab() == self) self.focus();
 }
 
 /// The title shown for this tab.
