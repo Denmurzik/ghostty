@@ -289,7 +289,7 @@ fn nowNs() u64 {
 pub fn logPacing(self: *const D3D11) void {
     if (!self.pacing_log) return;
     const build = nowNs() -| self.frame_begin_ns;
-    log.debug("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3}", .{
+    log.info("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3}", .{
         @as(f64, @floatFromInt(self.frame_slot_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(build)) / std.time.ns_per_ms,
     });

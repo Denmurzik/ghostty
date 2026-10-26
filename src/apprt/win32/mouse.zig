@@ -15,6 +15,7 @@ const log = std.log.scoped(.win32_mouse);
 /// when routing wheel messages.
 const surface_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
 
+const SPI_GETWHEELSCROLLLINES = 0x0068;
 const SPI_GETWHEELSCROLLCHARS = 0x006C;
 
 /// The "scroll one page" setting, reported as UINT_MAX.
@@ -47,34 +48,39 @@ pub const State = struct {
 
 /// Vertical wheel deltas gathered over one message-loop turn, so a burst of
 /// notches becomes one `scrollCallback` (and one pty write) instead of one
-/// per notch. Counts in `WHEEL_DELTA` units; deltas below a notch (precision
-/// touchpads, high-resolution wheels) add up and the sub-notch remainder
-/// carries over to the next turn.
+/// per notch. Counts in `WHEEL_DELTA` units. Notch deltas (multiples of 120)
+/// are delivered as whole notches; a turn with any smaller delta (precision
+/// touchpad, high-resolution wheel) is delivered as one precision scroll of
+/// the whole sum, which core turns into pixels and keeps the remainder of.
 pub const WheelAccumulator = struct {
+    pub const Delivery = union(enum) {
+        notches: i32,
+        precision: i32,
+    };
+
     /// Deltas not delivered yet, all of one direction.
     pending: i32 = 0,
+    precision: bool = false,
 
     /// Adds a delta. A delta against the direction of the pending ones
-    /// first returns the whole notches pending (dropping the remainder, which
-    /// pointed the other way): scrolling back must not be cancelled by the
-    /// forward motion before it.
-    pub fn add(self: *WheelAccumulator, delta: i16) ?i32 {
-        var flushed: ?i32 = null;
-        if (self.pending != 0 and (self.pending < 0) != (delta < 0)) {
-            flushed = self.take();
-            self.pending = 0;
-        }
+    /// first returns what was pending: scrolling back must not be cancelled
+    /// by the forward motion before it.
+    pub fn add(self: *WheelAccumulator, delta: i16) ?Delivery {
+        var flushed: ?Delivery = null;
+        if (self.pending != 0 and (self.pending < 0) != (delta < 0)) flushed = self.take();
         self.pending += delta;
+        if (@rem(delta, win32.user32.WHEEL_DELTA) != 0) self.precision = true;
         return flushed;
     }
 
-    /// The whole notches pending (signed, up is positive), or null if there
-    /// are none. The remainder stays.
-    pub fn take(self: *WheelAccumulator) ?i32 {
-        const notches = @divTrunc(self.pending, win32.user32.WHEEL_DELTA);
-        if (notches == 0) return null;
-        self.pending -= notches * win32.user32.WHEEL_DELTA;
-        return notches;
+    /// What is pending, or null if nothing.
+    pub fn take(self: *WheelAccumulator) ?Delivery {
+        const sum = self.pending;
+        const precision = self.precision;
+        self.* = .{};
+        if (sum == 0) return null;
+        if (precision) return .{ .precision = sum };
+        return .{ .notches = @divExact(sum, win32.user32.WHEEL_DELTA) };
     }
 };
 
@@ -354,13 +360,14 @@ fn handleWheel(
 }
 
 /// Vertical wheel: this message and the vertical wheel messages already
-/// queued for the surface become one scroll of whole notches. The
-/// remainder of a precision delta waits for the next turn.
+/// queued for the surface become one scroll (see `WheelAccumulator`). A
+/// queued message whose cursor is over another surface (a burst crossing a
+/// split) goes to that surface, after what was gathered is delivered.
 fn handleVerticalWheel(surface: *Surface, first: i16) void {
     const user32 = win32.user32;
     const acc = &surface.mouse_state.wheel;
 
-    if (acc.add(first)) |notches| scrollNotches(surface, notches);
+    if (acc.add(first)) |d| scrollDelivery(surface, d);
 
     // A burst is queued before the loop gets here; each message pulled
     // out is one less write and frame. Bounded, in case the wheel is
@@ -369,25 +376,44 @@ fn handleVerticalWheel(surface: *Surface, first: i16) void {
         var queued: user32.MSG = .{};
         if (user32.PeekMessageW(&queued, surface.hwnd, user32.WM_MOUSEWHEEL, user32.WM_MOUSEWHEEL, user32.PM_REMOVE) == 0) break;
         latency.count(.wheel_message);
-        if (acc.add(user32.getWheelDelta(queued.wParam))) |notches| scrollNotches(surface, notches);
+
+        const screen: win32.foundation.POINT = .{
+            .x = user32.getXLparam(queued.lParam),
+            .y = user32.getYLparam(queued.lParam),
+        };
+        if (user32.WindowFromPoint(screen)) |target| {
+            if (target != surface.hwnd and isSurfaceWindow(target)) {
+                if (acc.take()) |d| scrollDelivery(surface, d);
+                _ = user32.SendMessageW(target, queued.message, queued.wParam, queued.lParam);
+                continue;
+            }
+        }
+        if (acc.add(user32.getWheelDelta(queued.wParam))) |d| scrollDelivery(surface, d);
     }
 
-    if (acc.take()) |notches| scrollNotches(surface, notches);
+    if (acc.take()) |d| scrollDelivery(surface, d);
 }
 
-fn scrollNotches(surface: *Surface, notches: i32) void {
+fn scrollDelivery(surface: *Surface, d: WheelAccumulator.Delivery) void {
     latency.count(.scroll_call);
     // Core's positive y is up, as for the wheel.
+    const offset: f64, const precision: bool = switch (d) {
+        .notches => |n| .{ @floatFromInt(n), false },
+        .precision => |sum| .{
+            precisionPixels(sum, wheelScrollAmount(SPI_GETWHEELSCROLLLINES), surface.core_surface.size.cell.height),
+            true,
+        },
+    };
     surface.core_surface.scrollCallback(
         0,
-        @floatFromInt(notches),
-        .{ .precision = false },
+        offset,
+        .{ .precision = precision },
     ) catch |err| log.warn("scroll callback failed err={}", .{err});
 }
 
 /// The pixels a precision wheel delta scrolls: `WHEEL_DELTA` units are one
 /// notch, which is `amount` cells of `cell_size` pixels.
-fn precisionPixels(delta: i16, amount: u32, cell_size: u32) f64 {
+fn precisionPixels(delta: i32, amount: u32, cell_size: u32) f64 {
     const notches = @as(f64, @floatFromInt(delta)) / @as(f64, win32.user32.WHEEL_DELTA);
     return notches * @as(f64, @floatFromInt(amount)) * @as(f64, @floatFromInt(cell_size));
 }
@@ -489,36 +515,29 @@ test "win32 mouse: wheel offsets" {
 
 test "win32 mouse: wheel deltas coalesce per surface" {
     const testing = std.testing;
+    const D = WheelAccumulator.Delivery;
 
     // Five notches in one turn are one delivery.
     var acc: WheelAccumulator = .{};
     for (0..5) |_| try testing.expect(acc.add(120) == null);
-    try testing.expectEqual(@as(?i32, 5), acc.take());
-    try testing.expectEqual(@as(?i32, null), acc.take());
+    try testing.expectEqual(@as(?D, .{ .notches = 5 }), acc.take());
+    try testing.expectEqual(@as(?D, null), acc.take());
 
-    // Sub-notch deltas wait, and the remainder carries over.
-    acc.pending = 0;
+    // A turn with small deltas is one precision scroll of their sum.
     try testing.expect(acc.add(40) == null);
     try testing.expect(acc.add(40) == null);
-    try testing.expectEqual(@as(?i32, null), acc.take());
-    try testing.expect(acc.add(40) == null);
-    try testing.expectEqual(@as(?i32, 1), acc.take());
+    try testing.expectEqual(@as(?D, .{ .precision = 80 }), acc.take());
     try testing.expectEqual(@as(i32, 0), acc.pending);
-
-    try testing.expect(acc.add(200) == null);
-    try testing.expectEqual(@as(?i32, 1), acc.take());
-    try testing.expectEqual(@as(i32, 80), acc.pending);
+    try testing.expect(!acc.precision);
 
     // A direction change flushes what came before it.
-    acc = .{};
     try testing.expect(acc.add(240) == null);
-    try testing.expectEqual(@as(?i32, 2), acc.add(-120));
-    try testing.expectEqual(@as(?i32, -1), acc.take());
+    try testing.expectEqual(@as(?D, .{ .notches = 2 }), acc.add(-120));
+    try testing.expectEqual(@as(?D, .{ .notches = -1 }), acc.take());
 
     // Scrolling down accumulates the same way.
-    acc = .{};
     for (0..3) |_| try testing.expect(acc.add(-120) == null);
-    try testing.expectEqual(@as(?i32, -3), acc.take());
+    try testing.expectEqual(@as(?D, .{ .notches = -3 }), acc.take());
 }
 
 test "win32 mouse: precision pixels" {

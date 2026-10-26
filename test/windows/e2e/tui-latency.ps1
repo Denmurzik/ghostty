@@ -33,6 +33,7 @@ Invoke-E2eScenario 'tui-latency' {
         # One measurement block. $Keys: the b1 key sequence; Wheel: whether to
         # run b2/b3. $Tag names the rows.
         $script:LatGates = @()
+        $script:LatMisses = @()
         function Measure-Tui($Tag, [string[]]$Keys, [bool]$Wheel) {
             if ($Keys) {
                 $since = Get-NowNs
@@ -45,6 +46,8 @@ Invoke-E2eScenario 'tui-latency' {
                 if ($s.Count -gt 0) {
                     $st = Publish-Latency "b1-$Tag" $s
                     $script:LatGates += ,@($st, $s, "b1-$Tag owned", 'ghostty_owned', 6, 20)
+                } else {
+                    $script:LatMisses += "b1-$Tag closed no key sample"
                 }
             }
             if ($Wheel) {
@@ -57,6 +60,7 @@ Invoke-E2eScenario 'tui-latency' {
                 $rows = @(Get-LatencyRows)
                 $s = @(Get-Samples $rows 'wheel' $since $stamps $after | Where-Object { $_.Writes -gt 0 })
                 Write-E2eInfo "$Tag b2: $($s.Count) of 60 wheel samples"
+                if ($s.Count -eq 0) { $script:LatMisses += "b2-$Tag closed no wheel sample" }
                 if ($s.Count -gt 0) {
                     $st = Publish-Latency "b2-$Tag" $s
                     $script:LatGates += ,@($st, $s, "b2-$Tag owned", 'ghostty_owned', 6, 20)
@@ -87,6 +91,7 @@ Invoke-E2eScenario 'tui-latency' {
                     if ($Tag -eq 'less') { $script:LatGates += ,@($st, $one, 'b3-less burst', 'total', 50, 150) }
                 } else {
                     Write-E2eInfo "$Tag b3: the last notch did not close a sample ($($all.Count) wheel rows, $inc incomplete)"
+                    $script:LatMisses += "b3-${Tag}: the last notch did not close a sample"
                 }
             }
         }
@@ -120,7 +125,7 @@ Invoke-E2eScenario 'tui-latency' {
         }
 
         # Gates after every program ran, so one miss does not hide the rest.
-        $missed = @()
+        $missed = @($script:LatMisses)
         foreach ($g1 in $script:LatGates) {
             try { Assert-LatencyGate @g1 } catch { $missed += $_.Exception.Message }
         }
