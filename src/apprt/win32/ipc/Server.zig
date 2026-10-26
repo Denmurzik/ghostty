@@ -55,6 +55,8 @@ descriptor: ?*anyopaque,
 /// The listening instance until the thread takes it over.
 pipe: ?HANDLE,
 quit: HANDLE,
+/// Overlapped-op event of the IPC thread (created by `start`).
+event: ?HANDLE = null,
 thread: ?std.Thread = null,
 msg_hwnd: ?HWND = null,
 /// This process's elevation, as used for peer checks. A copy so tests
@@ -149,6 +151,7 @@ fn createInstance(self: *Server, first: bool) ?HANDLE {
 /// the pipe.
 pub fn start(self: *Server, msg_hwnd: HWND) !void {
     self.msg_hwnd = msg_hwnd;
+    self.event = kernel32.CreateEventW(null, 1, 0, null) orelse return error.Unexpected;
     self.thread = try std.Thread.spawn(.{ .stack_size = thread_stack }, run, .{self});
 }
 
@@ -177,6 +180,7 @@ pub fn stop(self: *Server) void {
         release(p, self.alloc);
     }
 
+    if (self.event) |e| _ = kernel32.CloseHandle(e);
     _ = kernel32.CloseHandle(self.quit);
     _ = kernel32.LocalFree(self.descriptor);
     self.alloc.free(self.name);
@@ -205,22 +209,26 @@ pub fn release(pending: *Pending, alloc: Allocator) void {
     alloc.destroy(pending);
 }
 
-const Accept = enum { connected, quit, failed };
+const Accept = enum { connected, retry, quit, failed };
 
 fn run(self: *Server) void {
-    const event = kernel32.CreateEventW(null, 1, 0, null) orelse {
-        log.err("CreateEventW failed err={}", .{kernel32.GetLastError()});
-        return;
-    };
-    defer _ = kernel32.CloseHandle(event);
-
+    const event = self.event.?;
     var cur = self.pipe.?;
     self.pipe = null;
     while (true) {
         const io: client.Io = .{ .pipe = cur, .event = event, .quit = self.quit };
-        if (self.accept(io) != .connected) {
-            _ = kernel32.CloseHandle(cur);
-            return;
+        switch (self.accept(io)) {
+            .connected => {},
+            // The client went away before we accepted it (ERROR_NO_DATA):
+            // recycle the instance and accept the next one.
+            .retry => {
+                _ = kernel32.DisconnectNamedPipe(cur);
+                continue;
+            },
+            .quit, .failed => {
+                _ = kernel32.CloseHandle(cur);
+                return;
+            },
         }
 
         // The next client gets its own instance right away and waits
@@ -251,10 +259,12 @@ fn accept(self: *Server, io: client.Io) Accept {
         kernel32.ERROR_IO_PENDING => {
             _ = io.finish(&ov, client.no_deadline) catch |err| return switch (err) {
                 error.Quit => .quit,
-                else => .failed,
+                error.Broken => .retry,
+                error.Timeout => .failed,
             };
             return .connected;
         },
+        kernel32.ERROR_NO_DATA => return .retry,
         else => |err| {
             log.err("ConnectNamedPipe failed err={}", .{err});
             return .failed;
@@ -687,4 +697,44 @@ test "win32 ipc: elevation mismatch is rejected" {
     try std.testing.expectEqual(protocol.Code.failed, resp.code);
     try std.testing.expectEqualStrings("peer rejected", resp.stderr);
     try std.testing.expectEqual(@as(u32, 0), ui.handled.load(.acquire));
+}
+
+test "win32 ipc server: client opens and closes before accept, next client still served" {
+    const alloc = std.testing.allocator;
+    const name = try testPipeName(alloc);
+    defer alloc.free(name);
+    var ui = try TestUi.create(alloc);
+    defer ui.destroy();
+    const server = try startServer(alloc, name, ui);
+    defer server.stop();
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+
+    // A is posted and waits for the (unpumped) UI, so B lands on the next
+    // instance, which is not being accepted yet.
+    var done: std.atomic.Value(u32) = .init(0);
+    var a: TestUi.Call = .{ .alloc = alloc, .name = name, .op = "a", .timeout_ms = 5000, .done = &done };
+    const ta = try std.Thread.spawn(.{}, TestUi.Call.run, .{&a});
+    defer ta.join();
+    std.Io.sleep(global.io(), .fromMilliseconds(150), .awake) catch {};
+    const h = kernel32.CreateFileW(
+        name.ptr,
+        kernel32.GENERIC_READ | kernel32.GENERIC_WRITE,
+        0,
+        null,
+        kernel32.OPEN_EXISTING,
+        kernel32.FILE_FLAG_OVERLAPPED,
+        null,
+    );
+    try std.testing.expect(h != kernel32.INVALID_HANDLE_VALUE);
+    _ = kernel32.CloseHandle(h);
+    try ui.pumpUntil(&done, 1);
+    _ = try a.expectResponse(arena.allocator());
+
+    var c: TestUi.Call = .{ .alloc = alloc, .name = name, .op = "c", .timeout_ms = 5000, .done = &done };
+    const tc = try std.Thread.spawn(.{}, TestUi.Call.run, .{&c});
+    defer tc.join();
+    try ui.pumpUntil(&done, 2);
+    const resp = try c.expectResponse(arena.allocator());
+    try std.testing.expectEqual(protocol.Code.ok, resp.code);
 }
