@@ -253,7 +253,8 @@ pub fn dropSwapChain(self: *D3D11) void {
 pub fn recreateOnPresentFailure(self: *D3D11, err: anyerror) bool {
     switch (err) {
         // INVALID_CALL / E_ACCESSDENIED arrive as the unmapped `ComFailure`.
-        error.ComFailure, error.InvalidArgument => {},
+        // `InvalidArgument` (a zero-size target) is not a window problem.
+        error.ComFailure => {},
         else => return false,
     }
     const target = self.present_target orelse return false;
@@ -265,11 +266,17 @@ pub fn recreateOnPresentFailure(self: *D3D11, err: anyerror) bool {
     return true;
 }
 
-/// Called after a successful present: the chain works with the current
-/// window state, so older generation bumps need no recreation.
-pub fn presentSucceeded(self: *D3D11) void {
-    const target = self.present_target orelse return;
-    self.swap_chain_generation = currentGeneration(target);
+/// The generation to hand to `presentSucceeded`, read BEFORE the present: a
+/// bump that lands during the present must stay unaccepted.
+pub fn presentGeneration(self: *const D3D11) u32 {
+    const target = self.present_target orelse return 0;
+    return currentGeneration(target);
+}
+
+/// Called after a successful present with the generation read before it: the
+/// chain worked with that window state, so older bumps need no recreation.
+pub fn presentSucceeded(self: *D3D11, generation: u32) void {
+    self.swap_chain_generation = generation;
 }
 
 /// Logs a swap chain failure the first time only.
@@ -710,8 +717,34 @@ test "d3d11 swapchain: a bump alone keeps the swap chain, a failed present after
     const second = try api.swapChain(32, 32);
     try std.testing.expectEqual(@as(u32, 0), second.pacer.pending);
     try second.present(true);
-    api.presentSucceeded();
+    api.presentSucceeded(api.presentGeneration());
     try std.testing.expect(!api.recreateOnPresentFailure(error.ComFailure));
+}
+
+test "d3d11 swapchain: a bump between the present and its acceptance stays pending" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var generation: std.atomic.Value(u32) = .init(0);
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .generation = &generation };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const sc = try api.swapChain(32, 32);
+
+    // The generation is read before the present; the UI thread re-parents
+    // and bumps while it runs.
+    const seen = api.presentGeneration();
+    try sc.present(true);
+    _ = generation.fetchAdd(1, .release);
+    api.presentSucceeded(seen);
+
+    // The next present fails: the bump must still allow the recreation.
+    try std.testing.expect(api.recreateOnPresentFailure(error.ComFailure));
 }
 
 test "d3d11 swapchain: recreation releases every back-buffer reference first" {

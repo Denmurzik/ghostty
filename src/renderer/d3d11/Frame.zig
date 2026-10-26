@@ -131,6 +131,8 @@ fn present(self: *const Self) !void {
         @intCast(self.target.width),
         @intCast(self.target.height),
     );
+    // Read before the present: a bump during it must stay unaccepted.
+    const seen = api.presentGeneration();
     const first = presentTo(sc, self.target, api.vsync);
     first catch |err| {
         // A window that changed parents may have broken the chain: build a
@@ -140,9 +142,10 @@ fn present(self: *const Self) !void {
             @intCast(self.target.width),
             @intCast(self.target.height),
         );
-        try presentTo(fresh, self.target, api.vsync);
+        // `fresh` took the generation at its creation.
+        return presentTo(fresh, self.target, api.vsync);
     };
-    api.presentSucceeded();
+    api.presentSucceeded(seen);
 }
 
 fn presentTo(sc: *SwapChain, target: *const Target, vsync: bool) !void {
