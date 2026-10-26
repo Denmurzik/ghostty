@@ -317,7 +317,8 @@ pub fn drawFrameEnd(self: *D3D11) void {
 /// first: a free slot, or a chain idle for longer than a refresh interval,
 /// costs one syscall under the context lock. Only a busy chain is waited
 /// on, without the lock, so one surface pacing itself does not hold up the
-/// others. The swap chain is destroyed only on this thread (`threadExit`).
+/// others. A sync draw may drop the chain meanwhile (`dropSwapChain`), so
+/// the wait holds its own handle and is booked only on the same chain.
 pub fn waitFrameSlot(self: *D3D11) void {
     self.device.lockContext();
     defer self.device.unlockContext();
@@ -327,17 +328,20 @@ pub fn waitFrameSlot(self: *D3D11) void {
     if (!sc.waitArmed()) return;
     if (sc.waitForSlot(0) or sc.idle()) return;
 
-    self.device.unlockContext();
-    defer self.device.lockContext();
-    if (!latency.enabled() and !self.pacing_log) {
-        _ = sc.waitForSlot(frame_slot_wait_ms);
-        return;
+    const w = sc.beginUnlockedWait() orelse return;
+    const timed = latency.enabled() or self.pacing_log;
+    const start = if (timed) nowNs() else 0;
+    const result = unlocked: {
+        self.device.unlockContext();
+        defer self.device.lockContext();
+        break :unlocked w.wait(frame_slot_wait_ms);
+    };
+    if (self.swap_chain) |*current| current.finishUnlockedWait(w, result);
+    if (timed) {
+        const waited = nowNs() -| start;
+        self.frame_slot_ns = waited;
+        latency.markSlotWait(waited);
     }
-    const start = nowNs();
-    _ = sc.waitForSlot(frame_slot_wait_ms);
-    const waited = nowNs() -| start;
-    self.frame_slot_ns = waited;
-    latency.markSlotWait(waited);
 }
 
 /// A frame takes a slot freed since `waitFrameSlot`, or one a synchronous
@@ -708,6 +712,34 @@ fn neverSignaled(sc: *SwapChain) !?win32.foundation.HANDLE {
 fn restoreWaitable(sc: *SwapChain, original: ?win32.foundation.HANDLE) void {
     if (sc.waitable) |h| _ = win32.kernel32.CloseHandle(h);
     sc.waitable = original;
+}
+
+test "d3d11 frame slot: a chain dropped during the wait is not booked" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(16, 16));
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const first = try api.swapChain(16, 16);
+    first.pacer.presented(nowNs());
+    const w = first.beginUnlockedWait() orelse return error.TestUnexpectedResult;
+
+    // A sync draw drops the chain and presents on a new one meanwhile.
+    api.dropSwapChain();
+    const second = try api.swapChain(16, 16);
+    second.pacer.presented(nowNs());
+
+    // The duplicate outlives the dropped chain's handle.
+    const result = w.wait(0);
+    try std.testing.expect(result != .failed);
+    second.finishUnlockedWait(w, .signaled);
+    try std.testing.expectEqual(@as(u32, 1), second.pacer.pending.load(.monotonic));
 }
 
 test "d3d11 swapchain: no recreation without a bump" {

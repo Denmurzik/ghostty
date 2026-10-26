@@ -67,6 +67,11 @@ surface_id: u32 = 0,
 /// Set once a failing wait was logged.
 wait_failed_logged: bool = false,
 
+/// Unique per created chain: a new chain may reuse the old one's addresses.
+serial: u64,
+
+var next_serial: std.atomic.Value(u64) = .init(1);
+
 pub fn init(
     device: *Device,
     hwnd: *anyopaque,
@@ -127,6 +132,7 @@ pub fn init(
         .width = width,
         .height = height,
         .flags = flags,
+        .serial = next_serial.fetchAdd(1, .monotonic),
     };
 }
 
@@ -153,6 +159,47 @@ pub fn waitForSlot(self: *Self, timeout_ms: u32) bool {
     };
     const waiter: HandleWaiter = .{ .handle = handle, .owner = self };
     return self.pacer.wait(nowNs(), timeout_ms, waiter);
+}
+
+/// A wait that runs without the context lock, so the chain may be dropped
+/// (and a new one created) meanwhile: it holds its own duplicate of the
+/// waitable, and its result only counts for the chain it started on.
+pub const UnlockedWait = struct {
+    handle: foundation.HANDLE,
+    serial: u64,
+
+    /// Blocks for at most `timeout_ms` and closes the duplicate.
+    pub fn wait(self: UnlockedWait, timeout_ms: u32) Pacer.WaitResult {
+        defer _ = kernel32.CloseHandle(self.handle);
+        return switch (kernel32.WaitForSingleObjectEx(self.handle, timeout_ms, 0)) {
+            kernel32.WAIT_OBJECT_0 => .signaled,
+            kernel32.WAIT_TIMEOUT => .timeout,
+            else => .failed,
+        };
+    }
+};
+
+/// Starts an `UnlockedWait`; null without a waitable or when it cannot be
+/// duplicated (the caller then skips the wait). The caller holds the lock.
+pub fn beginUnlockedWait(self: *Self) ?UnlockedWait {
+    self.device.assertContextLocked();
+    const handle = self.waitable orelse return null;
+    const process = kernel32.GetCurrentProcess();
+    var dup: foundation.HANDLE = undefined;
+    if (kernel32.DuplicateHandle(process, handle, process, &dup, 0, 0, kernel32.DUPLICATE_SAME_ACCESS) == 0) return null;
+    return .{ .handle = dup, .serial = self.serial };
+}
+
+/// Books the result of `w` if this is still the chain it waited on. The
+/// caller holds the lock again.
+pub fn finishUnlockedWait(self: *Self, w: UnlockedWait, result: Pacer.WaitResult) void {
+    self.device.assertContextLocked();
+    if (self.serial != w.serial) return;
+    if (result == .failed and !self.wait_failed_logged) {
+        self.wait_failed_logged = true;
+        log.warn("d3d11 swap chain wait failed, frames are not paced", .{});
+    }
+    self.pacer.book(result);
 }
 
 /// Whether a present is waiting to be matched by a wait.
@@ -228,16 +275,18 @@ pub const Pacer = struct {
     pub fn wait(self: *Pacer, now: u64, timeout_ms: u32, waiter: anytype) bool {
         if (self.pending.load(.monotonic) == 0) return true;
         const effective = if (self.isIdle(now)) 0 else timeout_ms;
-        switch (waiter.wait(effective)) {
-            .signaled => {
-                self.consume();
-                return true;
-            },
-            .timeout => return false,
-            .failed => {
-                self.pending.store(0, .monotonic);
-                return true;
-            },
+        const result = waiter.wait(effective);
+        self.book(result);
+        return result != .timeout;
+    }
+
+    /// Accounts for one wait: a signal matches a present, a failure gives
+    /// up on pacing, a timeout leaves the present pending.
+    pub fn book(self: *Pacer, result: WaitResult) void {
+        switch (result) {
+            .signaled => self.consume(),
+            .timeout => {},
+            .failed => self.pending.store(0, .monotonic),
         }
     }
 
