@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const foundation = @import("foundation.zig");
+const user32 = @import("user32.zig");
 const com = @import("com.zig");
 
 /// The result is an HINSTANCE-typed integer: a value above 32 is success, the rest are the `SE_ERR_*` codes.
@@ -129,7 +130,7 @@ pub const NOTIFYICONDATAW = extern struct {
     uID: u32 = 0,
     uFlags: u32 = 0,
     uCallbackMessage: u32 = 0,
-    hIcon: ?*anyopaque = null,
+    hIcon: ?user32.HICON = null,
     szTip: [128]u16 = @splat(0),
     dwState: u32 = 0,
     dwStateMask: u32 = 0,
@@ -139,7 +140,7 @@ pub const NOTIFYICONDATAW = extern struct {
     szInfoTitle: [64]u16 = @splat(0),
     dwInfoFlags: u32 = 0,
     guidItem: foundation.GUID = std.mem.zeroes(foundation.GUID),
-    hBalloonIcon: ?*anyopaque = null,
+    hBalloonIcon: ?user32.HICON = null,
 };
 
 /// `message` is a `NIM_*` value. Returns TRUE on success.

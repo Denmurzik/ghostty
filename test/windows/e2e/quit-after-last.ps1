@@ -8,34 +8,6 @@ Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1
 
 $script:WM_CLOSE = 0x10
 
-# Starts the exe like Start-E2eGhostty does (same sandbox environment, the
-# given class) but returns at once, without waiting for a window.
-function Start-Launch([string]$Class, [string[]]$LaunchArgs) {
-    $sbx = $script:Sbx
-    $vars = [ordered]@{
-        USERPROFILE            = $sbx.Home
-        HOME                   = $sbx.Home
-        LOCALAPPDATA           = $sbx.Local
-        APPDATA                = $sbx.Roaming
-        TEMP                   = $sbx.Tmp
-        TMP                    = $sbx.Tmp
-        XDG_CONFIG_HOME        = (Join-Path $sbx.Home '.config')
-        GHOSTTY_WIN32_TEST_IPC = '1'
-    }
-    $saved = @{}
-    foreach ($n in $vars.Keys) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
-    try {
-        foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $vars[$n], 'Process') }
-        $proc = Start-Process -FilePath $script:Exe -WorkingDirectory $script:Root -PassThru `
-            -ArgumentList (@("--class=$Class") + @($LaunchArgs | Where-Object { $_ }))
-    } finally {
-        foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
-    }
-    $null = $proc.Handle
-    Register-OwnGhostty -ProcessId $proc.Id
-    $proc
-}
-
 function Close-Window($G) {
     [void][GhosttyE2e.Win]::PostMessageW($G.Hwnd, $script:WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
 }

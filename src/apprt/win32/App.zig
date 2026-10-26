@@ -287,8 +287,8 @@ pub fn lastWindowAction(
 }
 
 /// `quit-after-last-window-closed-delay` in timer milliseconds; null if unset.
-fn quitDelayMs(self: *const App) ?u32 {
-    const d = self.config.@"quit-after-last-window-closed-delay" orelse return null;
+fn quitDelayMs(config: *const Config) ?u32 {
+    const d = config.@"quit-after-last-window-closed-delay" orelse return null;
     return @intCast(@min(
         d.duration / std.time.ns_per_ms,
         0x7FFFFFFF, // USER_TIMER_MAXIMUM
@@ -300,10 +300,16 @@ fn quitDelayMs(self: *const App) ?u32 {
 /// surface is gone and when the last window is destroyed. Only has an effect
 /// when no windows are open and `quit-after-last-window-closed` is set.
 pub fn startQuitTimer(self: *App) void {
-    if (self.windows.items.len > 0) return;
-    if (!self.config.@"quit-after-last-window-closed") return;
+    self.startQuitTimerFor(&self.config);
+}
 
-    if (win32.user32.SetTimer(self.msg_hwnd, quit_timer_id, self.quitDelayMs() orelse 0, null) == 0) {
+/// Like `startQuitTimer`, for a config that is not applied to the app yet
+/// (a runtime switch of `quit-after-last-window-closed` with no window open).
+pub fn startQuitTimerFor(self: *App, config: *const Config) void {
+    if (self.windows.items.len > 0) return;
+    if (!config.@"quit-after-last-window-closed") return;
+
+    if (win32.user32.SetTimer(self.msg_hwnd, quit_timer_id, quitDelayMs(config) orelse 0, null) == 0) {
         log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
     }
 }
@@ -329,8 +335,9 @@ pub fn windowDestroyed(self: *App, window: *Window) void {
     if (self.windows.items.len > 0) return;
     switch (lastWindowAction(
         self.config.@"quit-after-last-window-closed",
-        self.quitDelayMs(),
-        self.pipe_owner,
+        quitDelayMs(&self.config),
+        // Without an icon nothing could bring a staying process back.
+        self.pipe_owner and self.tray.hwnd != null,
     )) {
         .quit_now => win32.user32.PostQuitMessage(0),
         .quit_timer => self.startQuitTimer(),

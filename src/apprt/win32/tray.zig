@@ -136,6 +136,17 @@ fn add(app: *App) void {
     _ = shell32.Shell_NotifyIconW(shell32.NIM_SETVERSION, &nid);
 }
 
+/// Explorer restarted: its icons are gone, and the size of the small icon
+/// may have changed. Delete first so that a stale icon is never duplicated.
+fn readd(app: *App) void {
+    const hwnd = app.tray.hwnd orelse return;
+    var nid: shell32.NOTIFYICONDATAW = .{ .hWnd = hwnd, .uID = icon_id };
+    _ = shell32.Shell_NotifyIconW(shell32.NIM_DELETE, &nid);
+    if (app.tray.icon) |icon| _ = user32.DestroyIcon(icon);
+    app.tray.icon = loadIcon(app.hinstance, hwnd);
+    add(app);
+}
+
 fn remove(app: *App) void {
     if (!app.tray.visible) return;
     app.tray.visible = false;
@@ -178,7 +189,7 @@ fn wndProc(
 
     if (app.tray.taskbar_created != 0 and msg == app.tray.taskbar_created) {
         // Explorer restarted: its icons are gone.
-        if (app.tray.visible) add(app);
+        if (app.tray.visible) readd(app);
         return 0;
     }
 
@@ -215,7 +226,12 @@ fn wndProc(
         // Nothing to ask: the session is ending either way.
         user32.WM_QUERYENDSESSION => return 1,
         user32.WM_ENDSESSION => {
-            if (wparam != 0) user32.PostQuitMessage(0);
+            if (wparam != 0) {
+                // The process may be killed once this returns: take the
+                // icon out now.
+                deinit(app);
+                user32.PostQuitMessage(0);
+            }
             return 0;
         },
 
@@ -271,7 +287,13 @@ fn showMenu(app: *App, x: i32, y: i32) void {
     );
     // Lets the loop of the menu finish before the next message.
     _ = user32.PostMessageW(hwnd, user32.WM_NULL, 0, 0);
-    if (cmd > 0) runCommand(app, @intCast(cmd));
+    if (cmd > 0) {
+        runCommand(app, @intCast(cmd));
+    } else {
+        // Keyboard users come back to the icon after a dismissed menu.
+        var nid: shell32.NOTIFYICONDATAW = .{ .hWnd = hwnd, .uID = icon_id };
+        _ = shell32.Shell_NotifyIconW(shell32.NIM_SETFOCUS, &nid);
+    }
 }
 
 fn runCommand(app: *App, id: u32) void {

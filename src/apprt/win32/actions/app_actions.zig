@@ -138,6 +138,12 @@ pub fn config_change(app: *App, target: apprt.Target, value: apprt.Action.Value(
         .app => {
             theme.configChanged(app, value.config);
             tray.syncTo(app, value.config.@"quit-after-last-window-closed");
+            // With no window open nothing else would start (or cancel) the quit.
+            if (app.windows.items.len == 0) {
+                if (value.config.@"quit-after-last-window-closed") {
+                    app.startQuitTimerFor(value.config);
+                } else app.stopQuitTimer();
+            }
         },
         .surface => {},
     }
