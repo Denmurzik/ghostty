@@ -243,8 +243,8 @@ fn drainChars(surface: *Surface, sys: bool, buf: []u8) Drained {
     // A key yields at most a few units; bound the loop regardless.
     for (0..16) |_| {
         var msg: user32.MSG = .{};
-        const first = if (sys) user32.WM_SYSCHAR else user32.WM_CHAR;
-        const last = if (sys) user32.WM_SYSDEADCHAR else user32.WM_DEADCHAR;
+        const first: u32 = if (sys) user32.WM_SYSCHAR else user32.WM_CHAR;
+        const last: u32 = if (sys) user32.WM_SYSDEADCHAR else user32.WM_DEADCHAR;
         if (user32.PeekMessageW(&msg, surface.hwnd, first, last, user32.PM_REMOVE) == 0) break;
 
         const unit: u16 = @truncate(msg.wParam);

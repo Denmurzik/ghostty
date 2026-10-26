@@ -5,6 +5,7 @@
 pub const Termio = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -707,6 +708,10 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     // the lock to grab our read data.
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+    // Runs before the unlock: the renderer's snapshot cannot predate it.
+    defer if (comptime builtin.os.tag == .windows) {
+        @import("../os/main.zig").windows_latency.markParsed(1, 0);
+    };
     self.processOutputLocked(buf);
 }
 
