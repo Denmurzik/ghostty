@@ -190,8 +190,10 @@ function Enter-LatencyInput($G) {
 }
 
 function Exit-LatencyInput($Cursor) {
+    # Enter-LatencyInput returns the cursor after timeBeginPeriod: no cursor, no period to end.
+    if (-not $Cursor) { return }
     [void][GhosttyLat.Native]::timeEndPeriod(1)
-    if ($Cursor) { [void][GhosttyLat.Native]::SetCursorPos($Cursor.X, $Cursor.Y) }
+    [void][GhosttyLat.Native]::SetCursorPos($Cursor.X, $Cursor.Y)
 }
 
 function Get-VkOf([string]$Name) {
