@@ -8,12 +8,17 @@ Invoke-E2eScenario 'device-lost' {
     $bg = 0x10, 0x20, 0x30
     $g = Start-E2eGhostty -Env @{ GHOSTTY_D3D11_SIMULATE_DEVICE_LOST = '3000' }
 
-    # Only Debug builds arm the simulation: no "armed" line means a
-    # build mode without it (SKIP); an armed one must lose its device.
-    $armed = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
-        (Test-Path -LiteralPath $g.Log) -and (Select-String -LiteralPath $g.Log -Pattern 'device loss simulation armed' -Quiet)
+    # Only Debug builds simulate the loss; the startup line names the mode.
+    $modeLine = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        if (Test-Path -LiteralPath $g.Log) { Select-String -LiteralPath $g.Log -Pattern 'ghostty build optimize=(S+)' | Select-Object -First 1 }
     }
-    if (-not $armed) { throw 'E2E-SKIP: the build does not simulate device loss (not a Debug build)' }
+    if (-not $modeLine) { throw 'no "ghostty build optimize=" line in the log' }
+    $mode = $modeLine.Matches[0].Groups[1].Value
+    if ($mode -ne 'Debug') { throw "E2E-SKIP: build optimize=$mode does not simulate device loss" }
+    $armed = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+        Select-String -LiteralPath $g.Log -Pattern 'device loss simulation armed' -Quiet
+    }
+    if (-not $armed) { throw 'Debug build did not arm the device loss simulation' }
     $lost = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
         Select-String -LiteralPath $g.Log -Pattern 'simulating a device loss' -Quiet
     }
