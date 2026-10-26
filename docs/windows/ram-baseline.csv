@@ -6,3 +6,6 @@ date,commit,optimize,adapter,scenario,private_mb,ws_mb
 2026-10-26,43789b095,ReleaseFast,Microsoft Basic Render Driver,one-surface,69.5,47.8
 2026-10-26,43789b095,ReleaseFast,Intel(R) Arc(TM) Graphics,one-surface,105.8,78.9
 2026-10-26,43789b095,ReleaseFast,Microsoft Basic Render Driver,scrollback,116.4,49.3
+2026-10-27,62a8db7c9,ReleaseFast,Intel(R) Arc(TM) Graphics,one-surface,68.4,92.7
+2026-10-27,62a8db7c9,ReleaseFast,Intel(R) Arc(TM) Graphics,tabs,102.2,118.9
+2026-10-27,62a8db7c9,ReleaseFast,Intel(R) Arc(TM) Graphics,splits,96.6,114.3
