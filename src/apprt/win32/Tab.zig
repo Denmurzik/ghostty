@@ -56,6 +56,10 @@ hwnd_destroyed: bool = false,
 /// The divider being dragged, while the left button is held.
 drag: ?Drag = null,
 
+/// Brush of the divider fill and the colour it was made for.
+divider_brush: ?win32.user32.HBRUSH = null,
+divider_ref: u32 = 0,
+
 const Drag = struct {
     split: Surface.Tree.Node.Handle,
     kind: DragKind,
@@ -67,7 +71,7 @@ const Drag = struct {
     timer_armed: bool = false,
 };
 
-const DragKind = enum { horizontal, vertical };
+pub const DragKind = enum { horizontal, vertical };
 
 /// Smallest size of either side of a dragged divider: two cells of the
 /// axis (`cell` is one grid cell), at least 16 px.
@@ -373,6 +377,7 @@ pub fn split(
 /// first: joining the threads of the old surfaces takes a moment, and the
 /// remaining panes should not wait for it to get their size.
 pub fn replaceTree(self: *Tab, tree: Surface.Tree) void {
+    self.cancelDrag();
     var old = self.tree;
     self.tree = tree;
     self.layout();
@@ -384,6 +389,7 @@ pub fn replaceTree(self: *Tab, tree: Surface.Tree) void {
 pub fn removeSurface(self: *Tab, s: *Surface) void {
     const alloc = self.window.app.core_app.alloc;
     const at = self.tree.locate(s) orelse return;
+    self.cancelDrag();
     title_edit.cancelForSurface(self.window, s);
 
     // The new focus is picked in the old tree but only taken once the
@@ -475,8 +481,12 @@ fn fillDividerColor(self: *Tab, hdc: win32.user32.HDC) void {
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
     const c = theme.palette(self.window).divider;
     const ref: u32 = @as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16);
-    const brush = win32.gdi32.CreateSolidBrush(ref) orelse return;
-    defer _ = win32.gdi32.DeleteObject(@ptrCast(brush));
+    if (self.divider_brush == null or self.divider_ref != ref) {
+        if (self.divider_brush) |b| _ = win32.gdi32.DeleteObject(@ptrCast(b));
+        self.divider_brush = win32.gdi32.CreateSolidBrush(ref);
+        self.divider_ref = ref;
+    }
+    const brush = self.divider_brush orelse return;
     _ = win32.gdi32.FillRect(hdc, &rc, brush);
 }
 
@@ -510,6 +520,10 @@ fn beginDrag(self: *Tab, x: i32, y: i32) void {
 
 fn dragTo(self: *Tab, x: i32, y: i32) void {
     const d = &(self.drag orelse return);
+    if (!isSplit(&self.tree, d.split)) {
+        self.cancelDrag();
+        return;
+    }
     const pos = (if (d.kind == .horizontal) x else y) - d.grab_offset;
     const cell = self.window.cell_size orelse apprt.action.CellSize{ .width = 0, .height = 0 };
     const ratio = SplitLayout.ratioForDrag(
@@ -522,6 +536,19 @@ fn dragTo(self: *Tab, x: i32, y: i32) void {
     self.tree.resizeInPlace(d.split, ratio);
     if (!d.timer_armed and win32.user32.SetTimer(self.hwnd, messages.timers.tab.divider_drag, drag_interval_ms, null) != 0)
         d.timer_armed = true;
+}
+
+/// Whether `h` still names a split of `tree`.
+fn isSplit(tree: anytype, h: @TypeOf(tree.*).Node.Handle) bool {
+    return h.idx() < tree.nodes.len and tree.nodes[h.idx()] == .split;
+}
+
+/// Drop a drag without a layout: the tree is about to change or changed.
+fn cancelDrag(self: *Tab) void {
+    const d = self.drag orelse return;
+    self.drag = null;
+    if (d.timer_armed) _ = win32.user32.KillTimer(self.hwnd, messages.timers.tab.divider_drag);
+    _ = win32.user32.ReleaseCapture();
 }
 
 /// Finish a drag: the final layout is applied now, not by the timer.
@@ -614,6 +641,8 @@ fn wndProc(
 
         win32.user32.WM_NCDESTROY => {
             self.hwnd_destroyed = true;
+            if (self.divider_brush) |b| _ = win32.gdi32.DeleteObject(@ptrCast(b));
+            self.divider_brush = null;
             util.setUserData(hwnd, null);
         },
 
@@ -628,6 +657,23 @@ test "win32 tab: drag minimum is two cells" {
     try std.testing.expectEqual(@as(i32, 18), dragMinPx(cell, .horizontal));
     try std.testing.expectEqual(@as(i32, 36), dragMinPx(cell, .vertical));
     try std.testing.expectEqual(@as(i32, 16), dragMinPx(.{ .width = 0, .height = 0 }, .horizontal));
+}
+
+test "win32 tab: drag split must exist in the tree" {
+    const alloc = std.testing.allocator;
+    const TestTree = SplitTree(TestView);
+    var va: TestView = .{ .label = "A" };
+    var vb: TestView = .{ .label = "B" };
+    var ta: TestTree = try .init(alloc, &va);
+    defer ta.deinit();
+    var tb: TestTree = try .init(alloc, &vb);
+    defer tb.deinit();
+    var tree = try ta.split(alloc, .root, .right, 0.5, &tb);
+    defer tree.deinit();
+
+    try std.testing.expect(isSplit(&tree, .root));
+    try std.testing.expect(!isSplit(&ta, .root));
+    try std.testing.expect(!isSplit(&tree, @fromBackingInt(40)));
 }
 
 const TestView = struct {

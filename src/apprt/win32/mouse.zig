@@ -39,6 +39,10 @@ pub const State = struct {
     /// The window holds mouse capture while this is non-zero.
     captured_buttons: u16 = 0,
 
+    /// Client position of the last `WM_MOUSEMOVE`, to ignore synthetic
+    /// moves that do not move the pointer.
+    last_pos: ?[2]i32 = null,
+
     /// Whether a `WM_MOUSELEAVE` notification is armed.
     tracking_leave: bool = false,
 
@@ -96,13 +100,17 @@ pub fn handle(
     switch (msg) {
         user32.WM_MOUSEMOVE => {
             trackLeave(surface);
-            focusFollowsMouse(surface);
+            const pos = [2]i32{ user32.getXLparam(lparam), user32.getYLparam(lparam) };
+            const moved = if (surface.mouse_state.last_pos) |p| !std.mem.eql(i32, &p, &pos) else true;
+            surface.mouse_state.last_pos = pos;
+            if (moved) focusFollowsMouse(surface);
             sendPos(surface, lparam, currentMods());
             return 0;
         },
 
         user32.WM_MOUSELEAVE => {
             surface.mouse_state.tracking_leave = false;
+            surface.mouse_state.last_pos = null;
             // While a button is held the capture keeps the position
             // flowing; clearing it would break a drag selection.
             if (surface.mouse_state.captured_buttons == 0) {
@@ -179,6 +187,7 @@ fn focusFollowsMouse(surface: *Surface) void {
     if (!window.app.config.@"focus-follows-mouse") return;
     if (surface.mouse_state.captured_buttons != 0) return;
     const user32 = win32.user32;
+    if (window.strip_input.edit != null) return;
     if (user32.GetFocus() == surface.hwnd) return;
     if (user32.GetForegroundWindow() != window.hwnd) return;
     if (surface.tab.window.activeTab() != surface.tab) return;
