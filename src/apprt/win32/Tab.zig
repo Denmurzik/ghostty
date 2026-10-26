@@ -16,6 +16,9 @@ const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const title_edit = @import("title_edit.zig");
 const util = @import("util.zig");
+const geom = @import("geom.zig");
+const theme = @import("theme.zig");
+const messages = @import("messages.zig");
 
 const log = std.log.scoped(.win32_tab);
 
@@ -49,6 +52,32 @@ id: u32,
 
 /// Whether the container HWND was already taken down with its parent.
 hwnd_destroyed: bool = false,
+
+/// The divider being dragged, while the left button is held.
+drag: ?Drag = null,
+
+const Drag = struct {
+    split: Surface.Tree.Node.Handle,
+    kind: DragKind,
+    /// The whole rectangle of the split, for the ratio computation.
+    span: geom.Rect,
+    /// Cursor position minus divider centre at the press, along the axis.
+    grab_offset: i32,
+    /// Whether the throttled relayout timer is running.
+    timer_armed: bool = false,
+};
+
+const DragKind = enum { horizontal, vertical };
+
+/// Smallest size of either side of a dragged divider: two cells of the
+/// axis (`cell` is one grid cell), at least 16 px.
+pub fn dragMinPx(cell: apprt.action.CellSize, kind: DragKind) i32 {
+    const c: u32 = if (kind == .horizontal) cell.width else cell.height;
+    return @max(@as(i32, @intCast(@min(c, 1 << 20))) * 2, 16);
+}
+
+/// Throttle of the relayout while a divider is dragged.
+const drag_interval_ms = 16;
 
 /// Create the container and its first surface. The tab is not part of the
 /// window's tab list yet; `Window.addTab` appends it.
@@ -441,6 +470,68 @@ pub fn focusAfterRemove(
     return null;
 }
 
+fn fillDividerColor(self: *Tab, hdc: win32.user32.HDC) void {
+    var rc: win32.foundation.RECT = undefined;
+    if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
+    const c = theme.palette(self.window).divider;
+    const ref: u32 = @as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16);
+    const brush = win32.gdi32.CreateSolidBrush(ref) orelse return;
+    defer _ = win32.gdi32.DeleteObject(@ptrCast(brush));
+    _ = win32.gdi32.FillRect(hdc, &rc, brush);
+}
+
+/// The size cursor when the pointer is over a divider or one is dragged.
+fn cursorForPoint(self: *Tab) ?*const anyopaque {
+    const kind: DragKind = if (self.drag) |d| d.kind else blk: {
+        const l = self.split_layout orelse return null;
+        var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
+        if (win32.user32.GetCursorPos(&pt) == 0) return null;
+        if (win32.user32.ScreenToClient(self.hwnd, &pt) == 0) return null;
+        const i = l.dividerAt(pt.x, pt.y) orelse return null;
+        break :blk if (l.dividers[i].layout == .horizontal) .horizontal else .vertical;
+    };
+    return if (kind == .horizontal) win32.user32.IDC_SIZEWE else win32.user32.IDC_SIZENS;
+}
+
+fn beginDrag(self: *Tab, x: i32, y: i32) void {
+    const l = self.split_layout orelse return;
+    const i = l.dividerAt(x, y) orelse return;
+    const d = l.dividers[i];
+    const kind: DragKind = if (d.layout == .horizontal) .horizontal else .vertical;
+    const centre = if (kind == .horizontal) d.rect.x + @divTrunc(d.rect.w, 2) else d.rect.y + @divTrunc(d.rect.h, 2);
+    self.drag = .{
+        .split = d.split,
+        .kind = kind,
+        .span = d.span,
+        .grab_offset = (if (kind == .horizontal) x else y) - centre,
+    };
+    _ = win32.user32.SetCapture(self.hwnd);
+}
+
+fn dragTo(self: *Tab, x: i32, y: i32) void {
+    const d = &(self.drag orelse return);
+    const pos = (if (d.kind == .horizontal) x else y) - d.grab_offset;
+    const cell = self.window.cell_size orelse apprt.action.CellSize{ .width = 0, .height = 0 };
+    const ratio = SplitLayout.ratioForDrag(
+        if (d.kind == .horizontal) .horizontal else .vertical,
+        d.span,
+        SplitLayout.gapPx(self.window.dpi),
+        pos,
+        dragMinPx(cell, d.kind),
+    );
+    self.tree.resizeInPlace(d.split, ratio);
+    if (!d.timer_armed and win32.user32.SetTimer(self.hwnd, messages.timers.tab.divider_drag, drag_interval_ms, null) != 0)
+        d.timer_armed = true;
+}
+
+/// Finish a drag: the final layout is applied now, not by the timer.
+fn endDrag(self: *Tab) void {
+    const d = self.drag orelse return;
+    self.drag = null;
+    if (d.timer_armed) _ = win32.user32.KillTimer(self.hwnd, messages.timers.tab.divider_drag);
+    self.layout();
+}
+
 fn wndProc(
     hwnd: win32.foundation.HWND,
     msg: u32,
@@ -461,8 +552,65 @@ fn wndProc(
         return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
     switch (msg) {
-        // The surfaces paint every pixel of the container.
-        win32.user32.WM_ERASEBKGND => return 1,
+        // The surfaces cover the container except for the divider strips.
+        win32.user32.WM_ERASEBKGND => {
+            self.fillDividerColor(@ptrFromInt(wparam));
+            return 1;
+        },
+
+        win32.user32.WM_PAINT => {
+            var ps: win32.user32.PAINTSTRUCT = undefined;
+            if (win32.user32.BeginPaint(hwnd, &ps)) |hdc| {
+                self.fillDividerColor(hdc);
+                _ = win32.user32.EndPaint(hwnd, &ps);
+            }
+            return 0;
+        },
+
+        win32.user32.WM_SETCURSOR => {
+            if (win32.user32.loWord(@bitCast(lparam)) == win32.user32.HTCLIENT) {
+                if (self.cursorForPoint()) |cursor| {
+                    _ = win32.user32.SetCursor(win32.user32.LoadCursorW(null, cursor));
+                    return 1;
+                }
+            }
+        },
+
+        win32.user32.WM_LBUTTONDOWN => {
+            self.beginDrag(win32.user32.getXLparam(lparam), win32.user32.getYLparam(lparam));
+            return 0;
+        },
+
+        win32.user32.WM_MOUSEMOVE => {
+            if (self.drag != null) {
+                self.dragTo(win32.user32.getXLparam(lparam), win32.user32.getYLparam(lparam));
+                return 0;
+            }
+        },
+
+        win32.user32.WM_LBUTTONUP => {
+            if (self.drag != null) {
+                // The capture change ends the drag.
+                _ = win32.user32.ReleaseCapture();
+                self.endDrag();
+                self.focus();
+            }
+            return 0;
+        },
+
+        win32.user32.WM_CAPTURECHANGED => {
+            self.endDrag();
+            return 0;
+        },
+
+        win32.user32.WM_TIMER => if (wparam == messages.timers.tab.divider_drag) {
+            if (self.drag) |*d| {
+                d.timer_armed = false;
+                _ = win32.user32.KillTimer(hwnd, messages.timers.tab.divider_drag);
+                self.layout();
+            }
+            return 0;
+        },
 
         win32.user32.WM_NCDESTROY => {
             self.hwnd_destroyed = true;
@@ -473,6 +621,13 @@ fn wndProc(
     }
 
     return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+test "win32 tab: drag minimum is two cells" {
+    const cell: apprt.action.CellSize = .{ .width = 9, .height = 18 };
+    try std.testing.expectEqual(@as(i32, 18), dragMinPx(cell, .horizontal));
+    try std.testing.expectEqual(@as(i32, 36), dragMinPx(cell, .vertical));
+    try std.testing.expectEqual(@as(i32, 16), dragMinPx(.{ .width = 0, .height = 0 }, .horizontal));
 }
 
 const TestView = struct {

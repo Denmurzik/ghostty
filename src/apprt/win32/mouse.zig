@@ -13,7 +13,7 @@ const log = std.log.scoped(.win32_mouse);
 
 /// Must match the class `Surface` registers; used to recognise surfaces
 /// when routing wheel messages.
-const surface_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttySurface");
+const surface_class_name = Surface.class_name;
 
 const SPI_GETWHEELSCROLLLINES = 0x0068;
 const SPI_GETWHEELSCROLLCHARS = 0x006C;
@@ -96,6 +96,7 @@ pub fn handle(
     switch (msg) {
         user32.WM_MOUSEMOVE => {
             trackLeave(surface);
+            focusFollowsMouse(surface);
             sendPos(surface, lparam, currentMods());
             return 0;
         },
@@ -165,8 +166,23 @@ pub fn handle(
 pub fn refreshCursor(surface: *Surface) void {
     var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
     if (win32.user32.GetCursorPos(&pt) == 0) return;
-    if (win32.user32.WindowFromPoint(pt) != surface.hwnd) return;
+    // A captured surface owns the cursor wherever the pointer is.
+    if (surface.mouse_state.captured_buttons == 0 and
+        win32.user32.WindowFromPoint(pt) != surface.hwnd) return;
     applyCursor(surface.mouse_state);
+}
+
+/// `focus-follows-mouse`: moving over an unfocused surface of the
+/// foreground window focuses it. Never while a button is held.
+fn focusFollowsMouse(surface: *Surface) void {
+    const window = surface.tab.window;
+    if (!window.app.config.@"focus-follows-mouse") return;
+    if (surface.mouse_state.captured_buttons != 0) return;
+    const user32 = win32.user32;
+    if (user32.GetFocus() == surface.hwnd) return;
+    if (user32.GetForegroundWindow() != window.hwnd) return;
+    if (surface.tab.window.activeTab() != surface.tab) return;
+    _ = user32.SetFocus(surface.hwnd);
 }
 
 fn applyCursor(state: State) void {
