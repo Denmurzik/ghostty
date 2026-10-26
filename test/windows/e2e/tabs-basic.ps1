@@ -61,7 +61,7 @@ Invoke-E2eScenario 'tabs-basic' {
     # one backslash and printf then makes the bytes (a raw ESC would reach readline).
     Invoke-Act 'goto_tab:1'
     [void](Wait-Win 'active 0 again' { param($w) $w.active_tab -eq 0 })
-    Invoke-Act 'text:printf "\x1b]2;tab-A\x07"; sleep 60\r'
+    Invoke-Act 'text:printf "\\x1b]2;tab-A\\x07"; sleep 60\r'
     [void](Wait-Win 'tab 0 title tab-A' { param($w) @($w.tabs)[0].title -eq 'tab-A' })
     $caption = Wait-Until -TimeoutSec 5 -PollMs 100 -Condition {
         $t = [GhosttyE2e.Win]::TextOf($g.Hwnd)
