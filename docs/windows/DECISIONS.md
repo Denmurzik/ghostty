@@ -50,3 +50,6 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - Input latency (update 2026-10-26): lag reproduces on ReleaseFast too; HIGH lag in TUI apps on mouse-wheel scroll and interaction. Highest priority in M2 (first task).
 - Drops into Git Bash insert POSIX msys paths ('/c/Users/…'); unknown shells use cmd-style double quotes.
 - Latency gate: whole path ≤16 ms p95 ReleaseFast; if ConPTY+shell alone exceed it, try ConPTY passthrough / bundled OpenConsole like Windows Terminal; Ghostty-owned stages ≤6 ms; plus the owner's hands-on comparison against Windows Terminal. Debug may stay slower; daily use is ReleaseFast.
+
+## Owner decision (2026-10-27): visual style follows Ghostty for macOS
+- For every visual element (split dividers, tab strip and tabs, titlebar, overlays such as resize/search/command palette, quick terminal, scrollbar, inspector, dialogs) the reference is how Ghostty does it on macOS (`macos/Sources/…`): sizes in points → DIPs, colours derived the same way from the terminal palette/config, animations and spacing. Deviate only where Windows conventions require it (caption buttons, snap layouts, Mica), and say so in the task report.
