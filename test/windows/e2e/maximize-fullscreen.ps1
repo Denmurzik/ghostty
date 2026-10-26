@@ -15,10 +15,35 @@ if (-not ('GhosttyE2e.Place' -as [type])) {
 [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
 [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr h, int index);
+[StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int cbSize, L, T, R, B, wL, wT, wR, wB, flags; }
+[DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+[DllImport("user32.dll")] public static extern bool GetMonitorInfoW(IntPtr m, ref MONITORINFO mi);
+[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+// Monitor rect in physical pixels (this process is DPI-unaware; Screen.Bounds would be virtualised).
+public static int[] MonitorRect(IntPtr h) {
+    IntPtr old = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    try {
+        MONITORINFO mi = new MONITORINFO(); mi.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(MONITORINFO));
+        GetMonitorInfoW(MonitorFromWindow(h, 2), ref mi);
+        return new int[] { mi.L, mi.T, mi.R, mi.B };
+    } finally { if (old != IntPtr.Zero) SetThreadDpiAwarenessContext(old); }
+}
 "@
 }
 
 function Get-WinRect($S) { , @($S.window[0], $S.window[1], $S.window[2], $S.window[3]) }
+
+# `state` lists every window; these scenarios drive the first one.
+function Get-WinState([string]$Class) { @((Get-GhosttyState -Class $Class).windows)[0] }
+function Wait-WinState([string]$Class, [scriptblock]$Predicate, [double]$TimeoutSec = 10) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $w = $null
+    while ($true) {
+        try { $w = Get-WinState -Class $Class; if ($w -and ($w | ForEach-Object $Predicate)) { return $w } } catch { }
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) { throw "window state: condition not met within $TimeoutSec s: {$Predicate}; last: $($w | ConvertTo-Json -Compress -Depth 6)" }
+        Start-Sleep -Milliseconds 100
+    }
+}
 
 function Assert-Rect($Got, $Want, [int]$Tol, [string]$What) {
     for ($i = 0; $i -lt 4; $i++) {
@@ -57,24 +82,22 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     Wait-BashReady $g
     $h = $g.Hwnd
     $c = $g.Class
-    $st = Get-GhosttyState -Class $c
+    $st = Get-WinState -Class $c
     $orig = Get-WinRect $st
-    $scr = [Windows.Forms.Screen]::FromHandle($h)
-    $mon = $scr.Bounds
-    $monRect = @($mon.Left, $mon.Top, $mon.Right, $mon.Bottom)
+    $monRect = [GhosttyE2e.Place]::MonitorRect($h)
     $pt = $st.strip.close
     $closeX = [int](($pt[0] + $pt[2]) / 2)
     $closeY = [int](($pt[1] + $pt[3]) / 2)
 
     # Fullscreen: window == monitor, strip hidden, then the exact rect back.
     if (-not (Invoke-GhosttyAction -Class $c -Action 'toggle_fullscreen')) { throw 'toggle_fullscreen not performed' }
-    $s = Wait-GhosttyState -Class $c -Predicate { $_.fullscreen -eq $true } -TimeoutSec 5
+    $s = Wait-WinState -Class $c -Predicate { $_.fullscreen -eq $true } -TimeoutSec 5
     Assert-Rect (Get-WinRect $s) $monRect 0 'fullscreen window'
     if ($s.strip.mode -ne 'hidden') { throw "fullscreen strip.mode is $($s.strip.mode), expected hidden" }
     if (Invoke-GhosttyAction -Class $c -Action 'toggle_maximize') { throw 'toggle_maximize must be refused in fullscreen' }
 
     if (-not (Invoke-GhosttyAction -Class $c -Action 'toggle_fullscreen')) { throw 'second toggle_fullscreen not performed' }
-    $s = Wait-GhosttyState -Class $c -Predicate { $_.fullscreen -eq $false } -TimeoutSec 5
+    $s = Wait-WinState -Class $c -Predicate { $_.fullscreen -eq $false } -TimeoutSec 5
     Assert-Rect (Get-WinRect $s) $orig 1 'restored window'
     if ($s.strip.mode -ne 'titlebar') { throw "restored strip.mode is $($s.strip.mode), expected titlebar" }
 
@@ -83,22 +106,22 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     if (-not (Wait-Until { [GhosttyE2e.Place]::IsZoomed($h) } 5)) { throw 'toggle_maximize did not maximize' }
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_maximize')
     if (-not (Wait-Until { -not [GhosttyE2e.Place]::IsZoomed($h) } 5)) { throw 'second toggle_maximize did not restore' }
-    Assert-Rect (Get-WinRect (Get-GhosttyState -Class $c)) $orig 1 'window after maximize round trip'
+    Assert-Rect (Get-WinRect (Get-WinState -Class $c)) $orig 1 'window after maximize round trip'
 
     # Float on top.
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_float_on_top')
     if (-not (Wait-Until { Test-Topmost $h } 5)) { throw 'toggle_window_float_on_top did not set WS_EX_TOPMOST' }
-    if (-not (Get-GhosttyState -Class $c).topmost) { throw 'state.topmost is false after toggle_window_float_on_top' }
+    if (-not (Get-WinState -Class $c).topmost) { throw 'state.topmost is false after toggle_window_float_on_top' }
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_float_on_top')
     if (-not (Wait-Until { -not (Test-Topmost $h) } 5)) { throw 'toggle_window_float_on_top did not clear WS_EX_TOPMOST' }
 
     # resize_window (CSI 8 ; rows ; cols t, which core turns into pixels):
     # the content rect below the strip is exactly cols x rows cells.
-    $cell = (Get-GhosttyState -Class $c).cell
+    $cell = (Get-WinState -Class $c).cell
     Send-Line $h "printf '\033[8;30;100t'"
     $ew = 100 * $cell[0]
     $eh = 30 * $cell[1]
-    $s = Wait-GhosttyState -Class $c -Predicate { ($_.client[2] - $_.client[0]) -eq $ew } -TimeoutSec 5
+    $s = Wait-WinState -Class $c -Predicate { ($_.client[2] - $_.client[0]) -eq $ew } -TimeoutSec 5
     $content = $s.client[3] - $s.client[1] - $s.strip.bounds[3]
     if ($content -ne $eh) { throw "content height below the strip is $content, expected $eh" }
 
@@ -111,18 +134,17 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     # Decorations: none, and the former close-button point is not HTCLOSE.
     if ((Get-HitCode $h $closeX $closeY) -ne 20) { throw 'precondition: close button point is not HTCLOSE' }
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_decorations')
-    $s = Wait-GhosttyState -Class $c -Predicate { $_.decorations -eq 'none' } -TimeoutSec 5
+    $s = Wait-WinState -Class $c -Predicate { $_.decorations -eq 'none' } -TimeoutSec 5
     if ((Get-HitCode $h $closeX $closeY) -eq 20) { throw 'decorations none: the close button still answers HTCLOSE' }
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_decorations')
-    [void](Wait-GhosttyState -Class $c -Predicate { $_.decorations -eq 'client' } -TimeoutSec 5)
+    [void](Wait-WinState -Class $c -Predicate { $_.decorations -eq 'client' } -TimeoutSec 5)
     $g.Process.Kill()
     [void]$g.Process.WaitForExit(5000)
 
     # `fullscreen = true` starts fullscreen.
     $g = Start-E2eGhostty -ConfigText "confirm-close-surface = false`nfullscreen = true`n"
-    $s = Wait-GhosttyState -Class $g.Class -Predicate { $_.fullscreen -eq $true } -TimeoutSec 10
-    $m2 = [Windows.Forms.Screen]::FromHandle($g.Hwnd).Bounds
-    Assert-Rect (Get-WinRect $s) @($m2.Left, $m2.Top, $m2.Right, $m2.Bottom) 0 'start-up fullscreen window'
+    $s = Wait-WinState -Class $g.Class -Predicate { $_.fullscreen -eq $true } -TimeoutSec 10
+    Assert-Rect (Get-WinRect $s) ([GhosttyE2e.Place]::MonitorRect($g.Hwnd)) 0 'start-up fullscreen window'
     $g.Process.Kill()
     [void]$g.Process.WaitForExit(5000)
 
@@ -130,7 +152,7 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     foreach ($mode in 'client', 'server', 'none') {
         $cfg = "confirm-close-surface = false`nwindow-decoration = $mode`nwindow-width = 80`nwindow-height = 24`nwindow-padding-x = 0`nwindow-padding-y = 0`nwindow-padding-balance = false`n"
         $g = Start-E2eGhostty -ConfigText $cfg
-        $s = Wait-GhosttyState -Class $g.Class -Predicate { $_.cell[0] -gt 0 -and $_.tabs.Count -ge 1 } -TimeoutSec 10
+        $s = Wait-WinState -Class $g.Class -Predicate { $_.cell[0] -gt 0 -and $_.tabs.Count -ge 1 } -TimeoutSec 10
         $r = $s.tabs[0].surfaces[0].rect
         $w = $r[2] - $r[0]
         $hh = $r[3] - $r[1]

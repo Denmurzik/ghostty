@@ -105,8 +105,9 @@ Invoke-E2eScenario 'drop-files' {
         if (Test-Path -LiteralPath $cyg) {
             # Cross-check the rule with cygpath for the paths it can express.
             foreach ($i in 0..3) {
-                $want = (& $cyg -u $files[$i]).Trim()
-                if ($want -ne $expected[$i]) { throw "msys rule '$($expected[$i])' differs from cygpath '$want'" }
+                # cygpath -u would alias the sandbox TEMP to /tmp; resolve the rule back instead.
+                $back = (& $cyg -w $expected[$i]).Trim()
+                if ($back -ne $files[$i]) { throw "msys rule '$($expected[$i])' resolves to '$back' by cygpath, expected '$($files[$i])'" }
             }
         }
         Invoke-DropCase $g 'gitbash' "printf '%s\n' " ' > "$TEMP/gt-drop.txt"' $files $expected

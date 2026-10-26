@@ -128,7 +128,8 @@ function Wait-GhosttyState {
         }
         if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
             $dump = if ($last) { $last | ConvertTo-Json -Compress -Depth 10 } else { "no state ($lastErr)" }
-            throw "ghostty ipc: condition not met within $TimeoutSec s: {$Predicate}; last state: $dump"
+            $cond = ([string]$Predicate) -replace '\s+', ' '
+            throw "ghostty ipc: condition not met within $TimeoutSec s: {$cond}; last state: $dump"
         }
         Start-Sleep -Milliseconds $PollMs
     }

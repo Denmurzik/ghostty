@@ -80,7 +80,10 @@ function Start-OleFileDrag {
         if ($h -ne [IntPtr]::Zero) { [void][GhosttyE2e.DropNative]::GetWindowThreadProcessId($h, [ref]$owner) }
         if ($h -ne [IntPtr]::Zero -and $owner -eq [uint32]$PID) { $h }
     }
-    if (-not $src) { throw 'the OLE drag source window did not appear' }
+    if (-not $src) {
+        $why = (@($ps.Streams.Error) | ForEach-Object { $_.ToString() }) -join '; '
+        throw "the OLE drag source window did not appear (runspace errors: $why)"
+    }
     $rc = Get-ScreenRect $src
     $cx = [int](($rc.L + $rc.R) / 2)
     $cy = [int](($rc.T + $rc.B) / 2)

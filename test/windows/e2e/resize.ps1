@@ -13,8 +13,11 @@ Invoke-E2eScenario 'resize' {
         Set-WindowSize $g.Hwnd $size[0] $size[1]
         # Dump = surface rect (under the tab strip) in physical px; the test process is DPI-unaware, so ask the app.
         Start-Sleep -Milliseconds 400
-        $sb = (Get-SurfaceBoxes (Get-SplitState $g))[0]
-        $client = [pscustomobject]@{ Width = $sb.W; Height = $sb.H }
+        $ss = Get-SplitState $g
+        $sb = (Get-SurfaceBoxes $ss)[0]
+        # The native scrollbar (SM_CXVSCROLL = 17 DIP) is carved out of the surface rect and not part of the dump.
+        $sbw = [int][Math]::Round(17 * [double]@($ss.Surfaces)[0].scale)
+        $client = [pscustomobject]@{ Width = $sb.W - $sbw; Height = $sb.H }
         $d = Wait-Dump $g { param($d) $d.Width -eq $client.Width -and $d.Height -eq $client.Height } 10
         if (-not $d) {
             $last = Read-Dump $g.Dump

@@ -13,8 +13,15 @@ if (-not ('GhosttyE2e.Mouse' -as [type])) {
 [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
 [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
 [DllImport("user32.dll")] public static extern bool GetCursorPos(ref POINT p);
+[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
 "@
 }
+
+# The state document reports physical pixels, but powershell.exe is DPI-unaware: its
+# client, screen and metrics coordinates are virtualised at a scale above 100 %.
+# Make this thread per-monitor aware (PER_MONITOR_AWARE_V2 = -4) so that pointer
+# targets taken from the state land on the right pixel.
+[void][GhosttyE2e.Mouse]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 
 $script:Down = @{ left = 0x0002; right = 0x0008; middle = 0x0020 }
 $script:Up = @{ left = 0x0004; right = 0x0010; middle = 0x0040 }
@@ -156,4 +163,4 @@ function Send-MouseDrag {
     }
 }
 
-Export-ModuleMember -Function Send-MouseClick, Send-MouseMove, Send-MouseDown, Send-MouseUp, Send-MouseDrag
+Export-ModuleMember -Function Convert-ClientToScreen, Send-MouseClick, Send-MouseMove, Send-MouseDown, Send-MouseUp, Send-MouseDrag

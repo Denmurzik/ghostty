@@ -36,8 +36,16 @@ function Get-TabCount($G) {
     @(@($d.windows)[0].tabs).Count
 }
 
+# Git Bash with the close confirmation on (the shared configs switch it off).
+function Start-ConfirmShell {
+    $cfg = (Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8) -replace 'confirm-close-surface = false', 'confirm-close-surface = true'
+    $g = Start-E2eGhostty -ConfigText $cfg
+    Wait-BashReady $g
+    $g
+}
+
 function Start-PingShell {
-    $g = Start-BashE2e
+    $g = Start-ConfirmShell
     Send-Line $g.Hwnd 'ping -t 127.0.0.1 > /dev/null'
     if (-not (Wait-ChildNamed $g @('ping.exe') 15)) { throw 'ping.exe never started' }
     Start-Sleep -Milliseconds 500
@@ -67,7 +75,7 @@ Invoke-E2eScenario 'close-confirm' {
 
     # 2. A shell that exits behind the dialog: its tab and window close while
     # the dialog is up; answering must not crash.
-    $g = Start-BashE2e
+    $g = Start-ConfirmShell
     Send-Line $g.Hwnd 'sleep 4; exit'
     Start-Sleep -Milliseconds 400
     [void][GhosttyE2e.Win]::PostMessageW($g.Hwnd, $script:WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -113,7 +121,7 @@ Invoke-E2eScenario 'close-confirm' {
     Save-Evidence 'quit' $g -Window -Hwnd $dlg
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'quit')
     Start-Sleep -Milliseconds 1200
-    $n = (Get-ConfirmDialogs $g).Count
+    $n = @(Get-ConfirmDialogs $g).Count
     if ($n -ne 1) { throw "a second quit left $n dialogs, expected 1 (QuitGate)" }
     Send-DialogButton $dlg $script:IdCancel
     Wait-DialogGone $dlg 'Cancel on quit'

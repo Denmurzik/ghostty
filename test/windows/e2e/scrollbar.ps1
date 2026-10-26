@@ -22,7 +22,7 @@ function Get-FirstSurface($Class, [scriptblock]$Predicate = { $true }) {
     $s = Wait-GhosttyState -Class $Class -TimeoutSec 15 -Predicate {
         @($_.windows).Count -eq 1 -and @(@($_.windows)[0].tabs).Count -eq 1 -and
         (& $Predicate (@(@($_.windows)[0].tabs)[0].surfaces)[0])
-    }
+    }.GetNewClosure()
     @(@($s.windows)[0].tabs)[0].surfaces[0]
 }
 
@@ -44,7 +44,7 @@ Invoke-E2eScenario 'scrollbar' {
     if (($style -band $WS_VSCROLL) -eq 0) { throw 'scrollbar = system: the surface has no WS_VSCROLL' }
     $widthBefore = Get-SurfaceWidth $before
 
-    [void](Invoke-GhosttyAction -Class $class -Action 'text:cmd /c "for /L %i in (1,1,300) do @echo %i"\r')
+    [void](Invoke-GhosttyAction -Class $class -Action 'text:seq 1 300\r')
     $filled = Get-FirstSurface $class { param($s) $s.scrollbar.len -gt 0 -and $s.scrollbar.total -gt $s.scrollbar.len }
     Write-E2eInfo ("scrollbar total {0} offset {1} len {2}" -f $filled.scrollbar.total, $filled.scrollbar.offset, $filled.scrollbar.len)
     if ((Get-SurfaceWidth $filled) -ne $widthBefore) {

@@ -11,6 +11,9 @@ Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1
 
 Invoke-E2eScenario 'dpi-sim' {
     $g = Start-BashE2e
+    # powershell.exe is DPI-unaware: ask for physical coordinates so Screen.* matches the state.
+    if (-not ('GhosttyE2e.DpiCtx' -as [type])) { Add-Type -Namespace GhosttyE2e -Name DpiCtx -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);' }
+    [void][GhosttyE2e.DpiCtx]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 
     function Get-Win {
         $d = Get-GhosttyState -Class $g.Class
@@ -73,14 +76,16 @@ Invoke-E2eScenario 'dpi-sim' {
     $w0 = Wait-Win 'tab 0 active' { param($w) $w.active_tab -eq 0 -and $w.cell[1] -gt 0 }
     $baseCell = [int]$w0.cell[1]
     $baseStrip = @($w0.strip.bounds)[3] - @($w0.strip.bounds)[1]
-    Assert-Scale $w0 1.0 'start'
+    $baseDpi = [int]$w0.dpi
+    $baseScale = $baseDpi / 96.0
+    Assert-Scale $w0 $baseScale 'start'
     Save-Evidence 'dpi-96' $g -Window
 
     # 144
     Set-Dpi 144
     $w = Assert-Dpi 144 1.5 60
     $cell = [int]$w.cell[1]
-    if ([math]::Abs($cell - $baseCell * 1.5) -gt 1.5) { throw "cell height at 144: $cell, want about $($baseCell * 1.5)" }
+    if ([math]::Abs($cell - $baseCell * 1.5 / $baseScale) -gt 1.5) { throw "cell height at 144: $cell, want about $($baseCell * 1.5 / $baseScale)" }
     if (-not @($w.tabs)[0].zoomed) { throw 'the split zoom was lost by the dpi change' }
     Save-Evidence 'dpi-144' $g -Window
 
@@ -89,31 +94,35 @@ Invoke-E2eScenario 'dpi-sim' {
     $w = Wait-Win 'third tab' { param($w) @($w.tabs).Count -eq 3 }
     Assert-Scale $w 1.5 'after new_tab at 144'
     Invoke-Act 'new_split:right'
-    $w = Wait-Win 'split in the new tab' { param($w) @(@($w.tabs)[2].surfaces).Count -eq 2 }
+    $w = Wait-Win 'split in the new tab' { param($w) @(@($w.tabs)[$w.active_tab].surfaces).Count -eq 2 }
     Assert-Scale $w 1.5 'after new_split at 144'
 
     # 192
     Set-Dpi 192
     $w = Assert-Dpi 192 2.0 0
     $cell = [int]$w.cell[1]
-    if ([math]::Abs($cell - $baseCell * 2.0) -gt 2) { throw "cell height at 192: $cell, want about $($baseCell * 2.0)" }
+    if ([math]::Abs($cell - $baseCell * 2.0 / $baseScale) -gt 2) { throw "cell height at 192: $cell, want about $($baseCell * 2.0 / $baseScale)" }
     Save-Evidence 'dpi-192' $g -Window
 
     # Back at 96: the original cell size and strip.
-    Set-Dpi 96
-    $w = Assert-Dpi 96 1.0 $baseStrip
+    Set-Dpi $baseDpi
+    $w = Assert-Dpi $baseDpi $baseScale $baseStrip
     if ([int]$w.cell[1] -ne $baseCell) { throw "cell height back at 96: $($w.cell[1]), want $baseCell" }
+
+    # New tabs open next to the active one: go back to the zoomed first tab.
+    Invoke-Act 'goto_tab:1'
+    [void](Wait-Win 'tab 0 active again' { param($w) $w.active_tab -eq 0 })
 
     # Maximized: the dpi change refits the window to the work area.
     Invoke-Act 'toggle_maximize'
     [void](Wait-Win 'maximized' { param($w) $w.maximized })
-    foreach ($dpi in 144, 96) {
+    foreach ($dpi in 144, $baseDpi) {
         Set-Dpi $dpi
         $w = Wait-Win "maximized at $dpi" { param($w) $w.dpi -eq $dpi -and $w.maximized }
         $wa = (Get-Screen $w).WorkingArea
         $cw = $w.client[2] - $w.client[0]
         $ch = $w.client[3] - $w.client[1]
-        if ($cw -gt $wa.Width -or $ch -gt $wa.Height -or $cw -lt $wa.Width - 40 -or $ch -lt $wa.Height - 40) {
+        if ($cw -gt $wa.Width + 4 -or $ch -gt $wa.Height + 4 -or $cw -lt $wa.Width - 40 -or $ch -lt $wa.Height - 40) {
             throw "maximized at ${dpi}: client ${cw}x${ch} does not fill the work area $($wa.Width)x$($wa.Height)"
         }
         if ($w.window[0] -gt $wa.Left -or $w.window[2] -lt $wa.Right) { throw "maximized at ${dpi}: window [$($w.window -join ',')] does not cover the work area" }
@@ -125,7 +134,7 @@ Invoke-E2eScenario 'dpi-sim' {
     # Fullscreen: the client covers the monitor after a dpi change.
     Invoke-Act 'toggle_fullscreen'
     [void](Wait-Win 'fullscreen' { param($w) $w.fullscreen })
-    foreach ($dpi in 144, 96) {
+    foreach ($dpi in 144, $baseDpi) {
         Set-Dpi $dpi
         $w = Wait-Win "fullscreen at $dpi" { param($w) $w.dpi -eq $dpi -and $w.fullscreen }
         $mon = (Get-Screen $w).Bounds

@@ -52,11 +52,11 @@ Invoke-E2eScenario 'tab-drag' {
 
     # Window A with tabs T0, T1.
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_tab')
-    $wins = Wait-Wins 'two tabs' { param($a) @($a[0].tabs).Count -eq 2 }
+    $wins = @(Wait-Wins 'two tabs' { param($a) @($a[0].tabs).Count -eq 2 })
     $aId = $wins[0].id
     $t1 = @($wins[0].tabs)[1]
     $t1Hwnd = $t1.surfaces[0].hwnd
-    $pids = Get-CmdPids
+    $pids = @(Get-CmdPids)
     if ($pids.Count -lt 2) { throw "expected two cmd.exe, got $($pids -join ',')" }
 
     # 1. Tear T1 off: 250 px below A's bottom edge.
@@ -70,17 +70,17 @@ Invoke-E2eScenario 'tab-drag' {
         Start-Sleep -Milliseconds 60
         $sp = Convert-ClientToScreen $g.Hwnd $c[0] $c[1]
         Send-MouseMove -ScreenX $sp.X -ScreenY ($rc[3] + 250) -Steps 25
-        $ghostSeen = [bool](Wait-Until -TimeoutSec 2 -PollMs 50 -Condition { (Get-Ghosts).Count -ge 1 })
+        $ghostSeen = [bool](Wait-Until -TimeoutSec 2 -PollMs 50 -Condition { @(Get-Ghosts).Count -ge 1 })
         Start-Sleep -Milliseconds 300
     } finally {
         Send-MouseUp
     }
     if (-not $ghostSeen) { throw 'no visible GhosttyDragGhost window during the drag' }
-    $wins = Wait-Wins 'two windows, one tab each' { param($a) $a.Count -eq 2 -and @($a[0].tabs).Count -eq 1 -and @($a[1].tabs).Count -eq 1 }
+    $wins = @(Wait-Wins 'two windows, one tab each' { param($a) $a.Count -eq 2 -and @($a[0].tabs).Count -eq 1 -and @($a[1].tabs).Count -eq 1 })
     $moved = @($wins | Where-Object { $_.id -ne $aId })[0]
     if (@($moved.tabs)[0].surfaces[0].hwnd -ne $t1Hwnd) { throw 'the torn-off surface changed its hwnd' }
-    if ((Get-CmdPids) -join ',' -ne $pids -join ',') { throw "cmd.exe pids changed: $((Get-CmdPids) -join ',') vs $($pids -join ',')" }
-    if ((Get-Ghosts).Count -ne 0) { throw 'the drag ghost is still visible after the drop' }
+    if ((@(Get-CmdPids) -join ",") -ne ($pids -join ",")) { throw "cmd.exe pids changed: $((Get-CmdPids) -join ',') vs $($pids -join ',')" }
+    if (@(Get-Ghosts).Count -ne 0) { throw 'the drag ghost is still visible after the drop' }
     $newHwnd = Get-Hwnd $moved
     [void](Set-ForegroundSafe -Hwnd $newHwnd)
     $echo = Join-Path (Get-E2eTempRoot) 'tab-drag-echo.txt'
@@ -103,9 +103,9 @@ Invoke-E2eScenario 'tab-drag' {
     } finally {
         Send-MouseUp
     }
-    $wins = Wait-Wins 'one window with two tabs' { param($x) $x.Count -eq 1 -and @($x[0].tabs).Count -eq 2 }
+    $wins = @(Wait-Wins 'one window with two tabs' { param($x) $x.Count -eq 1 -and @($x[0].tabs).Count -eq 2 })
     if (@($wins[0].tabs)[1].surfaces[0].hwnd -ne $t1Hwnd) { throw 'T1 is not second after the re-dock' }
-    if ((Get-CmdPids) -join ',' -ne $pids -join ',') { throw 'cmd.exe pids changed after the re-dock' }
+    if ((@(Get-CmdPids) -join ",") -ne ($pids -join ",")) { throw 'cmd.exe pids changed after the re-dock' }
     Write-E2eInfo 're-dock ok'
 
     # 3. Esc cancels a tear-off.
@@ -128,7 +128,7 @@ Invoke-E2eScenario 'tab-drag' {
     $wins = @(Get-Wins)
     if ($wins.Count -ne 1) { throw "Esc did not cancel: $($wins.Count) windows" }
     if ((@($wins[0].tabs | ForEach-Object { $_.id }) -join ',') -ne ($order -join ',')) { throw 'tab order changed after Esc' }
-    if ((Get-Ghosts).Count -ne 0) { throw 'the ghost is visible after Esc' }
+    if (@(Get-Ghosts).Count -ne 0) { throw 'the ghost is visible after Esc' }
 
     Save-Evidence -Tag 'tab-drag' -G $g -Window
 }
