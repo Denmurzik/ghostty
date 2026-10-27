@@ -28,7 +28,6 @@ const messages = @import("messages.zig");
 const notify = @import("notify.zig");
 const overlay = @import("overlay.zig");
 const recovery = @import("recovery.zig");
-const scrollbar = @import("scrollbar.zig");
 const shell_open = @import("shell_open.zig");
 
 const Config = configpkg.Config;
@@ -166,7 +165,6 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
 /// The tab became the window's visible one (or stopped being it).
 pub fn tabShown(tab: *Tab, shown: bool) void {
     overlay.tabShown(tab, shown);
-    scrollbar.tabShown(tab, shown);
 }
 
 /// Called at the point where `Tab.setWindow` has moved the tab.

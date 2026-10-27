@@ -273,12 +273,7 @@ pub fn tabShown(tab: *Tab, shown: bool) void {
     if (shown) return;
     var it = tab.tree.iterator();
     while (it.next()) |entry| {
-        const state = &entry.view.scrollbar;
-        if (!clearHover(state)) continue;
-        if (state.popup_made and state.popup.visible) {
-            state.drawn = null;
-            restartHold(state);
-        }
+        _ = clearHover(&entry.view.scrollbar);
     }
 }
 
