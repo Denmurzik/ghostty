@@ -32,6 +32,7 @@ pub const Mailbox = mailbox.Mailbox;
 pub const Message = message.Message;
 pub const StreamHandler = stream_handler.StreamHandler;
 pub const ResizeEchoes = @import("termio/resize_echoes.zig").ResizeEchoes;
+pub const ResizePrime = @import("termio/resize_prime.zig").ResizePrime;
 
 test {
     @import("std").testing.refAllDecls(@This());

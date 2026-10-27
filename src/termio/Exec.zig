@@ -30,6 +30,7 @@ const windows = internal_os.windows;
 const latency = internal_os.windows_latency;
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const compat_fd = @import("../lib/compat/fd.zig");
+const ResizePrime = @import("resize_prime.zig").ResizePrime;
 
 const log = std.log.scoped(.io_exec);
 
@@ -54,6 +55,10 @@ const FlatpakHostCommand = if (!build_config.flatpak) struct {
 
 /// The subprocess state for our exec backend.
 subprocess: Subprocess,
+
+/// Windows: the key-up sent ahead of the first write after a resize.
+/// Touched only on the IO thread (`resize` and `queueWrite`).
+resize_prime: if (is_windows) ResizePrime else void = if (is_windows) .{} else {},
 
 /// Initialize the exec state. This will NOT start it, this only sets
 /// up the internal state necessary to start it later.
@@ -288,7 +293,12 @@ pub fn resize(
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
 ) !void {
-    return try self.subprocess.resize(grid_size, screen_size);
+    try self.subprocess.resize(grid_size, screen_size);
+    if (comptime is_windows) self.resize_prime.resized(
+        std.math.cast(u16, grid_size.columns) orelse std.math.maxInt(u16),
+        std.math.cast(u16, grid_size.rows) orelse std.math.maxInt(u16),
+        std.Io.Timestamp.now(global.io(), .awake).nanoseconds,
+    );
 }
 
 fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
@@ -443,11 +453,25 @@ pub fn queueWrite(
     data: []const u8,
     linefeed: bool,
 ) !void {
-    _ = self;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
+
+    if (comptime is_windows) {
+        const now = std.Io.Timestamp.now(global.io(), .awake).nanoseconds;
+        if (self.resize_prime.take(now)) try queueChunks(alloc, td, ResizePrime.sequence, false);
+    }
+    try queueChunks(alloc, td, data, linefeed);
+}
+
+fn queueChunks(
+    alloc: Allocator,
+    td: *termio.Termio.ThreadData,
+    data: []const u8,
+    linefeed: bool,
+) !void {
+    const exec = &td.backend.exec;
 
     // We go through and chunk the data if necessary to fit into
     // our cached buffers that we can queue to the stream.
