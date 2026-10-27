@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     });
     for ([_][]const u8{
         "user32",   "gdi32",   "dwmapi",  "imm32", "ole32", "advapi32", "d3d11", "dxgi",
-        "comctl32", "shell32", "uxtheme", "winmm", "d2d1",  "dwrite",
+        "comctl32", "shell32", "uxtheme", "winmm", "d2d1",  "dwrite", "comdlg32",
     }) |lib| module.linkSystemLibrary(lib, .{});
 
     const test_step = b.step("test", "Run the pkg/win32 tests");

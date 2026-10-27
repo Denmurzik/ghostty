@@ -259,3 +259,54 @@ test "win32 kernel32: global memory status" {
     try std.testing.expect(kernel32.GlobalMemoryStatusEx(&status) != 0);
     try std.testing.expect(status.ullTotalPhys > 0);
 }
+
+// Sizes follow the x86_64 SDK layout: SHELLEXECUTEINFOW is 112 (padding after
+// nShow and dwHotKey), TOOLINFOW 72, DWM_BLURBEHIND 24 (the HRGN is 8-aligned;
+// 20 on 32-bit).
+test "win32 shell32: SHELLEXECUTEINFOW size" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(112, @sizeOf(win32.shell32.SHELLEXECUTEINFOW));
+}
+
+test "win32 comctl32: TOOLINFOW size" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(72, @sizeOf(win32.comctl32.TOOLINFOW));
+}
+
+test "win32 dwmapi: DWM_BLURBEHIND size" {
+    try std.testing.expectEqual(if (@sizeOf(usize) == 8) 24 else 20, @sizeOf(dwmapi.DWM_BLURBEHIND));
+}
+
+test "win32 advapi32: HKEY_CURRENT_USER is sign-extended" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(0xFFFFFFFF80000001, @intFromPtr(advapi32.HKEY_CURRENT_USER));
+}
+
+test "win32 user32: RegisterHotKey roundtrip on a message window" {
+    const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWin32TestHotkey");
+    const instance = kernel32.GetModuleHandleW(null);
+    const class: user32.WNDCLASSEXW = .{
+        .lpfnWndProc = user32.DefWindowProcW,
+        .hInstance = instance,
+        .lpszClassName = class_name,
+    };
+    try std.testing.expect(user32.RegisterClassExW(&class) != 0);
+    defer _ = user32.UnregisterClassW(class_name, instance);
+    const hwnd = user32.CreateWindowExW(0, class_name, null, 0, 0, 0, 0, 0, user32.HWND_MESSAGE, null, instance, null) orelse
+        return error.CreateWindowFailed;
+    defer _ = user32.DestroyWindow(hwnd);
+
+    const mods = user32.MOD_CONTROL | user32.MOD_ALT | user32.MOD_SHIFT | user32.MOD_NOREPEAT;
+    if (user32.RegisterHotKey(hwnd, 1, mods, user32.VK_F9) == 0) {
+        if (kernel32.GetLastError() == user32.ERROR_HOTKEY_ALREADY_REGISTERED) return error.SkipZigTest;
+        return error.RegisterHotKeyFailed;
+    }
+    try std.testing.expect(user32.UnregisterHotKey(hwnd, 1) != 0);
+}
+
+test "win32 shlwapi: AssocIsDangerous flags .exe and not .txt" {
+    const exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
+    const txt = std.unicode.utf8ToUtf16LeStringLiteral(".txt");
+    try std.testing.expectEqual(true, win32.shlwapi.assocIsDangerous(exe) orelse return error.SkipZigTest);
+    try std.testing.expectEqual(false, win32.shlwapi.assocIsDangerous(txt).?);
+}

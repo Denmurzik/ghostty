@@ -6,6 +6,7 @@ const HWND = foundation.HWND;
 const WPARAM = foundation.WPARAM;
 const LPARAM = foundation.LPARAM;
 const LRESULT = foundation.LRESULT;
+const gdi32 = @import("gdi32.zig");
 
 pub extern "dwmapi" fn DwmSetWindowAttribute(HWND, attribute: u32, value: *const anyopaque, size: u32) callconv(.winapi) HRESULT;
 
@@ -41,3 +42,19 @@ pub const DWMWCP_DEFAULT = 0;
 pub const DWMWCP_DONOTROUND = 1;
 pub const DWMWCP_ROUND = 2;
 pub const DWMWCP_ROUNDSMALL = 3;
+
+pub const HRGN = gdi32.HRGN;
+
+/// `DWM_BLURBEHIND.dwFlags`.
+pub const DWM_BB_ENABLE = 0x00000001;
+pub const DWM_BB_BLURREGION = 0x00000002;
+
+pub const DWM_BLURBEHIND = extern struct {
+    dwFlags: u32 = 0,
+    fEnable: BOOL = 0,
+    hRgnBlur: ?HRGN = null,
+    fTransitionOnMaximized: BOOL = 0,
+};
+
+/// A null `hRgnBlur` with `DWM_BB_BLURREGION` blurs the whole window.
+pub extern "dwmapi" fn DwmEnableBlurBehindWindow(HWND, *const DWM_BLURBEHIND) callconv(.winapi) HRESULT;

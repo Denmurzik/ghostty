@@ -106,3 +106,12 @@ test "win32 ole32: IDropTarget and IDataObject slot counts" {
     try std.testing.expectEqual(12 * @sizeOf(usize), @sizeOf(IDataObject.VTable));
     try std.testing.expectEqual(32, @sizeOf(FORMATETC));
 }
+
+// COM apartments (threads other than the UI thread)
+
+pub const COINIT_APARTMENTTHREADED = 0x2;
+
+pub extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, coinit: u32) callconv(.winapi) HRESULT;
+pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
+/// Releases memory allocated by the shell or COM.
+pub extern "ole32" fn CoTaskMemFree(?*anyopaque) callconv(.winapi) void;

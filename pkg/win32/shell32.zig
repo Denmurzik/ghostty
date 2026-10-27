@@ -164,3 +164,43 @@ test "win32 shell32: NOTIFYICONDATAW layout" {
     try std.testing.expectEqual(952, @offsetOf(NOTIFYICONDATAW, "guidItem"));
     try std.testing.expectEqual(968, @offsetOf(NOTIFYICONDATAW, "hBalloonIcon"));
 }
+
+// ShellExecuteEx, AppUserModelID, reveal in Explorer (shellapi.h, shlobj_core.h)
+
+pub const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
+pub const SEE_MASK_NOASYNC = 0x00000100;
+pub const SEE_MASK_FLAG_NO_UI = 0x00000400;
+
+pub const SHELLEXECUTEINFOW = extern struct {
+    cbSize: u32 = @sizeOf(SHELLEXECUTEINFOW),
+    fMask: u32 = 0,
+    hwnd: ?foundation.HWND = null,
+    lpVerb: ?[*:0]const u16 = null,
+    lpFile: ?[*:0]const u16 = null,
+    lpParameters: ?[*:0]const u16 = null,
+    lpDirectory: ?[*:0]const u16 = null,
+    nShow: i32 = 0,
+    hInstApp: ?*anyopaque = null,
+    lpIDList: ?*anyopaque = null,
+    lpClass: ?[*:0]const u16 = null,
+    hkeyClass: ?*anyopaque = null,
+    dwHotKey: u32 = 0,
+    /// A union with `hMonitor` in the header.
+    hIcon: ?*anyopaque = null,
+    hProcess: ?foundation.HANDLE = null,
+};
+
+/// Returns TRUE on success; on failure `GetLastError` has the reason.
+pub extern "shell32" fn ShellExecuteExW(*SHELLEXECUTEINFOW) callconv(.winapi) foundation.BOOL;
+pub extern "shell32" fn SetCurrentProcessExplicitAppUserModelID(app_id: [*:0]const u16) callconv(.winapi) foundation.HRESULT;
+
+/// The returned `ITEMIDLIST` is released with `ILFree`.
+pub extern "shell32" fn ILCreateFromPathW(path: [*:0]const u16) callconv(.winapi) ?*anyopaque;
+pub extern "shell32" fn ILFree(pidl: ?*anyopaque) callconv(.winapi) void;
+/// With `cidl = 0` the item `pidl_folder` names is opened in its parent folder, selected.
+pub extern "shell32" fn SHOpenFolderAndSelectItems(
+    pidl_folder: *anyopaque,
+    cidl: u32,
+    apidl: ?[*]const *anyopaque,
+    flags: u32,
+) callconv(.winapi) foundation.HRESULT;

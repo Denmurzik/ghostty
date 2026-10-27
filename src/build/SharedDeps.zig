@@ -568,7 +568,7 @@ pub fn add(
             // lib-vt consumers do not.
             for ([_][]const u8{
                 "user32",   "gdi32",   "dwmapi",  "imm32", "ole32", "advapi32", "d3d11", "dxgi",
-                "comctl32", "shell32", "uxtheme", "winmm", "d2d1",  "dwrite",
+                "comctl32", "shell32", "uxtheme", "winmm", "d2d1",  "dwrite", "comdlg32",
             }) |lib| step.root_module.linkSystemLibrary(lib, .{});
         }
     }

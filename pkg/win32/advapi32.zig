@@ -72,3 +72,33 @@ pub const TOKEN_MANDATORY_LABEL = extern struct {
 
 pub extern "advapi32" fn GetSidSubAuthorityCount(sid: *anyopaque) callconv(.winapi) *u8;
 pub extern "advapi32" fn GetSidSubAuthority(sid: *anyopaque, index: u32) callconv(.winapi) *u32;
+
+// Registry writes (the toast registration under HKCU and its cleanup).
+
+pub const KEY_WRITE = 0x20006;
+pub const KEY_READ = 0x20019;
+pub const REG_SZ = 1;
+pub const REG_OPTION_NON_VOLATILE = 0;
+
+pub extern "advapi32" fn RegCreateKeyExW(
+    hkey: HKEY,
+    subkey: [*:0]const u16,
+    reserved: u32,
+    class: ?[*:0]u16,
+    options: u32,
+    access: u32,
+    security: ?*anyopaque,
+    result: *HKEY,
+    disposition: ?*u32,
+) callconv(.winapi) LSTATUS;
+/// `size` is in bytes and includes the terminating NUL for `REG_SZ`.
+pub extern "advapi32" fn RegSetValueExW(
+    hkey: HKEY,
+    name: ?[*:0]const u16,
+    reserved: u32,
+    kind: u32,
+    data: ?[*]const u8,
+    size: u32,
+) callconv(.winapi) LSTATUS;
+pub extern "advapi32" fn RegCloseKey(hkey: HKEY) callconv(.winapi) LSTATUS;
+pub extern "advapi32" fn RegDeleteTreeW(hkey: HKEY, subkey: ?[*:0]const u16) callconv(.winapi) LSTATUS;

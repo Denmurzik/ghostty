@@ -16,6 +16,10 @@ pub const uxtheme = @import("uxtheme.zig");
 pub const winmm = @import("winmm.zig");
 pub const d2d1 = @import("d2d1.zig");
 pub const dwrite = @import("dwrite.zig");
+pub const shlwapi = @import("shlwapi.zig");
+pub const dcomp = @import("dcomp.zig");
+pub const winrt = @import("winrt.zig");
+pub const comdlg32 = @import("comdlg32.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

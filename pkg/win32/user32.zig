@@ -963,3 +963,29 @@ pub const PM_QS_SENDMESSAGE = 0x00400000;
 pub const ULW_ALPHA = 0x00000002;
 pub const AC_SRC_OVER = 0x00;
 pub const AC_SRC_ALPHA = 0x01;
+
+// -- Global hotkeys, edit control (M3) -----------------------------------------
+pub extern "user32" fn RegisterHotKey(?HWND, id: i32, modifiers: u32, vk: u32) callconv(.winapi) BOOL;
+pub extern "user32" fn UnregisterHotKey(?HWND, id: i32) callconv(.winapi) BOOL;
+
+pub const WM_HOTKEY = 0x0312;
+pub const MOD_ALT = 0x0001;
+pub const MOD_CONTROL = 0x0002;
+pub const MOD_SHIFT = 0x0004;
+pub const MOD_WIN = 0x0008;
+pub const MOD_NOREPEAT = 0x4000;
+
+/// `GetLastError` after `RegisterHotKey` when another process owns the combination.
+pub const ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
+
+/// `SetWindowLongPtrW` index that changes the owner of a top-level window.
+pub const GWLP_HWNDPARENT = -8;
+
+pub const ES_LEFT = 0x0000;
+pub const EM_SETSEL = 0x00B1;
+pub const ECM_FIRST = 0x1500;
+/// `wparam` TRUE keeps the banner visible while the edit has focus; `lparam` is a `[*:0]const u16`.
+pub const EM_SETCUEBANNER = ECM_FIRST + 1;
+pub const EN_KILLFOCUS = 0x0200;
+pub const EN_CHANGE = 0x0300;
+pub const WM_CTLCOLOREDIT = 0x0133;

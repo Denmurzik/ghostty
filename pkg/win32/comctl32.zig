@@ -139,3 +139,32 @@ pub extern "comctl32" fn RemoveWindowSubclass(
     proc: SUBCLASSPROC,
     subclass_id: usize,
 ) callconv(.winapi) foundation.BOOL;
+
+// -- Tooltips ------------------------------------------------------------------
+
+pub const TOOLTIPS_CLASSW = std.unicode.utf8ToUtf16LeStringLiteral("tooltips_class32");
+
+pub const TTS_ALWAYSTIP = 0x01;
+pub const TTS_NOPREFIX = 0x02;
+
+pub const TTF_IDISHWND = 0x0001;
+pub const TTF_TRACK = 0x0020;
+pub const TTF_ABSOLUTE = 0x0080;
+
+pub const TTM_TRACKACTIVATE = 0x0400 + 17;
+pub const TTM_TRACKPOSITION = 0x0400 + 18;
+pub const TTM_SETMAXTIPWIDTH = 0x0400 + 24;
+pub const TTM_ADDTOOLW = 0x0400 + 50;
+pub const TTM_UPDATETIPTEXTW = 0x0400 + 57;
+
+pub const TOOLINFOW = extern struct {
+    cbSize: u32 = @sizeOf(TOOLINFOW),
+    uFlags: u32 = 0,
+    hwnd: ?HWND = null,
+    uId: usize = 0,
+    rect: foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+    hinst: ?HINSTANCE = null,
+    lpszText: ?[*:0]u16 = null,
+    lParam: isize = 0,
+    lpReserved: ?*anyopaque = null,
+};
