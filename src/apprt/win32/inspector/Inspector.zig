@@ -74,6 +74,11 @@ pub const Options = struct {
     show: bool = true,
     draw: DrawFn = drawCore,
     locked_hook: ?LockedHook = null,
+    /// Redraw at every tick (the default); tests turn it off.
+    refresh: bool = true,
+    /// Skip a frame while the display has no free slot (a window nobody
+    /// composes, as in tests, never has one).
+    poll_slot: bool = true,
 };
 
 /// One inspector window, owned by the surface it inspects.
@@ -89,6 +94,13 @@ pub const Inspector = struct {
     locked_hook: ?LockedHook,
 
     /// Something changed since the last frame.
+    /// Redraw at every tick while the window is shown.
+    refresh: bool,
+    poll_slot: bool,
+
+    /// Whether the tick looks at the window being visible (not in tests).
+    check_visible: bool,
+
     dirty: bool = true,
 
     /// Frames built by the tick.
@@ -140,6 +152,9 @@ pub const Inspector = struct {
             .device = opts.device,
             .draw = opts.draw,
             .locked_hook = opts.locked_hook,
+            .refresh = opts.refresh,
+            .check_visible = opts.show,
+            .poll_slot = opts.poll_slot,
         };
         self.applyScale(window.dpi);
         self.title_hash = titleHash(opts.surface.getTitle());
@@ -193,6 +208,12 @@ pub const Inspector = struct {
     /// has the focus.
     pub fn tick(self: *Inspector) void {
         self.syncTitle();
+        // The terminal changes without telling the app (plain output and
+        // keys wake nobody), so a shown inspector redraws at every tick.
+        if (self.refresh) {
+            if (self.check_visible and user32.IsWindowVisible(self.window.hwnd) == 0) return;
+            self.dirty = true;
+        }
         if (!self.dirty and !self.window.isForeground()) return;
         if (user32.IsIconic(self.window.hwnd) != 0) return;
         self.dirty = false;
@@ -237,13 +258,14 @@ pub const Inspector = struct {
 
         // Never wait on the display: without a free slot the frame is skipped
         // and tried again at the next tick.
-        if (self.swap_chain) |sc| {
-            if (sc.waitable) |h| {
-                if (kernel32.WaitForSingleObjectEx(h, 0, 0) != kernel32.WAIT_OBJECT_0) {
-                    self.dirty = true;
-                    return;
-                }
-            }
+        const pending_slot = if (self.poll_slot) blk: {
+            const sc = self.swap_chain orelse break :blk false;
+            const h = sc.waitable orelse break :blk false;
+            break :blk kernel32.WaitForSingleObjectEx(h, 0, 0) != kernel32.WAIT_OBJECT_0;
+        } else false;
+        if (pending_slot) {
+            self.dirty = true;
+            return;
         }
 
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
@@ -309,6 +331,10 @@ pub const Inspector = struct {
             return sc;
         }
         self.swap_chain = try SwapChain.init(self.device, self.window.hwnd, width, height, .hwnd);
+        // The new chain starts with its one slot signalled and a frame is
+        // about to take it: consume the signal, or a second present would
+        // queue behind the first and block on a window nobody composes.
+        if (self.swap_chain.?.waitable) |h| _ = kernel32.WaitForSingleObjectEx(h, 0, 0);
         return &self.swap_chain.?;
     }
 
@@ -468,6 +494,8 @@ const Fixture = struct {
     fn init(opts: struct {
         draw: DrawFn = drawNothing,
         locked_hook: ?LockedHook = null,
+        refresh: bool = false,
+        poll_slot: bool = false,
     }) !Fixture {
         const alloc = testing.allocator;
         const device = Device.init(alloc, .{ .driver = .warp }) catch return error.SkipZigTest;
@@ -491,6 +519,8 @@ const Fixture = struct {
             .show = false,
             .draw = opts.draw,
             .locked_hook = opts.locked_hook,
+            .refresh = opts.refresh,
+            .poll_slot = opts.poll_slot,
         });
         return .{ .device = device, .surface = surface, .insp = insp };
     }
@@ -594,4 +624,28 @@ test "win32 inspector: titles are cut at a code point, never replaced" {
     try testing.expect(cut.len <= title_max);
     try testing.expect(std.unicode.utf8ValidateSlice(cut));
     try testing.expect(std.mem.startsWith(u8, cut, "Inspector \u{2014} \u{44F}"));
+}
+
+test "win32 inspector: a refreshing inspector draws at every tick" {
+    const f = try Fixture.init(.{ .refresh = true });
+    defer f.deinit();
+    defer f.insp.close();
+
+    f.insp.tick();
+    const frames = f.insp.frames;
+    // The display may have no free slot (a hidden window has none): the
+    // tick then keeps the frame pending.
+    f.insp.dirty = false;
+    f.insp.tick();
+    try testing.expect(f.insp.dirty or f.insp.frames > frames);
+}
+
+test "win32 inspector: the tick timer lives and dies with the window" {
+    const f = try Fixture.init(.{});
+    defer f.deinit();
+    const hwnd = f.insp.window.hwnd;
+    // SetTimer with the same id returns it while the timer exists.
+    try testing.expect(win32.user32.SetTimer(hwnd, Window.tick_id, Window.tick_ms, null) != 0);
+    f.insp.close();
+    try testing.expect(win32.user32.KillTimer(hwnd, Window.tick_id) == 0);
 }
