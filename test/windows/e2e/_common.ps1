@@ -864,17 +864,23 @@ function Invoke-PayloadCase($G, [string]$File, [scriptblock]$TypePayload) {
 # After the process is gone: nothing from the snapshot (a process tree taken
 # while it ran) may still be alive, and nothing may still claim the old pid
 # as its parent.
-function Assert-NoSurvivors([object[]]$Snapshot, [int]$OldPid, [double]$GraceSec, [int[]]$Except = @(), [switch]$GhosttyAlive) {
+# -HostsMayLinger: the pseudo console's host (conhost.exe / OpenConsole.exe) stays
+# while a program with a console of its own that inherited handles of it (the
+# `start cmd` survivor) runs, so it is no leak until that program ends.
+function Assert-NoSurvivors([object[]]$Snapshot, [int]$OldPid, [double]$GraceSec, [int[]]$Except = @(), [switch]$GhosttyAlive, [switch]$HostsMayLinger) {
     $survivors = @()
     $deadline = [Diagnostics.Stopwatch]::StartNew()
+    $hosts = @('conhost.exe', 'openconsole.exe')
     do {
-        $survivors = @(Get-SurvivingProcesses $Snapshot | Where-Object { $Except -notcontains [int]$_.ProcessId })
+        $survivors = @(Get-SurvivingProcesses $Snapshot | Where-Object {
+            $Except -notcontains [int]$_.ProcessId -and -not ($HostsMayLinger -and $hosts -contains $_.Name.ToLowerInvariant())
+        })
         if ($survivors.Count -eq 0) { break }
         Start-Sleep -Milliseconds 250
     } while ($deadline.Elapsed.TotalSeconds -lt $GraceSec)
     if ($survivors.Count) { throw "processes left behind: $(Format-Procs $survivors)" }
     # Only meaningful once ghostty itself is gone.
-    if ($GhosttyAlive) { return }
+    if ($GhosttyAlive -or $HostsMayLinger) { return }
     $orphans = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $OldPid } |
         Select-Object ProcessId, Name)
     if ($orphans.Count) { throw "processes still reporting the old ghostty pid as parent: $(Format-Procs $orphans)" }

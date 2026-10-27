@@ -25,8 +25,12 @@ Invoke-E2eScenario 'close-tree' {
         $exit = Wait-ProcessExit $g 3
         Write-E2eInfo "ghostty exited after $($exit.Ms) ms"
         if (-not $exit.Exited) { throw 'ghostty still running 3 s after the window was closed' }
-        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep
+        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep -HostsMayLinger
         if (-not (Test-ProcessAlive $survivor)) { throw "the survivor console ($survivor) ended with the window" }
+        # Once it ends, the pseudo console's host must go too.
+        Stop-Survivor $survivor
+        $survivor = 0
+        Assert-NoSurvivors $snapshot $g.Pid 8
     } finally {
         Stop-Survivor $survivor
     }

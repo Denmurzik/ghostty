@@ -46,11 +46,18 @@ Invoke-E2eScenario 'tab-close-tree' {
         if ($names -notcontains 'bash.exe' -or $names -notcontains 'ping.exe') { throw "unexpected tab 1 tree: $(Format-Procs $snapshot)" }
 
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'close_tab:this')
-        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep -GhosttyAlive
+        Assert-NoSurvivors $snapshot $g.Pid 8 -Except $keep -GhosttyAlive -HostsMayLinger
         if (-not (Test-ProcessAlive $g.Pid)) { throw 'ghostty ended with the closed tab' }
         if (-not (Test-ProcessAlive $survivor)) { throw "the survivor console ($survivor) ended with the tab" }
-        $left = @(Get-ProcessTree $g.Pid | Where-Object { $beforeIds -contains [int]$_.ProcessId })
-        if ($left.Count -ne $beforeIds.Count) { throw "tab 0 lost processes: $(Format-Procs $left), had $(Format-Procs $before)" }
+        # Once it ends, the closed tab's console host must go too.
+        Stop-Survivor $survivor
+        $survivor = 0
+        Assert-NoSurvivors $snapshot $g.Pid 8 -GhosttyAlive
+        $core = @($before | Where-Object { [int]$_.ParentProcessId -eq $g.Pid })
+        $coreIds = @($core | ForEach-Object { [int]$_.ProcessId })
+        $left = @(Get-ProcessTree $g.Pid | Where-Object { $coreIds -contains [int]$_.ProcessId })
+        # The prompt's short-lived children (git, subshells) come and go.
+        if ($left.Count -ne $core.Count) { throw "tab 0 lost processes: $(Format-Procs $left), had $(Format-Procs $core)" }
 
         # Tab 0 is active again and its shell still runs lines.
         $alive = Join-Path $g.Sandbox.Tmp 'gt-tab0-alive.txt'
