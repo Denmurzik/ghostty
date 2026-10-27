@@ -17,6 +17,7 @@ const global = @import("../../global.zig");
 const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const app_actions = @import("actions/app_actions.zig");
 const bell = @import("bell.zig");
 const ipc_ops = @import("ipc/ops.zig");
 const messages = @import("messages.zig");
@@ -45,6 +46,7 @@ const aumid_subkey = "Software\\Classes\\AppUserModelId\\" ++ aumid;
 
 /// The icon the toast shows, written to disk on the first toast: the
 /// registration takes a file path.
+/// A copy of `images/icons/icon_128.png` (an embed cannot reach outside `src/`).
 const icon_png = @embedFile("notify_icon.png");
 
 /// Limits in code points; core truncates first, this is the backstop.
@@ -111,7 +113,8 @@ pub const State = struct {
     /// A failed toast was reported already (the log and the flash are not
     /// repeated per notice).
     warned: bool = false,
-    recorded: RingBuffer = .{},
+    /// Only in test mode, allocated on the first notice.
+    recorded: ?*RingBuffer = null,
     /// Every notice seen in test mode, including the ones the ring dropped.
     recorded_total: u32 = 0,
     live: [live_capacity]?*winrt.IToastNotification = @splat(null),
@@ -217,12 +220,19 @@ fn L(comptime s: []const u8) []const u16 {
 /// Writes `DisplayName` and `IconUri` under
 /// `HKCU\Software\Classes\AppUserModelId\<aumid>`: what Windows needs to show
 /// a toast of an unpackaged app under its own name and icon.
+/// Without an `icon_path` there is no `IconUri`.
+///
+/// The key and the icon file stay after the app is gone (nothing removes them:
+/// they are per user, small, and rewritten by the next run); an uninstaller
+/// deletes `HKCU\Software\Classes\AppUserModelId\<aumid>` and
+/// `%LOCALAPPDATA%\Ghostty\notify-icon.png`.
 pub fn registerAumid(w: RegistryWriter, icon_path: []const u8) bool {
     var icon_buf: [1024]u16 = undefined;
     const icon_len = std.unicode.utf8ToUtf16Le(&icon_buf, icon_path) catch return false;
 
     const subkey = L(aumid_subkey);
     if (!w.setString(w.ctx, subkey, L("DisplayName"), L(display_name))) return false;
+    if (icon_len == 0) return true;
     return w.setString(w.ctx, subkey, L("IconUri"), icon_buf[0..icon_len]);
 }
 
@@ -389,11 +399,22 @@ pub fn configChanged(app: *App, config: *const configpkg.Config) void {
 pub fn clicked(app: *App, wparam: WPARAM) void {
     const id = std.math.cast(u32, wparam) orelse return;
     const surface = findSurface(app, id) orelse return;
-    const window = surface.window;
-    const index = window.tabIndex(surface.tab) orelse return;
-    surface.tab.focused = surface;
-    window.selectTabFocus(index, false);
-    window.activate();
+    _ = app_actions.present_terminal(app, .{ .surface = &surface.core_surface }, {}) catch |err|
+        log.warn("unable to present the surface of a clicked toast err={}", .{err});
+}
+
+/// The end of the app: the toasts and the notifier are released while COM
+/// still runs. A toast clicked after this finds no message window.
+pub fn deinit(app: *App) void {
+    const state = &app.notify;
+    for (&state.live) |*slot| {
+        com.release(slot.*);
+        slot.* = null;
+    }
+    com.release(state.notifier);
+    state.notifier = null;
+    if (state.recorded) |r| app.core_app.alloc.destroy(r);
+    state.recorded = null;
 }
 
 fn findSurface(app: *App, id: u32) ?*Surface {
@@ -479,7 +500,13 @@ fn show(app: *App, surface: ?*Surface, title: []const u8, body: []const u8) void
         defer alloc.free(clean_title);
         const clean_body = sanitize(alloc, body, max_body_cp) catch return;
         defer alloc.free(clean_body);
-        app.notify.recorded.push(clean_title, clean_body, surface_id);
+        const ring = app.notify.recorded orelse blk: {
+            const r = alloc.create(RingBuffer) catch return;
+            r.* = .{};
+            app.notify.recorded = r;
+            break :blk r;
+        };
+        ring.push(clean_title, clean_body, surface_id);
         app.notify.recorded_total += 1;
         return;
     }
@@ -529,7 +556,9 @@ fn showToast(app: *App, title: []const u8, body: []const u8, surface_id: u32) !v
 
     const factory = try winrt.getActivationFactory(winrt.IToastNotificationFactory, winrt.IToastNotificationFactory.class_name);
     defer com.release(factory);
-    const toast = try factory.createToastNotification(doc);
+    const content = try com.queryInterface(doc, winrt.IXmlDocument);
+    defer com.release(content);
+    const toast = try factory.createToastNotification(content);
     errdefer com.release(toast);
 
     const handler = try Delegate.create(app.msg_hwnd, surface_id);
@@ -568,15 +597,17 @@ fn ensureNotifier(app: *App) !*winrt.IToastNotifier {
 }
 
 pub fn testState(app: *App, jw: *std.json.Stringify) !void {
-    const state = &app.notify;
     try jw.beginObject();
     try jw.objectField("total");
-    try jw.write(state.recorded_total);
+    // Outside test mode nothing is recorded (and the unit test of the state
+    // document passes no real app).
+    const ring: ?*const RingBuffer = if (testMode()) app.notify.recorded else null;
+    try jw.write(if (testMode()) app.notify.recorded_total else 0);
     try jw.objectField("recorded");
     try jw.beginArray();
-    const count = @min(state.recorded.len, recorded_capacity);
+    const count: usize = if (ring) |r| r.len else 0;
     for (0..count) |i| {
-        const r = state.recorded.at(i);
+        const r = ring.?.at(i);
         try jw.beginObject();
         try jw.objectField("title");
         try jw.write(r.title[0..@min(r.title_len, r.title.len)]);
@@ -661,6 +692,12 @@ test "win32 notify: aumid registration through the writer" {
     try testing.expect(fake.subkey_ok);
     try testing.expectEqualStrings("Ghostty \u{2014} Unofficial Windows port", fake.display_name[0..fake.display_name_len]);
     try testing.expectEqualStrings("C:\\icons\\g.png", fake.icon[0..fake.icon_len]);
+
+    // No icon: no IconUri.
+    var bare: FakeWriter = .{};
+    try testing.expect(registerAumid(.{ .ctx = &bare, .setString = FakeWriter.set }, ""));
+    try testing.expectEqual(@as(usize, 1), bare.calls);
+    try testing.expectEqual(@as(usize, 0), bare.icon_len);
 
     // A failing writer fails the registration.
     const Failing = struct {

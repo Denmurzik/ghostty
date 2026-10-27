@@ -53,9 +53,15 @@ pub const IXmlDocumentIO = extern struct {
     }
 };
 
-/// The `IXmlDocument` of an `XmlDocument` is its default interface: the
-/// `IInspectable` that `RoActivateInstance` returns is passed on as it is.
-pub const IXmlDocument = IInspectable;
+/// `Windows.Data.Xml.Dom.IXmlDocument`: only passed on (to the toast
+/// factory), so its own methods are not declared. Reached by `QueryInterface`
+/// on the `XmlDocument` instance: `RoActivateInstance` promises an
+/// `IInspectable` and no more.
+pub const IXmlDocument = extern struct {
+    vtable: *const IInspectable.VTable,
+
+    pub const iid = GUID.parse("f7f3a506-1e87-42d6-bcfb-b8c809fa5494");
+};
 
 pub const IToastNotificationManagerStatics = extern struct {
     vtable: *const VTable,

@@ -53,6 +53,7 @@ pub fn appStopping(app: *App) void {
     app.visibility.deinit(app.core_app.alloc);
     shell_open.appStopping(app);
     Inspector.appStopping(app);
+    notify.deinit(app);
 }
 
 /// The app-level config changed; `reloaded` when the files were read again.
