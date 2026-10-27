@@ -54,6 +54,8 @@ extern "gdi32" fn SetBkColor(user32.HDC, u32) callconv(.winapi) u32;
 
 // -- State -------------------------------------------------------------------------
 
+pub const no_sel = std.math.maxInt(usize);
+
 /// Per top-level window: the open palette, if any.
 pub const State = struct {
     popup: ?*overlay.Popup = null,
@@ -64,7 +66,8 @@ pub const State = struct {
     target_id: ?u32 = null,
     /// `Item` positions of the entries that match the query, best first.
     rows: []usize = &.{},
-    sel: usize = 0,
+    /// Position in `rows`; `no_sel` until a query is typed or a key moves it.
+    sel: usize = no_sel,
     /// The first row shown.
     scroll: usize = 0,
 };
@@ -75,7 +78,13 @@ const Item = struct {
     description: []const u8,
     /// "Ctrl+Shift+P", empty when the action has no binding.
     shortcut: []const u8,
+    run: Run,
+};
+
+const Run = union(enum) {
     action: input.Binding.Action,
+    /// Focus the surface with this id.
+    jump: u32,
 };
 
 /// What the heap block of an open palette holds; `popup` is its first field.
@@ -86,6 +95,8 @@ const Panel = struct {
     arena: std.heap.ArenaAllocator,
     items: []Item = &.{},
     entries: []filter.Entry = &.{},
+    /// Row heights in DIP, parallel to `State.rows`.
+    heights: []i32 = &.{},
     /// The query as typed, trimmed.
     query: std.ArrayList(u8) = .empty,
     /// Set while the palette closes itself: losing the focus is expected.
@@ -113,25 +124,30 @@ var next_serial: u32 = 0;
 /// (the action is a copy, not a view of the config) and the handler frees it.
 pub const Command = struct {
     arena: std.heap.ArenaAllocator,
-    kind: union(enum) {
+    kind: Kind,
+
+    pub const Kind = union(enum) {
         /// Closes the palette `serial` if it is still the open one.
         close: u32,
         /// Closes the palette and runs `action` on the surface `target_id`.
         execute: struct { serial: u32, target_id: u32, action: input.Binding.Action },
-    },
+        /// Closes the palette and brings the surface `surface_id` forward.
+        jump: struct { serial: u32, surface_id: u32 },
+    };
 
-    fn create(alloc: Allocator, kind: enum { close, execute }, serial: u32, target_id: u32, action: ?input.Binding.Action) !*Command {
+    /// `kind` is copied: the action gets its own memory.
+    fn create(alloc: Allocator, kind: Kind) !*Command {
         var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
         const cmd = try arena.allocator().create(Command);
         cmd.arena = arena;
         cmd.kind = switch (kind) {
-            .close => .{ .close = serial },
-            .execute => .{ .execute = .{
-                .serial = serial,
-                .target_id = target_id,
-                .action = try action.?.clone(cmd.arena.allocator()),
+            .execute => |e| .{ .execute = .{
+                .serial = e.serial,
+                .target_id = e.target_id,
+                .action = try e.action.clone(cmd.arena.allocator()),
             } },
+            else => kind,
         };
         return cmd;
     }
@@ -145,58 +161,92 @@ pub const Command = struct {
 
 // -- Layout ------------------------------------------------------------------------
 
-/// Sizes at 96 dpi, from `CommandPaletteView`: a 48 pt query field, a
-/// divider, rows of 8 pt padding in a list with a 10 pt margin and 4 pt gaps.
-/// The width and the 12 rows are the plan's (macOS stops at 500 pt wide and
-/// 200 pt of rows).
-const max_w = 600;
+/// Sizes at 96 dpi, from `CommandPaletteView`: a 500 pt wide panel, a 48 pt
+/// query field, a divider, and a list of at most 200 pt with a 10 pt margin
+/// and 4 pt gaps; a row is 8 pt padding around the 16 pt title and, when
+/// there is a description, 2 pt and the 13 pt description.
+const max_w = 500;
 const query_h = 48;
 const query_inset = 16;
 const edit_h = 28;
 const list_pad = 10;
-const row_h = 40;
+const list_max = 200;
+const row_single = 32;
+const row_double = 47;
 const row_gap = 4;
 const row_pad = 8;
 const row_radius = 5;
-const max_rows = 12;
 const empty_h = 49;
 const margin = 16;
 const radius = 10;
 
-/// The height of the popup at 96 dpi for `n` rows shown.
-pub fn panelHeight(n: usize) i32 {
-    const rows: i32 = @intCast(n);
-    const list = if (n == 0) empty_h else 2 * list_pad + rows * row_h + (rows - 1) * row_gap;
-    return query_h + 1 + list;
+fn rowHeight(item: Item) i32 {
+    return if (item.description.len > 0) row_double else row_single;
 }
 
-/// How many rows fit: at most `max_rows`, and no more than a window of
-/// `client_h` (DIP) leaves room for.
-pub fn visibleCount(total: usize, client_h: i32) usize {
-    const room = client_h - 2 * margin - query_h - 1 - 2 * list_pad;
-    const fit: i32 = @max(@divTrunc(room + row_gap, row_h + row_gap), 1);
-    return @min(total, @min(@as(usize, max_rows), @as(usize, @intCast(fit))));
+/// The height of the list area in DIP: the rows, capped at 200 and at what
+/// a window of `client_h` leaves room for (always one row).
+pub fn listHeight(heights: []const i32, client_h: i32) i32 {
+    if (heights.len == 0) return empty_h;
+    var content: i32 = 2 * list_pad - row_gap;
+    for (heights) |h| content += h + row_gap;
+    const room = client_h - 2 * margin - query_h - 1;
+    const cap = @min(list_max, @max(room, heights[0] + 2 * list_pad));
+    return @min(content, cap);
 }
 
-/// The `scroll` that keeps `sel` among the `visible` rows from it.
-pub fn scrollFor(scroll: usize, sel: usize, visible: usize, total: usize) usize {
-    if (visible == 0) return 0;
-    var s = scroll;
+/// The popup height in DIP for a list area of `list_h`.
+pub fn panelHeight(list_h: i32) i32 {
+    return query_h + 1 + list_h;
+}
+
+/// How many whole rows from `scroll` fit in a list area of `area` (at least
+/// one while there are rows).
+pub fn fitCount(heights: []const i32, scroll: usize, area: i32) usize {
+    if (scroll >= heights.len) return 0;
+    const avail = area - 2 * list_pad;
+    var used: i32 = 0;
+    var n: usize = 0;
+    for (heights[scroll..]) |h| {
+        const gap: i32 = if (n > 0) row_gap else 0;
+        const next = used + h + gap;
+        if (next > avail and n > 0) break;
+        used = next;
+        n += 1;
+    }
+    return n;
+}
+
+/// The first row at which the last row is shown.
+pub fn maxScroll(heights: []const i32, area: i32) usize {
+    var s: usize = 0;
+    while (s < heights.len and s + fitCount(heights, s, area) < heights.len) s += 1;
+    return s;
+}
+
+/// The `scroll` that keeps `sel` among the rows shown.
+pub fn scrollFor(heights: []const i32, scroll: usize, sel: usize, area: i32) usize {
+    if (heights.len == 0) return 0;
+    var s = @min(scroll, heights.len - 1);
+    if (sel == no_sel or sel >= heights.len) return s;
     if (sel < s) s = sel;
-    if (sel >= s + visible) s = sel + 1 - visible;
-    return @min(s, total -| visible);
+    while (sel >= s + fitCount(heights, s, area) and s < sel) s += 1;
+    return s;
 }
 
-/// Up (`-1`) or down (`+1`) from `sel`, wrapping, as on macOS.
+/// Up (`-1`) or down (`+1`) from `sel`, wrapping, as on macOS; from no
+/// selection up is the last row and down the first.
 pub fn moveSel(sel: usize, total: usize, delta: i32) usize {
-    if (total == 0) return 0;
+    if (total == 0) return no_sel;
+    if (sel == no_sel or sel >= total) return if (delta < 0) total - 1 else 0;
     if (delta < 0) return if (sel == 0) total - 1 else sel - 1;
     return if (sel + 1 >= total) 0 else sel + 1;
 }
 
 /// A page up or down stops at the ends.
 pub fn pageSel(sel: usize, total: usize, visible: usize, down: bool) usize {
-    if (total == 0) return 0;
+    if (total == 0) return no_sel;
+    if (sel == no_sel or sel >= total) return if (down) 0 else total - 1;
     const step = @max(visible, 1);
     return if (down) @min(sel + step, total - 1) else sel -| step;
 }
@@ -220,23 +270,17 @@ const Geometry = struct {
         };
     }
 
-    fn row(g: Geometry, w: i32, dpi: u32, i: usize) geom.Rect {
+    /// The rectangles of the rows from `scroll` that fit, in px.
+    fn rows(g: Geometry, heights: []const i32, scroll: usize, area_dip: i32, w: i32, dpi: u32, out: []geom.Rect) usize {
         const s = geom.scale;
-        const pitch = s(row_h, dpi) + s(row_gap, dpi);
-        return .{
-            .x = s(list_pad, dpi),
-            .y = g.list_top + s(list_pad, dpi) + @as(i32, @intCast(i)) * pitch,
-            .w = w - 2 * s(list_pad, dpi),
-            .h = s(row_h, dpi),
-        };
-    }
-
-    /// The index among the shown rows under `(x, y)`.
-    fn rowAt(g: Geometry, w: i32, dpi: u32, shown: usize, x: i32, y: i32) ?usize {
-        for (0..shown) |i| {
-            if (g.row(w, dpi, i).contains(x, y)) return i;
+        const n = @min(fitCount(heights, scroll, area_dip), out.len);
+        var y = g.list_top + s(list_pad, dpi);
+        for (0..n) |i| {
+            const h = s(heights[scroll + i], dpi);
+            out[i] = .{ .x = s(list_pad, dpi), .y = y, .w = w - 2 * s(list_pad, dpi), .h = h };
+            y += h + s(row_gap, dpi);
         }
-        return null;
+        return n;
     }
 };
 
@@ -378,13 +422,17 @@ fn itemLess(_: void, a: Item, b: Item) bool {
 
 // -- Open and close ----------------------------------------------------------------
 
-/// Builds the panel of a palette for `target_id` from `commands` (copied;
+/// A surface the palette can bring forward.
+const Jump = struct { id: u32, title: []const u8, pwd: []const u8 };
+
+/// Builds the panel of a palette for `target_id` from `commands` and `jumps` (copied;
 /// `keybinds` gives the shortcut texts) and registers it with the window.
 /// Nothing is shown yet.
 fn begin(
     window: *Window,
     target_id: u32,
     commands: []const input.Command,
+    jumps: []const Jump,
     keybinds: ?*const input.Binding.Set,
 ) !*Panel {
     const alloc = window.app.core_app.alloc;
@@ -399,7 +447,7 @@ fn begin(
             .kind = .panel,
             .anchor = .window_top_center,
             .window = window,
-            .size = .{ .w = max_w, .h = panelHeight(0) },
+            .size = .{ .w = max_w, .h = panelHeight(empty_h) },
             .margin = margin,
             .paint = paintPopup,
             .on_message = onMessage,
@@ -424,7 +472,17 @@ fn begin(
             .title = try a.dupe(u8, entry.title),
             .description = try a.dupe(u8, entry.description),
             .shortcut = shortcut,
-            .action = try entry.action.clone(a),
+            .run = .{ .action = try entry.action.clone(a) },
+        });
+    }
+    for (jumps) |j| {
+        const title = if (j.title.len > 0) j.title else "Untitled";
+        try items.append(a, .{
+            .title = try std.fmt.allocPrint(a, "Focus: {s}", .{title}),
+            // The working directory, unless the title shows it already.
+            .description = if (j.pwd.len > 0 and std.mem.indexOf(u8, title, j.pwd) == null) try a.dupe(u8, j.pwd) else "",
+            .shortcut = "",
+            .run = .{ .jump = j.id },
         });
     }
     std.mem.sort(Item, items.items, {}, itemLess);
@@ -437,6 +495,7 @@ fn begin(
     state.* = .{ .popup = &panel.popup, .target_id = target_id };
     errdefer {
         alloc.free(state.rows);
+        alloc.free(panel.heights);
         state.* = .{};
     }
     try applyQuery(panel, "");
@@ -448,6 +507,7 @@ fn release(panel: *Panel) void {
     const alloc = panel.popup.window.app.core_app.alloc;
     const state = &panel.popup.window.palette;
     alloc.free(state.rows);
+    alloc.free(panel.heights);
     state.* = .{};
     freeFonts(panel);
     if (panel.brush) |b| _ = gdi32.DeleteObject(@ptrCast(b));
@@ -510,8 +570,20 @@ pub fn toggle(app: *App, target: apprt.Target) !bool {
         return true;
     }
 
+    var jumps: std.ArrayList(Jump) = .empty;
+    defer jumps.deinit(app.core_app.alloc);
+    for (app.windows.items) |w| {
+        for (w.tabs.items) |tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                const v = entry.view;
+                try jumps.append(app.core_app.alloc, .{ .id = v.id, .title = v.title orelse "", .pwd = v.pwd orelse "" });
+            }
+        }
+    }
+
     const config = &app.config;
-    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, &config.keybind.set);
+    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, &config.keybind.set);
     errdefer close(window);
     try show(panel);
     return true;
@@ -616,7 +688,9 @@ fn place(p: *overlay.Popup, area: geom.Rect, size_px: overlay.Size) geom.Rect {
 
 // -- Query -------------------------------------------------------------------------
 
-/// Filters the entries by `text` (trimmed) and resets the selection.
+/// Filters the entries by `text` (trimmed). As on macOS the selection starts
+/// on the first row once there is a query, is dropped again when the query
+/// is cleared on that first row, and is otherwise kept (within the list).
 fn applyQuery(panel: *Panel, text: []const u8) !void {
     const window = panel.popup.window;
     const alloc = window.app.core_app.alloc;
@@ -627,10 +701,22 @@ fn applyQuery(panel: *Panel, text: []const u8) !void {
     try panel.query.appendSlice(alloc, trimmed);
 
     const rows = try filter.filter(alloc, trimmed, panel.entries);
+    errdefer alloc.free(rows);
+    const heights = try alloc.alloc(i32, rows.len);
+    for (rows, heights) |r, *h| h.* = rowHeight(panel.items[r]);
     alloc.free(state.rows);
+    alloc.free(panel.heights);
     state.rows = rows;
-    state.sel = 0;
-    state.scroll = 0;
+    panel.heights = heights;
+
+    if (rows.len == 0) {
+        state.sel = no_sel;
+    } else if (trimmed.len > 0) {
+        state.sel = if (state.sel == no_sel) 0 else @min(state.sel, rows.len - 1);
+    } else if (state.sel == 0 or state.sel >= rows.len) {
+        state.sel = no_sel;
+    }
+    state.scroll = scrollFor(heights, 0, state.sel, listAreaDip(panel));
     panel.hover = null;
     resizeToRows(panel);
 }
@@ -641,14 +727,13 @@ fn clientHeightDip(window: *const Window) i32 {
     return @divTrunc((rc.bottom - rc.top) * 96, @as(i32, @intCast(@max(window.dpi, 1))));
 }
 
-fn shownRows(panel: *const Panel) usize {
-    const window = panel.popup.window;
-    return visibleCount(window.palette.rows.len, clientHeightDip(window));
+/// The list area the palette has (or is about to have) in DIP.
+fn listAreaDip(panel: *const Panel) i32 {
+    return listHeight(panel.heights, clientHeightDip(panel.popup.window));
 }
 
 fn resizeToRows(panel: *Panel) void {
-    const shown = shownRows(panel);
-    panel.popup.setSize(.{ .w = max_w, .h = panelHeight(shown) });
+    panel.popup.setSize(.{ .w = max_w, .h = panelHeight(listAreaDip(panel)) });
 }
 
 fn editChanged(panel: *Panel) void {
@@ -702,12 +787,13 @@ fn postCommand(window: *Window, cmd: *Command) void {
 fn postClose(panel: *Panel) void {
     if (panel.closing) return;
     const window = panel.popup.window;
-    const cmd = Command.create(window.app.core_app.alloc, .close, panel.serial, 0, null) catch return;
+    const cmd = Command.create(window.app.core_app.alloc, .{ .close = panel.serial }) catch return;
     postCommand(window, cmd);
 }
 
 /// Runs the entry at `row` (a position in `State.rows`): the command goes to
-/// the window's queue, where the palette closes and the action runs.
+/// the window's queue, where the palette closes and the entry runs. No row
+/// (nothing selected) just closes.
 fn postExecute(panel: *Panel, row: usize) void {
     const window = panel.popup.window;
     const state = &window.palette;
@@ -721,7 +807,11 @@ fn postExecute(panel: *Panel, row: usize) void {
         postClose(panel);
         return;
     };
-    const cmd = Command.create(window.app.core_app.alloc, .execute, panel.serial, target, item.action) catch |err| {
+    const kind: Command.Kind = switch (item.run) {
+        .action => |a| .{ .execute = .{ .serial = panel.serial, .target_id = target, .action = a } },
+        .jump => |id| .{ .jump = .{ .serial = panel.serial, .surface_id = id } },
+    };
+    const cmd = Command.create(window.app.core_app.alloc, kind) catch |err| {
         log.warn("unable to copy a palette action err={}", .{err});
         postClose(panel);
         return;
@@ -735,7 +825,8 @@ fn run(panel: *Panel, action: KeyAction) void {
     const window = panel.popup.window;
     const state = &window.palette;
     const total = state.rows.len;
-    const shown = shownRows(panel);
+    const area = listAreaDip(panel);
+    const shown = fitCount(panel.heights, state.scroll, area);
     switch (action) {
         .up => state.sel = moveSel(state.sel, total, -1),
         .down => state.sel = moveSel(state.sel, total, 1),
@@ -744,14 +835,13 @@ fn run(panel: *Panel, action: KeyAction) void {
         .execute => return postExecute(panel, state.sel),
         .close => return postClose(panel),
     }
-    state.scroll = scrollFor(state.scroll, state.sel, shown, total);
+    state.scroll = scrollFor(panel.heights, state.scroll, state.sel, area);
     panel.popup.invalidate();
 }
 
 fn scrollBy(panel: *Panel, notches: i32) void {
     const state = &panel.popup.window.palette;
-    const shown = shownRows(panel);
-    const max_scroll = state.rows.len -| shown;
+    const max_scroll = maxScroll(panel.heights, listAreaDip(panel));
     const step: i64 = @as(i64, notches) * 3;
     const next = std.math.clamp(@as(i64, @intCast(state.scroll)) - step, 0, @as(i64, @intCast(max_scroll)));
     state.scroll = @intCast(next);
@@ -774,8 +864,32 @@ pub fn command(window: *Window, lparam: LPARAM) bool {
                 log.warn("unable to perform a palette action err={}", .{err});
             };
         },
+        .jump => |j| {
+            closeIfSerial(window, j.serial);
+            for (window.app.windows.items) |w| {
+                const surface = w.findSurface(j.surface_id) orelse continue;
+                const index = w.tabIndex(surface.tab) orelse return true;
+                surface.tab.focused = surface;
+                w.selectTabFocus(index, false);
+                w.activate();
+                return true;
+            }
+        },
     }
     return true;
+}
+
+/// Commands posted to a window that is going away are never delivered: take
+/// them out of its queue and free them, and take its palette down.
+pub fn windowDestroying(window: *Window) void {
+    var msg: user32.MSG = undefined;
+    const m = messages.WM_GHOSTTY_OVERLAY_CMD;
+    while (user32.PeekMessageW(&msg, window.hwnd, m, m, user32.PM_REMOVE) != 0) {
+        if (msg.lParam == 0) continue;
+        const cmd: *Command = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+        cmd.destroy();
+    }
+    close(window);
 }
 
 fn closeIfSerial(window: *Window, serial: u32) void {
@@ -887,8 +1001,12 @@ fn rowUnder(panel: *Panel, lparam: LPARAM) ?usize {
     _ = user32.GetClientRect(hwnd, &rc);
     const dpi = p.window.dpi;
     const g = Geometry.forWidth(rc.right - rc.left, dpi);
-    const shown = shownRows(panel);
-    return g.rowAt(rc.right - rc.left, dpi, shown, user32.getXLparam(lparam), user32.getYLparam(lparam));
+    var rects: [16]geom.Rect = undefined;
+    const n = g.rows(panel.heights, p.window.palette.scroll, listAreaDip(panel), rc.right - rc.left, dpi, &rects);
+    const x = user32.getXLparam(lparam);
+    const y = user32.getYLparam(lparam);
+    for (rects[0..n], 0..) |r, i| if (r.contains(x, y)) return i;
+    return null;
 }
 
 fn setHover(panel: *Panel, row: ?usize) void {
@@ -910,13 +1028,13 @@ fn editBrush(panel: *Panel, c: theme.Color) LRESULT {
 
 // -- Paint -------------------------------------------------------------------------
 
-const max_items = 12 * 40 + 8;
+const max_items = 16 * 40 + 8;
 
 /// The items of one paint and the UTF-16 text they point to.
 const Scene = struct {
     items: [max_items]Chrome.Item = undefined,
     n: usize = 0,
-    text: [max_rows * 640]u16 = undefined,
+    text: [16 * 640]u16 = undefined,
     used: usize = 0,
 
     fn add(s: *Scene, item: Chrome.Item) void {
@@ -959,11 +1077,13 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
         scene.add(.{ .text = .{ .rect = r, .text = L("No matches"), .font = body, .color = c.secondary, .halign = .leading } });
     }
 
-    const shown = @min(total -| state.scroll, visibleCount(total, clientHeightDip(window)));
+    var rects: [16]geom.Rect = undefined;
+    const area = @divTrunc((ctx.rect.h - g.list_top) * 96, @as(i32, @intCast(@max(dpi, 1))));
+    const shown = g.rows(panel.heights, state.scroll, area, w, dpi, &rects);
     for (0..shown) |i| {
         const pos = state.scroll + i;
         const item = panel.items[state.rows[pos]];
-        const r = g.row(w, dpi, i);
+        const r = rects[i];
         if (pos == state.sel) {
             scene.add(.{ .box = .{ .rect = r, .radius = s(row_radius, dpi), .fill = c.selected } });
         } else if (panel.hover == i) {
@@ -1086,11 +1206,11 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
         try jw.objectField("rows");
         try jw.write(state.rows.len);
         try jw.objectField("sel");
-        try jw.write(state.sel);
+        try jw.write(if (state.sel == no_sel) null else state.sel);
         try jw.objectField("first");
         try jw.write(if (state.rows.len > 0) panel.items[state.rows[0]].title else "");
         try jw.objectField("selected");
-        try jw.write(if (state.sel < state.rows.len) panel.items[state.rows[state.sel]].title else "");
+        try jw.write(if (state.sel != no_sel and state.sel < state.rows.len) panel.items[state.rows[state.sel]].title else "");
         try jw.objectField("target");
         try jw.write(state.target_id);
     }
@@ -1101,27 +1221,44 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
 
 test "win32 palette: scroll and selection" {
     const t = std.testing;
-    // Up from the first wraps, down from the last wraps.
+    // Up from the first wraps, down from the last wraps; from nothing, up is
+    // the last row and down the first.
     try t.expectEqual(@as(usize, 4), moveSel(0, 5, -1));
     try t.expectEqual(@as(usize, 0), moveSel(4, 5, 1));
     try t.expectEqual(@as(usize, 2), moveSel(1, 5, 1));
-    try t.expectEqual(@as(usize, 0), moveSel(0, 0, 1));
+    try t.expectEqual(@as(usize, 4), moveSel(no_sel, 5, -1));
+    try t.expectEqual(@as(usize, 0), moveSel(no_sel, 5, 1));
+    try t.expectEqual(no_sel, moveSel(0, 0, 1));
     // Pages stop at the ends.
-    try t.expectEqual(@as(usize, 12), pageSel(0, 30, 12, true));
-    try t.expectEqual(@as(usize, 29), pageSel(25, 30, 12, true));
-    try t.expectEqual(@as(usize, 0), pageSel(5, 30, 12, false));
+    try t.expectEqual(@as(usize, 4), pageSel(0, 30, 4, true));
+    try t.expectEqual(@as(usize, 29), pageSel(27, 30, 4, true));
+    try t.expectEqual(@as(usize, 0), pageSel(2, 30, 4, false));
+
+    // Rows of 32 DIP with 4 between: 5 fit in 200 - 2 * 10.
+    const single: [30]i32 = @splat(row_single);
+    try t.expectEqual(@as(usize, 5), fitCount(&single, 0, 200));
+    try t.expectEqual(@as(usize, 3), fitCount(&single, 27, 200));
+    try t.expectEqual(@as(usize, 0), fitCount(&single, 30, 200));
+    // Taller rows: 47 + 4 + 47 + 4 + 47 = 149 fits, a fourth does not.
+    const double: [10]i32 = @splat(row_double);
+    try t.expectEqual(@as(usize, 3), fitCount(&double, 0, 200));
+    // A single row always counts, however small the area.
+    try t.expectEqual(@as(usize, 1), fitCount(&double, 0, 30));
     // The selection stays in view.
-    try t.expectEqual(@as(usize, 0), scrollFor(0, 3, 12, 30));
-    try t.expectEqual(@as(usize, 1), scrollFor(0, 12, 12, 30));
-    try t.expectEqual(@as(usize, 18), scrollFor(18, 29, 12, 30));
-    try t.expectEqual(@as(usize, 5), scrollFor(10, 5, 12, 30));
-    // A tall list in a short window shows what fits, at least one row.
-    try t.expectEqual(@as(usize, 12), visibleCount(40, 1000));
-    try t.expectEqual(@as(usize, 3), visibleCount(3, 1000));
-    try t.expectEqual(@as(usize, 1), visibleCount(40, 100));
-    try t.expectEqual(@as(usize, 0), visibleCount(0, 1000));
-    try t.expectEqual(@as(i32, 48 + 1 + 49), panelHeight(0));
-    try t.expectEqual(@as(i32, 48 + 1 + 20 + 40), panelHeight(1));
+    try t.expectEqual(@as(usize, 0), scrollFor(&single, 0, 3, 200));
+    try t.expectEqual(@as(usize, 1), scrollFor(&single, 0, 5, 200));
+    try t.expectEqual(@as(usize, 25), scrollFor(&single, 25, 29, 200));
+    try t.expectEqual(@as(usize, 5), scrollFor(&single, 10, 5, 200));
+    try t.expectEqual(@as(usize, 7), scrollFor(&single, 7, no_sel, 200));
+    try t.expectEqual(@as(usize, 25), maxScroll(&single, 200));
+    try t.expectEqual(@as(usize, 0), maxScroll(single[0..3], 200));
+    // The list is as tall as its rows, up to 200, and what a short window
+    // leaves; no rows is the "No matches" line.
+    try t.expectEqual(@as(i32, 2 * 10 + 32), listHeight(single[0..1], 1000));
+    try t.expectEqual(@as(i32, 200), listHeight(&single, 1000));
+    try t.expectEqual(@as(i32, 2 * 10 + 32), listHeight(&single, 100));
+    try t.expectEqual(@as(i32, empty_h), listHeight(&.{}, 1000));
+    try t.expectEqual(@as(i32, 48 + 1 + 200), panelHeight(200));
 }
 
 test "win32 palette: key routing" {
@@ -1229,7 +1366,7 @@ test "win32 palette: target closed while open" {
         .{ .action = .undo, .title = "Undo", .description = "" },
     };
 
-    const panel = try begin(window, 42, &cmds, null);
+    const panel = try begin(window, 42, &cmds, &.{}, null);
     try panel.popup.show();
     const hwnd = panel.popup.hwnd.?;
     try std.testing.expect(window.palette.popup != null);
@@ -1253,9 +1390,9 @@ test "win32 palette: target closed while open" {
 
     // A command queued for the gone target is a no-op that frees its copy.
     const alloc = std.testing.allocator;
-    const queued = try Command.create(alloc, .execute, 1, 42, .{ .text = "queued" });
+    const queued = try Command.create(alloc, .{ .execute = .{ .serial = 1, .target_id = 42, .action = .{ .text = "queued" } } });
     try std.testing.expect(command(window, @bitCast(@intFromPtr(queued))));
-    const stale = try Command.create(alloc, .close, 1, 0, null);
+    const stale = try Command.create(alloc, .{ .close = 1 });
     try std.testing.expect(command(window, @bitCast(@intFromPtr(stale))));
     try std.testing.expect(!command(window, 0));
 }
@@ -1267,18 +1404,18 @@ test "win32 palette: a posted close of an older palette keeps the new one" {
     const cmds = [_]input.Command{
         .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
     };
-    const first = try begin(window, 1, &cmds, null);
+    const first = try begin(window, 1, &cmds, &.{}, null);
     const old_serial = first.serial;
     close(window);
-    const second = try begin(window, 1, &cmds, null);
+    const second = try begin(window, 1, &cmds, &.{}, null);
     defer close(window);
     try std.testing.expect(second.serial != old_serial);
 
-    const stale = try Command.create(std.testing.allocator, .close, old_serial, 0, null);
+    const stale = try Command.create(std.testing.allocator, .{ .close = old_serial });
     try std.testing.expect(command(window, @bitCast(@intFromPtr(stale))));
     try std.testing.expect(window.palette.popup != null);
 
-    const current = try Command.create(std.testing.allocator, .close, second.serial, 0, null);
+    const current = try Command.create(std.testing.allocator, .{ .close = second.serial });
     try std.testing.expect(command(window, @bitCast(@intFromPtr(current))));
     try std.testing.expect(window.palette.popup == null);
 }
@@ -1287,7 +1424,7 @@ test "win32 palette: overlay command owns a cloned action" {
     const alloc = std.testing.allocator;
     // The action points into memory a config reload frees.
     const config_text = try alloc.dupe(u8, "echo hello");
-    const cmd = try Command.create(alloc, .execute, 3, 9, .{ .text = config_text });
+    const cmd = try Command.create(alloc, .{ .execute = .{ .serial = 3, .target_id = 9, .action = .{ .text = config_text } } });
     @memset(config_text, 0xAA);
     alloc.free(config_text);
 
@@ -1296,4 +1433,45 @@ test "win32 palette: overlay command owns a cloned action" {
     try std.testing.expectEqualStrings("echo hello", e.action.text);
     // Freeing the command frees the copy and the block itself.
     cmd.destroy();
+}
+
+test "win32 palette: nothing selected until a query, jump entries" {
+    const owner = try TestOwner.create();
+    defer owner.destroy();
+    const window = &owner.window;
+    const cmds = [_]input.Command{
+        .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
+    };
+    const jumps = [_]Jump{
+        .{ .id = 5, .title = "bash", .pwd = "C:/work" },
+        .{ .id = 6, .title = "vim C:/work/a.txt", .pwd = "C:/work" },
+        .{ .id = 7, .title = "", .pwd = "" },
+    };
+    const panel = try begin(window, 5, &cmds, &jumps, null);
+    defer close(window);
+    const state = &window.palette;
+
+    try std.testing.expectEqual(@as(usize, 4), state.rows.len);
+    try std.testing.expectEqual(no_sel, state.sel);
+    // Sorted by title; a description makes the row taller, a title that
+    // shows the directory has none.
+    try std.testing.expectEqualStrings("Focus: bash", panel.items[state.rows[0]].title);
+    try std.testing.expectEqualStrings("C:/work", panel.items[state.rows[0]].description);
+    try std.testing.expectEqual(@as(i32, row_double), panel.heights[0]);
+    try std.testing.expectEqualStrings("Focus: Untitled", panel.items[state.rows[1]].title);
+    try std.testing.expectEqual(@as(i32, row_single), panel.heights[1]);
+    try std.testing.expectEqualStrings("Focus: vim C:/work/a.txt", panel.items[state.rows[2]].title);
+    try std.testing.expectEqual(@as(usize, 6), panel.items[state.rows[2]].run.jump);
+
+    // A query selects the first row, clearing it on the first row drops it.
+    try applyQuery(panel, "  send ");
+    try std.testing.expectEqual(@as(usize, 1), state.rows.len);
+    try std.testing.expectEqual(@as(usize, 0), state.sel);
+    try applyQuery(panel, "");
+    try std.testing.expectEqual(no_sel, state.sel);
+    // A moved selection survives the query, within the list.
+    try applyQuery(panel, "o");
+    state.sel = 2;
+    try applyQuery(panel, "oc");
+    try std.testing.expect(state.sel < state.rows.len);
 }
