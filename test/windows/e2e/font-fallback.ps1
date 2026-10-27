@@ -11,7 +11,7 @@ Invoke-E2eScenario 'font-fallback' {
     $esc = ([Text.Encoding]::UTF8.GetBytes($text) | ForEach-Object { '\x{0:x2}' -f $_ }) -join ''
     $g = Start-BashE2e
     Send-Line $g.Hwnd 'clear'
-    Send-Line $g.Hwnd "printf '${esc}\nMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\n'"
+    Send-Line $g.Hwnd "printf '\033[H\033[2J${esc}\nMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\n'"
 
     # Ink of the rows [y0, y1) between x0 and x1: pixels that differ from the background.
     function Test-Ink($D, $Bg, [int]$X0, [int]$X1, [int]$Y0, [int]$Y1) {
@@ -46,7 +46,7 @@ Invoke-E2eScenario 'font-fallback' {
         param($d)
         $bg = Get-DumpPixel $d ($d.Width - 6) ($d.Height - 6)
         $b = @(Get-Bands $d $bg)
-        $b.Count -ge 2 -and (Get-InkX $d $bg $b[1])[1] -gt 100
+        $b.Count -ge 2 -and $b[0][0] -lt 12 -and (Get-InkX $d $bg $b[1])[1] -gt 100
     } 20
     if (-not $d) { throw 'the text rows never appeared in the frame dump' }
     $bg = Get-DumpPixel $d ($d.Width - 6) ($d.Height - 6)
