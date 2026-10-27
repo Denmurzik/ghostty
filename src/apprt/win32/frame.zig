@@ -14,6 +14,7 @@ const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");
 const Chrome = @import("Chrome.zig");
 const theme = @import("theme.zig");
+const composition = @import("composition.zig");
 
 const user32 = win32.user32;
 const dwmapi = win32.dwmapi;
@@ -406,6 +407,8 @@ pub fn applyDecorations(window: *Window, decorations: Decorations) void {
         0,
         user32.SWP_FRAMECHANGED | user32.SWP_NOMOVE | user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE,
     );
+    // Translucent configs replace the Mica backdrop set above.
+    composition.applyToWindow(window);
     // A window still being created has no tabs; its creation lays it out.
     if (window.tabs.items.len > 0) window.layout();
 }

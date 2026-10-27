@@ -234,6 +234,10 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     const client = self.clientSize();
     self.size.store(renderer.D3D11.packSize(client.width, client.height), .release);
 
+    // The first swap chain is made while core initialises: its mode is set first.
+    composition_mod.surfaceWillInit(self);
+    errdefer composition_mod.surfaceDestroying(self);
+
     try self.core_surface.init(alloc, &config, app.core_app, app, self);
     self.initialized = true;
 
@@ -252,10 +256,25 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
 fn fillBackground(self: *Surface, hdc: win32.user32.HDC) void {
     var rc: win32.foundation.RECT = undefined;
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
-    const c = self.window.app.config.background;
+    // Black is alpha 0 over the glass of a translucent window.
+    var c = self.window.app.config.background;
+    if (composition_mod.eraseTransparent(self.window)) c = .{ .r = 0, .g = 0, .b = 0 };
     const brush = win32.gdi32.CreateSolidBrush(@as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16)) orelse return;
     defer _ = win32.gdi32.DeleteObject(@ptrCast(brush));
-    _ = win32.gdi32.FillRect(hdc, &rc, brush);
+    if (self.window.composition.glass) {
+        composition_mod.fillWithAlpha(hdc, &rc, brush, composition_mod.eraseTransparent(self.window));
+    } else {
+        _ = win32.gdi32.FillRect(hdc, &rc, brush);
+    }
+}
+
+/// Erase the client area again after the backdrop changed (the first erase
+/// of `WM_ERASEBKGND` is the only one the window procedure does).
+pub fn repaintBackground(self: *Surface) void {
+    if (self.hwnd_destroyed) return;
+    const hdc = win32.user32.GetDC(self.hwnd) orelse return;
+    defer _ = win32.user32.ReleaseDC(self.hwnd, hdc);
+    self.fillBackground(hdc);
 }
 
 /// Take a reference. The split tree calls this for every node it holds.
@@ -296,6 +315,7 @@ pub fn deinit(self: *Surface) void {
     self.initialized = false;
 
     self.core_surface.deinit();
+    composition_mod.surfaceReleased(self);
     self.app.scheduleMemoryRelease();
 
     // The parent's destruction may already have taken the child with it.
@@ -458,6 +478,8 @@ pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
         .id = self.id,
         .generation = &self.present_generation,
         .decor = &self.decor_word,
+        .mode = &self.composition.mode,
+        .hand_off = composition_mod.handOffFor(self),
     };
 }
 
@@ -696,6 +718,9 @@ fn wndProc(
         },
 
         win32.user32.WM_PAINT => {
+            // Over glass the area a resize exposes must be erased to alpha 0
+            // again, or DWM shows stale pixels there.
+            if (composition_mod.eraseTransparent(self.window)) self.repaintBackground();
             _ = win32.user32.ValidateRect(hwnd, null);
             return 0;
         },

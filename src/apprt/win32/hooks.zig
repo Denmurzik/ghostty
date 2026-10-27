@@ -53,6 +53,7 @@ pub fn appStopping(app: *App) void {
     app.visibility.deinit(app.core_app.alloc);
     shell_open.appStopping(app);
     Inspector.appStopping(app);
+    composition.appStopping(app);
     notify.deinit(app);
     drainDialogs(app.msg_hwnd);
 }
@@ -125,7 +126,8 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             const quick = QuickTerminal.windowMessage(window, msg, wparam, lparam);
             return overlays orelse quick;
         },
-        win32.user32.WM_NCACTIVATE => return overlay.windowMessage(window, msg, wparam, lparam),
+        win32.user32.WM_NCACTIVATE => return overlay.windowMessage(window, msg, wparam, lparam) orelse composition.windowMessage(window, msg, wparam),
+        win32.user32.WM_SHOWWINDOW => return composition.windowMessage(window, msg, wparam),
         win32.user32.WM_TIMER => return QuickTerminal.windowMessage(window, msg, wparam, lparam),
         messages.WM_GHOSTTY_POSTED_DIALOG => {
             const kind = std.enums.fromInt(DialogKind, wparam) orelse {
