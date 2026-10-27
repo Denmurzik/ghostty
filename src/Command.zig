@@ -418,7 +418,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     };
 
     const flags: windows.DWORD = windows.CREATE_UNICODE_ENVIRONMENT |
-        (if (attribute_list != null) windows.EXTENDED_STARTUPINFO_PRESENT else 0);
+        (if (attribute_list != null) windows.EXTENDED_STARTUPINFO_PRESENT else @as(windows.DWORD, 0));
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
