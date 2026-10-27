@@ -208,8 +208,8 @@ pub fn captionInk(pal: theme.Palette, part: TabStrip.Part, hover: TabStrip.Part,
 
 /// Where the pieces of one tab go.
 pub const TabParts = struct {
-    /// The filled shape; the active tab's reaches below the strip so only
-    /// its top corners are rounded.
+    /// The filled shape: a rounded pill inset from the strip's top and
+    /// bottom edges, so the active tab stays apart from the terminal.
     chip: geom.Rect,
     bell: ?geom.Rect,
     title: geom.Rect,
@@ -218,12 +218,13 @@ pub const TabParts = struct {
 
 pub fn tabParts(r: geom.Rect, dpi: u32, active: bool, show_close: bool, bell: bool) TabParts {
     const m = TabStrip.Metrics.forDpi(dpi);
-    const top = geom.scale(if (active) 6 else 4, dpi);
+    _ = active;
+    const top = geom.scale(4, dpi);
     const chip: geom.Rect = .{
         .x = r.x,
         .y = top,
         .w = r.w,
-        .h = if (active) r.h - top else r.h - 2 * top,
+        .h = r.h - 2 * top,
     };
     const close: ?geom.Rect = if (show_close and r.w >= 2 * m.close_w)
         .{ .x = r.right() - m.close_w, .y = 0, .w = m.close_w, .h = r.h }
@@ -696,8 +697,10 @@ test "win32 chrome: tab parts" {
     try std.testing.expectEqual(@as(i32, 110), full.bell.?.x);
     try std.testing.expectEqual(@as(i32, 130), full.title.x);
     try std.testing.expectEqual(@as(i32, 142), full.title.w);
-    // The active chip reaches the strip's bottom edge.
-    try std.testing.expectEqual(@as(i32, 40), full.chip.bottom());
+    // The active chip keeps the same gap above the terminal as below the
+    // strip's top edge.
+    try std.testing.expectEqual(@as(i32, 4), full.chip.y);
+    try std.testing.expectEqual(@as(i32, 36), full.chip.bottom());
 
     // Too narrow for a close button, as in `TabStrip.Layout.hitTest`.
     const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 40 }, 96, true, true, false);
