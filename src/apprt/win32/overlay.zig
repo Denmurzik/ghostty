@@ -89,6 +89,8 @@ pub const Popup = struct {
     visible: bool = false,
     /// A bottom-left label flips to bottom-right under the cursor.
     avoid_cursor: bool = false,
+    /// A label lets the mouse through to the window below; false for one that takes clicks (the scroller).
+    click_through: bool = true,
     /// Hidden by the host: the tab of `surface` is not the shown one.
     tab_hidden: bool = false,
     /// Pixel size the label was last drawn at.
@@ -290,9 +292,10 @@ fn ensureWindow(p: *Popup) !void {
         .lpszClassName = class,
     });
 
+    const label_click: u32 = if (p.click_through) user32.WS_EX_TRANSPARENT else 0;
     const ex_style: u32, const style: u32 = switch (p.kind) {
         .label => .{
-            user32.WS_EX_LAYERED | user32.WS_EX_TRANSPARENT | user32.WS_EX_NOACTIVATE | user32.WS_EX_TOOLWINDOW,
+            user32.WS_EX_LAYERED | label_click | user32.WS_EX_NOACTIVATE | user32.WS_EX_TOOLWINDOW,
             user32.WS_POPUP,
         },
         .panel => .{ user32.WS_EX_TOOLWINDOW, user32.WS_POPUP | user32.WS_CLIPCHILDREN },

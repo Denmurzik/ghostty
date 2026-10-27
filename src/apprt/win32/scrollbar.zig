@@ -1,192 +1,533 @@
-//! Native scrollbar of a surface: the `WS_VSCROLL` bar of the surface window,
-//! bound to the terminal scrollback (SPEC §18.11).
+//! Overlay scroller of a surface, like the macOS one (`SurfaceScrollView`
+//! with `scrollerStyle = .overlay`): it takes no width, so the grid always
+//! has the whole pane. A thin knob floats over the right edge when the
+//! viewport scrolls or the pointer reaches the edge, grows while the pointer
+//! is on it, fades out after a pause, can be dragged, and a click on the
+//! track beside it scrolls a page (SPEC §18.11).
 //!
-//! With `scrollbar = system` the bar exists from window creation and stays
-//! visible (`SIF_DISABLENOSCROLL` greys it out instead of hiding it), so the
-//! client area, and with it the grid, never changes when scrollback first
-//! appears. `scrollbar = never` creates the window without the style.
+//! It is a label popup of the overlay host (`overlay.zig`): an owned layered
+//! window that never takes the focus, drawn with Direct2D. It exists only
+//! while the knob is shown, so an idle terminal pays nothing: no window
+//! work, no timers, nothing on the key path. Core's `scrollbar` action
+//! (`update`) keeps the numbers; `scrollbar = never` never creates it.
 //!
-//! macOS shows an overlay scroller that takes no space and fades out; a
-//! native Windows bar always occupies `SM_CXVSCROLL` of the width, which is
-//! the one deliberate difference.
+//! The colours follow the terminal background (light or dark knob), as
+//! macOS picks `.aqua` or `.darkAqua` from it.
 const std = @import("std");
 const win32 = @import("win32");
 const terminal = @import("../../terminal/main.zig");
+const Chrome = @import("Chrome.zig");
 const Surface = @import("Surface.zig");
+const geom = @import("geom.zig");
+const messages = @import("messages.zig");
+const overlay = @import("overlay.zig");
 const theme = @import("theme.zig");
 
 const log = std.log.scoped(.win32_scrollbar);
 
 const user32 = win32.user32;
 
+const L = std.unicode.utf8ToUtf16LeStringLiteral;
+const class_name = L("GhosttyOverlayScroller");
+
+// Sizes at 96 dpi. AppKit draws the overlay scroller itself and the repo has
+// no numbers for it; these are its measured values: a 15 pt strip, a 7 pt
+// knob that grows to 11 pt under the pointer, 2 pt from the edge.
+const strip_w = 15;
+const knob_w = 7;
+const knob_w_hover = 11;
+const knob_inset = 2;
+const pad_v = 2;
+const min_knob_h = 18;
+
+/// The knob stays this long after the last scroll, then fades over `fade_ms`
+/// (the AppKit overlay timing).
+pub const hold_ms = 750;
+pub const fade_ms = 400;
+const fade_tick_ms = 16;
+
 pub const State = struct {
     total: u64 = 0,
     offset: u64 = 0,
     len: u64 = 0,
-    /// Whether the surface window has the bar (`scrollbar = system`).
+    /// `scrollbar = system`: the scroller may appear.
     enabled: bool = false,
-    /// A thumb drag is running: the bar follows the mouse, not core.
+    /// A knob drag is running: the knob follows the mouse, not core.
     dragging: bool = false,
+    /// Top of the knob while dragging, popup pixels.
+    drag_top: i32 = 0,
+    /// Distance from the knob's top to the grabbed point.
+    grab: i32 = 0,
+    /// The pointer is on the popup.
+    hover: bool = false,
+    tracking_leave: bool = false,
+    /// Opacity of what is drawn; falls to 0 while fading.
+    alpha: u8 = 255,
+    fading: bool = false,
+    fade_start: u64 = 0,
+    /// The knob geometry last drawn, to skip identical redraws.
+    drawn: ?Knob = null,
+    popup: overlay.Popup = undefined,
+    popup_made: bool = false,
 };
 
-/// Divisor that brings the range of `total` rows into an `i32`: 1 unless the
-/// scrollback is beyond 2^31 rows.
-fn scaleOf(total: u64) u64 {
-    return (total -| 1) / std.math.maxInt(i32) + 1;
+pub const Knob = struct { y: i32, h: i32 };
+
+// -- Geometry (pure) -------------------------------------------------------------
+
+/// The knob in a track of `height` px: its length is the visible share of the
+/// scrollback (at least `min_h`), its place the viewport's share of the
+/// travel. Null when everything is visible.
+pub fn knobFor(total: u64, offset: u64, len: u64, height: i32, pad: i32, min_h: i32) ?Knob {
+    if (len == 0 or total <= len) return null;
+    const track = height - 2 * pad;
+    if (track <= 0) return null;
+    const track_f: f64 = @floatFromInt(track);
+    const share = @as(f64, @floatFromInt(len)) / @as(f64, @floatFromInt(total));
+    const h: i32 = @intFromFloat(std.math.clamp(@round(track_f * share), @as(f64, @floatFromInt(@min(min_h, track))), track_f));
+    const travel: f64 = @floatFromInt(track - h);
+    const last = total - len;
+    const frac = @as(f64, @floatFromInt(@min(offset, last))) / @as(f64, @floatFromInt(last));
+    return .{ .y = pad + @as(i32, @intFromFloat(@round(travel * frac))), .h = h };
 }
 
-/// The last row the viewport can start at.
-fn maxOffset(state: State) u64 {
-    return state.total -| state.len;
+/// The row whose knob has its top at `top` (the inverse of `knobFor`).
+pub fn rowForKnobTop(total: u64, len: u64, height: i32, pad: i32, min_h: i32, top: i32) u64 {
+    const knob = knobFor(total, 0, len, height, pad, min_h) orelse return 0;
+    const travel = height - 2 * pad - knob.h;
+    if (travel <= 0) return 0;
+    const last = total - len;
+    const frac = std.math.clamp(@as(f64, @floatFromInt(top - pad)) / @as(f64, @floatFromInt(travel)), 0, 1);
+    return @intFromFloat(@round(frac * @as(f64, @floatFromInt(last))));
 }
 
-/// The scroll info for a terminal scrollbar: the range is the rows, the page
-/// is the visible rows. Ranges beyond `i32` are divided down.
-pub fn toScrollInfo(value: terminal.Scrollbar) user32.SCROLLINFO {
-    const total: u64 = value.total;
-    const len: u64 = value.len;
-    const scale = scaleOf(total);
+/// The row a click at `y` on the track scrolls to, one page toward it; null
+/// on the knob itself.
+pub fn pageRow(state: State, knob: Knob, y: i32) ?u64 {
+    const last = state.total -| state.len;
+    const page = @max(state.len, 1);
+    if (y < knob.y) return state.offset -| page;
+    if (y >= knob.y + knob.h) return @min(state.offset +| page, last);
+    return null;
+}
+
+/// The strip over the right edge of the surface (screen coordinates).
+pub fn stripRect(surface: geom.Rect, dpi: u32) geom.Rect {
+    const w = @min(geom.scale(strip_w, dpi), surface.w);
+    return .{ .x = surface.right() - w, .y = surface.y, .w = w, .h = surface.h };
+}
+
+/// Opacity after `elapsed` ms of fading.
+pub fn fadeAlpha(elapsed: u64) u8 {
+    if (elapsed >= fade_ms) return 0;
+    return @intCast(255 - elapsed * 255 / fade_ms);
+}
+
+const Look = struct { knob: theme.Color, track: theme.Color, edge: theme.Color };
+
+/// Knob, track and edge line over a light or dark terminal background.
+pub fn look(dark: bool, expanded: bool, alpha: u8) Look {
+    const ink: u8 = if (dark) 255 else 0;
+    const scaled = struct {
+        fn a(base: u32, alpha_: u8) u8 {
+            return @intCast(base * alpha_ / 255);
+        }
+    }.a;
     return .{
-        .fMask = user32.SIF_RANGE | user32.SIF_PAGE | user32.SIF_POS | user32.SIF_DISABLENOSCROLL,
-        .nMin = 0,
-        .nMax = @intCast((total -| 1) / scale),
-        .nPage = @intCast(@min(@max(len / scale, @intFromBool(len > 0)), std.math.maxInt(i32))),
-        .nPos = @intCast(@min(value.offset / scale, std.math.maxInt(i32))),
+        .knob = .{ .r = ink, .g = ink, .b = ink, .a = scaled(if (expanded) 0xB0 else 0x80, alpha) },
+        // Collapsed, the track is only there to catch clicks (alpha 1).
+        .track = .{ .r = ink, .g = ink, .b = ink, .a = if (expanded) scaled(if (dark) 0x1A else 0x10, alpha) else 1 },
+        .edge = .{ .r = ink, .g = ink, .b = ink, .a = if (expanded) scaled(0x22, alpha) else 0 },
     };
 }
 
-/// The row to scroll to for a `WM_VSCROLL` code, if it moves anything.
-/// `track` is the 32-bit `nTrackPos` of a thumb drag.
-pub fn rowFor(code: u16, track: i32, state: State) ?u64 {
-    const last = maxOffset(state);
-    const row: u64 = switch (code) {
-        user32.SB_LINEUP => state.offset -| 1,
-        user32.SB_LINEDOWN => state.offset +| 1,
-        user32.SB_PAGEUP => state.offset -| @max(state.len, 1),
-        user32.SB_PAGEDOWN => state.offset +| @max(state.len, 1),
-        user32.SB_THUMBTRACK, user32.SB_THUMBPOSITION => @as(u64, @intCast(@max(track, 0))) *| scaleOf(state.total),
-        user32.SB_TOP => 0,
-        user32.SB_BOTTOM => last,
-        else => return null,
-    };
-    return @min(row, last);
+fn isDark(bg: anytype) bool {
+    const rgb: terminal.color.RGB = .{ .r = bg.r, .g = bg.g, .b = bg.b };
+    return rgb.luminance() < 0.5;
 }
 
-/// Dark or light scrollbar, like the rest of the chrome. Called once the
-/// surface window exists; a config or scheme change goes through
-/// `theme.applyToWindow`.
-pub fn init(surface: *Surface) void {
-    if (!surface.scrollbar.enabled) return;
-    const dark = theme.palette(surface.window).dark;
-    _ = win32.uxtheme.SetWindowTheme(
-        surface.hwnd,
-        if (dark) std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer") else null,
-        null,
-    );
-    // Show the bar disabled until core reports a scrollback.
-    _ = update(surface, .{ .total = 0, .offset = 0, .len = 0 });
-}
+// -- Core side ---------------------------------------------------------------------
 
-/// Core reported a new scrollbar. Always stores it, so the IPC state is
-/// right even without a bar; moves the thumb unless the user holds it.
+/// Core reported a new scrollbar. Always stores it, so the IPC state is right
+/// even without a scroller; shows the knob when the viewport moved.
 pub fn update(surface: *Surface, value: terminal.Scrollbar) bool {
-    surface.scrollbar.total = value.total;
-    surface.scrollbar.offset = value.offset;
-    surface.scrollbar.len = value.len;
-    if (!surface.scrollbar.enabled or surface.scrollbar.dragging) return true;
-    if (surface.hwnd_destroyed) return true;
+    const state = &surface.scrollbar;
+    const was = state.*;
+    state.total = value.total;
+    state.offset = value.offset;
+    state.len = value.len;
+    if (!state.enabled or state.dragging or surface.hwnd_destroyed) return true;
+    if (!state.popup_made and state.total <= state.len) return true;
 
-    const info = toScrollInfo(value);
-    _ = user32.SetScrollInfo(surface.hwnd, user32.SB_VERT, &info, 1);
+    if (state.total <= state.len) {
+        if (state.popup.visible) hide(state);
+        return true;
+    }
+    const moved = state.offset != was.offset;
+    const was_bottom = was.offset >= was.total -| was.len;
+    const now_bottom = state.offset >= state.total -| state.len;
+    if (state.popup_made and state.popup.visible) {
+        // Output at the bottom grows the scrollback: the knob follows
+        // quietly, without keeping itself on screen.
+        if (moved and !(was_bottom and now_bottom)) flash(surface) else redraw(state);
+    } else if (moved and !(was_bottom and now_bottom)) {
+        flash(surface);
+    }
     return true;
 }
 
-/// A `WM_VSCROLL` for the surface.
-pub fn handle(surface: *Surface, wparam: win32.foundation.WPARAM) void {
-    const code: u16 = @truncate(wparam);
+/// The pointer moved over the surface at client `x`. Reaching the strip
+/// shows the scroller, as hovering the gutter does on macOS. Costs a few
+/// compares when nothing scrolls.
+pub fn pointerMoved(surface: *Surface, x: i32, button_down: bool) void {
     const state = &surface.scrollbar;
+    if (!state.enabled or button_down or state.total <= state.len) return;
+    var rc: win32.foundation.RECT = undefined;
+    if (user32.GetClientRect(surface.hwnd, &rc) == 0) return;
+    if (x < rc.right - geom.scale(strip_w, surface.window.dpi)) return;
+    flash(surface);
+}
 
-    var track: i32 = 0;
-    switch (code) {
-        user32.SB_THUMBTRACK, user32.SB_THUMBPOSITION => {
-            // The 16 bits of the message overflow on long scrollbacks.
-            var info: user32.SCROLLINFO = .{ .fMask = user32.SIF_TRACKPOS };
-            if (user32.GetScrollInfo(surface.hwnd, user32.SB_VERT, &info) != 0) track = info.nTrackPos;
-            state.dragging = code == user32.SB_THUMBTRACK;
-        },
-        user32.SB_ENDSCROLL => {
-            state.dragging = false;
-            // Put the thumb where core has the viewport.
-            _ = update(surface, .{
-                .total = @intCast(state.total),
-                .offset = @intCast(state.offset),
-                .len = @intCast(state.len),
-            });
-            return;
-        },
-        else => {},
+/// Shows the knob (or keeps it) and restarts the pause before it fades.
+pub fn flash(surface: *Surface) void {
+    const state = &surface.scrollbar;
+    if (!state.enabled or surface.hwnd_destroyed or state.total <= state.len) return;
+    if (user32.IsIconic(surface.window.hwnd) != 0 or user32.IsWindowVisible(surface.hwnd) == 0) return;
+
+    if (!state.popup_made) {
+        state.popup = .{
+            .kind = .label,
+            .anchor = .surface_top_right,
+            .window = surface.window,
+            .surface = surface,
+            .size = .{ .w = strip_w, .h = 0 },
+            .margin = 0,
+            .paint = paintPopup,
+            .on_message = onMessage,
+            .place = placePopup,
+            .ctx = surface,
+            .class = class_name,
+            .click_through = false,
+        };
+        state.popup_made = true;
     }
+    state.alpha = 255;
+    state.fading = false;
+    state.drawn = null;
+    const p = &state.popup;
+    if (p.visible) {
+        redraw(state);
+    } else {
+        p.show() catch |err| {
+            log.warn("unable to show the scroller err={}", .{err});
+            return;
+        };
+    }
+    restartHold(state);
+}
 
-    const row = rowFor(code, track, state.*) orelse return;
+fn restartHold(state: *State) void {
+    const hwnd = state.popup.hwnd orelse return;
+    _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_hold);
+    _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_fade);
+    state.fading = false;
+    state.alpha = 255;
+    if (state.hover or state.dragging) return;
+    _ = user32.SetTimer(hwnd, messages.timers.overlay.scroller_hold, hold_ms, null);
+}
+
+fn hide(state: *State) void {
+    const p = &state.popup;
+    if (p.hwnd) |hwnd| {
+        _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_hold);
+        _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_fade);
+    }
+    p.hide();
+    state.hover = false;
+    state.tracking_leave = false;
+    state.fading = false;
+    state.alpha = 255;
+    state.drawn = null;
+}
+
+fn redraw(state: *State) void {
+    const p = &state.popup;
+    if (!p.visible) return;
+    const surface: *Surface = @ptrCast(@alignCast(p.ctx orelse return));
+    const knob = currentKnob(surface);
+    if (state.drawn) |d| if (knob) |k| if (d.y == k.y and d.h == k.h) return;
+    p.invalidate();
+    state.drawn = knob;
+}
+
+fn popupHeight(state: *const State) i32 {
+    const hwnd = state.popup.hwnd orelse return 0;
+    var rc: win32.foundation.RECT = undefined;
+    if (user32.GetClientRect(hwnd, &rc) == 0) return 0;
+    return rc.bottom - rc.top;
+}
+
+/// The knob in popup pixels, following the mouse during a drag.
+fn knobAt(state: *const State, height: i32, dpi: u32) ?Knob {
+    var knob = knobFor(state.total, state.offset, state.len, height, geom.scale(pad_v, dpi), geom.scale(min_knob_h, dpi)) orelse return null;
+    if (state.dragging) {
+        const lo = geom.scale(pad_v, dpi);
+        knob.y = std.math.clamp(state.drag_top, lo, @max(height - lo - knob.h, lo));
+    }
+    return knob;
+}
+
+fn currentKnob(surface: *const Surface) ?Knob {
+    const state = &surface.scrollbar;
+    return knobAt(state, popupHeight(state), surface.window.dpi);
+}
+
+/// The knob of `surface` in pixels from the top of its surface, for the IPC
+/// state; null while the scroller is not shown.
+pub fn knobOf(surface: *const Surface) ?Knob {
+    const state = &surface.scrollbar;
+    if (!state.popup_made or !state.popup.visible) return null;
+    return currentKnob(surface);
+}
+
+fn scrollTo(surface: *Surface, row: u64) void {
     if (!surface.initialized) return;
     _ = surface.core_surface.performBindingAction(.{ .scroll_to_row = @intCast(row) }) catch |err|
         log.warn("scroll_to_row failed err={}", .{err});
 }
 
-fn sb(total: usize, offset: usize, len: usize) terminal.Scrollbar {
+// -- Popup -------------------------------------------------------------------------
+
+fn placePopup(p: *overlay.Popup, surface: geom.Rect, size_px: overlay.Size) geom.Rect {
+    _ = size_px;
+    return stripRect(surface, p.window.dpi);
+}
+
+fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
+    const surface: *Surface = @ptrCast(@alignCast(p.ctx orelse return));
+    const state = &surface.scrollbar;
+    const dark = isDark(surface.window.app.config.background);
+    const expanded = state.hover or state.dragging;
+    const colors = look(dark, expanded, state.alpha);
+    const w = ctx.rect.w;
+    const h = ctx.rect.h;
+
+    var items: [3]Chrome.Item = undefined;
+    var n: usize = 0;
+    items[n] = .{ .box = .{ .rect = .{ .x = 0, .y = 0, .w = w, .h = h }, .radius = 0, .fill = colors.track } };
+    n += 1;
+    if (expanded) {
+        items[n] = .{ .box = .{ .rect = .{ .x = 0, .y = 0, .w = geom.scale(1, ctx.dpi), .h = h }, .radius = 0, .fill = colors.edge } };
+        n += 1;
+    }
+    if (knobAt(state, h, ctx.dpi)) |knob| {
+        const kw = geom.scale(if (expanded) knob_w_hover else knob_w, ctx.dpi);
+        items[n] = .{ .box = .{
+            .rect = .{ .x = w - geom.scale(knob_inset, ctx.dpi) - kw, .y = knob.y, .w = kw, .h = knob.h },
+            .radius = @divTrunc(kw, 2),
+            .fill = colors.knob,
+        } };
+        n += 1;
+    }
+    Chrome.paintItems(ctx.hdc, ctx.rect, items[0..n], ctx.palette, ctx.dpi, null) catch |err| {
+        log.warn("unable to paint the scroller err={}", .{err});
+    };
+}
+
+fn onMessage(p: *overlay.Popup, msg: u32, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) ?win32.foundation.LRESULT {
+    const surface: *Surface = @ptrCast(@alignCast(p.ctx orelse return null));
+    const state = &surface.scrollbar;
+    const hwnd = p.hwnd orelse return null;
+    switch (msg) {
+        user32.WM_NCHITTEST => return user32.HTCLIENT,
+
+        user32.WM_MOUSEMOVE => {
+            if (!state.tracking_leave) {
+                var tme: user32.TRACKMOUSEEVENT = .{ .dwFlags = user32.TME_LEAVE, .hwndTrack = hwnd };
+                if (user32.TrackMouseEvent(&tme) != 0) state.tracking_leave = true;
+            }
+            if (state.dragging) {
+                state.drag_top = user32.getYLparam(lparam) - state.grab;
+                const dpi = surface.window.dpi;
+                const row = rowForKnobTop(state.total, state.len, popupHeight(state), geom.scale(pad_v, dpi), geom.scale(min_knob_h, dpi), state.drag_top);
+                scrollTo(surface, row);
+                p.invalidate();
+            } else if (!state.hover) {
+                state.hover = true;
+                restartHold(state);
+                state.drawn = null;
+                redraw(state);
+            }
+            return 0;
+        },
+
+        user32.WM_MOUSELEAVE => {
+            state.tracking_leave = false;
+            if (!state.dragging and state.hover) {
+                state.hover = false;
+                state.drawn = null;
+                redraw(state);
+                restartHold(state);
+            }
+            return 0;
+        },
+
+        user32.WM_LBUTTONDOWN => {
+            const y = user32.getYLparam(lparam);
+            const knob = currentKnob(surface) orelse return 0;
+            if (pageRow(state.*, knob, y)) |row| {
+                scrollTo(surface, row);
+            } else {
+                state.dragging = true;
+                state.grab = y - knob.y;
+                state.drag_top = knob.y;
+                _ = user32.SetCapture(hwnd);
+                restartHold(state);
+                p.invalidate();
+            }
+            return 0;
+        },
+
+        user32.WM_LBUTTONUP => {
+            if (state.dragging) _ = user32.ReleaseCapture();
+            return 0;
+        },
+
+        user32.WM_CAPTURECHANGED => {
+            if (state.dragging) {
+                state.dragging = false;
+                state.hover = false;
+                state.tracking_leave = false;
+                state.drawn = null;
+                redraw(state);
+                restartHold(state);
+            }
+            return 0;
+        },
+
+        // The wheel over the strip scrolls the terminal as anywhere else.
+        user32.WM_MOUSEWHEEL => {
+            _ = user32.SendMessageW(surface.hwnd, msg, wparam, lparam);
+            return 0;
+        },
+
+        user32.WM_TIMER => {
+            if (wparam == messages.timers.overlay.scroller_hold) {
+                _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_hold);
+                if (state.hover or state.dragging) return 0;
+                state.fading = true;
+                state.fade_start = win32.kernel32.GetTickCount64();
+                _ = user32.SetTimer(hwnd, messages.timers.overlay.scroller_fade, fade_tick_ms, null);
+                return 0;
+            }
+            if (wparam == messages.timers.overlay.scroller_fade) {
+                const a = fadeAlpha(win32.kernel32.GetTickCount64() -% state.fade_start);
+                if (a == 0) {
+                    hide(state);
+                } else if (a != state.alpha) {
+                    state.alpha = a;
+                    p.invalidate();
+                }
+                return 0;
+            }
+            return null;
+        },
+
+        else => return null,
+    }
+}
+
+fn sb(total: usize, offset: usize, len: usize) State {
     return .{ .total = total, .offset = offset, .len = len };
 }
 
-test "win32 scrollbar: scroll info from terminal scrollbar" {
+test "win32 scrollbar: knob length and place follow the viewport" {
     const t = std.testing;
 
-    const a = toScrollInfo(sb(300, 40, 24));
-    try t.expectEqual(@as(i32, 0), a.nMin);
-    try t.expectEqual(@as(i32, 299), a.nMax);
-    try t.expectEqual(@as(u32, 24), a.nPage);
-    try t.expectEqual(@as(i32, 40), a.nPos);
-    try t.expect(a.fMask & user32.SIF_DISABLENOSCROLL != 0);
-    try t.expectEqual(@as(u32, @sizeOf(user32.SCROLLINFO)), a.cbSize);
+    // 300 rows, 24 visible, 600 px high with 2 px padding: 596 px of track.
+    const top = knobFor(300, 0, 24, 600, 2, 18).?;
+    try t.expectEqual(@as(i32, 2), top.y);
+    try t.expectEqual(@as(i32, 48), top.h);
+    const bottom = knobFor(300, 276, 24, 600, 2, 18).?;
+    try t.expectEqual(@as(i32, 598), bottom.y + bottom.h);
+    const mid = knobFor(300, 138, 24, 600, 2, 18).?;
+    try t.expectEqual(@as(i32, 2 + 274), mid.y);
 
-    // No scrollback: the page covers the range, so the bar is greyed out.
-    const b = toScrollInfo(sb(24, 0, 24));
-    try t.expectEqual(@as(i32, 23), b.nMax);
-    try t.expectEqual(@as(u32, 24), b.nPage);
+    // Past the end clamps; a huge scrollback keeps the minimum length.
+    try t.expectEqual(bottom.y, knobFor(300, 9999, 24, 600, 2, 18).?.y);
+    const long = knobFor(10_000_000, 0, 24, 600, 2, 18).?;
+    try t.expectEqual(@as(i32, 18), long.h);
 
-    const empty = toScrollInfo(sb(0, 0, 0));
-    try t.expectEqual(@as(i32, 0), empty.nMax);
-
-    // Beyond the i32 range everything is divided by the same factor.
-    const c = toScrollInfo(sb(10_000_000_000, 5_000_000_000, 50));
-    try t.expectEqual(@as(i32, 1_999_999_999), c.nMax);
-    try t.expectEqual(@as(i32, 1_000_000_000), c.nPos);
-    try t.expectEqual(@as(u32, 10), c.nPage);
+    // Nothing to scroll: no knob.
+    try t.expectEqual(@as(?Knob, null), knobFor(24, 0, 24, 600, 2, 18));
+    try t.expectEqual(@as(?Knob, null), knobFor(0, 0, 0, 600, 2, 18));
+    try t.expectEqual(@as(?Knob, null), knobFor(300, 0, 24, 3, 2, 18));
 }
 
-test "win32 scrollbar: row for each SB code" {
+test "win32 scrollbar: dragging maps the knob top back to rows" {
     const t = std.testing;
-    const s: State = .{ .total = 300, .offset = 100, .len = 24, .enabled = true };
+    try t.expectEqual(@as(u64, 0), rowForKnobTop(300, 24, 600, 2, 18, -50));
+    try t.expectEqual(@as(u64, 276), rowForKnobTop(300, 24, 600, 2, 18, 9999));
+    try t.expectEqual(@as(u64, 138), rowForKnobTop(300, 24, 600, 2, 18, 2 + 274));
 
-    try t.expectEqual(@as(?u64, 99), rowFor(user32.SB_LINEUP, 0, s));
-    try t.expectEqual(@as(?u64, 101), rowFor(user32.SB_LINEDOWN, 0, s));
-    try t.expectEqual(@as(?u64, 76), rowFor(user32.SB_PAGEUP, 0, s));
-    try t.expectEqual(@as(?u64, 124), rowFor(user32.SB_PAGEDOWN, 0, s));
-    try t.expectEqual(@as(?u64, 150), rowFor(user32.SB_THUMBTRACK, 150, s));
-    try t.expectEqual(@as(?u64, 150), rowFor(user32.SB_THUMBPOSITION, 150, s));
-    try t.expectEqual(@as(?u64, 0), rowFor(user32.SB_TOP, 0, s));
-    try t.expectEqual(@as(?u64, 276), rowFor(user32.SB_BOTTOM, 0, s));
-    try t.expectEqual(@as(?u64, null), rowFor(user32.SB_ENDSCROLL, 0, s));
+    // The knob drawn for a row maps back to that row (within a pixel's worth).
+    for ([_]u64{ 0, 1, 50, 137, 276 }) |row| {
+        const k = knobFor(300, row, 24, 600, 2, 18).?;
+        const back = rowForKnobTop(300, 24, 600, 2, 18, k.y);
+        try t.expect(back + 1 >= row and back <= row + 1);
+    }
+}
+
+test "win32 scrollbar: a click on the track pages toward it" {
+    const t = std.testing;
+    const s = sb(300, 100, 24);
+    const knob = knobFor(s.total, s.offset, s.len, 600, 2, 18).?;
+
+    try t.expectEqual(@as(?u64, 76), pageRow(s, .{ .y = knob.y, .h = knob.h }, knob.y - 1));
+    try t.expectEqual(@as(?u64, 124), pageRow(s, knob, knob.y + knob.h));
+    try t.expectEqual(@as(?u64, null), pageRow(s, knob, knob.y + 1));
 
     // Clamped to the ends.
-    const top: State = .{ .total = 300, .offset = 0, .len = 24 };
-    try t.expectEqual(@as(?u64, 0), rowFor(user32.SB_LINEUP, 0, top));
-    try t.expectEqual(@as(?u64, 0), rowFor(user32.SB_PAGEUP, 0, top));
-    const bottom: State = .{ .total = 300, .offset = 276, .len = 24 };
-    try t.expectEqual(@as(?u64, 276), rowFor(user32.SB_LINEDOWN, 0, bottom));
-    try t.expectEqual(@as(?u64, 276), rowFor(user32.SB_THUMBTRACK, 290, bottom));
-    try t.expectEqual(@as(?u64, 0), rowFor(user32.SB_THUMBTRACK, -5, bottom));
+    const near_top = sb(300, 10, 24);
+    try t.expectEqual(@as(?u64, 0), pageRow(near_top, .{ .y = 20, .h = 40 }, 5));
+    const near_end = sb(300, 270, 24);
+    try t.expectEqual(@as(?u64, 276), pageRow(near_end, .{ .y = 500, .h = 40 }, 590));
+}
 
-    // A scaled thumb position maps back to rows.
-    const huge: State = .{ .total = 10_000_000_000, .offset = 0, .len = 50 };
-    try t.expectEqual(@as(?u64, 5_000_000_000), rowFor(user32.SB_THUMBTRACK, 1_000_000_000, huge));
+test "win32 scrollbar: strip sits on the right edge and fades out" {
+    const t = std.testing;
+    const surface: geom.Rect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    const r = stripRect(surface, 96);
+    try t.expectEqual(@as(i32, 885), r.x);
+    try t.expectEqual(@as(i32, 15), r.w);
+    try t.expectEqual(@as(i32, 600), r.h);
+    try t.expectEqual(@as(i32, 23), stripRect(surface, 144).w);
+    // Never wider than the surface.
+    try t.expectEqual(@as(i32, 8), stripRect(.{ .x = 0, .y = 0, .w = 8, .h = 100 }, 96).w);
+
+    try t.expectEqual(@as(u8, 255), fadeAlpha(0));
+    try t.expect(fadeAlpha(fade_ms / 2) < 140 and fadeAlpha(fade_ms / 2) > 120);
+    try t.expectEqual(@as(u8, 0), fadeAlpha(fade_ms));
+    try t.expectEqual(@as(u8, 0), fadeAlpha(10_000));
+}
+
+test "win32 scrollbar: colours follow the background and grow on hover" {
+    const t = std.testing;
+    const dark_idle = look(true, false, 255);
+    try t.expectEqual(@as(u8, 255), dark_idle.knob.r);
+    try t.expectEqual(@as(u8, 0x80), dark_idle.knob.a);
+    try t.expectEqual(@as(u8, 1), dark_idle.track.a);
+    try t.expectEqual(@as(u8, 0), dark_idle.edge.a);
+
+    const light_hover = look(false, true, 255);
+    try t.expectEqual(@as(u8, 0), light_hover.knob.r);
+    try t.expect(light_hover.knob.a > dark_idle.knob.a);
+    try t.expect(light_hover.track.a > 1);
+
+    // Fading scales every alpha down.
+    const half = look(true, true, 128);
+    try t.expect(half.knob.a < look(true, true, 255).knob.a);
+
+    try t.expect(isDark(.{ .r = 0x1e, .g = 0x1e, .b = 0x2e }));
+    try t.expect(!isDark(.{ .r = 0xfa, .g = 0xfa, .b = 0xfa }));
 }

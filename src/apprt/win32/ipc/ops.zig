@@ -26,6 +26,7 @@ const Server = @import("Server.zig");
 const QuickTerminal = @import("../QuickTerminal.zig");
 const export_io = @import("../export_io.zig");
 const hooks = @import("../hooks.zig");
+const scrollbar = @import("../scrollbar.zig");
 
 const log = std.log.scoped(.win32_ipc_ops);
 
@@ -517,6 +518,13 @@ fn writeSurface(jw: *std.json.Stringify, window: *Window, s: *Surface, focused: 
     try jw.write(s.scrollbar.offset);
     try jw.objectField("len");
     try jw.write(s.scrollbar.len);
+    // The overlay scroller: shown, and its knob in px from the top of the surface.
+    try jw.objectField("scroller_visible");
+    try jw.write(scrollbar.knobOf(s) != null);
+    try jw.objectField("scroller_alpha");
+    try jw.write(s.scrollbar.alpha);
+    try jw.objectField("knob");
+    if (scrollbar.knobOf(s)) |k| try jw.write([2]i32{ k.y, k.h }) else try jw.write(null);
     try jw.endObject();
     try jw.endObject();
 }

@@ -7,6 +7,7 @@ const apprt = @import("../../apprt.zig");
 const input = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
+const scrollbar = @import("scrollbar.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.win32_mouse);
@@ -101,6 +102,7 @@ pub fn handle(
         user32.WM_MOUSEMOVE => {
             trackLeave(surface);
             const pos = [2]i32{ user32.getXLparam(lparam), user32.getYLparam(lparam) };
+            scrollbar.pointerMoved(surface, pos[0], surface.mouse_state.captured_buttons != 0);
             const moved = if (surface.mouse_state.last_pos) |p| !std.mem.eql(i32, &p, &pos) else true;
             surface.mouse_state.last_pos = pos;
             if (moved) focusFollowsMouse(surface);

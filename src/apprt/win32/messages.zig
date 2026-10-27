@@ -79,6 +79,10 @@ pub const timers = struct {
         pub const hide: usize = 1;
         /// Debounce of the search query (`SearchBar.zig`).
         pub const search_debounce: usize = 2;
+        /// Pause before the scroller knob fades (`scrollbar.zig`).
+        pub const scroller_hold: usize = 3;
+        /// Frames of the scroller fade.
+        pub const scroller_fade: usize = 4;
     };
     pub const inspector = struct {
         /// 30 Hz render tick (`Inspector.zig`).
@@ -145,7 +149,7 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
     const classes = .{
         [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory },
         [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace },
-        [_]usize{ timers.overlay.hide, timers.overlay.search_debounce },
+        [_]usize{ timers.overlay.hide, timers.overlay.search_debounce, timers.overlay.scroller_hold, timers.overlay.scroller_fade },
         [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce, timers.window.tab_tooltip, timers.window.tab_anim },
     };
     inline for (classes) |ids| {

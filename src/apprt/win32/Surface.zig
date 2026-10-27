@@ -201,9 +201,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     var parent_rect: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     _ = win32.user32.GetClientRect(tab.hwnd, &parent_rect);
 
-    // The bar is part of the window from the start, so the grid never reflows.
-    var style: u32 = win32.user32.WS_CHILD | win32.user32.WS_VISIBLE | win32.user32.WS_CLIPSIBLINGS;
-    if (self.scrollbar.enabled) style |= win32.user32.WS_VSCROLL;
+    const style: u32 = win32.user32.WS_CHILD | win32.user32.WS_VISIBLE | win32.user32.WS_CLIPSIBLINGS;
 
     // The window procedure sees WM_NCCREATE before this returns and stores
     // `self` as the window's user data.
@@ -226,7 +224,6 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     };
     errdefer _ = win32.user32.DestroyWindow(hwnd);
     self.hwnd = hwnd;
-    scrollbar_mod.init(self);
     if (win32.user32.SetTimer(hwnd, messages.timers.surface.title_grace, title_rules.grace_ms, null) == 0) {
         self.title_grace_over = true;
     }
@@ -652,11 +649,6 @@ fn wndProc(
         // returns 0 there and applies the scale itself.
         WM_DPICHANGED_AFTERPARENT => {
             self.applyDpi();
-            return 0;
-        },
-
-        win32.user32.WM_VSCROLL => {
-            scrollbar_mod.handle(self, wparam);
             return 0;
         },
 
