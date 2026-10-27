@@ -762,7 +762,9 @@ pub fn placeTitle(self: *Window) void {
     const text = self.chrome_title orelse "";
     var buf: [256]u16 = undefined;
     const wide = Chrome.toWide(&buf, text);
-    const width = if (wide.len == 0) 0 else Chrome.measureText(wide, Chrome.title_font, self.dpi) catch 0;
+    var family_buf: [Chrome.family_cap]u16 = undefined;
+    const font = Chrome.titleFont(Chrome.titleFamily(self, &family_buf));
+    const width = if (wide.len == 0) 0 else Chrome.measureText(wide, font, self.dpi) catch 0;
     self.strip.placeTitle(TabStrip.Metrics.forDpi(self.dpi), width, proxy_icon.refresh(self));
 }
 

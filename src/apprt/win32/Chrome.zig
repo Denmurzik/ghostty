@@ -44,6 +44,8 @@ const format_slots = 4;
 /// Point sizes of the tab title and of its key label.
 const tab_pt = 11;
 const key_pt = 10;
+/// The window title: `NSFont.systemFontSize` of macOS.
+const title_pt = 13;
 
 pub const Formats = struct {
     dpi: u32,
@@ -104,7 +106,7 @@ pub const Shared = struct {
         }
 
         const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
-        const title = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, 12 * scale, L("en-us"));
+        const title = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, title_pt * scale, L("en-us"));
         errdefer com.release(title);
         try title.setWordWrapping(.NO_WRAP);
         try title.setTextAlignment(.LEADING);
@@ -285,8 +287,20 @@ pub fn tabParts(r: geom.Rect, dpi: u32, show_close: bool, bell: bool) TabParts {
 /// label ("Ctrl+1") and the close button.
 const key_zone = 48;
 
-/// The font of the window title.
-pub const title_font: Font = .{ .size_pt = 12 };
+/// The font of the window title; `family` is `window-title-font-family`
+/// (UTF-16), the strip's UI font when null.
+pub fn titleFont(family: ?[]const u16) Font {
+    return .{ .size_pt = title_pt, .family = family };
+}
+
+/// `window-title-font-family` as UTF-16 in `buf`, null when unset or empty.
+pub fn titleFamily(window: *const Window, buf: *[family_cap]u16) ?[]const u16 {
+    const name = window.app.config.@"window-title-font-family" orelse return null;
+    const wide = toUtf16(buf, name);
+    return if (wide.len == 0) null else wide;
+}
+
+pub const family_cap = 96;
 
 /// Text of at most `buf.len` UTF-16 units; cuts the input at a code point.
 pub fn toWide(buf: []u16, s: []const u8) []const u16 {
@@ -339,8 +353,10 @@ pub const Inputs = struct {
     pressed: TabStrip.Part = .nowhere,
     maximized: bool = false,
     window_active: bool = true,
-    /// The window title, shown in the `title_text` rect.
+    /// The window title, shown in the `title_text` rect, and its family
+    /// (`window-title-font-family`).
     title: []const u8 = "",
+    title_family: ?[]const u16 = null,
     drop_index: ?usize = null,
     drag: ?DragView = null,
     /// Offset of the tab row while it slides in or out (0 at rest, up to
@@ -459,6 +475,15 @@ const Painter = struct {
         }
     }
 
+    /// The window title; in the family of the config when it has one.
+    fn titleLabel(self: *Painter, r: geom.Rect, utf8: []const u8, c: theme.Color, family: ?[]const u16) void {
+        const fam = family orelse return self.label(r, utf8, self.fm.title, c);
+        const sh = shared() catch return;
+        const format = makeFormat(sh, titleFont(fam), .leading, true, self.dpi) catch return;
+        defer com.release(format);
+        self.label(r, utf8, format, c);
+    }
+
     fn drawNewTab(self: *Painter, r: geom.Rect, hovered: bool, pressed: bool) void {
         self.fillCapsule(r, self.pal.track_bg);
         if (pressed) self.fillCapsule(r, self.pal.button_pressed_bg) else if (hovered) self.fillCapsule(r, self.pal.button_hover_bg);
@@ -535,7 +560,7 @@ const Painter = struct {
 
         if (lay.title_text.w > 0) {
             const ink = if (in.window_active) self.pal.text else self.pal.text_inactive;
-            self.label(lay.title_text, in.title, self.fm.title, ink);
+            self.titleLabel(lay.title_text, in.title, ink, in.title_family);
         }
 
         const parts = [_]struct { rect: ?geom.Rect, part: TabStrip.Part }{
@@ -830,6 +855,8 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         }
     }
 
+    var family_buf: [family_cap]u16 = undefined;
+
     var drag: ?DragView = null;
     if (window.strip_input.drag) |*d| {
         if (d.active) {
@@ -850,6 +877,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         .maximized = user32.IsZoomed(window.hwnd) != 0,
         .window_active = theme.windowActive(window),
         .title = window.chrome_title orelse "",
+        .title_family = titleFamily(window, &family_buf),
         .drop_index = window.strip_input.drop_index,
         .drag = drag,
         .row_dy = if (anim.running) rowOffset(anim.rowAt(now), window.dpi) else 0,
@@ -894,6 +922,8 @@ pub const Font = struct {
     icons: bool = false,
     size_pt: f32 = 13,
     weight: dwrite.FontWeight = .NORMAL,
+    /// A family of the caller's choosing (not for `icons`); the UI font when null.
+    family: ?[]const u16 = null,
 };
 
 pub const HAlign = enum { leading, center };
@@ -930,7 +960,13 @@ pub fn blend(top: theme.Color, bottom: theme.Color) theme.Color {
 
 fn makeFormat(sh: *Shared, font: Font, halign: HAlign, trim: bool, dpi: u32) !*dwrite.IDWriteTextFormat {
     const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
-    const family = if (font.icons) sh.icon_family else sh.title_family;
+    var family_buf: [family_cap:0]u16 = undefined;
+    const family: [*:0]const u16 = if (font.icons) sh.icon_family else if (font.family) |f| blk: {
+        const n = @min(f.len, family_cap);
+        @memcpy(family_buf[0..n], f[0..n]);
+        family_buf[n] = 0;
+        break :blk &family_buf;
+    } else sh.title_family;
     const format = try sh.dwrite.createTextFormat(family, font.weight, .NORMAL, .NORMAL, font.size_pt * scale, L("en-us"));
     errdefer com.release(format);
     try format.setWordWrapping(.NO_WRAP);
@@ -960,7 +996,8 @@ var measured_next: usize = 0;
 /// Width in px of `text` in `font` at `dpi`. Short texts are remembered, so
 /// a label that is painted again and again measures once.
 pub fn measureText(text: []const u16, font: Font, dpi: u32) !i32 {
-    const cacheable = text.len > 0 and text.len <= measure_chars;
+    // A family is a slice of the caller's: not part of the cache key.
+    const cacheable = text.len > 0 and text.len <= measure_chars and font.family == null;
     if (cacheable) for (&measured) |*m| {
         if (m.dpi == dpi and m.len == text.len and std.meta.eql(m.font, font) and
             std.mem.eql(u16, m.text[0..m.len], text)) return m.width;
@@ -1245,4 +1282,19 @@ test "win32 chrome: blend over an opaque colour" {
     try std.testing.expectEqual(black, blend(.{ .r = 255, .g = 255, .b = 255, .a = 0 }, black));
     const half = blend(.{ .r = 255, .g = 255, .b = 255, .a = 128 }, black);
     try std.testing.expectEqual(@as(u8, 128), half.r);
+}
+
+test "win32 chrome: the title family changes the measure and is not cached" {
+    defer deinitShared();
+    const text = L("WWWWW iiiii");
+    const ui = try measureText(text, titleFont(null), 96);
+    const mono = try measureText(text, titleFont(L("Consolas")[0..8]), 96);
+    try std.testing.expect(ui > 0 and mono > 0 and ui != mono);
+    // Asked again with another family at the same address: no stale hit.
+    var name = [_]u16{ 'C', 'o', 'n', 's', 'o', 'l', 'a', 's' };
+    const again = try measureText(text, titleFont(&name), 96);
+    try std.testing.expectEqual(mono, again);
+    name = [_]u16{ 'A', 'r', 'i', 'a', 'l', 0, 0, 0 };
+    const arial = try measureText(text, titleFont(name[0..5]), 96);
+    try std.testing.expect(arial != mono);
 }

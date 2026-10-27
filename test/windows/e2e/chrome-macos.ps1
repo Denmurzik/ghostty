@@ -231,6 +231,8 @@ function Test-Animation([string]$Background, [string]$Foreground) {
             Start-Sleep -Milliseconds 600
             $final = Get-ScreenShot $o.X $o.Y $width 66
             $after = Get-SurfaceRect
+            $dir = Get-EvidenceDir
+            if ($dir) { foreach ($k in 1, 4, 7) { $shots[$k].Save((Join-Path $dir "chrome-macos-anim-$Action-$k.png"), [Drawing.Imaging.ImageFormat]::Png) } }
             $diffs = @($shots | ForEach-Object { Get-ShotDiff $_ $final })
             foreach ($s in $shots) { $s.Dispose() }
             $final.Dispose()
