@@ -18,10 +18,10 @@ Invoke-E2eScenario 'inspector' {
         @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyInspector') | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) })
     }
 
-    if ((Get-InspectorWindows).Count -ne 0) { throw 'an inspector window exists before the action' }
+    if (@(Get-InspectorWindows).Count -ne 0) { throw 'an inspector window exists before the action' }
 
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'inspector:toggle')
-    if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-InspectorWindows).Count -eq 1 })) {
+    if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { @(Get-InspectorWindows).Count -eq 1 })) {
         throw 'inspector:toggle did not open a GhosttyInspector window'
     }
     $caption = [GhosttyE2e.Win]::TextOf((Get-InspectorWindows)[0])
@@ -37,7 +37,7 @@ Invoke-E2eScenario 'inspector' {
     }
 
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'inspector:toggle')
-    if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { (Get-InspectorWindows).Count -eq 0 })) {
+    if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { @(Get-InspectorWindows).Count -eq 0 })) {
         throw 'the second inspector:toggle did not close the window'
     }
     $i = Get-Insp

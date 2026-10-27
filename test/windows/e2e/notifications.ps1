@@ -9,7 +9,7 @@ Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 function Get-Recorded($G) { @((Get-GhosttyState -Class $G.Class).m3.notify.recorded) }
 
 function Wait-Recorded($G, [int]$Count, [string]$What) {
-    $ok = Wait-Until -TimeoutSec 10 -PollMs 150 -Condition { (Get-Recorded $G).Count -ge $Count }
+    $ok = Wait-Until -TimeoutSec 10 -PollMs 150 -Condition { @(Get-Recorded $G).Count -ge $Count }
     if (-not $ok) {
         throw "$What : expected $Count recorded notice(s), state: $((Get-GhosttyState -Class $G.Class).m3.notify | ConvertTo-Json -Compress -Depth 6)"
     }
@@ -21,7 +21,7 @@ Invoke-E2eScenario 'notifications' {
     $g = Start-E2eGhostty -ConfigText $cfg
     Wait-BashReady $g
 
-    if ((Get-Recorded $g).Count -ne 0) { throw 'notices recorded before anything was sent' }
+    if (@(Get-Recorded $g).Count -ne 0) { throw 'notices recorded before anything was sent' }
 
     # OSC 9: the toast carries the app name as its title.
     Send-Line $g.Hwnd "printf '\e]9;hello & <you>\e\'"
@@ -54,5 +54,5 @@ Invoke-E2eScenario 'notifications' {
     Send-Line $g.Hwnd "printf '\e]9;silenced\e\'"
     Start-Sleep -Seconds 2
     $after = Get-Recorded $g
-    if ($after.Count -ne 3) { throw "a notice was recorded with desktop-notifications = false: $($after | ConvertTo-Json -Compress)" }
+    if (@($after).Count -ne 3) { throw "a notice was recorded with desktop-notifications = false: $($after | ConvertTo-Json -Compress)" }
 }
