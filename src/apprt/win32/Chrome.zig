@@ -6,10 +6,12 @@
 //! process, all used from the UI thread only. The target is drawn at 96 DPI
 //! in pixels; text formats are cached per window DPI.
 const std = @import("std");
+const builtin = @import("builtin");
 const win32 = @import("win32");
 const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");
 const geom = @import("geom.zig");
+const overlay = @import("overlay.zig");
 const theme = @import("theme.zig");
 
 const com = win32.com;
@@ -470,7 +472,17 @@ fn withPainter(hdc: HDC, w: i32, h: i32, pal: theme.Palette, dpi: u32, ctx: anyt
         if (err == error.DeviceLost) sh.dropTarget();
         return err;
     };
+    if (builtin.is_test) if (test_end_draw_hr) |hr| {
+        test_end_draw_hr = null;
+        d2d1.checkEndDraw(hr) catch |err| {
+            if (err == error.DeviceLost) sh.dropTarget();
+            return err;
+        };
+    };
 }
+
+/// Test hook: the HRESULT the next `EndDraw` is taken to have returned.
+var test_end_draw_hr: ?win32.foundation.HRESULT = null;
 
 fn drawStripBody(in: Inputs, p: *Painter) void {
     p.drawStrip(in);
@@ -497,15 +509,19 @@ pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme
     return true;
 }
 
-const LabelArgs = struct { size: geom.Rect, text: []const u16, pal: theme.Palette };
+const LabelArgs = struct { size: geom.Rect, text: []const u16, fill: theme.Color, radius: i32 };
 
 fn drawLabelBody(args: LabelArgs, p: *Painter) void {
-    p.drawText(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, args.text, p.fm.label, args.pal.text);
+    const r: geom.Rect = .{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h };
+    p.fillRound(r, args.radius, args.fill);
+    p.drawText(r, args.text, p.fm.label, p.pal.text);
 }
 
-/// A centred text label on an opaque fill (the resize overlay). As on macOS
-/// the fill is the system window background (`.background`), not the
-/// terminal's; high contrast keeps the system window colour.
+/// A centred text label on an opaque rounded fill (the resize overlay). As
+/// on macOS (`RoundedRectangle(cornerRadius: 4)`) the fill is the system
+/// window background (`.background`), not the terminal's; high contrast
+/// keeps the system window colour. The corners stay transparent, for a
+/// layered window. A lost device is retried once, a failure is logged once.
 pub fn paintLabel(hdc: HDC, size: geom.Rect, text: []const u16, palette: theme.Palette, dpi: u32) !void {
     var pal = palette;
     if (theme.highContrast()) {
@@ -514,8 +530,22 @@ pub fn paintLabel(hdc: HDC, size: geom.Rect, text: []const u16, palette: theme.P
         pal.strip_bg = if (pal.dark) .{ .r = 0x32, .g = 0x32, .b = 0x32 } else .{ .r = 0xEC, .g = 0xEC, .b = 0xEC };
         pal.text = if (pal.dark) .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } else .{ .r = 0, .g = 0, .b = 0 };
     }
-    pal.strip_bg.a = 255;
-    try withPainter(hdc, size.w, size.h, pal, dpi, LabelArgs{ .size = size, .text = text, .pal = pal }, drawLabelBody);
+    var fill = pal.strip_bg;
+    fill.a = 255;
+    // The target is cleared to transparent, the fill is drawn on top.
+    pal.strip_bg.a = 0;
+    const args: LabelArgs = .{ .size = size, .text = text, .fill = fill, .radius = geom.scale(4, dpi) };
+    withPainter(hdc, size.w, size.h, pal, dpi, args, drawLabelBody) catch |err| {
+        if (err != error.DeviceLost) {
+            logOnce(err);
+            return err;
+        }
+        // The target was dropped: a second try builds a new one.
+        withPainter(hdc, size.w, size.h, pal, dpi, args, drawLabelBody) catch |err2| {
+            logOnce(err2);
+            return err2;
+        };
+    };
 }
 
 var logged: bool = false;
@@ -528,13 +558,19 @@ fn logOnce(err: anyerror) void {
     log.warn("unable to paint the chrome err={}", .{err});
 }
 
-fn fillFallback(hdc: HDC, r: geom.Rect, c: theme.Color) void {
+/// GDI fill for when Direct2D failed. The buffered DIB is premultiplied and
+/// GDI leaves its alpha at 0, so over Mica the fill would not show:
+/// `buffer` (when `hdc` is its DC) gets its alpha set opaque.
+fn fillFallback(hdc: HDC, r: geom.Rect, c: theme.Color, buffer: ?uxtheme.HPAINTBUFFER) void {
     const ref: u32 = @as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16);
     const brush = gdi32.CreateSolidBrush(ref) orelse return;
     defer _ = gdi32.DeleteObject(@ptrCast(brush));
     const rc = r.toRECT();
     _ = gdi32.FillRect(hdc, &rc, brush);
+    if (buffer) |b| _ = BufferedPaintSetAlpha(b, &rc, 255);
 }
+
+extern "uxtheme" fn BufferedPaintSetAlpha(uxtheme.HPAINTBUFFER, ?*const win32.foundation.RECT, alpha: u8) callconv(.winapi) win32.foundation.HRESULT;
 
 fn partOfHover(window: *const Window) TabStrip.Part {
     return switch (window.strip_input.hover) {
@@ -559,7 +595,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
 
     const views = alloc.alloc(TabView, window.tabs.items.len) catch |err| {
         logOnce(err);
-        fillFallback(hdc, bounds, pal.strip_bg);
+        fillFallback(hdc, bounds, pal.strip_bg, null);
         return;
     };
     defer alloc.free(views);
@@ -590,7 +626,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         .hover = partOfHover(window),
         .pressed = window.frame.pressed,
         .maximized = user32.IsZoomed(window.hwnd) != 0,
-        .window_active = if (user32.GetForegroundWindow()) |fg| fg == window.hwnd else false,
+        .window_active = if (user32.GetForegroundWindow()) |fg| fg == window.hwnd or overlay.panelHasForeground(window) else false,
         .title = title,
         .drop_index = window.strip_input.drop_index,
         .drag = drag,
@@ -605,7 +641,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         lost_retried = false;
     } else |err| {
         logOnce(err);
-        fillFallback(target_dc, bounds, pal.strip_bg);
+        fillFallback(target_dc, bounds, pal.strip_bg, hbp);
         // A lost device is recreated by the next paint; retry once per loss,
         // a persistent failure must not re-queue paints forever.
         if (err == error.DeviceLost and !lost_retried) {
@@ -735,4 +771,44 @@ test "win32 chrome: paints a strip into a DIB" {
         }
     }
     try std.testing.expect(inked);
+}
+
+test "win32 chrome: shared target recreated after RECREATE_TARGET" {
+    const width = 120;
+    const height = 40;
+    const dc = gdi32.CreateCompatibleDC(null) orelse return error.SkipZigTest;
+    defer _ = gdi32.DeleteDC(dc);
+    const info: gdi32.BITMAPINFO = .{ .bmiHeader = .{ .biWidth = width, .biHeight = -height, .biBitCount = 32 } };
+    var bits: ?*anyopaque = null;
+    const bitmap = gdi32.CreateDIBSection(dc, &info, gdi32.DIB_RGB_COLORS, &bits, null, 0) orelse return error.SkipZigTest;
+    defer _ = gdi32.DeleteObject(@ptrCast(bitmap));
+    const old = gdi32.SelectObject(dc, @ptrCast(bitmap));
+    defer if (old) |o| {
+        _ = gdi32.SelectObject(dc, o);
+    };
+    defer deinitShared();
+
+    const text = L("80 x 24");
+    const size: geom.Rect = .{ .x = 0, .y = 0, .w = width, .h = height };
+    try paintLabel(dc, size, text, test_palette, 96);
+    try std.testing.expect((try shared()).target != null);
+
+    // EndDraw reports D2DERR_RECREATE_TARGET: the target is dropped, and
+    // `paintLabel` retries once with a new one.
+    test_end_draw_hr = d2d1.D2DERR_RECREATE_TARGET;
+    try paintLabel(dc, size, text, test_palette, 96);
+    try std.testing.expect(test_end_draw_hr == null);
+    try std.testing.expect((try shared()).target != null);
+
+    // The strip painter has no retry of its own: the first paint fails with
+    // DeviceLost and the target is gone, the second one succeeds.
+    var layout: TabStrip.Layout = .{};
+    defer layout.deinit(std.testing.allocator);
+    try layout.compute(std.testing.allocator, TabStrip.Metrics.forDpi(96), width, .titlebar, true, 1, 0);
+    const in: Inputs = .{ .layout = &layout, .palette = test_palette, .dpi = 96 };
+    test_end_draw_hr = d2d1.D2DERR_RECREATE_TARGET;
+    try std.testing.expectError(error.DeviceLost, paintInto(dc, size, in));
+    try std.testing.expect((try shared()).target == null);
+    try paintInto(dc, size, in);
+    try std.testing.expect((try shared()).target != null);
 }

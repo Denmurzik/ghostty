@@ -1,14 +1,13 @@
-//! The "cols x rows" overlay shown while resizing: a small owned popup that
-//! never takes focus, painted with Direct2D and hidden by a window timer.
+//! The "cols x rows" overlay shown while resizing: a label popup of the
+//! overlay host (owned, never focused), painted with Direct2D and hidden by
+//! the host's timer.
 const std = @import("std");
 const win32 = @import("win32");
 const configpkg = @import("../../config.zig");
 const Surface = @import("Surface.zig");
 const Chrome = @import("Chrome.zig");
 const geom = @import("geom.zig");
-const messages = @import("messages.zig");
-const theme = @import("theme.zig");
-const util = @import("util.zig");
+const overlay = @import("overlay.zig");
 
 const user32 = win32.user32;
 
@@ -17,9 +16,6 @@ const log = std.log.scoped(.win32_resize_overlay);
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 const class_name = L("GhosttyResizeOverlay");
 
-/// `WM_MOUSEACTIVATE` result: do not activate, and eat the click.
-const ma_noactivate = 3;
-
 /// Sizes at 96 DPI, from macOS `SurfaceResizeOverlay`: 5 pt padding, 13 pt text, no margin to the edge.
 const margin_px = 0;
 const pad_x = 5;
@@ -27,7 +23,9 @@ const char_w = 8;
 const height_px = 26;
 
 pub const State = struct {
-    hwnd: ?win32.foundation.HWND = null,
+    /// The host popup; `popup_made` once it was set up.
+    popup: overlay.Popup = undefined,
+    popup_made: bool = false,
     /// Whether a size was already reported; `after-first` skips the first.
     armed: bool = false,
     /// The surface and grid of the last report, to ignore repeats.
@@ -37,8 +35,6 @@ pub const State = struct {
     /// What the popup paints, set when it is shown.
     text: [32]u16 = undefined,
     text_len: usize = 0,
-    dpi: u32 = 96,
-    pal: ?theme.Palette = null,
 };
 
 pub const Size = struct { w: i32, h: i32 };
@@ -111,135 +107,53 @@ fn show(surface: *Surface, state: *State, config: *const configpkg.Config, cols:
     const n = try std.unicode.utf8ToUtf16Le(&wide, text);
     @memcpy(state.text[0..n], wide[0..n]);
     state.text_len = n;
-    state.dpi = window.dpi;
 
-    state.pal = theme.palette(window);
-
-    const dpi = window.dpi;
-    const w = geom.scale(2 * pad_x + char_w * @as(i32, @intCast(n)), dpi);
-    const h = geom.scale(height_px, dpi);
-
-    var origin: win32.foundation.POINT = .{ .x = 0, .y = 0 };
-    _ = user32.ClientToScreen(surface.hwnd, &origin);
-    var client: win32.foundation.RECT = undefined;
-    _ = user32.GetClientRect(surface.hwnd, &client);
-    const rect = placement(
-        config.@"resize-overlay-position",
-        .{ .x = origin.x, .y = origin.y, .w = client.right - client.left, .h = client.bottom - client.top },
-        .{ .w = w, .h = h },
-        geom.scale(margin_px, dpi),
-    );
-
-    const hwnd = try ensureWindow(window, state);
-    _ = user32.SetWindowPos(
-        hwnd,
-        user32.HWND_TOPMOST,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        user32.SWP_NOACTIVATE | user32.SWP_SHOWWINDOW,
-    );
-    _ = user32.InvalidateRect(hwnd, null, 0);
+    if (!state.popup_made) {
+        state.popup = .{
+            .kind = .label,
+            .anchor = .surface_top_right,
+            .window = window,
+            .surface = surface,
+            .size = .{ .w = 0, .h = height_px },
+            .margin = margin_px,
+            .paint = paintPopup,
+            .place = placePopup,
+            .ctx = state,
+            .class = class_name,
+        };
+        state.popup_made = true;
+    }
+    const p = &state.popup;
+    // The surface may differ between reports (splits).
+    p.surface = surface;
+    p.size = .{ .w = 2 * pad_x + char_w * @as(i32, @intCast(n)), .h = height_px };
+    try p.show();
 
     const ms: u64 = @max(1, config.@"resize-overlay-duration".duration / std.time.ns_per_ms);
-    _ = user32.SetTimer(hwnd, messages.timers.resize_overlay.hide, @intCast(@min(ms, std.math.maxInt(u32))), null);
+    p.hideAfter(@intCast(@min(ms, std.math.maxInt(u32))));
 }
 
-fn ensureWindow(window: anytype, state: *State) !win32.foundation.HWND {
-    if (state.hwnd) |h| return h;
-
-    try util.registerClass(&.{
-        .style = user32.CS_HREDRAW | user32.CS_VREDRAW,
-        .lpfnWndProc = wndProc,
-        .hInstance = window.app.hinstance,
-        .hCursor = user32.LoadCursorW(null, user32.IDC_ARROW),
-        .lpszClassName = class_name,
-    });
-
-    const hwnd = user32.CreateWindowExW(
-        user32.WS_EX_NOACTIVATE | user32.WS_EX_TOOLWINDOW,
-        class_name,
-        L(""),
-        user32.WS_POPUP,
-        0,
-        0,
-        1,
-        1,
-        window.hwnd,
-        null,
-        window.app.hinstance,
-        null,
-    ) orelse {
-        log.warn("CreateWindowExW failed err={}", .{win32.kernel32.GetLastError()});
-        return error.CreateWindowFailed;
-    };
-    util.setUserData(hwnd, state);
-
-    // Rounded corners of the popup, where the system draws them.
-    const pref: i32 = win32.dwmapi.DWMWCP_ROUNDSMALL;
-    _ = win32.dwmapi.DwmSetWindowAttribute(
-        hwnd,
-        win32.dwmapi.DWMWA_WINDOW_CORNER_PREFERENCE,
-        &pref,
-        @sizeOf(i32),
+fn placePopup(p: *overlay.Popup, surface: geom.Rect, size_px: overlay.Size) geom.Rect {
+    const config = &p.window.app.config;
+    return placement(
+        config.@"resize-overlay-position",
+        surface,
+        .{ .w = size_px.w, .h = size_px.h },
+        geom.scale(margin_px, p.window.dpi),
     );
+}
 
-    state.hwnd = hwnd;
-    return hwnd;
+fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
+    const state: *const State = @ptrCast(@alignCast(p.ctx orelse return));
+    Chrome.paintLabel(ctx.hdc, ctx.rect, state.text[0..state.text_len], ctx.palette, ctx.dpi) catch |err| {
+        log.warn("unable to paint the resize overlay err={}", .{err});
+    };
 }
 
 pub fn deinit(state: *State) void {
-    if (state.hwnd) |h| {
-        // Owned popups die with their owner; this is for an explicit teardown.
-        util.setUserData(h, null);
-        _ = user32.DestroyWindow(h);
-    }
-    state.hwnd = null;
-}
-
-fn paint(hwnd: win32.foundation.HWND, state: *const State) void {
-    var ps: user32.PAINTSTRUCT = undefined;
-    const hdc = user32.BeginPaint(hwnd, &ps) orelse return;
-    defer _ = user32.EndPaint(hwnd, &ps);
-    paintInto(hwnd, hdc, state) catch |err| log.warn("unable to paint the resize overlay err={}", .{err});
-}
-
-fn paintInto(hwnd: win32.foundation.HWND, hdc: user32.HDC, state: *const State) !void {
-    var rc: win32.foundation.RECT = undefined;
-    _ = user32.GetClientRect(hwnd, &rc);
-    const pal = state.pal orelse return;
-    try Chrome.paintLabel(hdc, geom.Rect.fromRECT(rc), state.text[0..state.text_len], pal, state.dpi);
-}
-
-fn wndProc(
-    hwnd: win32.foundation.HWND,
-    msg: u32,
-    wparam: win32.foundation.WPARAM,
-    lparam: win32.foundation.LPARAM,
-) callconv(.winapi) win32.foundation.LRESULT {
-    switch (msg) {
-        user32.WM_MOUSEACTIVATE => return ma_noactivate,
-        user32.WM_NCHITTEST => return user32.HTTRANSPARENT,
-        user32.WM_ERASEBKGND => return 1,
-        user32.WM_PAINT => {
-            if (util.fromUserData(State, hwnd)) |state| {
-                paint(hwnd, state);
-                return 0;
-            }
-        },
-        user32.WM_TIMER => if (wparam == messages.timers.resize_overlay.hide) {
-            _ = user32.KillTimer(hwnd, messages.timers.resize_overlay.hide);
-            _ = user32.ShowWindow(hwnd, user32.SW_HIDE);
-            return 0;
-        },
-        user32.WM_NCDESTROY => {
-            if (util.fromUserData(State, hwnd)) |state| state.hwnd = null;
-            util.setUserData(hwnd, null);
-        },
-        else => {},
-    }
-    return user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+    // Owned popups die with their owner; this is for an explicit teardown.
+    if (state.popup_made) state.popup.destroy();
+    state.popup_made = false;
 }
 
 test "win32 overlay: placement for each position" {
