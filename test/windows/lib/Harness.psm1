@@ -328,7 +328,11 @@ function Stop-OwnGhostty {
     foreach ($id in $script:OwnPids) {
         $p = Get-Process -Id $id -ErrorAction SilentlyContinue
         if ($null -eq $p -or $p.ProcessName -notlike 'ghostty*') { continue }
-        & taskkill.exe /PID $id /T /F 2>&1 | Out-Null
+        # taskkill reports a child that exited meanwhile ("could not be terminated") on stderr; under
+        # ErrorActionPreference=Stop the 2>&1 redirection would turn that into a terminating error.
+        $ea = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & taskkill.exe /PID $id /T /F 2>&1 | Out-Null } finally { $ErrorActionPreference = $ea }
     }
     $script:OwnPids.Clear()
 }

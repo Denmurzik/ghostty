@@ -304,6 +304,34 @@ powershell -NoProfile -File test/windows/vt-smoke/selftest.ps1      # Compare-Im
 `lib/ImageCompare.psm1` (`Compare-Image -Actual -Reference [-Tolerance 24]
 [-MinMatch 0.995]`) is the per-channel image comparison.
 
+## M3 scenarios and owner-safety additions
+
+`e2e.ps1 -Milestone M3` (orders 395..900): `chrome-macos`, `chrome-proxy-icon`, `scrollbar` (overlay scroller),
+`split-dim`, `bell-border`, `custom-shader`, `overlay-follow`, `font-fallback`, `hotkey-global`, `toggle-visibility`,
+`link-hover-open`, `status-overlays` (key-state label, read-only badge, copy toast), `search`, `palette`,
+`quick-terminal`, `notifications`, `inspector`, `config-errors`, `export-io`, `transparency`, `opacity-blur`,
+`chrome-transparency`, `tab-menu`, `drop-text`, `pwd-osc7`, `device-recover` (Debug exe, SKIP otherwise; the
+`opacity` variant through `GHOSTTY_E2E_VARIANT=opacity`), `vt-smoke` (order 700) and `m3-shots` (order 900, the
+acceptance screenshot set). The test IPC (`lib/GhosttyIpc.psm1`) `state` answer carries an `m3` object (overlay, decor, notify, quick, search,
+palette, composition, hotkeys, health, opened, inspector, export_io, config_errors) that these scenarios read.
+
+- `m3-shots`: one PNG per feature into the evidence dir (`m3-search-bar`, `m3-palette-open`, `m3-palette-filtered`,
+  `m3-key-state`, `m3-readonly-badge`, `m3-link-label`, `m3-quick-top`, `m3-quick-bottom`, `m3-inspector`,
+  `m3-health-bar` (Debug only), `m3-split-dim`, `m3-bell-border`, `m3-custom-shader`) plus `m3-shots-results.txt`.
+  Every shot is a `Save-WindowShot` crop of one Ghostty window; a phase that meets a foreign window is recorded as
+  SKIP and the others go on. The transparency shots over the magenta/striped backdrop come from `transparency` and
+  `opacity-blur` (`*-screen.png`). Run it through `e2e.ps1 -Only m3-shots -EvidenceDir <dir>`.
+- Owner safety: every screen capture goes through `Get-ScreenShot` / `Save-WindowShot` (`e2e/_common.ps1`). They check
+  the exact z-order and a `WindowFromPoint` grid over the capture rect and, when a window that is not ours is there,
+  retry three times and then throw `E2E-SKIP: desktop busy`; nothing is saved. Images are cropped to the Ghostty window
+  (a margin only over a scenario's own backdrop). `Save-Evidence -Window` uses PrintWindow of the Ghostty HWND (it does
+  not show owned popups). Never add a capture that bypasses these, and delete any image that shows anything but Ghostty
+  or the test backdrops.
+- Known flake: Git Bash loses the first byte typed after its pty resized or after a tab switch (cmd.exe does not), so
+  scenarios that type right after such a change re-send (`background-focus`, `device-recover`).
+- RAM rows of the M3 features: `measure-ram.ps1 -Tag m3-<feature> [-ExtraConfig ...] [-Actions ...] [-Sample ...]` (see
+  the section below); the acceptance numbers and method are in `docs/windows/m3/acceptance.md`.
+
 ## Latency probes: options
 
 `input-latency.ps1` takes `-ExtraConfig "k = v;k = v"` (config lines appended to

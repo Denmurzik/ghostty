@@ -204,6 +204,13 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   `Present`; `SetFullscreenState` is never called. `ResizeBuffers` and all presents happen on the render thread; the
   UI thread never calls into DXGI. M1 e2e has a live-resize-while-streaming hang watchdog (acceptance timing on a
   ReleaseFast build, see `test/windows/README.md`).
+- **Exception (M3, R-M3-4):** the inspector's own swap chain. The imgui inspector window is a separate top-level
+  `GhosttyInspector` window per surface; it draws on the UI thread from a 30 Hz timer (only while open, visible and not
+  iconic) with the shared device under `Device.lockContext` and owns a UI-thread swap chain (created, resized, presented
+  and released there, `ClearState` after its draw). It is the only place where the UI thread calls DXGI; it never touches
+  a surface's chain. A composition (DComp) swap chain of a terminal surface is created on the render thread and handed to
+  the UI thread as an AddRef'd pointer in a posted message (`composition.zig`), the UI thread only attaches it to the
+  window's DComp target (§18.21, §18.32).
 - Teardown order: `Surface.destroy` = `core_surface.deinit()` (joins render + IO threads, releases the swap chain) →
   `DestroyWindow(child)` → free; `Window.destroy` destroys its surfaces before its own HWND. The surface WndProc ignores
   core callbacks until `initialized` is set (`WM_SIZE` arrives inside `CreateWindowExW`, before `core_surface.init`).
@@ -222,10 +229,24 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   `-DSPIRV_CROSS_C_API_HLSL=1`), `shadertoy.Target.hlsl`, `hlslFromSpv` with SM 5.0, bindings `b1`/`t0`/`s0`, compiled with
   `ps_5_0` against the builtin `full_screen` VS [renderer §3].
 
-### 6.6 Later renderer work
-M3: composition swap chain + DComp (per-surface target on the child HWND, premultiplied alpha, visuals for overlays),
-`background-opacity`/`background-blur` (Mica/Acrylic on the top-level + transparent surfaces), device-loss recovery,
-imgui inspector (`imgui_impl_win32` + `imgui_impl_dx11` in `pkg/dcimgui`), bg image + Kitty images verified on D3D11.
+### 6.6 M3 renderer work (done) and what remains
+M3 shipped (amended by the rulings of §18, R-M3-1..12):
+- **Composition swap chain** only when transparency is configured (`background-opacity < 1` or `background-blur` not
+  `false`): a premultiplied-alpha `CreateSwapChainForComposition` chain per surface, attached to one DComp target on
+  the window (R-M3-2, §18.21, §18.32); otherwise the surface stays in `hwnd` mode. Overlays are **not** DComp visuals (this
+  amends the earlier "visuals for overlays" plan): text overlays are owned `WS_POPUP` windows (§7.5, R-M3-1), and the
+  unfocused-split dimming and the bell border are drawn by the D3D11 backend on the frame target before present
+  (`Decor.zig` / `decor.hlsl`, driven by a per-surface atomic word, skipped at word 0).
+- `background-opacity`/`background-blur`: Acrylic (`DWMSBT_TRANSIENTWINDOW`) for the whole window over a transparent
+  client (R-M3-3, §18.22).
+- Custom shaders: GLSL (shadertoy) to SPIR-V to HLSL (SPIRV-Cross), `ps_5_0`; the post passes read/write UNORM views so a
+  shader sees the same raw framebuffer values as on OpenGL/Metal (Task 7.1). A failing post shader disables all custom
+  shaders (as Metal/OpenGL do).
+- Device-loss recovery (R-M3-10) and the renderer-health bar; background and Kitty image textures are dropped and
+  re-uploaded on a device generation change (platform-neutral hook in `generic.zig`/`image.zig`).
+- imgui inspector (`imgui_impl_win32` + `imgui_impl_dx11` in `pkg/dcimgui`, R-M3-4); background image verified on D3D11
+  (`vt-smoke/bg-image`).
+- Kitty graphics could not be verified end to end: the inbox ConPTY drops APC sequences (§18.33).
 
 ## 7. Apprt `src/apprt/win32`
 
@@ -301,6 +322,17 @@ Mouse (`mouse.zig`): client px → `cursorPosCallback`; buttons L/R/M/X1/X2 with
 - Tab strip + overlays rendered by Direct2D/DirectWrite into the top-level window (`Chrome.zig`); first M2 task is a spike
   proving Mica + child-HWND swap chains + D2D chrome coexist (risk R9).
 - M1 has no custom chrome: standard captioned window with immersive dark mode attribute only.
+- **Overlays (M3, R-M3-1, amends the "DComp overlay visuals" plan of §17):** every overlay is an owned `WS_POPUP`
+  (`overlay.zig` host; they follow move/resize/maximize/DPI/minimize/tab switch and tab tear-off): search bar, command
+  palette, resize overlay, link label, key-state label, read-only badge, copy toast, health bar, drop highlight is not drawn
+  (macOS has none). They paint with the shared Direct2D painter API of `Chrome.zig` and the macOS look (§18.20, DECISIONS
+  style rule). Child windows above a flip-model child swap chain hit the airspace problem, DComp visuals are not used.
+  Only the search bar and the palette take focus; a popup that needs the owner to look active keeps it so.
+- **Window chrome after the owner's macOS redesign (M3 Task 29, DECISIONS 2026-10-27):** a title row (focused surface
+  title and a shell-icon proxy for its pwd, centred; Windows caption buttons on the right) and a tab row below it, shown
+  with two or more tabs (`window-show-tab-bar`), equal-width tabs with the `goto_tab` shortcut and a hover close button,
+  macOS animations, inactive-window dimming. The translucent window is frosted (Acrylic) and stays frosted while
+  inactive (`WM_NCACTIVATE(FALSE)` is swallowed except with `window-decoration = server`, §18.22).
 
 ### 7.6 Dialogs
 M1: `MessageBoxW` (OK/Cancel) for close confirmation, unsafe paste and OSC 52 — no struct-packing risk. M2: `TaskDialogIndirect`
@@ -487,6 +519,14 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | close 10 extra surfaces, wait 30 s | back within +10% of the pre-open value | M2: +18.0 % and +14.1 % (81.2 / 78.5 vs 68.8 MB): **over, owner decision** (a 16-pane cycle leaves about +80 MB, pre-existing) |
 | 0 windows, resident in the notification area (§18.15) | recorded | M2: 63.1 MB private (recorded, not gated) |
 | tmux.exe per invocation | ≤ 5 MB, ≤ 100 ms wall | M4 |
+| M3 (2026-10-28, ReleaseFast, Arc iGPU, 96 dpi, default window 1388x751): 1 window 1 surface | M2 row + 1 MB | 64.5 / 64.5 MB (M2: 69.1): met |
+| M3 DirectWrite discovery (`font-family = Consolas`, CJK printed) | `font-consolas-m1` row + 2 MB | 66.5 MB (m1 69.7 at 175 %; same-day one-surface 64.5, +2.0): met |
+| M3 custom shader (1 shader, invert) | +2 x target bytes + 4 MB | +13.6 MB at 1388x751 (gate +12.3), +21.5 MB maximised 1872x1050 (gate +19.7): **over by 1.3 / 1.8 MB, owner decision** |
+| M3 composition mode (`background-opacity = 0.9`) | first surface +3 MB, each extra +0.5 MB | first +0.4 MB, extra -0.15 MB per surface: met |
+| M3 overlays (search + command palette, each opened once; link label not driven) | +1 MB total | +2.1 MB (search +1.1, palette +1.0; stays after close): **over by 1.1 MB, owner decision** |
+| M3 inspector open on 1 surface | +25 MB open; within +2 MB 30 s after close | +3.5 MB open (met); +3.6 MB 30 s after close: **over the +2 MB return rule by 1.6 MB, owner decision** |
+| M3 quick terminal | 0 before the first toggle, then one surface's cost | 64.3 before (0); +10.1 MB after the first toggle (one tab/split costs +5.7/+6.0, an extra window +17.7): **over a surface's cost, owner decision** |
+| M3 first toast (WinRT DLLs) | +4 MB | deferred: owner-approval-gated (HKCU AUMID key) |
 Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit` (user),
 `EmptyWorkingSet` is NOT used (it only hides private bytes).
 
@@ -580,13 +620,19 @@ removed (macOS has none); the native always-visible scrollbar stays an interim, 
 look polish is an M3 task; full recovery after a GPU device loss is M3 (§18.19); the Git Bash cwd inheritance waits for M5 OSC 7 translation; tab
 context menu and tab tooltips are M3; the +80 MB after a 16-pane open/close cycle is accepted as pre-existing and flagged for M3 RAM work.
 
-**M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
-AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),
-inspector (imgui win32+dx11), config-errors dialog, custom shaders (HLSL via SPIRV-Cross), Kitty graphics
-and background image verified, transparency + blur (DComp composition swap chains), DirectWrite discovery/fallback,
-device-loss recovery + renderer-health bar, key-sequence/table indicator, export-terminal-io save dialog, vt-smoke
-screenshots; from M2: unfocused-split dimming and `bell-features = border` (DComp overlay visuals), readonly badge,
-`toggle_visibility` (with global hotkeys), `toggle_background_opacity`. Exit: feature checklist (one line per cross-platform feature) all green with a test or screenshot each.
+**M3 (done, accepted with concerns: `docs/windows/m3/acceptance.md`; commit `docs(windows): M3 acceptance — RAM, latency, screenshots, feature checklist`) — feature parity.**
+Quick terminal (`RegisterHotKey`, slide, owned tool window), global keybinds, command palette, search bar,
+notifications (WinRT toasts, AUMID self-registered under HKCU, R-M3-5), URL hover/open with untrusted-URL validation
+(R-M3-8), inspector (imgui win32 + dx11), config-errors dialog, export-terminal-io save dialog, custom shaders (GLSL to
+HLSL via SPIRV-Cross), background image, transparency + blur (composition swap chains, Acrylic), DirectWrite discovery
+and fallback, device-loss recovery with the renderer-health bar, key-sequence/table indicator, read-only badge,
+unfocused-split dimming and `bell-features = border` (decor pass), `toggle_visibility`, `toggle_background_opacity`,
+tab context menu and tooltip, text drops, overlay scrollbar, the owner's macOS-style chrome redesign (title row, tab
+row, proxy icon), OSC 7 path translation (pulled forward from M5), vt-smoke screenshots and the feature checklist
+(`docs/windows/feature-checklist.md`). Exit: the checklist is closed except the recorded gaps (Kitty graphics and SGR 58
+underline colour: the inbox ConPTY drops them, §18.33; ligatures, Kitty keyboard end to end, IME: owner checks); RAM and
+latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the numbers over budget and the open
+Git Bash input-loss item are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
 
 **M4 — tmux shim + IPC + Claude Code e2e.** `tmux.exe`, IPC server, registry, all §12 semantics, DCS tmux unwrap,
 `SplitTree.replace`, PATH prepend + TMUX/TMUX_PANE in every surface. Exit: replay test green; real Claude Code agent-team
@@ -689,3 +735,128 @@ Rulings for M2 (architect-m2, 2026-10-26; lead/owner may overturn):
 19. M2 Task 39: the shared D3D11 device has a generation; after `DEVICE_REMOVED/RESET` new surfaces get a fresh device and
     the lost one is freed with its last renderer; a resident process with a lost device and no window quits. Existing
     surfaces stay blank until closed; full recovery and the renderer-health bar remain M3.
+
+Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here by Task 27):
+
+20. R-M3-1, overlays = owned popups, pixel effects = decor pass (amends §17 "DComp overlay visuals" and §6.6). Text overlays
+    are owned `WS_POPUP`s (proven by M2's resize overlay; child windows above a flip-model child swap chain hit the airspace
+    problem). Unfocused-split dimming and the bell border are drawn by the D3D11 backend on the frame target before
+    present, driven by a per-surface atomic word, skipped at word 0. The bell border clears on key-down and on focus-in
+    like macOS (a flag check on the existing hooks, no new call on the key path). Task 11 owns the shared Direct2D painter API
+    in `Chrome.zig` that the overlays (search, palette, labels) use to match the macOS look. Cost if wrong: a later switch
+    to DComp visuals for the two effects, local to `Decor.zig`/`decor.zig`.
+21. R-M3-2, composition mode only for transparency. A surface's swap chain is `hwnd` mode unless `background-opacity < 1`
+    or `background-blur` is not `false`; a config reload switches modes through the M2 present-target generation (chain
+    recreated on the render thread, the old chain kept until the new one presented). Whether a window can be translucent is
+    decided at creation: a window shown opaque (or that showed an `hwnd` chain) stays opaque after a reload to a translucent
+    config (restart needed, like macOS) and `toggle_background_opacity` on it is a no-op returning false; a window born
+    translucent goes solid at `background-opacity = 1` and back without a restart. `toggle_background_opacity` never
+    switches modes: it makes the backdrop layer opaque. Task 14 hands the chain to the UI thread in a posted message
+    (DComp objects are touched on the UI thread only) and retires the `hwnd` chain after the first composition present;
+    a minimised window is throttled through core visibility. Cost if wrong: transparency costs RAM/latency for everyone
+    (if always-on) or one mode switch per toggle.
+22. R-M3-3, backdrop with transparency (as built, Task 8 spike + Tasks 15a/15b). The window is translucent through
+    `DwmEnableBlurBehindWindow` with an empty region and a child class `hbrBackground = BLACK_BRUSH` (never
+    `DwmExtendFrameIntoClientArea(-1)` + `DWMSBT_NONE`, which stays opaque black); with `background-blur` (default true when
+    `background-opacity < 1`) the whole window uses Acrylic (`DWMSBT_TRANSIENTWINDOW`). The owner requires the blur to stay
+    when the window is inactive, so `WM_NCACTIVATE(FALSE)` is swallowed for those windows (without it Acrylic goes
+    solid), except with `window-decoration = server` (the native caption must show inactive); accepted side effects: the
+    owner of a MessageBox and a second Acrylic window are drawn active too. Chrome paints with the same alpha and draws its own
+    caption buttons (the blur variant has no DWM ones). The renderer premultiplies in sRGB space like DWM blends, only the
+    background layers (not text or cursor). Radius values are ignored (DWM has no radius). High contrast and "Transparency
+    effects" off turn the effect off (an owner check; the off-state is not machine-tested). Capture-based tests use the screen
+    rect (PrintWindow does not see the backdrop). Cost if wrong: one backdrop constant.
+23. R-M3-4, inspector uses the shared device under `Device.lockContext`, rendered on the UI thread from a 30 Hz timer while
+    its window is open, visible and not iconic, plus a hook in the wakeup handler guarded by an open-inspector count (core
+    does not wake the app on pty output or keys); `render_inspector` only sets a dirty flag. It is a separate top-level
+    `GhosttyInspector` window per surface, created on the first `inspector` action. `imgui_impl_dx11.cpp` is compiled
+    with `-DD3DCompile=ghostty_imgui_D3DCompile` (forwards to the System32-loaded pointer of `pkg/win32/d3dcompiler.zig`);
+    `imgui_impl_win32.cpp` with `-DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD`; `ghostty.exe` imports neither `d3dcompiler_47.dll`
+    nor `xinput*`. This UI-thread swap chain is the one exception to §6.4. Known: a GPU busy for more than 50 ms can make
+    one inspector `Present` wait under the context lock. Cost if wrong: an own device for the inspector.
+24. R-M3-5, toasts via WinRT, no COM activator. AUMID `com.mitchellh.ghostty.windows-unofficial` (Debug builds `...-debug`),
+    self-registered under `HKCU\Software\Classes\AppUserModelId\<AUMID>` (`DisplayName` "Ghostty - Unofficial Windows
+    port", `IconUri` = `%LOCALAPPDATA%\ghostty\toast-icon.png` written from `images/icons/icon_128.png`) on the first
+    notification; `SetCurrentProcessExplicitAppUserModelID` at start, which ungroups taskbar pins made with M1/M2 builds
+    (changelog). A click runs the `Activated` delegate (pool thread, only posts) and presents that surface while Ghostty
+    runs (it always runs: tray); a toast clicked in the Action Center after Ghostty exited does nothing (no `ToastActivator`
+    CLSID). Title and body are XML-escaped with control characters stripped. If WinRT fails: `FlashWindowEx` plus one
+    warning. The key and the icon file persist after uninstall (documented). Cost if wrong: a COM activator server (M5).
+25. R-M3-6, quick terminal = a `Window` of kind `.quick`: `WS_POPUP`, `WS_EX_TOOLWINDOW`, topmost while shown, decorations
+    none, strip `tabs_only` only with 2 or more tabs, size/position/screen from `quick-terminal-*`, slide by `SetWindowPos`
+    frames on a timer with a `SetWindowRgn` clip (monitor and DPI fixed for the animation), not user-resizable in v1,
+    hidden on toggle (not destroyed), destroyed when its last surface closes. It is excluded from `goto_window`, the tray's
+    last-active window and, while hidden, from the `quit-after-last-window-closed` count; a shown quick terminal counts
+    as a window (killing a visible terminal's shell is the worse failure; macOS may quit there). Auto-hide ignores the
+    own panel's deactivation. `quick-terminal-keyboard-interactivity` and `-space-behavior` are ignored on Windows.
+    `+toggle-quick-terminal` now parses its options (`--class=`), which also fixes GTK (an upstreamable change). Cost if
+    wrong: a process that stays alive while only the quick terminal is visible.
+26. R-M3-7, global keybinds (`global:`) = `RegisterHotKey` on the message-only window, `MOD_NOREPEAT`; activation runs the
+    bound action through `core_app.performAllAction`; a chord owned by another app logs one warning; re-registered on
+    config change, not on keyboard-layout change (documented gap); no low-level hook.
+27. R-M3-8, `open_url` policy (extends M2 Task 34.4). `text`/`html` (from Ghostty) open directly; `unknown`/`osc8` (terminal
+    output) are validated: `http`, `https`, `mailto`, `ftp` open; `file:` URLs are percent-decoded once, bare paths
+    resolved against the surface's pwd (`/c/x` to `C:\x`, `~`, relative), then `GetFullPathNameW`; refused: ADS (`:`
+    after the drive), `\\?\` / `\\.\` prefixes, UNC, DOS device names, and drives that are not fixed or removable. Existing
+    local files open, except that (after stripping trailing dots and spaces, and checking the 8.3 short name) an
+    executable/script/container type or any type for which `AssocIsDangerous` is true is revealed in Explorer instead of run;
+    a missing path is refused; any other scheme asks first (TaskDialog); more than 2048 bytes or any C0/C1 control is
+    refused. Validation and execution run on one lazy STA worker (queue up to 8, `SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI`) so a dead
+    network drive never blocks the UI thread; `link.open` returns true for every verdict. Cost if wrong: a confirmation or
+    reveal where a direct open was expected.
+28. R-M3-9, DirectWrite for discovery only (Task 5): rasterisation stays FreeType + HarfBuzz; `src/font/directwrite.zig` does
+    family and fallback discovery (`MapCharacters`, plus a walk over installed faces for codepoints it does not map), the M1
+    index stays as the fallback when no DWrite factory can be created; emoji presentation is not routed to DirectWrite
+    (Segoe UI Emoji is COLRv1, FreeType cannot colour it: the embedded Noto Color Emoji stays). A codepoint missing from every
+    font costs one walk (1-74 ms Debug, cold DWrite), then `SharedGrid` caches the miss. `+list-fonts` printed NUL-interleaved
+    UTF-16 names on Windows (M1 bug): fixed in core `freetype Face.name` (upstream candidate).
+29. R-M3-10, device-loss recovery. A renderer that sees `DEVICE_REMOVED/RESET` marks its generation lost and reports
+    `unhealthy`; the apprt shows the health bar and, 250 ms after the first report, calls `displayUnrealized()` +
+    `displayRealized()` for every surface on a lost generation; the backend re-acquires the device on the next frame; image
+    textures (Kitty images, background image) are dropped and re-uploaded on a generation change; custom shaders are disabled
+    after a loss (logged once). Three failed recoveries within 60 s switch acquisition to WARP. M2 Task 39's "resident
+    process quits when the device is lost" is removed. The e2e `device-recover` uses an SGR 48;2 cell block as its
+    marker, not a Kitty image (§18.33). Residual: a surface that is hidden and unhealthy mid-recovery may show the default
+    health text; `markUnhealthy` pushes `.forever` under `draw_mutex` (deadlocks only on a full mailbox).
+30. R-M3-11, `docs/windows/feature-checklist.md` (one line per cross-platform feature: milestone, evidence, status) is the M3
+    exit artefact and feeds the v1.0 gate.
+31. R-M3-12, text drops go through core's paste path (`completeClipboardRequest` with a `.paste` request), so bracketed
+    paste and the unsafe-paste confirmation apply as for Ctrl+V (M2 §18.17 text drops).
+32. Task 8 spike verdict (`test/windows/composition-spike/RESULT.md`): (a) a DComp child target with a worker-thread
+    composition swap chain works; (b) a transparent client works only via `DwmEnableBlurBehindWindow` (empty region) with
+    the child erasing with a black brush, `DwmExtendFrameIntoClientArea(-1)` + `DWMSBT_NONE` stays opaque black; (c) Acrylic
+    works with "Transparency effects" on; (d) works; (e) the target survives `SetParent`, a second target on the same HWND fails
+    `0x88980800` (release the old one first); (f) PrintWindow misses the backdrop, use screen capture; (g) pacing is unchanged
+    (about 8.1 ms); (h) the DComp device costs 0.07-0.20 MB (one null-device DComp device per process); (i) a minimised
+    composition chain keeps presenting (90-120 fps, never occluded), so the renderer throttles itself on `IsIconic`; (j) hwnd and
+    composition switch cleanly; (k) `ALLOW_TEARING` is accepted (creation and present flags in lockstep); (l) the DComp
+    device survives D3D device recreation. DPI was simulated; one GPU and one monitor.
+33. L1, ConPTY ruling (M3 Task 28 probe, `test/windows/conpty-probe/RESULT.md`). The inbox conhost with default flags
+    delivers OSC 9, 777, 133, 8 and 22 to the terminal; it drops Kitty graphics APC sequences and mangles SGR 58 (underline
+    colour); `PSEUDOCONSOLE_PASSTHROUGH_MODE` (flag 8) arrives identical for the probed sequences and does not rescue the APC.
+    No default-flag change (Task 28.1 is not scheduled). Kitty graphics and SGR 58 underline colour are therefore
+    **owner-approved provisional gaps** (the vt-smoke cases `kitty-image` and `underline-colors` SKIP and carry no reference)
+    until a newer `conpty.dll` + OpenConsole is bundled (an owner question: needs a download approval, selectable with
+    `GHOSTTY_WIN32_CONPTY_DLL`). Not gating: with flag 8 a Debug run showed key-echo whole-path p95 18.8 ms against 50 ms with flag 0.
+34. Execution rulings of M3 (lead, recorded for the owner):
+    - Task 7: a failing custom post shader drops all custom shaders (as Metal/OpenGL do); `generic.zig` `has_custom_shaders`
+      requires `post_pipelines.len > 0` (also fixes a latent Metal/OpenGL bug: candidate upstream PR). Task 7.1: shader passes
+      use UNORM views (gamma space), animation draws are paced on the frame slot.
+    - Task 15a: composition hosting (Surface/Tab) and the persistent blur backdrop; 15b: chrome painted with the same alpha
+      (sRGB premultiply of background layers only). Task 9: `theme.windowActive` helper and a pending-activation flag with 1 s
+      expiry for owned popups.
+    - Task 29 (chrome redesign): the title area and tab row follow Ghostty for macOS (DECISIONS 2026-10-27). Task 29.1: OSC 7
+      is translated to a local drive path in core `reportPwd` on Windows only; UNC paths are not supported (untrusted OSC 7
+      could make the next tab or a link open contact an SMB share, an NTLM hash leak); any program may set a local-drive cwd for
+      the next tab (upstream parity); Git Bash integration emits OSC 7 from the builtin `pwd -W`, recomputed only when `PWD` changes.
+    - Owner decision (readline `bell-style visible` in Git for Windows' `/etc/inputrc` flashed the window on backspace at an
+      empty prompt): bash integration on MSYS sets `bell-style audible` unless the user's inputrc sets a bell style.
+    - Task 25.1: the scrollbar is an overlay scroller like macOS (AppKit numbers approximate); an empty-track click is swallowed
+      (avoids a stray selection under a closing popup); no track-click autorepeat.
+    - Test harness (privacy): every screen capture goes through `Get-ScreenShot` / `Save-WindowShot`, which check the exact
+      z-order and a `WindowFromPoint` grid and skip (E2E-SKIP, nothing saved) when a window that is not ours is in the
+      capture area; images are cropped to the Ghostty window (a margin only over the scenario's own backdrop).
+    - Task 26: `vt-smoke` references are keyed by display scale (`ref/<case>@<dpi>.png`, a missing DPI is a SKIP);
+      `background-focus` retries an exit line lost by Git Bash. Open: see the known issue below.
+    - Known issue (pending the Task 26.4 verdict): Git Bash can lose the first byte typed after its pty was resized or after a
+      tab switch (3-5 of 5 probes, cmd.exe 0 of 5). Not fixed in M3; see the changelog.
