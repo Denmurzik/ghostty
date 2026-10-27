@@ -22,6 +22,9 @@ const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const overlay = @import("overlay.zig");
 const theme = @import("theme.zig");
+const renderer = @import("../../renderer.zig");
+const configpkg = @import("../../config.zig");
+const App = @import("App.zig");
 
 const log = std.log.scoped(.win32_scrollbar);
 
@@ -176,15 +179,52 @@ pub fn update(surface: *Surface, value: terminal.Scrollbar) bool {
     return true;
 }
 
+/// What a reloaded `scrollbar` setting does to a live surface.
+pub const Reconfig = enum { none, enable, disable };
+
+pub fn reconfig(was_enabled: bool, now_enabled: bool) Reconfig {
+    if (was_enabled == now_enabled) return .none;
+    return if (now_enabled) .enable else .disable;
+}
+
+/// `scrollbar` changed in the config: `never` takes the scroller away from
+/// the live surfaces, `system` allows it again from the next scroll on.
+pub fn configChanged(app: *App, config: *const configpkg.Config) void {
+    const now = config.scrollbar == .system;
+    for (app.windows.items) |window| {
+        for (window.tabs.items) |tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |e| setEnabled(e.view, now);
+        }
+    }
+}
+
+fn setEnabled(surface: *Surface, now: bool) void {
+    const state = &surface.scrollbar;
+    switch (reconfig(state.enabled, now)) {
+        .none => {},
+        .enable => state.enabled = true,
+        .disable => {
+            state.enabled = false;
+            if (state.dragging) {
+                _ = user32.ReleaseCapture();
+                state.dragging = false;
+            }
+            if (state.popup_made and state.popup.visible) hide(state);
+        },
+    }
+}
+
 /// The pointer moved over the surface at client `x`. Reaching the strip
 /// shows the scroller, as hovering the gutter does on macOS. Costs a few
 /// compares when nothing scrolls.
 pub fn pointerMoved(surface: *Surface, x: i32, button_down: bool) void {
     const state = &surface.scrollbar;
     if (!state.enabled or button_down or state.total <= state.len) return;
-    var rc: win32.foundation.RECT = undefined;
-    if (user32.GetClientRect(surface.hwnd, &rc) == 0) return;
-    if (x < rc.right - geom.scale(strip_w, surface.window.dpi)) return;
+    // `Surface.size` is kept by WM_SIZE: no syscall per mouse move.
+    const width: i32 = @intCast(renderer.D3D11.unpackSize(surface.size.load(.acquire)).width);
+    if (width == 0) return;
+    if (x < width - geom.scale(strip_w, surface.window.dpi)) return;
     flash(surface);
 }
 
@@ -374,6 +414,10 @@ fn onMessage(p: *overlay.Popup, msg: u32, wparam: win32.foundation.WPARAM, lpara
 
         user32.WM_LBUTTONDOWN => {
             const y = user32.getYLparam(lparam);
+            // No knob: the scrollback shrank to one screen mid-click and the
+            // popup is about to hide. The click is swallowed on purpose; passing
+            // it on would mean mapping it to the surface under a closing popup
+            // and could start a selection the user never aimed at.
             const knob = currentKnob(surface) orelse return 0;
             if (pageRow(state.*, knob, y)) |row| {
                 scrollTo(surface, row);
@@ -492,6 +536,14 @@ test "win32 scrollbar: a click on the track pages toward it" {
     try t.expectEqual(@as(?u64, 0), pageRow(near_top, .{ .y = 20, .h = 40 }, 5));
     const near_end = sb(300, 270, 24);
     try t.expectEqual(@as(?u64, 276), pageRow(near_end, .{ .y = 500, .h = 40 }, 590));
+}
+
+test "win32 scrollbar: a config reload enables or disables the scroller" {
+    const t = std.testing;
+    try t.expectEqual(Reconfig.none, reconfig(true, true));
+    try t.expectEqual(Reconfig.none, reconfig(false, false));
+    try t.expectEqual(Reconfig.disable, reconfig(true, false));
+    try t.expectEqual(Reconfig.enable, reconfig(false, true));
 }
 
 test "win32 scrollbar: strip sits on the right edge and fades out" {

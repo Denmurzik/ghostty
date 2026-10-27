@@ -16,6 +16,7 @@ const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const hooks = @import("hooks.zig");
 const messages = @import("messages.zig");
+const scrollbar = @import("scrollbar.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
 
@@ -450,8 +451,7 @@ fn wndProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winap
 // -- Hooks -----------------------------------------------------------------------
 
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
-    _ = app;
-    _ = config;
+    scrollbar.configChanged(app, config);
 }
 
 fn hwndOf(lparam: LPARAM) ?HWND {

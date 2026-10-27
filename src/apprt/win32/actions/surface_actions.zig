@@ -44,7 +44,7 @@ pub fn render(app: *App, target: apprt.Target, value: void) !bool {
     return true;
 }
 
-/// The viewport or the scrollback changed: move the native scrollbar.
+/// The viewport or the scrollback changed: update the overlay scroller.
 pub fn scrollbar(app: *App, target: apprt.Target, value: apprt.Action.Value(.scrollbar)) !bool {
     const s = surfaceOf(app, target) orelse return false;
     return scrollbar_mod.update(s, value);

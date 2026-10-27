@@ -107,13 +107,14 @@ fn drivePrefix(path: []const u8) ?Drive {
     return null;
 }
 
-/// C1 controls and the bidi/line-separator characters that let a path look
-/// like another one: U+0080..U+009F, U+061C, U+200E/F, U+2028..U+202E,
-/// U+2066..U+2069.
+/// C1 controls, bidi/line-separator and zero-width or invisible format
+/// characters that let a path look like another one: U+0080..U+009F,
+/// U+00AD, U+061C, U+200B..U+200F, U+2028..U+202E, U+2060..U+2064,
+/// U+2066..U+2069, U+FEFF.
 fn hasInvisible(s: []const u8) bool {
     var it = std.unicode.Utf8View.initUnchecked(s).iterator();
     while (it.nextCodepoint()) |cp| switch (cp) {
-        0x80...0x9f, 0x61c, 0x200e, 0x200f, 0x2028...0x202e, 0x2066...0x2069 => return true,
+        0x80...0x9f, 0xad, 0x61c, 0x200b...0x200f, 0x2028...0x202e, 0x2060...0x2064, 0x2066...0x2069, 0xfeff => return true,
         else => {},
     };
     return false;
@@ -234,6 +235,14 @@ test "pwd_path: unsafe input is refused" {
     try expectTranslate("/c/a\xe2\x81\xa7b", null);
     try expectTranslate("/c/a\xe2\x80\xa8b", null);
     try expectTranslate("/c/a\xd8\x9cb", null);
+    // Zero-width and invisible format characters.
+    try expectTranslate("/c/a\xe2\x80\x8bb", null); // U+200B
+    try expectTranslate("/c/a\xe2\x80\x8cb", null); // U+200C
+    try expectTranslate("/c/a\xe2\x80\x8db", null); // U+200D
+    try expectTranslate("/c/a\xe2\x81\xa0b", null); // U+2060
+    try expectTranslate("/c/a\xe2\x81\xa4b", null); // U+2064
+    try expectTranslate("/c/a\xef\xbb\xbfb", null); // U+FEFF
+    try expectTranslate("/c/a\xc2\xadb", null); // U+00AD
     try expectTranslate("/c/\xc3\xa9\xc2\xa0", "C:\\\xc3\xa9\xc2\xa0");
 }
 
