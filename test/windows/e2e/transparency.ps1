@@ -29,6 +29,7 @@ function Set-Opacity($G, [string]$Value) {
 }
 
 Invoke-E2eScenario 'transparency' {
+    Assert-TransparencyEffects
     $dir = Get-EvidenceDir
     $shot = {
         param($Tag)

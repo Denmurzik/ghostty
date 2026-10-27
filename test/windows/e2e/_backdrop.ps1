@@ -117,10 +117,19 @@ function Move-Window([IntPtr]$Hwnd, [int]$X, [int]$Y, [int]$W, [int]$H) {
 # Takes the foreground away from Ghostty without covering it: a small window
 # of ours far to the right. Returns the form (close it when done).
 function Switch-AwayFromGhostty($G) {
-    $f = New-BackdropForm 2000 100 200 200
+    # On the monitor of the window, away from it.
+    $area = [Windows.Forms.Screen]::FromHandle($G.Hwnd).Bounds
+    $f = New-BackdropForm ($area.Right - 240) ($area.Top + 100) 200 200
     Show-BackdropForm $f
     if (-not (Set-ForegroundSafe -Hwnd $f.Handle)) { $f.Close(); throw 'E2E-SKIP: could not take the foreground' }
     Invoke-Pump 1200
     if ([GhosttyE2e.Win]::GetForegroundWindow() -eq $G.Hwnd) { $f.Close(); throw 'Ghostty is still the foreground window' }
     $f
+}
+
+# Skips the scenario when Windows "Transparency effects" is off (Acrylic and the
+# frosted look need it). Read only.
+function Assert-TransparencyEffects {
+    $v = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name EnableTransparency -ErrorAction SilentlyContinue).EnableTransparency
+    if ($null -ne $v -and $v -eq 0) { throw 'E2E-SKIP: Windows Transparency effects are off' }
 }

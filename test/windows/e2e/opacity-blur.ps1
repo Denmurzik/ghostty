@@ -19,6 +19,7 @@ function Get-SystemBackdrop([IntPtr]$Hwnd) {
 }
 
 Invoke-E2eScenario 'opacity-blur' {
+    Assert-TransparencyEffects
     $dir = Get-EvidenceDir
     $back = New-BackdropForm 60 60 1500 1000 -Stripes
     try {
@@ -64,7 +65,7 @@ Invoke-E2eScenario 'opacity-blur' {
         if ($ina.Spread -gt 8) { throw "inactive: the blur is gone (spread $($ina.Spread))" }
         # The same blurred colour in both states: the backdrop did not go solid.
         $d = [Math]::Abs($ina.Color.R - $act.Color.R) + [Math]::Abs($ina.Color.G - $act.Color.G) + [Math]::Abs($ina.Color.B - $act.Color.B)
-        if ($d -gt 40) { throw "inactive colour $(Format-Color $ina.Color) differs from active $(Format-Color $act.Color)" }
+        if ($d -gt 24) { throw "inactive colour $(Format-Color $ina.Color) differs from active $(Format-Color $act.Color)" }
 
         # Without background-blur the stripes are sharp (translucent only).
         $path = Join-Path $script:Sbx.Home '.config\ghostty\config.ghostty'

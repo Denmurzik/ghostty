@@ -192,6 +192,7 @@ pub fn terminate(self: *App) void {
     self.last_active = null;
     while (self.windows.pop()) |window| window.destroy();
     self.windows.deinit(self.core_app.alloc);
+    composition_mod.appStopped(self);
 
     Chrome.deinitShared();
     _ = win32.uxtheme.BufferedPaintUnInit();

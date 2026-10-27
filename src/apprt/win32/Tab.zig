@@ -547,10 +547,7 @@ pub fn focusAfterRemove(
 fn fillDividerColor(self: *Tab, hdc: win32.user32.HDC) void {
     var rc: win32.foundation.RECT = undefined;
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
-    // Black is alpha 0 over the glass of a translucent window (the dividers
-    // are the gaps between the panes there).
-    var c = theme.palette(self.window).divider;
-    if (composition.isTranslucent(self.window)) c = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const c = theme.palette(self.window).divider;
     const ref: u32 = @as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16);
     if (self.divider_brush == null or self.divider_ref != ref) {
         if (self.divider_brush) |b| _ = win32.gdi32.DeleteObject(@ptrCast(b));
@@ -559,7 +556,8 @@ fn fillDividerColor(self: *Tab, hdc: win32.user32.HDC) void {
     }
     const brush = self.divider_brush orelse return;
     if (self.window.composition.glass) {
-        composition.fillWithAlpha(hdc, &rc, brush, composition.isTranslucent(self.window));
+        // The dividers are opaque, also over glass (the panes cover the rest).
+        composition.fillWithAlpha(hdc, &rc, brush, false);
     } else {
         _ = win32.gdi32.FillRect(hdc, &rc, brush);
     }

@@ -236,7 +236,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
 
     // The first swap chain is made while core initialises: its mode is set first.
     composition_mod.surfaceWillInit(self);
-    errdefer composition_mod.surfaceDestroying(self);
+    errdefer composition_mod.surfaceAborted(self);
 
     try self.core_surface.init(alloc, &config, app.core_app, app, self);
     self.initialized = true;

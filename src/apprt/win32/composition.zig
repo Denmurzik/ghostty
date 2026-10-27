@@ -50,6 +50,7 @@ const Window = @import("Window.zig");
 const messages = @import("messages.zig");
 const theme = @import("theme.zig");
 const recovery = @import("recovery.zig");
+const frame = @import("frame.zig");
 
 const dcomp = win32.dcomp;
 const dxgi = win32.dxgi;
@@ -279,9 +280,13 @@ fn enterComposition(surface: *Surface) !void {
 }
 
 /// Before core tears the surface down: the visual stops showing the chain.
+/// The mode stays as it is: the render thread runs until core deinit, and a
+/// frame drawn after a store of 0 would retire the composition chain and
+/// create an hwnd chain on a closing pane (and could taint the glass of its
+/// window). A chain handed over late finds no visual in `attach` and is
+/// released.
 pub fn surfaceDestroying(surface: *Surface) void {
     destroyTree(surface.app.composition.device, &surface.composition);
-    surface.composition.mode.store(0, .release);
 }
 
 /// After core's render thread is gone: nothing can be handed over any more.
@@ -317,9 +322,12 @@ fn syncSurface(surface: *Surface, want: bool) void {
 
 /// Re-parenting keeps the target (spike e); nothing to recreate.
 pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
-    _ = tab;
     _ = from;
-    _ = to;
+    // A surface from a window of the other kind follows the new window.
+    decide(to);
+    const want = to.composition.glass or wantComposition(&to.app.config, theme.highContrast());
+    var it = tab.tree.iterator();
+    while (it.next()) |entry| syncSurface(entry.view, want);
 }
 
 // ----------------------------------------------------------------------
@@ -446,6 +454,14 @@ pub fn eraseTransparent(window: *const Window) bool {
     return isTranslucent(window);
 }
 
+/// Whether a `WM_NCACTIVATE` is swallowed: only the deactivation of an
+/// Acrylic window, and not with the native caption (`window-decoration =
+/// server`), which has to show the window inactive. Known side effects: the
+/// owner of a MessageBox and a second Acrylic window look active too.
+fn swallowDeactivation(backdrop: Backdrop, decorations: frame.Decorations, wparam: win32.foundation.WPARAM) bool {
+    return wparam == 0 and backdrop == .acrylic and decorations != .server;
+}
+
 /// `WM_NCACTIVATE` and `WM_SHOWWINDOW` of a window. DWM turns the Acrylic backdrop into a solid
 /// colour when it sees the window deactivated (the owner wants the blur to
 /// stay): measured on Windows 11 10.0.26300, the Acrylic of a window whose
@@ -454,7 +470,7 @@ pub fn eraseTransparent(window: *const Window) bool {
 pub fn windowMessage(window: *Window, msg: u32, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESULT {
     switch (msg) {
         win32.user32.WM_NCACTIVATE => {
-            if (wparam != 0 or window.composition.backdrop != .acrylic) return null;
+            if (!swallowDeactivation(window.composition.backdrop, window.frame.decorations, wparam)) return null;
             return 1;
         },
         // The glass set while the window was being created is not always in
@@ -471,12 +487,21 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: win32.foundation.WPARAM)
 /// device and dropped its swap chain. The old chain must leave the visual and
 /// any chain still waiting is stale; the renderer hands the new one over.
 pub fn recoveryHook(surface: *Surface) void {
-    const state = &surface.composition;
+    dropChains(surface.app.composition.device, &surface.composition);
+}
+
+fn dropChains(device: ?*dcomp.IDCompositionDevice, state: *SurfaceState) void {
     com.release(state.pending.swap(null, .acq_rel));
     if (state.visual) |v| {
         v.setContent(null) catch {};
-        if (surface.app.composition.device) |d| d.commit() catch {};
+        if (device) |d| d.commit() catch {};
     }
+}
+
+/// Used by `Surface.create` when core init fails.
+pub fn surfaceAborted(surface: *Surface) void {
+    surfaceDestroying(surface);
+    surfaceReleased(surface);
 }
 
 pub fn appStarted() void {
@@ -484,7 +509,13 @@ pub fn appStarted() void {
 }
 
 pub fn appStopping(app: *App) void {
+    _ = app;
     recovery.composition_hook = null;
+}
+
+/// After the windows are destroyed: their trees were released against the
+/// device, which can go now.
+pub fn appStopped(app: *App) void {
     com.release(app.composition.device);
     app.composition.device = null;
 }
@@ -792,4 +823,68 @@ test "win32 composition: a translucent-capable window goes solid, not hwnd" {
     const look = Look.of(&cfg);
     try std.testing.expectEqual(@as(f64, 1.0), look.opacity);
     try std.testing.expect(look.blur);
+}
+
+test "win32 composition: recovery drops the old and the waiting chain" {
+    const device = fakeDevice();
+    var app_state: AppState = .{ .device = device };
+    var state: SurfaceState = .{};
+    try createTree(device, &state, undefined);
+    const shown = fakeChain();
+    defer std.testing.allocator.destroy(shown.obj);
+    attach(&app_state, &state, shown.chain, 0, 0);
+    try std.testing.expectEqual(@as(u32, 1), counts.set_content);
+    const waiting = fakeChain();
+    defer std.testing.allocator.destroy(waiting.obj);
+    park(&state, waiting.chain, 0);
+    const commits = counts.commits;
+    dropChains(device, &state);
+    try std.testing.expect(state.pending.load(.acquire) == null);
+    try std.testing.expectEqual(@as(u32, 0), waiting.obj.refs);
+    try std.testing.expectEqual(@as(u32, 1), counts.set_content_null);
+    try std.testing.expectEqual(commits + 1, counts.commits);
+    // The tree itself stays for the chain the renderer hands over next.
+    try std.testing.expect(state.visual != null);
+    destroyTree(device, &state);
+}
+
+test "win32 composition: a closing surface keeps its mode and releases late chains" {
+    const device = fakeDevice();
+    var app_state: AppState = .{ .device = device };
+    var state: SurfaceState = .{};
+    try createTree(device, &state, undefined);
+    state.mode.store(1, .release);
+    destroyTree(device, &state);
+    // surfaceDestroying only does this: the render thread must not see mode 0.
+    try std.testing.expectEqual(@as(u8, 1), state.mode.load(.acquire));
+    const late = fakeChain();
+    defer std.testing.allocator.destroy(late.obj);
+    attach(&app_state, &state, late.chain, 0, 0);
+    try std.testing.expectEqual(@as(u32, 0), counts.set_content);
+    try std.testing.expectEqual(@as(u32, 0), late.obj.refs);
+}
+
+test "win32 composition: WM_NCACTIVATE is swallowed only for Acrylic without a native caption" {
+    try std.testing.expect(swallowDeactivation(.acrylic, .client, 0));
+    try std.testing.expect(swallowDeactivation(.acrylic, .none, 0));
+    try std.testing.expect(!swallowDeactivation(.acrylic, .server, 0));
+    try std.testing.expect(!swallowDeactivation(.acrylic, .client, 1));
+    try std.testing.expect(!swallowDeactivation(.transparent, .client, 0));
+    try std.testing.expect(!swallowDeactivation(.@"opaque", .client, 0));
+    try std.testing.expect(!swallowDeactivation(.mica, .client, 0));
+}
+
+test "win32 composition: background-blur defaults on for Windows" {
+    const info = @typeInfo(configpkg.Config).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, T, attrs| {
+        if (comptime std.mem.eql(u8, name, "background-blur")) {
+            const def = comptime attrs.defaultValue(T).?;
+            const want: configpkg.Config.BackgroundBlur = if (@import("builtin").os.tag == .windows) .true else .false;
+            try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(def));
+        }
+    }
+    // With that default a translucent config is frosted, an opaque one needs nothing.
+    const frosted = testConfig(0.9, .true);
+    try std.testing.expectEqual(Backdrop.acrylic, backdropFor(&frosted, false, false));
+    try std.testing.expect(!wantComposition(&testConfig(1.0, .true), false));
 }
