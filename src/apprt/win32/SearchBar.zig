@@ -9,6 +9,7 @@ const input = @import("../../input.zig");
 const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const Chrome = @import("Chrome.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const overlay = @import("overlay.zig");
@@ -33,20 +34,10 @@ const EM_SETCUEBANNER = 0x1501;
 const DEFAULT_CHARSET = 1;
 const CLEARTYPE_QUALITY = 5;
 const FW_NORMAL = 400;
-const NULL_PEN = 8;
-const TRANSPARENT = 1;
-const DT_CENTER = 0x1;
-const DT_RIGHT = 0x2;
-const DT_VCENTER = 0x4;
-const DT_SINGLELINE = 0x20;
-const DT_NOPREFIX = 0x800;
 const subclass_id = 1;
 
-extern "gdi32" fn SetBkMode(user32.HDC, i32) callconv(.winapi) i32;
 extern "gdi32" fn SetTextColor(user32.HDC, u32) callconv(.winapi) u32;
 extern "gdi32" fn SetBkColor(user32.HDC, u32) callconv(.winapi) u32;
-extern "gdi32" fn RoundRect(user32.HDC, i32, i32, i32, i32, i32, i32) callconv(.winapi) i32;
-extern "user32" fn DrawTextW(user32.HDC, [*]const u16, i32, *win32.foundation.RECT, u32) callconv(.winapi) i32;
 
 /// Debounce of the query after a keystroke.
 const debounce_ms = 50;
@@ -66,8 +57,6 @@ const Panel = struct {
     popup: overlay.Popup,
     surface: *Surface,
     font: ?gdi32.HFONT = null,
-    small_font: ?gdi32.HFONT = null,
-    icon_font: ?gdi32.HFONT = null,
     font_dpi: u32 = 0,
     brush: ?user32.HBRUSH = null,
     brush_rgb: u32 = 0,
@@ -360,15 +349,13 @@ fn layoutChildren(panel: *Panel) void {
 
     if (panel.font_dpi != dpi) {
         // The EDIT gets the new font before the old one is deleted.
-        const old = [3]?gdi32.HFONT{ panel.font, panel.small_font, panel.icon_font };
+        const old = panel.font;
         panel.font = makeFont(14, dpi, L("Segoe UI"));
-        panel.small_font = makeFont(11, dpi, L("Segoe UI"));
-        panel.icon_font = makeFont(12, dpi, L("Segoe Fluent Icons"));
         panel.font_dpi = dpi;
         if (panel.font) |f| _ = user32.SendMessageW(edit, WM_SETFONT, @intFromPtr(f), 1);
-        for (old) |h| if (h) |o| {
+        if (old) |o| {
             _ = gdi32.DeleteObject(@ptrCast(o));
-        };
+        }
     }
     if (panel.dark_applied != pal.dark) {
         panel.dark_applied = pal.dark;
@@ -383,7 +370,7 @@ fn makeFont(px: i32, dpi: u32, face: [*:0]const u16) ?gdi32.HFONT {
 }
 
 fn freeFonts(panel: *Panel) void {
-    inline for (.{ &panel.font, &panel.small_font, &panel.icon_font }) |f| {
+    inline for (.{&panel.font}) |f| {
         if (f.*) |h| _ = gdi32.DeleteObject(@ptrCast(h));
         f.* = null;
     }
@@ -596,27 +583,33 @@ fn fieldBrush(panel: *Panel, c: theme.Color) LRESULT {
 
 fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     const panel = Panel.of(p);
-
     const c = colors(ctx.palette);
     const l = Layout.forDpi(ctx.dpi);
-    const hdc = ctx.hdc;
-
-    fillRect(hdc, .{ .x = 0, .y = 0, .w = ctx.rect.w, .h = ctx.rect.h }, c.bg);
-
-    const r = geom.scale(field_radius, ctx.dpi);
-    roundFill(hdc, l.field, r, c.field);
-
-    _ = SetBkMode(hdc, TRANSPARENT);
     const state = &panel.surface.search;
+    const full: geom.Rect = .{ .x = 0, .y = 0, .w = ctx.rect.w, .h = ctx.rect.h };
+    const r = geom.scale(field_radius, ctx.dpi);
 
     var buf: [48]u8 = undefined;
+    var wide: [48]u16 = undefined;
     const text = counterText(&buf, state.total, state.selected);
-    if (text.len > 0) {
-        var wide: [48]u16 = undefined;
-        const n = std.unicode.utf8ToUtf16Le(&wide, text) catch 0;
-        drawText(hdc, panel.small_font, wide[0..n], l.counter, c.secondary, DT_RIGHT);
-    }
+    const n = std.unicode.utf8ToUtf16Le(&wide, text) catch 0;
+    const counter_font: Chrome.Font = .{ .size_pt = 11 };
+    const counter_w = if (n > 0) Chrome.measureText(wide[0..n], counter_font, ctx.dpi) catch 0 else 0;
 
+    var items: [8]Chrome.Item = undefined;
+    var count: usize = 0;
+    items[count] = .{ .box = .{ .rect = l.field, .radius = r, .fill = c.field } };
+    count += 1;
+    if (n > 0) {
+        items[count] = .{ .text = .{
+            .rect = .{ .x = l.counter.right() - counter_w, .y = l.counter.y, .w = counter_w, .h = l.counter.h },
+            .text = wide[0..n],
+            .font = counter_font,
+            .color = c.secondary,
+            .halign = .leading,
+        } };
+        count += 1;
+    }
     const buttons = [_]struct { part: Part, rect: geom.Rect, glyph: []const u16 }{
         .{ .part = .next, .rect = l.next, .glyph = L("\u{E70E}") },
         .{ .part = .previous, .rect = l.previous, .glyph = L("\u{E70D}") },
@@ -625,35 +618,29 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     for (buttons) |b| {
         const down = panel.pressed == b.part;
         const over = panel.hot == b.part;
-        if (down) roundFill(hdc, b.rect, r, c.pressed) else if (over) roundFill(hdc, b.rect, r, c.hover);
-        drawText(hdc, panel.icon_font, b.glyph, b.rect, if (down or over) c.text else c.secondary, DT_CENTER);
+        if (down or over) {
+            items[count] = .{ .box = .{ .rect = b.rect, .radius = r, .fill = if (down) c.pressed else c.hover } };
+            count += 1;
+        }
+        items[count] = .{ .text = .{
+            .rect = b.rect,
+            .text = b.glyph,
+            .font = .{ .icons = true, .size_pt = 12 },
+            .color = if (down or over) c.text else c.secondary,
+        } };
+        count += 1;
     }
+
+    Chrome.paintItems(ctx.hdc, full, items[0..count], ctx.palette, ctx.dpi, c.bg) catch |err| {
+        log.warn("unable to paint the search bar err={}", .{err});
+        fillRect(ctx.hdc, full, c.bg);
+    };
 }
 
 fn fillRect(hdc: user32.HDC, r: geom.Rect, c: theme.Color) void {
     const brush = gdi32.CreateSolidBrush(colorRef(c)) orelse return;
     defer _ = gdi32.DeleteObject(@ptrCast(brush));
     _ = gdi32.FillRect(hdc, &r.toRECT(), brush);
-}
-
-fn roundFill(hdc: user32.HDC, r: geom.Rect, radius: i32, c: theme.Color) void {
-    const brush = gdi32.CreateSolidBrush(colorRef(c)) orelse return;
-    defer _ = gdi32.DeleteObject(@ptrCast(brush));
-    const old_brush = gdi32.SelectObject(hdc, @ptrCast(brush));
-    const old_pen = gdi32.SelectObject(hdc, gdi32.GetStockObject(NULL_PEN) orelse return);
-    _ = RoundRect(hdc, r.x, r.y, r.right() + 1, r.bottom() + 1, 2 * radius, 2 * radius);
-    if (old_pen) |o| _ = gdi32.SelectObject(hdc, o);
-    if (old_brush) |o| _ = gdi32.SelectObject(hdc, o);
-}
-
-fn drawText(hdc: user32.HDC, font: ?gdi32.HFONT, text: []const u16, r: geom.Rect, c: theme.Color, align_flag: u32) void {
-    const old = if (font) |f| gdi32.SelectObject(hdc, @ptrCast(f)) else null;
-    defer if (old) |o| {
-        _ = gdi32.SelectObject(hdc, o);
-    };
-    _ = SetTextColor(hdc, colorRef(c));
-    var rc = r.toRECT();
-    _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rc, align_flag | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 // -- Test state --------------------------------------------------------------------
