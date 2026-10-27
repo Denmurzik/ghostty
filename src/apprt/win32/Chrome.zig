@@ -40,6 +40,16 @@ const glyph_bell = L("\u{EA8F}");
 
 /// How many DPIs keep their text formats; a window moves between few.
 const format_slots = 4;
+const family_slots = 4;
+
+const FamilyFormat = struct {
+    dpi: u32,
+    size_pt: f32,
+    trim: bool,
+    len: usize,
+    name: [family_cap]u16,
+    format: *dwrite.IDWriteTextFormat,
+};
 
 /// Point sizes of the tab title and of its key label.
 const tab_pt = 11;
@@ -82,6 +92,10 @@ pub const Shared = struct {
     icon_family: [*:0]const u16,
     formats: [format_slots]?Formats = @splat(null),
     next_slot: usize = 0,
+    /// Formats of the window title family (`window-title-font-family`), by
+    /// (family, size, DPI, trim): built once, not at every paint and layout.
+    family_formats: [family_slots]?FamilyFormat = @splat(null),
+    next_family: usize = 0,
 
     fn renderTarget(self: *Shared) !*d2d1.ID2D1DCRenderTarget {
         if (self.target) |t| return t;
@@ -173,6 +187,7 @@ pub fn shared() !*Shared {
 
 pub fn deinitShared() void {
     const s = &(shared_state orelse return);
+    for (s.family_formats) |slot| if (slot) |f| com.release(f.format);
     for (s.formats) |slot| if (slot) |f| f.deinit();
     s.dropTarget();
     com.release(s.dwrite);
@@ -255,7 +270,12 @@ pub const TabParts = struct {
     close: ?geom.Rect,
 };
 
-pub fn tabParts(r: geom.Rect, dpi: u32, show_close: bool, bell: bool) TabParts {
+/// `key_w` is the width in px of the tab's key label (0 when it has none).
+/// The title keeps priority: the side zones that centre it (a key label and
+/// the close button fit in one) are reserved only when the tab leaves a
+/// usable title (`min_title` DIP) beside them; a narrower tab hides the key
+/// label first, then its title simply gets the width.
+pub fn tabParts(r: geom.Rect, dpi: u32, show_close: bool, bell: bool, key_w: i32) TabParts {
     const m = TabStrip.Metrics.forDpi(dpi);
     const inset = m.pill_inset;
     const chip: geom.Rect = .{ .x = r.x + inset, .y = r.y + inset, .w = @max(r.w - 2 * inset, 0), .h = @max(r.h - 2 * inset, 0) };
@@ -265,27 +285,30 @@ pub fn tabParts(r: geom.Rect, dpi: u32, show_close: bool, bell: bool) TabParts {
         .{ .x = r.right() - m.close_w, .y = r.y, .w = m.close_w, .h = r.h }
     else
         null;
-    const side = if (wide) geom.scale(key_zone, dpi) else m.tab_pad;
-    var left = r.x + side;
+    const key_pad = geom.scale(10, dpi);
+    const zone = @max(m.close_w, if (key_w > 0) key_w + key_pad + geom.scale(4, dpi) else 0);
+    const keyed = r.w >= 2 * zone + geom.scale(min_title, dpi);
+    // Without the key zone the title still clears the close button.
+    const left_pad = if (keyed) zone else m.tab_pad;
+    const right_pad = if (keyed) zone else if (wide) m.close_w else m.tab_pad;
+    var left = r.x + left_pad;
     var bell_rect: ?geom.Rect = null;
     if (bell) {
         const bw = geom.scale(16, dpi);
         bell_rect = .{ .x = left, .y = r.y, .w = bw, .h = r.h };
         left += bw + geom.scale(4, dpi);
     }
-    const key_pad = geom.scale(10, dpi);
     return .{
         .chip = chip,
         .bell = bell_rect,
-        .title = .{ .x = left, .y = r.y, .w = @max(r.right() - side - left, 0), .h = r.h },
-        .key = if (wide) .{ .x = r.right() - geom.scale(key_zone, dpi), .y = r.y, .w = geom.scale(key_zone, dpi) - key_pad, .h = r.h } else null,
+        .title = .{ .x = left, .y = r.y, .w = @max(r.right() - right_pad - left, 0), .h = r.h },
+        .key = if (keyed and key_w > 0) .{ .x = r.right() - zone, .y = r.y, .w = zone - key_pad, .h = r.h } else null,
         .close = close,
     };
 }
 
-/// Width in DIP reserved at each side of a wide tab's title for the key
-/// label ("Ctrl+1") and the close button.
-const key_zone = 48;
+/// The least title width (DIP) a tab keeps beside its key zones.
+const min_title = 60;
 
 /// The font of the window title; `family` is `window-title-font-family`
 /// (UTF-16), the strip's UI font when null.
@@ -445,7 +468,7 @@ const Painter = struct {
         close_hovered: bool,
         window_active: bool,
     ) void {
-        const parts = tabParts(r, self.dpi, hovered, view.bell);
+        const parts = tabParts(r, self.dpi, hovered, view.bell, keyWidth(view.key, self.dpi));
         if (parts.chip.w <= 0 or parts.chip.h <= 0) return;
         if (active) {
             self.fillCapsule(parts.chip, self.pal.pill_bg);
@@ -471,7 +494,7 @@ const Painter = struct {
             }
             self.glyph(c, glyph_close, ink);
         } else if (view.key.len > 0) {
-            if (parts.key) |k| self.label(k, view.key, self.fm.key, self.pal.text_dim);
+            if (parts.key) |k| self.label(k, view.key, self.fm.key, if (active and window_active) self.pal.text else self.pal.text_dim);
         }
     }
 
@@ -479,8 +502,7 @@ const Painter = struct {
     fn titleLabel(self: *Painter, r: geom.Rect, utf8: []const u8, c: theme.Color, family: ?[]const u16) void {
         const fam = family orelse return self.label(r, utf8, self.fm.title, c);
         const sh = shared() catch return;
-        const format = makeFormat(sh, titleFont(fam), .leading, true, self.dpi) catch return;
-        defer com.release(format);
+        const format = familyFormat(sh, titleFont(fam), true, self.dpi) catch return;
         self.label(r, utf8, format, c);
     }
 
@@ -691,8 +713,8 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
 
 /// The width of the title area of the tab at `r` when it is hovered (its
 /// close button is shown), from `tabParts`.
-pub fn titleAreaWidth(r: geom.Rect, dpi: u32, bell: bool) i32 {
-    return tabParts(r, dpi, true, bell).title.w;
+pub fn titleAreaWidth(r: geom.Rect, dpi: u32, bell: bool, key_w: i32) i32 {
+    return tabParts(r, dpi, true, bell, key_w).title.w;
 }
 
 /// The measure of tab titles for `TabStrip.Layout.tabTrimmed`: the width
@@ -713,7 +735,9 @@ fn measureArea(ctx: ?*anyopaque, tab: geom.Rect, index: usize) i32 {
     const window: *const Window = @ptrCast(@alignCast(ctx.?));
     const bell = index < window.tabs.items.len and
         window.app.config.@"bell-features".title and window.tabs.items[index].bellRinging();
-    return titleAreaWidth(tab, window.dpi, bell);
+    var buf: [key_cap]u8 = undefined;
+    const key = keyLabel(&window.app.config.keybind.set, index, &buf);
+    return titleAreaWidth(tab, window.dpi, bell, keyWidth(key, window.dpi));
 }
 
 /// Width in px of `text` set in the label font at `dpi`.
@@ -784,6 +808,13 @@ fn partOfHover(window: *const Window) TabStrip.Part {
         .nowhere => window.frame.hover,
         else => |p| p,
     };
+}
+
+/// Width in px of a key label (0 for none), as the painter sets it.
+fn keyWidth(key: []const u8, dpi: u32) i32 {
+    if (key.len == 0) return 0;
+    var buf: [key_cap]u16 = undefined;
+    return measureText(toUtf16(&buf, key), .{ .size_pt = key_pt }, dpi) catch geom.scale(@as(i32, @intCast(key.len)) * 6, dpi);
 }
 
 /// The label of the `goto_tab` key of tab `index` (0-based) in `set`, like
@@ -958,6 +989,25 @@ pub fn blend(top: theme.Color, bottom: theme.Color) theme.Color {
     };
 }
 
+/// The format of a font with a family of the caller's, kept for the next time;
+/// borrowed, not to be released.
+fn familyFormat(sh: *Shared, font: Font, trim: bool, dpi: u32) !*dwrite.IDWriteTextFormat {
+    const fam = font.family orelse unreachable;
+    const n = @min(fam.len, family_cap);
+    for (sh.family_formats) |slot| {
+        const f = slot orelse continue;
+        if (f.dpi == dpi and f.trim == trim and f.size_pt == font.size_pt and f.len == n and std.mem.eql(u16, f.name[0..n], fam[0..n])) return f.format;
+    }
+    const format = try makeFormat(sh, font, .leading, trim, dpi);
+    const i = sh.next_family;
+    sh.next_family = (i + 1) % family_slots;
+    if (sh.family_formats[i]) |old| com.release(old.format);
+    var entry: FamilyFormat = .{ .dpi = dpi, .size_pt = font.size_pt, .trim = trim, .len = n, .name = undefined, .format = format };
+    @memcpy(entry.name[0..n], fam[0..n]);
+    sh.family_formats[i] = entry;
+    return format;
+}
+
 fn makeFormat(sh: *Shared, font: Font, halign: HAlign, trim: bool, dpi: u32) !*dwrite.IDWriteTextFormat {
     const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
     var family_buf: [family_cap:0]u16 = undefined;
@@ -1004,8 +1054,9 @@ pub fn measureText(text: []const u16, font: Font, dpi: u32) !i32 {
     };
 
     const sh = try shared();
-    const format = try makeFormat(sh, font, .leading, false, dpi);
-    defer com.release(format);
+    const cached = font.family != null;
+    const format = if (cached) try familyFormat(sh, font, false, dpi) else try makeFormat(sh, font, .leading, false, dpi);
+    defer if (!cached) com.release(format);
     const layout = try sh.dwrite.createTextLayout(text, format, 4096, 256);
     defer com.release(layout);
     const metrics = try layout.getMetrics();
@@ -1098,40 +1149,66 @@ test "win32 chrome: caption glyphs and fills" {
 }
 
 test "win32 chrome: tab parts" {
-    // A slot of the track: 200 x 28 at 96 dpi.
+    // A slot of the track: 200 x 28 at 96 dpi, a 36 px key label ("Ctrl+1").
     const r: geom.Rect = .{ .x = 100, .y = 34, .w = 200, .h = 28 };
-    const plain = tabParts(r, 96, false, false);
+    const plain = tabParts(r, 96, false, false, 36);
     try std.testing.expect(plain.close == null);
     try std.testing.expect(plain.bell == null);
-    // The title is centred with 48 px kept free at each side for the key
-    // label and the close button.
-    try std.testing.expectEqual(@as(i32, 148), plain.title.x);
-    try std.testing.expectEqual(@as(i32, 104), plain.title.w);
-    try std.testing.expectEqual(@as(i32, 252), plain.key.?.x);
-    try std.testing.expectEqual(@as(i32, 38), plain.key.?.w);
+    // The title is centred with the key zone (36 + 10 + 4 = 50) free at each side.
+    try std.testing.expectEqual(@as(i32, 150), plain.title.x);
+    try std.testing.expectEqual(@as(i32, 100), plain.title.w);
+    try std.testing.expectEqual(@as(i32, 250), plain.key.?.x);
+    try std.testing.expectEqual(@as(i32, 40), plain.key.?.w);
 
-    const full = tabParts(r, 96, true, true);
+    const full = tabParts(r, 96, true, true, 36);
     try std.testing.expectEqual(@as(i32, 272), full.close.?.x);
-    try std.testing.expectEqual(@as(i32, 148), full.bell.?.x);
-    try std.testing.expectEqual(@as(i32, 168), full.title.x);
-    try std.testing.expectEqual(@as(i32, 84), full.title.w);
+    try std.testing.expectEqual(@as(i32, 150), full.bell.?.x);
+    try std.testing.expectEqual(@as(i32, 170), full.title.x);
+    try std.testing.expectEqual(@as(i32, 80), full.title.w);
     // The pill is the slot less 2 px all round.
     try std.testing.expectEqual(@as(i32, 102), full.chip.x);
     try std.testing.expectEqual(@as(i32, 36), full.chip.y);
     try std.testing.expectEqual(@as(i32, 24), full.chip.h);
 
-    // Too narrow for a close button or a key label, as in `TabStrip.Layout.hitTest`.
-    const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 28 }, 96, true, false);
+    // A longer label widens the zone; no label keeps the close button's width.
+    try std.testing.expectEqual(@as(i32, 280 - 2 * 104), tabParts(.{ .w = 280, .h = 28 }, 96, false, false, 90).title.w);
+    try std.testing.expectEqual(@as(i32, 200 - 56), tabParts(r, 96, false, false, 0).title.w);
+
+    // Too narrow for a close button, as in `TabStrip.Layout.hitTest`.
+    const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 28 }, 96, true, false, 36);
     try std.testing.expect(narrow.close == null);
     try std.testing.expect(narrow.key == null);
     try std.testing.expectEqual(@as(i32, 10), narrow.title.x);
 }
 
+test "win32 chrome: narrow tabs keep their title and hide the key label first" {
+    // 72 px is the least width of a scrolling tab, 96 / 140 are ten tabs in a
+    // 1000 px window and a few more: the title is never squeezed to nothing.
+    const widths = [_]i32{ 72, 96, 140, 159, 160, 300 };
+    var last: i32 = 0;
+    for (widths) |w| {
+        const p = tabParts(.{ .x = 0, .y = 0, .w = w, .h = 28 }, 96, true, false, 36);
+        try std.testing.expect(p.title.w >= 34);
+        // A label is shown only where the title keeps 60 px beside the zones.
+        if (p.key != null) try std.testing.expect(p.title.w >= 60);
+        try std.testing.expect(p.title.x + p.title.w <= w);
+        last = p.title.w;
+    }
+    try std.testing.expectEqual(@as(i32, 72 - 10 - 28), tabParts(.{ .w = 72, .h = 28 }, 96, true, false, 36).title.w);
+    try std.testing.expect(tabParts(.{ .w = 96, .h = 28 }, 96, true, false, 36).key == null);
+    try std.testing.expect(tabParts(.{ .w = 140, .h = 28 }, 96, true, false, 36).key == null);
+    try std.testing.expect(tabParts(.{ .w = 160, .h = 28 }, 96, true, false, 36).key != null);
+    try std.testing.expect(last > 100);
+}
+
 test "win32 chrome: title area for the tooltip follows tabParts" {
     const r: geom.Rect = .{ .x = 100, .y = 34, .w = 200, .h = 28 };
-    try std.testing.expectEqual(tabParts(r, 96, true, false).title.w, titleAreaWidth(r, 96, false));
-    try std.testing.expectEqual(@as(i32, 84), titleAreaWidth(r, 96, true));
-    try std.testing.expect(titleAreaWidth(r, 96, true) < titleAreaWidth(r, 96, false));
+    try std.testing.expectEqual(tabParts(r, 96, true, false, 36).title.w, titleAreaWidth(r, 96, false, 36));
+    try std.testing.expectEqual(@as(i32, 80), titleAreaWidth(r, 96, true, 36));
+    try std.testing.expect(titleAreaWidth(r, 96, true, 36) < titleAreaWidth(r, 96, false, 36));
+    // A wide label costs title width, so a long label trims sooner.
+    const wide: geom.Rect = .{ .x = 100, .y = 34, .w = 300, .h = 28 };
+    try std.testing.expect(titleAreaWidth(wide, 96, false, 80) < titleAreaWidth(wide, 96, false, 36));
 }
 
 test "win32 chrome: key label of goto_tab like the palette" {
@@ -1174,7 +1251,7 @@ test "win32 chrome: paints a strip into a DIB" {
     defer layout.deinit(alloc);
     try layout.compute(alloc, TabStrip.Metrics.forDpi(96), width, .titlebar, true, 2, 0);
     const tab0 = layout.tabs.items[0];
-    const close_rect = tabParts(tab0, 96, true, false).close.?;
+    const close_rect = tabParts(tab0, 96, true, false, 0).close.?;
 
     const dc = gdi32.CreateCompatibleDC(null) orelse return error.SkipZigTest;
     defer _ = gdi32.DeleteDC(dc);

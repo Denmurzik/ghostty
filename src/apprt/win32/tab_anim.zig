@@ -131,6 +131,7 @@ pub const State = struct {
         std.debug.assert(ids.len == targets.len and ids.len == titles.len);
         const animate = allow and self.tabs.items.len > 0 and !self.sameIds(ids);
         const p = self.progress(now_ns);
+        const row_now = self.rowAt(now_ns);
 
         var next: std.ArrayList(Entry) = .empty;
         errdefer next.deinit(alloc);
@@ -178,6 +179,9 @@ pub const State = struct {
         self.closing.deinit(alloc);
         self.closing = gone;
         if (animate) {
+            // The row, too, goes on from where it is painted (a third tab within
+            // 200 ms of the second must not send it back to hidden).
+            self.row_from = row_now;
             self.start_ns = now_ns;
             self.running = true;
             self.fresh = true;
@@ -189,6 +193,18 @@ pub const State = struct {
     /// The tab row goes in (`visible`) or out. Without `animate` it jumps.
     pub fn retargetRow(self: *State, now_ns: u64, visible: bool, animate: bool) void {
         const to: f64 = if (visible) 1 else 0;
+        if (!animate) {
+            // A jump (another DPI, a hidden window) settles everything, a leaving
+            // row included.
+            self.row_from = to;
+            self.row_to = to;
+            if (self.running) {
+                self.running = false;
+                self.closing.clearRetainingCapacity();
+                for (self.tabs.items) |*e| e.from = e.to;
+            }
+            return;
+        }
         if (to == self.row_to and (self.row_from == self.row_to or self.running)) return;
         const cur = self.rowAt(now_ns);
         self.row_to = to;
@@ -197,12 +213,19 @@ pub const State = struct {
             // The tab rects continue from where they are.
             const p = self.progress(now_ns);
             for (self.tabs.items) |*e| e.from = lerpRect(e.from, e.to, p);
+            for (self.closing.items) |*e| e.from = lerpRect(e.from, e.to, p);
             self.start_ns = now_ns;
             self.running = true;
             self.fresh = true;
-        } else {
+        }
+    }
+
+    /// The row is not animated (no title row to slide under): it just is.
+    pub fn settleRow(self: *State, visible: bool) void {
+        const to: f64 = if (visible) 1 else 0;
+        if (self.row_to != to or self.row_from != to) {
             self.row_from = to;
-            if (self.closing.items.len == 0) self.running = false;
+            self.row_to = to;
         }
     }
 
@@ -397,4 +420,42 @@ test "win32 tab anim: the row slides in and out, the terminal keeps the room whi
     st.retargetRow(3000 * t, true, false);
     try testing.expect(!st.running);
     try testing.expectEqual(@as(f64, 1), st.rowAt(3000 * t));
+}
+
+test "win32 tab anim: a third tab within the slide keeps the row, a jump settles a leaving row" {
+    const alloc = testing.allocator;
+    var st: State = .{};
+    defer st.deinit(alloc);
+    const t = std.time.ns_per_ms;
+
+    try st.retarget(alloc, 0, true, &.{1}, &.{"a"}, &.{r(8, 200)});
+    st.retargetRow(0, true, true);
+    try testing.expect(st.tick(0));
+    // 100 ms into the row sliding in, the second and a third tab come.
+    try st.retarget(alloc, 100 * t, true, &.{ 1, 2 }, &.{ "a", "b" }, &.{ r(8, 100), r(108, 100) });
+    try testing.expect(st.tick(100 * t));
+    const at_start = st.rowAt(100 * t);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), at_start, 1e-3);
+    try st.retarget(alloc, 180 * t, true, &.{ 1, 2, 3 }, &.{ "a", "b", "c" }, &.{ r(8, 67), r(75, 67), r(142, 66) });
+    try testing.expect(st.tick(180 * t));
+    // The row continues from where it was painted, it does not go back to hidden.
+    try testing.expect(st.rowAt(180 * t) > 0.5);
+    try testing.expectApproxEqAbs(st.rowAt(180 * t), st.rowAt(180 * t + 1), 0.01);
+
+    // A closed tab keeps shrinking from where it is when the row starts to leave.
+    try st.retarget(alloc, 400 * t, true, &.{ 1, 3 }, &.{ "a", "c" }, &.{ r(8, 100), r(108, 100) });
+    try testing.expect(st.tick(400 * t));
+    const half = 400 * t + duration_ns / 2;
+    const shrunk = st.closingAt(0, half).rect;
+    st.retargetRow(half, false, true);
+    try testing.expect(st.tick(half));
+    try testing.expectEqual(shrunk, st.closingAt(0, half).rect);
+
+    // A jump (another DPI) settles a row that is leaving.
+    try testing.expect(st.rowLeaving());
+    st.retargetRow(half + t, false, false);
+    try testing.expect(!st.rowLeaving());
+    try testing.expect(!st.running);
+    try testing.expectEqual(@as(usize, 0), st.closing.items.len);
+    try testing.expectEqual(@as(f64, 0), st.rowAt(half + t));
 }

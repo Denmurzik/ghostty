@@ -421,7 +421,9 @@ pub fn stripMode(window: *const Window) TabStrip.Mode {
 
 /// Window size minus content size: frame insets plus the strip height.
 pub fn nonClientSize(window: *const Window) Size {
-    const strip_h = TabStrip.height(TabStrip.Metrics.forDpi(window.dpi), stripMode(window), window.showTabs());
+    // The row that is sliding out still holds its room (`Window.layout`).
+    const shown = window.showTabs() or (stripMode(window) == .titlebar and window.tab_anim.rowLeaving());
+    const strip_h = TabStrip.height(TabStrip.Metrics.forDpi(window.dpi), stripMode(window), shown);
 
     switch (window.frame.decorations) {
         .server => {

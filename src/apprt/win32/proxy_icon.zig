@@ -42,26 +42,52 @@ const max_path = 1024;
 /// Menu command of "Copy path"; the folders are 1..n.
 const copy_command = 100;
 
-pub const State = struct {
-    /// The directory `bitmap` is of (also kept when no icon could be made,
-    /// so that it is not tried at every layout).
-    path: ?[:0]u8 = null,
-    dpi: u32 = 0,
-    size: i32 = 0,
-    bitmap: ?gdi32.HBITMAP = null,
+/// Icons kept per window: a shell whose `cd` goes back and forth between a
+/// few folders asks the shell for each one once (per DPI).
+const cache_slots = 8;
 
-    fn clear(self: *State, alloc: Allocator) void {
-        if (self.bitmap) |b| _ = gdi32.DeleteObject(@ptrCast(b));
-        if (self.path) |p| alloc.free(p);
-        self.* = .{};
+const Entry = struct {
+    /// The directory `bitmap` is of (also kept when no icon could be made,
+    /// so that it is not tried again).
+    path: [:0]u8,
+    dpi: u32,
+    size: i32,
+    bitmap: ?gdi32.HBITMAP,
+};
+
+pub const State = struct {
+    slots: [cache_slots]?Entry = @splat(null),
+    /// The slot the title row shows; null for no icon.
+    shown: ?usize = null,
+    next: usize = 0,
+
+    fn free(entry: Entry, alloc: Allocator) void {
+        if (entry.bitmap) |b| _ = gdi32.DeleteObject(@ptrCast(b));
+        alloc.free(entry.path);
+    }
+
+    /// The icon of the slot being shown.
+    pub fn current(self: *const State) ?Entry {
+        const i = self.shown orelse return null;
+        return self.slots[i];
+    }
+
+    fn find(self: *const State, path: []const u8, dpi: u32) ?usize {
+        for (self.slots, 0..) |slot, i| {
+            const e = slot orelse continue;
+            if (e.dpi == dpi and std.mem.eql(u8, e.path, path)) return i;
+        }
+        return null;
     }
 
     pub fn deinit(self: *State, alloc: Allocator) void {
-        self.clear(alloc);
+        for (self.slots) |slot| if (slot) |e| free(e, alloc);
+        self.* = .{};
     }
 };
 
-/// Whether `path` may get an icon: a local drive path of sane length and
+/// Whether `path` may get an icon: a local drive path (`C:\...` or `C:/...`;
+/// not an msys `/c/...` one, the caller translates those) of sane length and
 /// without control, quote or bidi characters.
 pub fn usable(path: []const u8) bool {
     if (path.len > max_path or !link_policy.isDriveAbsolute(path)) return false;
@@ -77,24 +103,29 @@ pub fn pwdOf(window: *const Window) ?[]const u8 {
 }
 
 /// Brings the icon in line with the focused surface's directory and the
-/// window's DPI; true when there is an icon to show.
+/// window's DPI; true when there is an icon to show. The shell is asked once
+/// per folder and DPI (a few are kept), not at every `cd`.
 pub fn refresh(window: *Window) bool {
     const alloc = window.app.core_app.alloc;
     const state = &window.proxy;
     const path = pwdOf(window) orelse {
-        state.clear(alloc);
+        state.shown = null;
         return false;
     };
-    if (state.path) |p| {
-        if (state.dpi == window.dpi and std.mem.eql(u8, p, path)) return state.bitmap != null;
-    }
-    state.clear(alloc);
-
-    state.path = alloc.dupeSentinel(u8, path, 0) catch return false;
-    state.dpi = window.dpi;
-    state.size = TabStrip.Metrics.forDpi(window.dpi).icon_size;
-    state.bitmap = folderIcon(alloc, path, state.size);
-    return state.bitmap != null;
+    const slot = state.find(path, window.dpi) orelse blk: {
+        const copy = alloc.dupeSentinel(u8, path, 0) catch {
+            state.shown = null;
+            return false;
+        };
+        const size = TabStrip.Metrics.forDpi(window.dpi).icon_size;
+        const i = state.next;
+        state.next = (i + 1) % cache_slots;
+        if (state.slots[i]) |old| State.free(old, alloc);
+        state.slots[i] = .{ .path = copy, .dpi = window.dpi, .size = size, .bitmap = folderIcon(alloc, path, size) };
+        break :blk i;
+    };
+    state.shown = slot;
+    return state.slots[slot].?.bitmap != null;
 }
 
 /// The path as a wide, backslash-separated string.
@@ -133,14 +164,15 @@ fn folderIcon(alloc: Allocator, path: []const u8, px: i32) ?gdi32.HBITMAP {
 /// inactive, like the title.
 pub fn draw(window: *const Window, hdc: user32.HDC, window_active: bool) void {
     const rect = window.strip.proxy_icon orelse return;
-    const bitmap = window.proxy.bitmap orelse return;
+    const icon = window.proxy.current() orelse return;
+    const bitmap = icon.bitmap orelse return;
     const mem = gdi32.CreateCompatibleDC(hdc) orelse return;
     defer _ = gdi32.DeleteDC(mem);
     const old = gdi32.SelectObject(mem, @ptrCast(bitmap));
     defer if (old) |o| {
         _ = gdi32.SelectObject(mem, o);
     };
-    const size = window.proxy.size;
+    const size = icon.size;
     _ = gdi32.GdiAlphaBlend(hdc, rect.x, rect.y, rect.w, rect.h, mem, 0, 0, size, size, .{
         .SourceConstantAlpha = if (window_active) 255 else 128,
         .AlphaFormat = user32.AC_SRC_ALPHA,
@@ -399,4 +431,18 @@ test "win32 proxy icon: the static drag source answers IUnknown and IDropSource"
     try std.testing.expect(out != null);
     try std.testing.expectEqual(ole32.E_NOINTERFACE, DropSource.vtable.base.QueryInterface(unknown, &ole32.IID_IDropTarget, &out));
     try std.testing.expect(out == null);
+}
+
+test "win32 proxy icon: icons are found by folder and dpi" {
+    const alloc = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(alloc);
+    state.slots[0] = .{ .path = try alloc.dupeSentinel(u8, "C:\\a", 0), .dpi = 96, .size = 16, .bitmap = null };
+    state.slots[1] = .{ .path = try alloc.dupeSentinel(u8, "C:\\a", 0), .dpi = 144, .size = 24, .bitmap = null };
+    try std.testing.expectEqual(@as(?usize, 0), state.find("C:\\a", 96));
+    try std.testing.expectEqual(@as(?usize, 1), state.find("C:\\a", 144));
+    try std.testing.expectEqual(@as(?usize, null), state.find("C:\\b", 96));
+    try std.testing.expect(state.current() == null);
+    state.shown = 1;
+    try std.testing.expectEqual(@as(i32, 24), state.current().?.size);
 }

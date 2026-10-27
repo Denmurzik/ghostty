@@ -61,6 +61,11 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
         Write-E2eInfo "$($colours.Count) distinct colours in the icon rect"
         if ($colours.Count -lt 8) { throw "the icon rect is flat ($($colours.Count) colours)" }
         Save-Evidence 'proxy-icon' $g -Window
+        # The window as it is on screen (PrintWindow shows only what a window paints for WM_PRINTCLIENT).
+        $cw = $s.bounds[2] - $s.bounds[0]
+        $full = Get-ScreenShot $o.X $o.Y $cw 260
+        if ($dir) { $full.Save((Join-Path $dir 'chrome-proxy-icon-screen.png'), [Drawing.Imaging.ImageFormat]::Png) }
+        $full.Dispose()
 
         # Click: the folder is recorded as opened.
         $cx = [int](($icon[0] + $icon[2]) / 2)

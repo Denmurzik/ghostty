@@ -563,9 +563,9 @@ fn fakeWidth(_: ?*anyopaque, title: []const u8) i32 {
     return @intCast(title.len * 8);
 }
 
-/// A title area for the tests: the tab less 80 px of paddings and labels.
+/// A title area for the tests: the tab less 38 px (the padding and the close button of a narrow tab).
 fn fakeArea(_: ?*anyopaque, tab: geom.Rect, _: usize) i32 {
-    return @max(tab.w - 80, 0);
+    return @max(tab.w - 38, 0);
 }
 
 const fake_measure: Measure = .{ .width_fn = fakeWidth, .area_fn = fakeArea };
@@ -575,18 +575,22 @@ test "win32 tabstrip: trimmed flags from the measure callback" {
     var layout: Layout = .{};
     defer layout.deinit(alloc);
     const m = Metrics.forDpi(96);
-    // 30 tabs in 800 px: every tab is tab_min_w (72) wide, the title area 0.
+    // 30 tabs in 800 px: every tab is tab_min_w (72) wide, the title area 34.
     try layout.compute(alloc, m, 800, .titlebar, true, 30, 0);
-    try std.testing.expectEqual(@as(i32, 0), fakeArea(null, layout.tabs.items[0], 0));
+    try std.testing.expectEqual(@as(i32, 34), fakeArea(null, layout.tabs.items[0], 0));
 
     var titles: [30][]const u8 = @splat("");
     titles[1] = "a title that does not fit";
+    titles[2] = "abcd"; // 32 px: fits
+    titles[3] = "abcde"; // 40 px: does not
     try layout.fillTrimmed(alloc, &titles, fake_measure);
     try std.testing.expectEqual(@as(usize, 30), layout.trimmed.items.len);
     try std.testing.expect(!layout.trimmed.items[0]);
     try std.testing.expect(layout.trimmed.items[1]);
+    try std.testing.expect(!layout.trimmed.items[2]);
+    try std.testing.expect(layout.trimmed.items[3]);
 
-    // Wide tabs: the same long title fits 80 px less than the tab.
+    // Wide tabs: the same long title fits 38 px less than the tab.
     try layout.compute(alloc, m, 600, .titlebar, true, 2, 0);
     var two = [_][]const u8{ "short", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" };
     try layout.fillTrimmed(alloc, &two, fake_measure);

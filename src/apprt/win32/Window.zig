@@ -679,7 +679,7 @@ pub fn layout(self: *Window) void {
     // The tab row slides in with the second tab. It slides out over the
     // room it had, which the terminal gets back when it is gone (the grid
     // resizes once, not per frame).
-    self.tab_anim.retargetRow(now, want_tabs, animate and mode == .titlebar);
+    if (mode == .titlebar) self.tab_anim.retargetRow(now, want_tabs, animate) else self.tab_anim.settleRow(want_tabs);
     const show_row = want_tabs or (mode == .titlebar and self.tab_anim.rowLeaving());
     self.strip.compute(
         alloc,
@@ -1260,6 +1260,14 @@ fn wndProc(
                 Chrome.paint(self, hdc, geom.Rect.fromRECT(ps.rcPaint));
                 _ = win32.user32.EndPaint(hwnd, &ps);
             }
+            return 0;
+        },
+
+        // PrintWindow and screen-capture tools ask the window to draw itself into
+        // their DC: the strip is ours to paint, the child windows paint themselves.
+        win32.user32.WM_PRINTCLIENT => {
+            const hdc: win32.user32.HDC = @ptrFromInt(wparam);
+            Chrome.paint(self, hdc, .{});
             return 0;
         },
 

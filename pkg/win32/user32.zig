@@ -994,3 +994,6 @@ pub const WM_CTLCOLOREDIT = 0x0133;
 /// `GetWindow` command: the owner of an owned window.
 pub const GW_OWNER = 4;
 pub extern "user32" fn GetWindow(HWND, cmd: u32) callconv(.winapi) ?HWND;
+
+/// Sent by PrintWindow (and WM_PRINT) to draw the client area into a DC.
+pub const WM_PRINTCLIENT = 0x0318;
