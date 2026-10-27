@@ -471,7 +471,9 @@ Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CON
 (defaults + `command = direct:cmd.exe /k`), waits until the window is visible + 10 s idle, samples
 `Get-Process -Id <pid>` → `PrivateMemorySize64` (**Private Bytes**, the budgeted number) and `WorkingSet64` (reported),
 ghostty.exe only (conhost/OpenConsole and shells are reported separately, not budgeted). Steps for extra tabs/splits/windows
-are driven by the test-only IPC `action` op (§18.8; M2+), never by keyboard input. Output: one CSV row per scenario appended to `docs/windows/ram-baseline.csv`
+are driven by the test-only IPC `action` op (§18.8; M2+), never by keyboard input: `tabs` = 10 x `new_tab`, `splits` = 10 x `new_split` in one tab,
+`windows` = 4 x `new_window`, `close-10` = 10 tabs opened and closed again, 30 s idle (rows `close-10-before` / `close-10`), `zero-windows` = the
+process resident with no window; the per-surface / per-window cost is (row - `one-surface`) / 10, 10, 4. Output: one CSV row per scenario appended to `docs/windows/ram-baseline.csv`
 (date, commit, optimize, adapter, scenario, private_mb, ws_mb). Budgeted numbers are measured on `-Doptimize=ReleaseFast`
 builds (Debug numbers may be recorded with `optimize=Debug` but are never gated). The scrollback scenario uses
 `cmd /c "for /L %i in (1,1,200000) do @echo %i"` (there is no `seq` in cmd).
@@ -479,11 +481,11 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | Scenario (100% DPI, default font/config, idle) | v1.0 target (Private Bytes) | M1 gate |
 |---|---|---|
 | 1 window, 1 surface | ≤ 80 MB | ≤ 110 MB (+ baseline recorded) |
-| each extra surface (tab or split) | ≤ +10 MB | measured from M2 |
-| each extra window (1 surface) | ≤ +15 MB | measured from M2 |
+| each extra surface (tab or split) | ≤ +10 MB | M2: +5.7 MB per tab, +6.0 per split (ReleaseFast, Arc iGPU): met |
+| each extra window (1 surface) | ≤ +15 MB | M2: +17.7 MB (2 runs: 140.2 / 140.1 vs 69.1 MB): **over, owner decision** |
 | surface after `seq 1 200000` (scrollback full at default `scrollback-limit` 10 MB) | ≤ surface cost + 15 MB | recorded |
-| close 10 extra surfaces, wait 30 s | back within +10% of the pre-open value | from M2 |
-| 0 windows, resident in the notification area (§18.15) | recorded | from M2 |
+| close 10 extra surfaces, wait 30 s | back within +10% of the pre-open value | M2: +18.0 % and +14.1 % (81.2 / 78.5 vs 68.8 MB): **over, owner decision** (a 16-pane cycle leaves about +80 MB, pre-existing) |
+| 0 windows, resident in the notification area (§18.15) | recorded | M2: 63.1 MB private (recorded, not gated) |
 | tmux.exe per invocation | ≤ 5 MB, ≤ 100 ms wall | M4 |
 Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit` (user),
 `EmptyWorkingSet` is NOT used (it only hides private bytes).
@@ -557,7 +559,7 @@ recorded; (8) no hang on close while output streams or during live resize; (9) `
 and ends the process ≤ 3 s; (10) `aarch64-windows-msvc` compiles (recorded, not gating). GUI scenarios that cannot run on
 a locked/non-interactive desktop are recorded as SKIP and re-run interactively before sign-off.
 
-**M2 — tabs, splits, multi-window, Mica, titlebar, DPI, keybind actions.** Custom frame (caption removed, DWM-extended,
+**M2 (done, accepted with concerns: `docs/windows/m2/acceptance.md`; commit `test(windows): M2 RAM rows, screenshots and acceptance record`) — tabs, splits, multi-window, Mica, titlebar, DPI, keybind actions.** Custom frame (caption removed, DWM-extended,
 Mica under the titlebar/tab strip, own caption buttons, `HTMAXBUTTON` snap layouts, `window-decoration` client/server/none),
 Direct2D/DirectWrite tab strip (select, close, middle-click, new, drag reorder, overflow scroll, inline rename = `prompt_title`),
 tabs and splits over core `SplitTree` (one container HWND per tab, one child HWND per surface; divider drag, zoom, equalize,
@@ -573,6 +575,10 @@ resident (§18.19; full recovery M3). Every `Action.Key` is classified implement
 unsupported by `apprt/win32/actions.zig`. Exit: action-coverage test green; M1+M2 e2e green on Debug and ReleaseFast;
 screenshots at 100/150/200% (simulated through the test DPI op; real multi-monitor checked by the owner); per-tab/split/window
 and close-10 RAM rows within §14 targets; the ReleaseFast latency gates of §18.18 met. Plan: `docs/windows/plans/M2-tabs-splits-windows.md`.
+Scope moved during execution (ledger): Task 40 (ConPTY variant) is N/A, the measured ConPTY stage is not the floor (§18.18); the drop highlight is
+removed (macOS has none); the native always-visible scrollbar stays an interim, an overlay scroller like macOS is M3 work; a macOS-like tab bar
+look polish is an M3 task; full recovery after a GPU device loss is M3 (§18.19); the Git Bash cwd inheritance waits for M5 OSC 7 translation; tab
+context menu and tab tooltips are M3; the +80 MB after a 16-pane open/close cycle is accepted as pre-existing and flagged for M3 RAM work.
 
 **M3 — feature parity.** Quick terminal (`RegisterHotKey`, slide), command palette, search bar, notifications (toast with
 AUMID self-registered under HKCU, §13), URL hover/open (`ShellExecuteW`, untrusted URL validation),

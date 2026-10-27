@@ -199,11 +199,70 @@ the same path in parts: the 2 KiB slicing of a read, a 50 MB stream of
 random write sizes through the overlapped pipe read loop, and checked lines
 from `cmd /c type` through a pseudo console into a terminal.
 
+## M2 additions
+
+### Test IPC and `lib/GhosttyIpc.psm1`
+
+A Ghostty started with `GHOSTTY_WIN32_TEST_IPC=1` (`Start-E2eGhostty` sets it)
+answers four test-only ops on its named pipe
+`ghostty-<sid>-<session>-<u|a>-<class>`, next to the product ops
+(`new-window`, `new-tab`): `state` (windows, tabs, surfaces, rects, dpi,
+strip bounds, flags as JSON), `action` (runs a keybind action by name, e.g.
+`new_split:right`, answers `performed`), `dpi` (simulates a per-monitor DPI
+change) and `color-scheme` (simulates the system light/dark scheme). The
+module wraps them: `Invoke-GhosttyIpc`, `Get-GhosttyState`,
+`Invoke-GhosttyAction`, `Wait-GhosttyState`. Scenarios drive tabs, splits and
+windows through these ops, never through keybind `SendInput`. The module is
+ASCII only (Windows PowerShell 5.1 reads a BOM-less file as ANSI).
+
+### `lib/MouseInput.psm1`
+
+Real mouse input for the strip, divider, tab-drag and drop scenarios
+(`Send-MouseClick`, `Send-MouseMove`, `Send-MouseDown/Up`, `Send-MouseDrag`,
+`Convert-ClientToScreen`). The thread is made per-monitor-aware (V2) so the
+physical-pixel coordinates the `state` op reports hit the right pixel at any
+scaling (the test powershell.exe itself is DPI-unaware). Only used inside a
+scenario, i.e. under the desktop lock.
+
+### M2 scenarios
+
+`e2e.ps1 -Milestone M2` (orders 200..495): `ipc-state`, `tabs-basic`,
+`tabs-keys`, `splits-basic`, `split-close`, `split-many` (16 panes; a Debug
+exe runs it under the test-lock), `theme`, `config-reload`,
+`split-divider-drag`, `frame-hittest`, `chrome-paint`, `tab-strip-mouse`,
+`tab-rename`, `single-instance`, `ipc-cli`, `windows-multi`, `dpi-sim`,
+`resize-overlay`, `scrollbar`, `maximize-fullscreen`, `bell-progress`,
+`close-confirm`, `tray`, `quit-after-last`, `tab-close-tree`, `tab-drag`,
+`drop-files`, `device-lost` (needs a Debug exe, SKIP otherwise),
+`background-focus`, `m2-acceptance` (idle CPU and the screenshot set), and
+the latency scenarios `input-latency`, `tui-latency`, `output-latency`.
+
+- `tray`: the process stays resident after the last window closes (Windows
+  default `quit-after-last-window-closed = false`); the tray icon is driven
+  through its message window, not clicked.
+- `tab-close-tree` / `close-tree`: closing a tab (or window) ends the shell
+  and its console tree; a `start cmd` GUI child survives a tab close as in
+  Windows Terminal.
+- `drop-files`: a real OLE drag from a helper (`_drop.ps1`) into the pane;
+  the paths arrive quoted for the shell actually running (Git Bash, pwsh,
+  cmd); there is no drop highlight (as on macOS).
+- Latency (`_latency.ps1`): stage tables of the key echo, TUI keys, TUI wheel
+  and output path from the std-only tracer; gates (ReleaseFast): Ghostty-owned
+  stages <= 6 ms p95, whole path <= 16 ms p95 with cmd, burst <= 50 ms.
+  Gates are judged on the median of three ReleaseFast runs, and need a quiet
+  machine: with another process using 15-20 % CPU the Ghostty-owned p95
+  rises to about 15 ms (renderer-thread wake). `bg-cpu` in the INFO line is
+  the background load during the run. `GHOSTTY_LAT_RECORD_BASELINE=1`
+  appends the rows to `docs/windows/latency-baseline.csv`. Debug is recorded
+  with looser gates.
+- `stream-integrity` on a Debug exe: use `GHOSTTY_E2E_STREAM_MB=2` (50 MB does
+  not finish in 600 s there).
+
 ## measure-ram.ps1
 
 ```
 zig build -j2 -Doptimize=ReleaseFast --prefix zig-out-rf
-powershell -NoProfile -File test/windows/measure-ram.ps1 [-Driver hardware|warp] [-Scenario one-surface|scrollback] [-Optimize ReleaseFast|Debug]
+powershell -NoProfile -File test/windows/measure-ram.ps1 [-Driver hardware|warp] [-Scenario one-surface|scrollback|tabs|splits|windows|close-10|zero-windows] [-Optimize ReleaseFast|Debug]
 ```
 
 Starts `ghostty.exe` (`zig-out-rf\bin\ghostty.exe` for ReleaseFast, `zig-out\bin\ghostty.exe` for
@@ -212,7 +271,12 @@ idles 10 s and appends one row to `docs/windows/ram-baseline.csv`:
 `date,commit,optimize,adapter,scenario,private_mb,ws_mb`. Only ghostty.exe is
 measured (Private Bytes is the budgeted number). `scrollback` first runs
 `for /L %i in (1,1,200000) do @echo %i` in the surface, so it types into the
-window and needs a usable foreground. The run holds the desktop lock. Only
+window and needs a usable foreground. `tabs` (10 x `new_tab`), `splits`
+(10 x `new_split`), `windows` (4 x `new_window`) and `close-10` (open 10 tabs,
+close them, idle 30 s; rows `close-10-before` and `close-10`) are driven by the
+test IPC `action` op; `zero-windows` leaves the process resident in the tray.
+Per-tab / per-split / per-extra-window cost = (row - one-surface) / 10, 10, 4.
+The run holds the desktop lock. Only
 `-Optimize ReleaseFast` rows are gated (M1: one surface <= 110 MB); a Debug
 build also logs `private usage after Device.init / first surface / first
 frame` (`-LogCopy <file>` keeps the log), and logs `d3d11 adapter=` at info.

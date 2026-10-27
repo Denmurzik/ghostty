@@ -17,11 +17,16 @@ Scenarios:
                the surface (cmd has no `seq`), so the scrollback is full, then
                idles. Needs a usable foreground window to type into; without
                one it is reported and no row is written.
-  tabs         one window with 5 tabs (4 x `new_tab`), idle. Driven by the test
-               IPC `action` op, no keyboard input. The per-tab cost is
-               (tabs - one-surface) / 4.
-  splits       one tab with 5 split panes (4 x `new_split`, right/down
-               alternating), idle. Per split: (splits - one-surface) / 4.
+  tabs         one window with 11 tabs (10 x `new_tab`), idle. Driven by the
+               test IPC `action` op, no keyboard input. The per-tab cost is
+               (tabs - one-surface) / 10.
+  splits       one tab with 11 split panes (10 x `new_split`, right/down
+               alternating), idle. Per split: (splits - one-surface) / 10.
+  windows      5 windows (4 x `new_window`), idle. Per extra window:
+               (windows - one-surface) / 4.
+  close-10     idles, samples (`close-10-before` row), opens 10 tabs, closes
+               them again (10 x `close_tab`), idles 30 s and samples the
+               `close-10` row. Gate: within +10 % of the before value.
   zero-windows one window opened then closed with the Windows default
                `quit-after-last-window-closed = false`: the process stays
                resident (tray, Task 28) and is sampled. A build whose process
@@ -42,7 +47,8 @@ adapter is read from the `d3d11 adapter=` line of the sandbox's ghostty.log.
 hardware (default) or warp (GHOSTTY_D3D11_DRIVER=warp).
 
 .PARAMETER Scenario
-one-surface (default), scrollback, tabs, splits or zero-windows.
+one-surface (default), scrollback, tabs, splits, windows, close-10 or
+zero-windows.
 
 .PARAMETER Optimize
 ReleaseFast (default) or Debug: which build to measure and what the row says.
@@ -73,7 +79,7 @@ powershell -NoProfile -File test/windows/measure-ram.ps1 -Driver warp -Scenario 
 #>
 param(
     [ValidateSet('hardware', 'warp')][string]$Driver = 'hardware',
-    [ValidateSet('one-surface', 'scrollback', 'tabs', 'splits', 'zero-windows')][string]$Scenario = 'one-surface',
+    [ValidateSet('one-surface', 'scrollback', 'tabs', 'splits', 'windows', 'close-10', 'zero-windows')][string]$Scenario = 'one-surface',
     [ValidateSet('ReleaseFast', 'Debug')][string]$Optimize = 'ReleaseFast',
     [string]$Exe,
     [string]$Csv,
@@ -127,7 +133,7 @@ $vars = [ordered]@{
     XDG_CONFIG_HOME      = $configHome
     GHOSTTY_D3D11_DRIVER = $(if ($Driver -eq 'warp') { 'warp' } else { $null })
     GHOSTTY_D3D11_DUMP   = $null
-    GHOSTTY_WIN32_TEST_IPC = $(if ($Scenario -in 'tabs', 'splits', 'zero-windows') { '1' } else { $null })
+    GHOSTTY_WIN32_TEST_IPC = $(if ($Scenario -in 'tabs', 'splits', 'windows', 'close-10', 'zero-windows') { '1' } else { $null })
 }
 
 $lock = Enter-GuiLock -Owner 'measure-ram.ps1' -TimeoutMinutes 30
@@ -187,17 +193,35 @@ try {
     }
 
     $notApplicable = $false
+    $beforeMb = $null
+    $beforeWs = $null
     switch ($Scenario) {
         'tabs' {
-            for ($i = 0; $i -lt 4; $i++) { Invoke-RamAction 'new_tab' }
+            for ($i = 0; $i -lt 10; $i++) { Invoke-RamAction 'new_tab' }
             $w = @((Get-RamState).windows)[0]
-            if (@($w.tabs).Count -ne 5) { throw "expected 5 tabs, state shows $(@($w.tabs).Count)" }
+            if (@($w.tabs).Count -ne 11) { throw "expected 11 tabs, state shows $(@($w.tabs).Count)" }
         }
         'splits' {
-            for ($i = 0; $i -lt 4; $i++) { Invoke-RamAction $(if ($i % 2 -eq 0) { 'new_split:right' } else { 'new_split:down' }) }
+            for ($i = 0; $i -lt 10; $i++) { Invoke-RamAction $(if ($i % 2 -eq 0) { 'new_split:right' } else { 'new_split:down' }) }
             $w = @((Get-RamState).windows)[0]
             $n = @(@($w.tabs)[[int]$w.active_tab].surfaces).Count
-            if ($n -ne 5) { throw "expected 5 surfaces, state shows $n" }
+            if ($n -ne 11) { throw "expected 11 surfaces, state shows $n" }
+        }
+        'windows' {
+            for ($i = 0; $i -lt 4; $i++) { Invoke-RamAction 'new_window' }
+            $n = @((Get-RamState).windows).Count
+            if ($n -ne 5) { throw "expected 5 windows, state shows $n" }
+        }
+        'close-10' {
+            Start-Sleep -Seconds $IdleSeconds
+            $proc.Refresh()
+            $beforeMb = [math]::Round($proc.PrivateMemorySize64 / 1MB, 1)
+            $beforeWs = [math]::Round($proc.WorkingSet64 / 1MB, 1)
+            for ($i = 0; $i -lt 10; $i++) { Invoke-RamAction 'new_tab' }
+            if (@(@((Get-RamState).windows)[0].tabs).Count -ne 11) { throw 'expected 11 tabs before closing' }
+            for ($i = 0; $i -lt 10; $i++) { Invoke-RamAction 'close_tab' }
+            if (@(@((Get-RamState).windows)[0].tabs).Count -ne 1) { throw 'expected 1 tab after closing' }
+            $IdleSeconds = 30
         }
         'zero-windows' {
             Invoke-RamAction 'close_window'
@@ -253,5 +277,14 @@ $row = '{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit
     ($adapter -replace ',', ' '), $Scenario,
     ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $privateMb)),
     ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $wsMb))
+if ($null -ne $beforeMb) {
+    $before = '{0},{1},{2},{3},close-10-before,{4},{5}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
+        ($adapter -replace ',', ' '),
+        ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $beforeMb)),
+        ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $beforeWs))
+    [IO.File]::AppendAllText($Csv, $before + "`n", (New-Object Text.UTF8Encoding $false))
+    Write-Output $before
+    Write-Host ('INFO close-10: {0} MB after vs {1} MB before = {2:P1}' -f $privateMb, $beforeMb, ($privateMb / $beforeMb - 1))
+}
 [IO.File]::AppendAllText($Csv, $row + "`n", (New-Object Text.UTF8Encoding $false))
 Write-Output $row
