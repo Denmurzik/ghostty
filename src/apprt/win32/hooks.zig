@@ -258,6 +258,8 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try Inspector.testState(app, jw);
     try jw.objectField("export_io");
     try export_io.testState(app, jw);
+    try jw.objectField("config_errors");
+    try config_errors.testState(app, jw);
     try jw.endObject();
 }
 
@@ -278,7 +280,7 @@ test "win32 hooks: testState writes an m3 object" {
     defer parsed.deinit();
     const m3 = parsed.value.object.get("m3") orelse return error.TestUnexpectedResult;
     try std.testing.expect(m3 == .object);
-    inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io" }) |key| {
+    inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io", "config_errors" }) |key| {
         try std.testing.expect(m3.object.get(key) != null);
     }
 }
