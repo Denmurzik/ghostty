@@ -55,10 +55,14 @@ pub fn windowDestroying(window: *Window) void {
     var msg: win32.user32.MSG = undefined;
     const m = messages.WM_GHOSTTY_POSTED_DIALOG;
     while (win32.user32.PeekMessageW(&msg, window.hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
-        if (msg.wParam != @backingInt(hooks.DialogKind.url_confirm)) continue;
-        const payload: *shell_open.ConfirmPayload = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
-        payload.destroy();
+        hooks.discardDialog(msg.wParam, msg.lParam);
     }
+}
+
+/// A confirmation that will never be delivered.
+pub fn discard(lparam: win32.foundation.LPARAM) void {
+    const payload: *shell_open.ConfirmPayload = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    payload.destroy();
 }
 
 /// `WM_GHOSTTY_POSTED_DIALOG` of kind `url_confirm`: the worker met a link

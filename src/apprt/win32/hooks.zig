@@ -64,7 +64,7 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     QuickTerminal.configChanged(app, config);
     composition.configChanged(app, config);
     notify.configChanged(app, config);
-    config_errors.configChanged(app, config);
+    config_errors.configChanged(app, config, reloaded);
     if (reloaded) app_toast.configReloaded(app);
 }
 
@@ -82,7 +82,25 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
             return null;
         },
         win32.user32.WM_TIMER => return recovery.timer(app, wparam),
+        messages.WM_GHOSTTY_POSTED_DIALOG => {
+            // Posted before any window existed (start-up config errors).
+            if (std.enums.fromInt(DialogKind, wparam) == .config_errors) {
+                config_errors.postedApp(app, lparam);
+            } else discardDialog(wparam, lparam);
+            return 0;
+        },
         else => return null,
+    }
+}
+
+/// A `WM_GHOSTTY_POSTED_DIALOG` that will never be delivered (its window is
+/// going away): frees what its lparam owns.
+pub fn discardDialog(wparam: WPARAM, lparam: LPARAM) void {
+    const kind = std.enums.fromInt(DialogKind, wparam) orelse return;
+    switch (kind) {
+        .export_io => export_io.discard(lparam),
+        .config_errors => config_errors.discard(lparam),
+        .url_confirm => link.discard(lparam),
     }
 }
 

@@ -103,14 +103,30 @@ fn taskDialogProc() ?TaskDialogIndirectFn {
     return S.proc;
 }
 
+/// What showing a task dialog came to. A failed HRESULT may arrive after the
+/// dialog was on screen, so only `unavailable` justifies a second prompt.
+pub const TaskDialogOutcome = union(enum) {
+    /// The entry point is missing: nothing was shown.
+    unavailable,
+    failed: HRESULT,
+    pressed: i32,
+};
+
+pub fn taskDialogShow(config: *const TASKDIALOGCONFIG) TaskDialogOutcome {
+    const proc = taskDialogProc() orelse return .unavailable;
+    var button: i32 = 0;
+    const hr = proc(config, &button, null, null);
+    if (hr < 0) return .{ .failed = hr };
+    return .{ .pressed = button };
+}
+
 /// Show a task dialog. The id of the pressed button, or null when the
 /// dialog is unavailable or failed.
 pub fn taskDialogIndirect(config: *const TASKDIALOGCONFIG) ?i32 {
-    const proc = taskDialogProc() orelse return null;
-    var button: i32 = 0;
-    const hr = proc(config, &button, null, null);
-    if (hr < 0) return null;
-    return button;
+    return switch (taskDialogShow(config)) {
+        .pressed => |id| id,
+        else => null,
+    };
 }
 
 // -- Window subclassing ------------------------------------------------------

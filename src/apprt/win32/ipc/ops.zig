@@ -289,6 +289,8 @@ test "win32 ipc: export-io path must be an absolute drive path" {
     try testing.expect(!testPathOk("\\\\?\\C:\\x"));
     try testing.expect(!testPathOk("\\\\.\\C:\\x"));
     try testing.expect(!testPathOk("C:\\\\x"));
+    try testing.expect(!export_io.pathSafe("C:\\tmp\\..\\x"));
+    try testing.expect(!export_io.pathSafe("C:\\tmp\\x.txt:s"));
 }
 
 /// Test op: what the inspector's export button emits, which a script cannot
@@ -296,7 +298,7 @@ test "win32 ipc: export-io path must be an absolute drive path" {
 fn exportIo(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
     const surface = targetSurface(app, req.surface) orelse
         return reply(alloc, .failed, "", "no such surface", null);
-    if (!testPathOk(req.path)) return reply(alloc, .bad_request, "", "invalid path", null);
+    if (!testPathOk(req.path) or !export_io.pathSafe(req.path)) return reply(alloc, .bad_request, "", "invalid path", null);
     const saved = export_io.saveTest(app, .{ .surface = surface.core() }, .{ .contents = req.text }, req.path);
     if (!saved) return reply(alloc, .failed, "", "export failed", null);
     return reply(alloc, .ok, "", "", null);

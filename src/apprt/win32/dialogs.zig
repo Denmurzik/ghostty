@@ -25,6 +25,8 @@ const replacement: u21 = 0xFFFD;
 /// the visible symbol for the control character c.
 const control_pictures: u21 = 0x2400;
 
+const log = std.log.scoped(.win32_dialogs);
+
 const w16 = std.unicode.utf8ToUtf16LeStringLiteral;
 
 /// What a close would take down. Decides the sentence of the confirmation.
@@ -37,9 +39,19 @@ pub fn confirmCloseKind(owner: win32.foundation.HWND, kind: CloseKind) bool {
         .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
     };
     const config = buildConfig(owner, kind, &buttons);
-    if (comctl32.taskDialogIndirect(&config)) |id| return id == button_accept;
+    return switch (comctl32.taskDialogShow(&config)) {
+        .pressed => |id| id == button_accept,
+        .failed => |hr| refused(hr),
+        .unavailable => fallbackBox(owner, closeTitle(kind), closeBody(kind)),
+    };
+}
 
-    return fallbackBox(owner, closeTitle(kind), closeBody(kind));
+/// The task dialog failed, maybe after it had been on screen: asking again
+/// would prompt twice, so the answer is the default button (Cancel), and the
+/// failure is logged.
+fn refused(hr: i32) bool {
+    log.warn("task dialog failed, taking the default button hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    return false;
 }
 
 /// The task dialog of a close confirmation. Pure: nothing is shown.
@@ -125,9 +137,72 @@ pub fn confirm(
         .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
     };
     const config = buildConfigText(owner, wide_title, null, wide_body, &buttons);
-    if (comctl32.taskDialogIndirect(&config)) |id| return id == button_accept;
+    return switch (comctl32.taskDialogShow(&config)) {
+        .pressed => |id| id == button_accept,
+        .failed => |hr| refused(hr),
+        .unavailable => fallbackBox(owner, title, body),
+    };
+}
 
-    return fallbackBox(owner, title, body);
+/// One button of `taskDialogList`.
+pub const ListButton = struct {
+    id: i32,
+    text: []const u8,
+};
+
+const list_buttons_max = 4;
+
+/// A task dialog with a warning icon, a main instruction, a body (a list
+/// of lines, say) and custom buttons. The id of the pressed button; null
+/// when the dialog failed (nothing is asked a second time). Without
+/// `TaskDialogIndirect` the body is shown in a plain message box and the
+/// result is null as well. Text that does not fit the fixed buffers is cut.
+pub fn taskDialogList(
+    owner: ?win32.foundation.HWND,
+    title: []const u8,
+    instruction: []const u8,
+    body: []const u8,
+    buttons: []const ListButton,
+    default_id: i32,
+) ?i32 {
+    var title_buf: [128]u16 = undefined;
+    var instruction_buf: [256]u16 = undefined;
+    var body_buf: [16384]u16 = undefined;
+    var text_bufs: [list_buttons_max][64]u16 = undefined;
+    var raw: [list_buttons_max]comctl32.TASKDIALOG_BUTTON = undefined;
+    const count = @min(buttons.len, list_buttons_max);
+    for (buttons[0..count], 0..) |b, i| raw[i] = .{
+        .nButtonID = b.id,
+        .pszButtonText = toWide(&text_bufs[i], b.text).ptr,
+    };
+
+    var config = buildConfigText(
+        owner,
+        toWide(&title_buf, title),
+        toWide(&instruction_buf, instruction),
+        toWide(&body_buf, body),
+        raw[0..count],
+    );
+    config.pszMainIcon = @ptrFromInt(comctl32.TD_WARNING_ICON);
+    config.nDefaultButton = default_id;
+    switch (comctl32.taskDialogShow(&config)) {
+        .pressed => |id| return id,
+        .failed => |hr| {
+            log.warn("task dialog failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+            return null;
+        },
+        .unavailable => {
+            var box_title: [128]u16 = undefined;
+            var box_body: [16384]u16 = undefined;
+            _ = win32.user32.MessageBoxW(
+                owner,
+                toWide(&box_body, body),
+                toWide(&box_title, title),
+                win32.user32.MB_OK | win32.user32.MB_ICONWARNING,
+            );
+            return null;
+        },
+    }
 }
 
 /// The M1 message box, for when `TaskDialogIndirect` cannot be used.
@@ -324,4 +399,12 @@ test "win32 comctl32: TASKDIALOGCONFIG is byte-packed" {
     try std.testing.expectEqual(160, @sizeOf(comctl32.TASKDIALOGCONFIG));
     try std.testing.expectEqual(12, @sizeOf(comctl32.TASKDIALOG_BUTTON));
     try std.testing.expectEqual(148, @offsetOf(comctl32.TASKDIALOGCONFIG, "lpCallbackData"));
+}
+
+// The 64-bit layout of commdlg.h's OPENFILENAMEW.
+test "win32 comdlg32: OPENFILENAMEW size" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(152, @sizeOf(win32.comdlg32.OPENFILENAMEW));
+    try std.testing.expectEqual(96, @offsetOf(win32.comdlg32.OPENFILENAMEW, "Flags"));
+    try std.testing.expectEqual(148, @offsetOf(win32.comdlg32.OPENFILENAMEW, "FlagsEx"));
 }
