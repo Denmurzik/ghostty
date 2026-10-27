@@ -7,7 +7,7 @@ Debug-only scenarios, Intel Arc iGPU (hardware adapter), 1920x1080 at 96 dpi, 60
 
 Status: **accepted with concerns** for the owner: four RAM rows over their budget (custom shader, overlays, inspector
 after close, quick terminal), the absolute 6 ms latency gate not reached under background load (the relative gates
-pass), ARM64 does not build, the real-toast RAM row is deferred, and the Git Bash input-loss item is pending the
+pass), the real-toast RAM row is deferred, and the Git Bash input-loss item is pending the
 Task 26.4 verdict.
 
 ## RAM (Private MB, `measure-ram.ps1`, ReleaseFast, idle 10 s; rows tagged `m3-*` in `ram-baseline.csv`)
@@ -62,12 +62,7 @@ blur, `background-blur = false`) `transparency-translucent-screen.png`, `-inacti
 `opacity-blur-active-screen.png`, `opacity-blur-inactive-screen.png`, `opacity-blur-noblur-screen.png`; vt-smoke
 `vt-smoke-summary.txt` and `vt-smoke/vts-*.png` (frame dumps).
 
-Privacy defect found and fixed in the new script: `Save-WindowShot` crops `GetWindowRect`, which includes the
-invisible 8 px resize border, where the pixels belong to whatever is behind the window; a first set of shots showed
-fragments of a foreign window there. Those images were deleted; `m3-shots.ps1` crops to `DWMWA_EXTENDED_FRAME_BOUNDS`
-inset by 3 px (still through `Get-ScreenShot`). `Save-WindowShot` itself (`e2e/_common.ps1`) has the same weakness
-for margin 0; the transparency shots use a margin over our own backdrop, where it does no harm. Older evidence taken with
-`Save-WindowShot` at margin 0 (15b and Task 25 sets) should be checked by the lead.
+Privacy defect (fixed in 117aa103b): `Save-WindowShot` cropped `GetWindowRect`, whose invisible 8 px resize border showed aforeign window; it now uses `DWMWA_EXTENDED_FRAME_BOUNDS`, and `m3-shots.ps1` uses it. The first shot set was purged and regenerated.
 
 vt-smoke (`-Driver warp`, ReleaseFast, 96 dpi): 14 PASS (match 100 %, max diff <= 1), 3 SKIP (no 96 dpi reference:
 `kitty-image`, `underline-colors` because of L1, `wide-cjk`). `Stop-OwnGhostty` raised an error when taskkill found a
@@ -75,18 +70,14 @@ child already gone (two runs of three failed at the `kitty-image` case); fixed i
 
 ## ARM64 cross-build
 
-`zig build -Dtarget=aarch64-windows-gnu -j6`: **FAIL**, one compile error, first line
-`pkg\win32\dcomp.zig:43:22: error: @ptrCast increases pointer alignment` (`create_device2 = @ptrCast(proc)`, the
-`GetProcAddress` result cast to a function pointer; fix with `@alignCast`). It is M3 code (Task 8 bindings,
-reached through `composition.zig:245`), not an upstream problem. The two M2 errors (`comctl32.zig:99`,
-`os/windows.zig:712`) no longer appear. More errors may follow once this one is fixed (Zig stops at the first
-failing function it analyses). Not gating (M2/M3 rule: MSVC ARM64 is checked in the M6 CI).
+`zig build -Dtarget=aarch64-windows-gnu -j6`: **PASS** after `117aa103b` (`@alignCast` in `pkg/win32/dcomp.zig`). The first
+run on `e60878000` failed with `pkg/win32/dcomp.zig:43:22: error: @ptrCast increases pointer alignment` (M3 Task 8 code).
 
 ## Exit checklist (plan, "M3 exit checklist")
 
 1. Builds: Debug `zig build -j6` ok, ReleaseFast ok (both through the test lock). The unit-test filters (`win32 `
    three times, `d3d11 `, `shadertoy`, `windows directwrite`, `renderer: redraw`), `-Demit-lib-vt` and the Linux
-   recipe were not run in Task 27 (outside its brief); ARM64 fails as above.
+   recipe were not run in Task 27 (outside its brief); ARM64 passes (117aa103b).
 2. Action classification test: not re-run in Task 27.
 3. E2E: Task 25 (HEAD 1125d50e9 plus fixes) 65 of 80 first pass, every failure explained (stale tests fixed, Debug-only
    slowness, foreground theft, L1 for `device-recover`); Tasks 26.1-26.3 fixed `device-recover`, the `vt-smoke` DPI refs
@@ -108,6 +99,5 @@ failing function it analyses). Not gating (M2/M3 rule: MSVC ARM64 is checked in 
 
 - Task 26.4 verdict (Git Bash first keystroke lost after a pty resize or tab switch): PLACEHOLDER in the changelog,
   the checklist and SPEC section 18.34.
-- `pkg/win32/dcomp.zig:43` `@alignCast` (ARM64).
 - RAM overruns above; the quick terminal (+10.1 MB) is the one worth a look.
 - Plan line 119 (message ids) still lists `+11..+14`; the shipped ids are `+12..+15` (ledger note), not edited here.

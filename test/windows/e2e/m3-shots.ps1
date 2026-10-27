@@ -14,12 +14,6 @@
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 
-if (-not ('GhosttyE2e.ShotDwm' -as [type])) {
-    Add-Type -Namespace GhosttyE2e -Name ShotDwm -MemberDefinition @"
-[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-[DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, ref RECT r, int size);
-"@
-}
 if (-not ('GhosttyE2e.ShotKeys' -as [type])) {
     Add-Type -Namespace GhosttyE2e -Name ShotKeys -MemberDefinition @"
 [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
@@ -45,14 +39,8 @@ Invoke-E2eScenario 'm3-shots' {
         }
         Write-E2eInfo $results[$results.Count - 1]
     }
-    # The visible frame (DWMWA_EXTENDED_FRAME_BOUNDS), not GetWindowRect: the latter holds the invisible resize
-    # border, where the pixels belong to whatever is behind the window. Still through the capture guard.
     function Shot($G, [IntPtr]$Hwnd, [string]$Name, [int]$Margin = 0) {
-        $r = New-Object GhosttyE2e.ShotDwm+RECT
-        if ([GhosttyE2e.ShotDwm]::DwmGetWindowAttribute($Hwnd, 9, [ref]$r, 16) -ne 0) { throw "no frame bounds for $Name" }
-        # 3 px inset: the rounded corners and the 1 px border blend with whatever is behind the window.
-        $bmp = Get-ScreenShot ($r.Left + 3) ($r.Top + 3) ($r.Right - $r.Left - 6) ($r.Bottom - $r.Top - 6)
-        try { $bmp.Save((Join-Path $dir "m3-$Name.png"), [Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+        Save-WindowShot $Hwnd (Join-Path $dir "m3-$Name.png") $Margin
     }
     function Place($G) {
         Move-Window $G.Hwnd 160 160 1000 700
