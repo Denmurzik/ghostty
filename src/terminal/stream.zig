@@ -7340,3 +7340,102 @@ test "stream: continuation every-byte cuts preserve future behavior" {
         );
     };
 }
+
+/// Recording handler for the tmux passthrough tests: how many cells were
+/// printed and which OSC actions arrived, with their payloads.
+const TmuxPassthroughHandler = struct {
+    printed: usize = 0,
+    notifications: usize = 0,
+    titles: usize = 0,
+    title_buf: [64]u8 = undefined,
+    title_len: usize = 0,
+    note_title_buf: [64]u8 = undefined,
+    note_title_len: usize = 0,
+    note_body_buf: [64]u8 = undefined,
+    note_body_len: usize = 0,
+
+    pub fn deinit(_: *@This()) void {}
+
+    pub fn vt(
+        self: *@This(),
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) void {
+        switch (action) {
+            .print => self.printed += 1,
+            .print_slice => self.printed += value.cps.len,
+            .window_title => {
+                self.titles += 1;
+                self.title_len = value.title.len;
+                @memcpy(self.title_buf[0..value.title.len], value.title);
+            },
+            .show_desktop_notification => {
+                self.notifications += 1;
+                self.note_title_len = value.title.len;
+                @memcpy(self.note_title_buf[0..value.title.len], value.title);
+                self.note_body_len = value.body.len;
+                @memcpy(self.note_body_buf[0..value.body.len], value.body);
+            },
+            else => {},
+        }
+    }
+};
+
+test "stream: tmux passthrough OSC reaches the handler" {
+    // tmux's DCS passthrough: `ESC P tmux;` hooks an unknown DCS (final `t`)
+    // whose data ("mux;") is ignored, then the doubled ESC leaves the DCS
+    // (parse_table.zig: dcs_passthrough ESC exits to escape) and the inner
+    // sequence is parsed as a normal OSC.
+    {
+        var s: Stream(TmuxPassthroughHandler) = .init(.{ .handler = .{}, .allocator = testing.allocator });
+        defer s.deinit();
+        s.nextSlice("\x1bPtmux;\x1b\x1b]9;m4\x07\x1b\\");
+        try testing.expectEqual(@as(usize, 1), s.handler.notifications);
+        try testing.expectEqualStrings("m4", s.handler.note_body_buf[0..s.handler.note_body_len]);
+        try testing.expectEqual(@as(usize, 0), s.handler.printed);
+    }
+    {
+        var s: Stream(TmuxPassthroughHandler) = .init(.{ .handler = .{}, .allocator = testing.allocator });
+        defer s.deinit();
+        s.nextSlice("\x1bPtmux;\x1b\x1b]777;notify;a;b\x1b\x1b\\" ++ "\x1b\\");
+        try testing.expectEqual(@as(usize, 1), s.handler.notifications);
+        try testing.expectEqualStrings("a", s.handler.note_title_buf[0..s.handler.note_title_len]);
+        try testing.expectEqualStrings("b", s.handler.note_body_buf[0..s.handler.note_body_len]);
+        try testing.expectEqual(@as(usize, 0), s.handler.printed);
+    }
+    {
+        var s: Stream(TmuxPassthroughHandler) = .init(.{ .handler = .{}, .allocator = testing.allocator });
+        defer s.deinit();
+        s.nextSlice("\x1bPtmux;\x1b\x1b]0;title\x07\x1b\\");
+        try testing.expectEqual(@as(usize, 1), s.handler.titles);
+        try testing.expectEqualStrings("title", s.handler.title_buf[0..s.handler.title_len]);
+        try testing.expectEqual(@as(usize, 0), s.handler.printed);
+    }
+}
+
+test "stream: tmux passthrough nested and oversize" {
+    // Doubly wrapped: the inner wrapper is not unwrapped again, and nothing
+    // is printed.
+    {
+        var s: Stream(TmuxPassthroughHandler) = .init(.{ .handler = .{}, .allocator = testing.allocator });
+        defer s.deinit();
+        s.nextSlice("\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b]9;deep\x07\x1b\x1b\\" ++ "\x1b\\");
+        try testing.expectEqual(@as(usize, 0), s.handler.printed);
+    }
+    // A 1 MiB payload inside the wrapped OSC neither hangs nor prints.
+    {
+        var s: Stream(TmuxPassthroughHandler) = .init(.{ .handler = .{}, .allocator = testing.allocator });
+        defer s.deinit();
+        const big = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(big);
+        @memset(big, 'x');
+        s.nextSlice("\x1bPtmux;\x1b\x1b]9;");
+        s.nextSlice(big);
+        s.nextSlice("\x07\x1b\\");
+        try testing.expectEqual(@as(usize, 0), s.handler.printed);
+        // The stream still works afterwards.
+        s.nextSlice("\x1b]9;after\x07");
+        try testing.expectEqual(@as(usize, 1), s.handler.notifications);
+        try testing.expectEqualStrings("after", s.handler.note_body_buf[0..s.handler.note_body_len]);
+    }
+}
