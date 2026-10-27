@@ -48,9 +48,6 @@ const MF_BYCOMMAND: u32 = 0x00000000;
 const MF_ENABLED: u32 = 0x00000000;
 const MF_GRAYED: u32 = 0x00000001;
 
-extern "user32" fn EnableMenuItem(user32.HMENU, id: u32, flags: u32) callconv(.winapi) i32;
-extern "user32" fn GetSystemMenu(hwnd: win32.foundation.HWND, revert: win32.foundation.BOOL) callconv(.winapi) ?user32.HMENU;
-
 pub fn decorationsFor(setting: configpkg.Config.WindowDecoration) Decorations {
     return switch (setting) {
         .auto, .client => .client,
@@ -295,7 +292,7 @@ pub fn showSystemMenuBelowStrip(window: *Window) void {
 /// `WM_SYSCOMMAND`. A window without `WS_SYSMENU` may have no system menu
 /// to fetch, then a popup with the same commands is built.
 fn showSystemMenu(window: *Window, x: i32, y: i32) void {
-    const system = GetSystemMenu(window.hwnd, 0);
+    const system = user32.GetSystemMenu(window.hwnd, 0);
     const menu = system orelse buildMenu() orelse {
         log.warn("unable to build the system menu err={}", .{win32.kernel32.GetLastError()});
         return;
@@ -329,7 +326,7 @@ fn showSystemMenu(window: *Window, x: i32, y: i32) void {
 }
 
 fn enable(menu: user32.HMENU, id: usize, on: bool) void {
-    _ = EnableMenuItem(menu, @intCast(id), MF_BYCOMMAND | if (on) MF_ENABLED else MF_GRAYED);
+    _ = user32.EnableMenuItem(menu, @intCast(id), MF_BYCOMMAND | if (on) MF_ENABLED else MF_GRAYED);
 }
 
 fn buildMenu() ?user32.HMENU {

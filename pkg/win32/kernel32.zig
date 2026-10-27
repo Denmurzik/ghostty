@@ -113,6 +113,7 @@ pub extern "kernel32" fn WaitForMultipleObjects(count: u32, handles: [*]const HA
 pub extern "kernel32" fn CloseHandle(HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn DuplicateHandle(source_process: HANDLE, source: HANDLE, target_process: HANDLE, target: *HANDLE, access: u32, inherit: BOOL, options: u32) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) u32;
 pub extern "kernel32" fn ProcessIdToSessionId(process_id: u32, session_id: *u32) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetNamedPipeServerProcessId(pipe: HANDLE, process_id: *u32) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetNamedPipeClientProcessId(pipe: HANDLE, process_id: *u32) callconv(.winapi) BOOL;

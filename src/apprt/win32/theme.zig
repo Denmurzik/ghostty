@@ -18,8 +18,6 @@ const LRESULT = win32.foundation.LRESULT;
 
 const log = std.log.scoped(.win32_theme);
 
-extern "user32" fn GetSysColor(index: i32) callconv(.winapi) u32;
-
 const COLOR_WINDOW = 5;
 const COLOR_WINDOWTEXT = 8;
 const COLOR_HIGHLIGHT = 13;
@@ -54,10 +52,10 @@ const SystemColors = struct {
 
     fn read() SystemColors {
         return .{
-            .window = fromColorRef(GetSysColor(COLOR_WINDOW)),
-            .window_text = fromColorRef(GetSysColor(COLOR_WINDOWTEXT)),
-            .highlight = fromColorRef(GetSysColor(COLOR_HIGHLIGHT)),
-            .highlight_text = fromColorRef(GetSysColor(COLOR_HIGHLIGHTTEXT)),
+            .window = fromColorRef(win32.user32.GetSysColor(COLOR_WINDOW)),
+            .window_text = fromColorRef(win32.user32.GetSysColor(COLOR_WINDOWTEXT)),
+            .highlight = fromColorRef(win32.user32.GetSysColor(COLOR_HIGHLIGHT)),
+            .highlight_text = fromColorRef(win32.user32.GetSysColor(COLOR_HIGHLIGHTTEXT)),
         };
     }
 };

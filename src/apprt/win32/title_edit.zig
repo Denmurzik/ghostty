@@ -24,23 +24,6 @@ const HWND = win32.foundation.HWND;
 
 const log = std.log.scoped(.win32_title_edit);
 
-extern "gdi32" fn CreateFontW(
-    height: i32,
-    width: i32,
-    escapement: i32,
-    orientation: i32,
-    weight: i32,
-    italic: u32,
-    underline: u32,
-    strike_out: u32,
-    charset: u32,
-    out_precision: u32,
-    clip_precision: u32,
-    quality: u32,
-    pitch_and_family: u32,
-    face: [*:0]const u16,
-) callconv(.winapi) ?*anyopaque;
-
 const WM_SETFONT = 0x0030;
 const EM_SETSEL = 0x00B1;
 const FW_NORMAL = 400;
@@ -53,7 +36,7 @@ pub const Kind = enum { surface, tab, window };
 /// The editor of a window, kept in `strip_input.State`.
 pub const Session = struct {
     hwnd: HWND,
-    font: ?*anyopaque,
+    font: ?win32.gdi32.HFONT,
     kind: Kind,
     /// The tab or surface being renamed (0 for the window).
     target_id: u32,
@@ -152,7 +135,7 @@ pub fn beginFor(window: *Window, kind: Kind, target_id: u32, rect: geom.Rect, in
         return;
     };
 
-    const font = CreateFontW(
+    const font = win32.gdi32.CreateFontW(
         -geom.scale(14, window.dpi),
         0,
         0,
@@ -218,7 +201,7 @@ pub fn cancelForTab(window: *Window, tab: *const Tab) void {
         .window => false,
         .tab => s.target_id == tab.id,
         .surface => blk: {
-            var it = @constCast(tab).tree.iterator();
+            var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 if (entry.view.id == s.target_id) break :blk true;
             }
@@ -246,7 +229,7 @@ fn teardown(s: Session) void {
     // WM_KILLFOCUS, which must not post another result.
     _ = comctl32.RemoveWindowSubclass(s.hwnd, editProc, subclass_id);
     _ = user32.DestroyWindow(s.hwnd);
-    if (s.font) |f| _ = win32.gdi32.DeleteObject(f);
+    if (s.font) |f| _ = win32.gdi32.DeleteObject(@ptrCast(f));
 }
 
 /// The result of the editor `hwnd` arrived: applies the text when committed

@@ -9,7 +9,8 @@ pub const HKEY = *opaque {};
 /// `LSTATUS`: 0 (`ERROR_SUCCESS`) or a Win32 error code.
 pub const LSTATUS = i32;
 
-pub const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+/// The SDK defines it as `(HKEY)(ULONG_PTR)((LONG)0x80000001)`: sign-extended.
+pub const HKEY_CURRENT_USER: HKEY = @ptrFromInt(@as(usize, 0) -% 0x7FFFFFFF);
 
 pub const RRF_RT_REG_DWORD = 0x00000010;
 

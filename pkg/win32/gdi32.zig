@@ -64,3 +64,21 @@ pub const NULL_BRUSH = 5;
 
 pub const DIB_RGB_COLORS = 0;
 pub const BI_RGB = 0;
+
+pub const HFONT = *opaque {};
+pub extern "gdi32" fn CreateFontW(
+    height: i32,
+    width: i32,
+    escapement: i32,
+    orientation: i32,
+    weight: i32,
+    italic: u32,
+    underline: u32,
+    strike_out: u32,
+    charset: u32,
+    out_precision: u32,
+    clip_precision: u32,
+    quality: u32,
+    pitch_and_family: u32,
+    face: [*:0]const u16,
+) callconv(.winapi) ?HFONT;
