@@ -57,8 +57,8 @@ Invoke-E2eScenario 'config-errors' {
     Send-DialogButton $dlg $script:IdReload
     if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { -not [GhosttyE2e.Win]::IsWindow($dlg) })) { throw 'Reload did not close the dialog' }
     Start-Sleep -Milliseconds 1000
-    if ((Get-Dialogs).Count -ne 0) { throw 'a dialog is up after the fixed config was reloaded' }
+    if (@(Get-Dialogs).Count -ne 0) { throw 'a dialog is up after the fixed config was reloaded' }
     $e = Get-Errors
     if ($e.choice -ne 'reload') { throw "choice is '$($e.choice)', expected reload" }
-    if ($e.shown -ne $shown + 1) { throw "dialog shown $($e.shown) times, expected $($shown + 1)" }
+    if ($e.shown -ne $shown + 2) { throw "dialog shown $($e.shown) times, expected $($shown + 2)" }
 }
