@@ -4,7 +4,8 @@
 # while `new_tab` runs through the test IPC; every frame is classified as
 # black (most sampled pixels near #000000) or not. The configured
 # background is a dark blue, so black is told apart from it. Three runs,
-# each with 0 black frames. GHOSTTY_E2E_FLASH_RUNS overrides the run count.
+# each with 0 black frames. GHOSTTY_E2E_FLASH_RUNS overrides the run count,
+# GHOSTTY_E2E_FLASH_EXTRA appends config lines (e.g. background-opacity = 0.9).
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
@@ -61,7 +62,7 @@ public class FlashProbe {
 
 Invoke-E2eScenario 'new-tab-flash' {
     $runs = if ($env:GHOSTTY_E2E_FLASH_RUNS) { [int]$env:GHOSTTY_E2E_FLASH_RUNS } else { 3 }
-    $g = Start-E2eGhostty -ConfigText "background = #1a2b4c`nforeground = #e0e0e0`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = always`n"
+    $g = Start-E2eGhostty -ConfigText "background = #1a2b4c`nforeground = #e0e0e0`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = always`n$($env:GHOSTTY_E2E_FLASH_EXTRA)"
     try {
         if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
