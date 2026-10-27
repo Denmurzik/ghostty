@@ -63,7 +63,7 @@ function Start-OleDrag {
         $form.Location = New-Object System.Drawing.Point(($wa.Right - 140), ($wa.Bottom - 100))
         $form.Add_MouseDown({
             $data = New-Object System.Windows.Forms.DataObject
-            if ($null -ne $text) {
+            if (-not [string]::IsNullOrEmpty($text)) {
                 $data.SetText($text)
             } else {
                 $list = New-Object System.Collections.Specialized.StringCollection
