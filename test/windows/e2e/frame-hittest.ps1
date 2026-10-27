@@ -121,22 +121,17 @@ function Test-Responsive([IntPtr]$Hwnd) {
 }
 
 function Get-ScreenRegionPng([int]$X, [int]$Y, [int]$W, [int]$H) {
-    $bmp = New-Object Drawing.Bitmap $W, $H
+    # The shared guarded capture: nothing foreign may be in the rect.
+    $bmp = Get-ScreenShot $X $Y $W $H
     try {
-        $g = [Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H))
-        $g.Dispose()
         $ms = New-Object IO.MemoryStream
         $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png)
         , $ms.ToArray()
     } finally { $bmp.Dispose() }
 }
 function Get-ScreenPixel([int]$X, [int]$Y) {
-    $bmp = New-Object Drawing.Bitmap 1, 1
+    $bmp = Get-ScreenShot $X $Y 1 1
     try {
-        $g = [Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size 1, 1))
-        $g.Dispose()
         $c = $bmp.GetPixel(0, 0)
         , @([int]$c.R, [int]$c.G, [int]$c.B)
     } finally { $bmp.Dispose() }

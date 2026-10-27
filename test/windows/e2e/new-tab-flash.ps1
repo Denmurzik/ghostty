@@ -79,6 +79,8 @@ Invoke-E2eScenario 'new-tab-flash' {
             $h = $rc.Bottom - $top - 4
 
             $probe = New-Object GhosttyE2e.FlashProbe
+            # The probe only counts black pixels (nothing is saved); a foreign window would skew it.
+            Assert-CaptureRectClear ($origin.X + 4) ($origin.Y + $top) $w $h
             $probe.Start($origin.X + 4, $origin.Y + $top, $w, $h)
             try {
                 Start-Sleep -Milliseconds 300

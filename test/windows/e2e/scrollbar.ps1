@@ -42,9 +42,7 @@ function Save-Strip($Surface, [string]$Name) {
     $h = $Surface.rect[3] - $Surface.rect[1]
     $o = Convert-ClientToScreen $hwnd 0 0
     $bw = [Math]::Min(120, $w)
-    $bmp = New-Object Drawing.Bitmap $bw, $h
-    $gfx = [Drawing.Graphics]::FromImage($bmp)
-    try { $gfx.CopyFromScreen($o.X + $w - $bw, $o.Y, 0, 0, (New-Object Drawing.Size $bw, $h)) } finally { $gfx.Dispose() }
+    $bmp = Get-ScreenShot ($o.X + $w - $bw) $o.Y $bw $h
     $path = Join-Path $ShotDir "$Name.png"
     $bmp.Save($path, [Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
