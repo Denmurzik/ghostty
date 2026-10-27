@@ -20,7 +20,8 @@ pub fn close_window(app: *App, target: apprt.Target, value: void) !bool {
 
 pub fn initial_size(app: *App, target: apprt.Target, value: apprt.Action.Value(.initial_size)) !bool {
     const window = app.windowForTarget(target) orelse return false;
-    window.setInitialSize(value.width, value.height);
+    const size = placement.pointsToPixels(window, value.width, value.height);
+    window.setInitialSize(size.w, size.h);
     return true;
 }
 
@@ -74,7 +75,8 @@ pub fn reset_window_size(app: *App, target: apprt.Target, value: apprt.Action.Va
 
 pub fn resize_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.resize_window)) !bool {
     const window = app.windowForTarget(target) orelse return false;
-    return placement.resizeClient(window, value.width, value.height);
+    const size = placement.pointsToPixels(window, value.width, value.height);
+    return placement.resizeClient(window, size.w, size.h);
 }
 
 pub fn prompt_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt_title)) !bool {

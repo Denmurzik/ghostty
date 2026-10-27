@@ -123,6 +123,18 @@ pub fn setFloat(window: *Window, mode: apprt.action.FloatWindow) bool {
     return true;
 }
 
+/// Core sizes the window in points (its pixels divided by the content scale,
+/// for `initial_size` and `resize_window`); the window is sized in physical
+/// pixels.
+pub fn pointsToPixels(window: *const Window, width: u32, height: u32) struct { w: u32, h: u32 } {
+    return .{ .w = scalePoints(width, window.dpi), .h = scalePoints(height, window.dpi) };
+}
+
+fn scalePoints(v: u32, dpi: u32) u32 {
+    const px = (@as(u64, v) * dpi + 48) / 96;
+    return @intCast(@min(px, std.math.maxInt(u32)));
+}
+
 /// Re-apply the content size core reported at start-up.
 pub fn resetSize(window: *Window) bool {
     const size = window.placement.initial_size orelse return false;
@@ -201,6 +213,15 @@ fn monitorRect(hwnd: win32.foundation.HWND) ?geom.Rect {
     var info: user32.MONITORINFO = .{};
     if (user32.GetMonitorInfoW(monitor, &info) == 0) return null;
     return geom.Rect.fromRECT(info.rcMonitor);
+}
+
+test "win32 placement: core points scale to physical pixels" {
+    try std.testing.expectEqual(@as(u32, 1623), scalePoints(1623, 96));
+    // 1.75: the 167 columns of 17 px that core divided by the scale.
+    try std.testing.expectEqual(@as(u32, 2840), scalePoints(1623, 168));
+    // A zero dimension still means "keep".
+    try std.testing.expectEqual(@as(u32, 0), scalePoints(0, 168));
+    try std.testing.expectEqual(@as(u32, 1362), scalePoints(778, 168));
 }
 
 test "win32 placement: resize keeps a zero dimension" {
