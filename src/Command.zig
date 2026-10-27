@@ -356,9 +356,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     // attributes such that the child process only inherits these handles,
     // then set bInheritsHandles below.
 
-    // Only the pseudo console needs an attribute list.
-    var attribute_list: windows.LPPROC_THREAD_ATTRIBUTE_LIST = null;
-    const stdin, const stdout, const stderr = if (self.pseudo_console) |pseudo_console| b: {
+    const attribute_list, const stdin, const stdout, const stderr = if (self.pseudo_console) |pseudo_console| b: {
         var attribute_list_size: usize = undefined;
         _ = windows.exp.kernel32.InitializeProcThreadAttributeList(
             null,
@@ -367,17 +365,15 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             &attribute_list_size,
         );
 
-        const list = (try arena.alloc(u8, attribute_list_size)).ptr;
+        const attribute_list = (try arena.alloc(u8, attribute_list_size)).ptr;
         if (windows.exp.kernel32.InitializeProcThreadAttributeList(
-            list,
+            attribute_list,
             1,
             0,
             &attribute_list_size,
         ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
-        attribute_list = list;
-
         if (windows.exp.kernel32.UpdateProcThreadAttribute(
-            list,
+            attribute_list,
             0,
             windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             pseudo_console,
@@ -386,17 +382,17 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             null,
         ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
 
-        break :b .{ null, null, null };
+        break :b .{ attribute_list, null, null, null };
     } else b: {
         const stdin = if (self.stdin) |f| f.handle else null_fd.?;
         const stdout = if (self.stdout) |f| f.handle else null_fd.?;
         const stderr = if (self.stderr) |f| f.handle else null_fd.?;
-        break :b .{ stdin, stdout, stderr };
+        break :b .{ null, stdin, stdout, stderr };
     };
 
     var startup_info_ex = windows.STARTUPINFOEX{
         .StartupInfo = .{
-            .cb = @sizeOf(windows.STARTUPINFOEX),
+            .cb = if (attribute_list != null) @sizeOf(windows.STARTUPINFOEX) else @sizeOf(windows.STARTUPINFOW),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
@@ -422,7 +418,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     };
 
     const flags: windows.DWORD = windows.CREATE_UNICODE_ENVIRONMENT |
-        windows.EXTENDED_STARTUPINFO_PRESENT;
+        (if (attribute_list != null) windows.EXTENDED_STARTUPINFO_PRESENT else 0);
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(

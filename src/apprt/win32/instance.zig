@@ -53,10 +53,7 @@ fn queryUser(token: HANDLE, buf: *UserBuf) bool {
 }
 
 fn queryElevated(token: HANDLE) ?bool {
-    var elev: advapi32.TOKEN_ELEVATION = .{ .TokenIsElevated = 0 };
-    var len: u32 = 0;
-    if (advapi32.GetTokenInformation(token, advapi32.TokenElevation, &elev, @sizeOf(advapi32.TOKEN_ELEVATION), &len) == 0) return null;
-    return elev.TokenIsElevated != 0;
+    return internal_os.windows.tokenIsElevated(token);
 }
 
 /// The mandatory integrity level (the last sub-authority of the label SID)

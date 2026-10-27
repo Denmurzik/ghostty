@@ -510,7 +510,6 @@ pub extern "kernel32" fn MoveFileExW(
 
 // --- process access (tests)
 
-pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
 pub const PROCESS_TERMINATE: DWORD = 0x0001;
 
 pub extern "kernel32" fn OpenProcess(
@@ -535,6 +534,15 @@ extern "advapi32" fn GetTokenInformation(
 
 var elevated_cache: std.atomic.Value(u8) = .init(0); // 0 unknown, 1 no, 2 yes
 
+/// TokenElevation of `token` (a handle opened with `TOKEN_QUERY`); null when
+/// it cannot be read.
+pub fn tokenIsElevated(token: HANDLE) ?bool {
+    var elev: TOKEN_ELEVATION = .{ .TokenIsElevated = 0 };
+    var len: DWORD = 0;
+    if (GetTokenInformation(token, TokenElevation, &elev, @sizeOf(TOKEN_ELEVATION), &len) == FALSE) return null;
+    return elev.TokenIsElevated != 0;
+}
+
 /// Whether the current process runs elevated (TokenElevation), cached.
 /// An unreadable token counts as elevated: the stricter answer is the safe
 /// side for every caller (IPC pipe names, diagnostic variables).
@@ -548,16 +556,13 @@ pub fn isElevated() bool {
         var token: HANDLE = undefined;
         if (OpenProcessToken(exp.kernel32.GetCurrentProcess(), TOKEN_QUERY, &token) == FALSE) break :blk true;
         defer _ = exp.kernel32.CloseHandle(token);
-        var elev: TOKEN_ELEVATION = .{ .TokenIsElevated = 0 };
-        var len: DWORD = 0;
-        if (GetTokenInformation(token, TokenElevation, &elev, @sizeOf(TOKEN_ELEVATION), &len) == FALSE) break :blk true;
-        break :blk elev.TokenIsElevated != 0;
+        break :blk tokenIsElevated(token) orelse true;
     };
     elevated_cache.store(if (result) 2 else 1, .release);
     return result;
 }
 
-/// The value of a diagnostic environment variable (`GHOSTTY_WIN32_CONPTY_*`,
+/// The value of a diagnostic environment variable (`GHOSTTY_WIN32_*`,
 /// `GHOSTTY_LATENCY_*`, `GHOSTTY_D3D11_*`), or null when unset or when the
 /// process is elevated. The user profile's environment is writable at medium
 /// integrity and UAC copies it into the elevated process, so an elevated
@@ -572,7 +577,7 @@ fn diagnosticEnvFor(elevated: bool, alloc: std.mem.Allocator, name: []const u8) 
     return @import("../global.zig").environ().getAlloc(alloc, name) catch null;
 }
 
-const diagnostic_prefixes = [_][]const u8{ "GHOSTTY_LATENCY_", "GHOSTTY_WIN32_CONPTY_", "GHOSTTY_D3D11_" };
+const diagnostic_prefixes = [_][]const u8{ "GHOSTTY_LATENCY_", "GHOSTTY_WIN32_", "GHOSTTY_D3D11_" };
 
 /// Removes every diagnostic variable (see `diagnosticEnv`) from the
 /// environment a child shell gets, so they do not leak into programs, or
@@ -588,7 +593,7 @@ pub fn scrubDiagnosticEnv(env: *std.process.Environ.Map) void {
     }
 }
 
-test "scrubDiagnosticEnv removes only the diagnostic variables" {
+test "windows diag env: scrub removes only the diagnostic variables" {
     const testing = std.testing;
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
@@ -597,6 +602,7 @@ test "scrubDiagnosticEnv removes only the diagnostic variables" {
     try env.put("GHOSTTY_LATENCY_TRACE", "x");
     try env.put("GHOSTTY_LATENCY_TAG", "x");
     try env.put("GHOSTTY_WIN32_CONPTY_DLL", "x");
+    try env.put("GHOSTTY_WIN32_EXIT_IMMEDIATELY", "1");
     try env.put("ghostty_d3d11_debug", "1");
     try env.put("GHOSTTY_RESOURCES_DIR", "r");
     try env.put("PATH", "p");
@@ -606,7 +612,7 @@ test "scrubDiagnosticEnv removes only the diagnostic variables" {
     try testing.expect(env.get("PATH") != null);
 }
 
-test "diagnosticEnv ignores the environment when elevated" {
+test "windows diag env: ignored when elevated" {
     const testing = std.testing;
     // Any variable that is always set on Windows.
     const value = diagnosticEnvFor(false, testing.allocator, "SystemRoot") orelse
