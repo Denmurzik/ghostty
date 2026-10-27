@@ -129,7 +129,8 @@ pub fn ancestorSplit(
 
 /// resize-pane -x/-y: `size` is the wanted pane size (percent of
 /// `window_px`, or cells). Returns the left/top share of the split's
-/// `span_px`, or null when it falls outside (0, 1).
+/// `span_px`, or null when it falls outside (0, 1). Callers pass the span
+/// minus the divider gap, as that is what the split ratio applies to.
 pub fn ratioFor(
     size: cli.Size,
     window_px: i32,
@@ -234,17 +235,17 @@ test "win32 tmux layout: tiled 5 panes is 3+2" {
 
     var l = try TestLayout.compute(alloc, &tree, .{ .x = 0, .y = 0, .w = 900, .h = 600 }, 0);
     defer l.deinit(alloc);
-    // Row 0: ids 0..2 equal thirds; row 1: ids 3..4 halves (f16 ratios, so +-2 px).
+    // Row 0: ids 0..2 equal thirds; row 1: ids 3..4 halves (f16 ratios, so +-1 px).
     for (0..3) |i| {
         const r = rectOf(l, @intCast(i));
         try testing.expectEqual(@as(i32, 0), r.y);
-        try testing.expect(@abs(r.w - 300) <= 2);
+        try testing.expect(@abs(r.w - 300) <= 1);
         try testing.expectEqual(@as(i32, 300), r.h);
     }
     for (3..5) |i| {
         const r = rectOf(l, @intCast(i));
         try testing.expectEqual(@as(i32, 300), r.y);
-        try testing.expect(@abs(r.w - 450) <= 2);
+        try testing.expect(@abs(r.w - 450) <= 1);
     }
     try testing.expect(rectOf(l, 0).x < rectOf(l, 1).x and rectOf(l, 1).x < rectOf(l, 2).x);
 }

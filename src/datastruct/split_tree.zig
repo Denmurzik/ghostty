@@ -592,6 +592,7 @@ pub fn SplitTree(comptime V: type) type {
             at: Node.Handle,
             view: *View,
         ) Allocator.Error!Self {
+            assert(at.idx() < self.nodes.len);
             assert(self.nodes[at.idx()] == .leaf);
 
             var arena = ArenaAllocator.init(gpa);
@@ -2620,4 +2621,48 @@ test "SplitTree: replace root leaf" {
     try testing.expectEqual(@as(usize, 1), r.nodes.len);
     try testing.expectEqualStrings("B", r.nodes[0].leaf.label);
     try testing.expect(r.zoomed == null);
+}
+
+var live_views: i32 = 0;
+
+const CountedView = struct {
+    id: u32,
+
+    pub fn ref(self: *CountedView, alloc: Allocator) Allocator.Error!*CountedView {
+        const ptr = try alloc.create(CountedView);
+        ptr.* = self.*;
+        live_views += 1;
+        return ptr;
+    }
+
+    pub fn unref(self: *CountedView, alloc: Allocator) void {
+        live_views -= 1;
+        alloc.destroy(self);
+    }
+};
+
+test "SplitTree: replace refs the new tree and releases on deinit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const CTree = SplitTree(CountedView);
+    live_views = 0;
+
+    var va: CountedView = .{ .id = 0 };
+    var vb: CountedView = .{ .id = 1 };
+    var vc: CountedView = .{ .id = 2 };
+    var ta = try CTree.init(alloc, &va);
+    defer ta.deinit();
+    var tb = try CTree.init(alloc, &vb);
+    defer tb.deinit();
+    try testing.expectEqual(@as(i32, 2), live_views);
+
+    var t = try ta.split(alloc, .root, .right, 0.5, &tb);
+    try testing.expectEqual(@as(i32, 4), live_views);
+
+    var r = try t.replace(alloc, CTree.Node.Handle.root.offset(1), &vc);
+    try testing.expectEqual(@as(i32, 6), live_views);
+    t.deinit();
+    try testing.expectEqual(@as(i32, 4), live_views);
+    r.deinit();
+    try testing.expectEqual(@as(i32, 2), live_views);
 }
