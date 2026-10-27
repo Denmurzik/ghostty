@@ -13,6 +13,10 @@
 //! A write that comes very soon after the resize can reach the pseudo
 //! console before the resize does, so the prefix goes on every write until
 //! one comes `settle_ns` or more after the last resize.
+//!
+//! Only a conhost that knows win32-input-mode parses the sequence (an older
+//! one could show it as text), so nothing is armed until the pseudo console
+//! has asked for the mode (`CSI ? 9001 h`, among its first output bytes).
 const std = @import("std");
 
 pub const ResizePrime = struct {
@@ -25,9 +29,23 @@ pub const ResizePrime = struct {
 
     const Grid = struct { columns: u16, rows: u16 };
 
+    /// The pseudo console's request for win32-input-mode.
+    pub const request = "\x1b[?9001h";
+
+    /// The output searched for `request`: it comes first, at startup.
+    pub const scan_bytes = 4096;
+
     grid: ?Grid = null,
     pending: bool = false,
     resized_ns: i96 = 0,
+
+    /// Set by the read thread once `request` was seen.
+    win32_input: std.atomic.Value(bool) = .init(false),
+
+    /// Pseudo console output, read thread.
+    pub fn noteOutput(self: *ResizePrime, buf: []const u8) void {
+        if (std.mem.indexOf(u8, buf, request) != null) self.win32_input.store(true, .release);
+    }
 
     /// The pseudo console was given this grid at `now_ns`. The first grid
     /// (the spawn size) and a pixel-only resize arm nothing.
@@ -37,6 +55,7 @@ pub const ResizePrime = struct {
         self.grid = g;
         const p = prev orelse return;
         if (p.columns == g.columns and p.rows == g.rows) return;
+        if (!self.win32_input.load(.acquire)) return;
         self.pending = true;
         self.resized_ns = now_ns;
     }
@@ -53,6 +72,7 @@ const ms = std.time.ns_per_ms;
 
 test "ResizePrime: nothing before the first resize" {
     var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
     try std.testing.expect(!p.take(0));
     p.resized(80, 24, 0);
     try std.testing.expect(!p.take(100 * ms));
@@ -60,6 +80,7 @@ test "ResizePrime: nothing before the first resize" {
 
 test "ResizePrime: one prefix for a write after the settle time" {
     var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
     try std.testing.expect(p.take(2500 * ms));
@@ -68,6 +89,7 @@ test "ResizePrime: one prefix for a write after the settle time" {
 
 test "ResizePrime: writes inside the settle time keep the prefix armed" {
     var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
     try std.testing.expect(p.take(1000 * ms));
@@ -79,6 +101,7 @@ test "ResizePrime: writes inside the settle time keep the prefix armed" {
 
 test "ResizePrime: a later resize re-arms and restarts the settle time" {
     var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
     try std.testing.expect(p.take(1040 * ms));
@@ -90,7 +113,19 @@ test "ResizePrime: a later resize re-arms and restarts the settle time" {
 
 test "ResizePrime: a pixel-only resize (same grid) arms nothing" {
     var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(80, 24, 1000 * ms);
     try std.testing.expect(!p.take(1100 * ms));
+}
+
+test "ResizePrime: nothing armed until the pseudo console asks for win32-input-mode" {
+    var p: ResizePrime = .{};
+    p.resized(80, 24, 0);
+    p.noteOutput("\x1b[?1004h");
+    p.resized(100, 30, 1000 * ms);
+    try std.testing.expect(!p.take(2000 * ms));
+    p.noteOutput("\x1b[?25l\x1b[?9001h\x1b[?1004h");
+    p.resized(90, 30, 3000 * ms);
+    try std.testing.expect(p.take(4000 * ms));
 }

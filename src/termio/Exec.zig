@@ -57,7 +57,8 @@ const FlatpakHostCommand = if (!build_config.flatpak) struct {
 subprocess: Subprocess,
 
 /// Windows: the key-up sent ahead of the first write after a resize.
-/// Touched only on the IO thread (`resize` and `queueWrite`).
+/// Touched on the IO thread (`resize` and `queueWrite`), except for its
+/// atomic `win32_input`, which the read thread sets.
 resize_prime: if (is_windows) ResizePrime else void = if (is_windows) .{} else {},
 
 /// Initialize the exec state. This will NOT start it, this only sets
@@ -452,26 +453,22 @@ pub fn queueWrite(
     td: *termio.Termio.ThreadData,
     data: []const u8,
     linefeed: bool,
-) !void {
+) Allocator.Error!void {
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
 
-    if (comptime is_windows) {
-        const now = std.Io.Timestamp.now(global.io(), .awake).nanoseconds;
-        if (self.resize_prime.take(now)) try queueChunks(alloc, td, ResizePrime.sequence, false);
-    }
-    try queueChunks(alloc, td, data, linefeed);
-}
-
-fn queueChunks(
-    alloc: Allocator,
-    td: *termio.Termio.ThreadData,
-    data: []const u8,
-    linefeed: bool,
-) !void {
-    const exec = &td.backend.exec;
+    // Windows: the key-up ahead of the first write after a resize (see
+    // resize_prime.zig), queued with the prime held off so it is sent once.
+    if (comptime is_windows) if (self.resize_prime.pending) {
+        if (self.resize_prime.take(std.Io.Timestamp.now(global.io(), .awake).nanoseconds)) {
+            const pending = self.resize_prime.pending;
+            self.resize_prime.pending = false;
+            defer self.resize_prime.pending = pending;
+            try self.queueWrite(alloc, td, ResizePrime.sequence, false);
+        }
+    };
 
     // We go through and chunk the data if necessary to fit into
     // our cached buffers that we can queue to the stream.
@@ -1892,6 +1889,9 @@ pub const ReadThread = struct {
         const Ctx = struct {
             io: *termio.Termio,
             quit: windows.HANDLE,
+            /// Output bytes still searched for the pseudo console's
+            /// win32-input-mode request (see resize_prime.zig).
+            prime_scan: *usize,
 
             fn process(self: @This(), slice: []const u8) void {
                 self.io.processOutput(slice);
@@ -1905,10 +1905,15 @@ pub const ReadThread = struct {
 
             fn onData(self: @This(), buf: []const u8) void {
                 latency.markOutput(buf.len);
+                if (self.prime_scan.* > 0) {
+                    self.prime_scan.* -|= buf.len;
+                    self.io.backend.exec.resize_prime.noteOutput(buf);
+                }
                 processSlicedWindows(self.quit, self, buf, process);
             }
         };
-        const end = readLoopWindows(fd, quit_event, Ctx{ .io = io, .quit = quit_event }, Ctx.onData);
+        var prime_scan: usize = ResizePrime.scan_bytes;
+        const end = readLoopWindows(fd, quit_event, Ctx{ .io = io, .quit = quit_event, .prime_scan = &prime_scan }, Ctx.onData);
 
         switch (end) {
             .quit => log.info("read thread got quit signal", .{}),
