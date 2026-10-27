@@ -94,10 +94,6 @@ dpi: u32 = dpi_mod.default_dpi,
 /// A title set by the user; wins over the active tab's title.
 title_override: ?[:0]u8 = null,
 
-/// The working directory last reported by one of the window's surfaces,
-/// kept for `window-subtitle`.
-pwd: ?[:0]u8 = null,
-
 strip: TabStrip.Layout = .{},
 strip_input: strip_input_mod.State = .{},
 frame: frame_mod.State = .{},
@@ -312,7 +308,6 @@ pub fn destroy(self: *Window) void {
     self.strip.tabs.deinit(alloc);
     self.tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
-    if (self.pwd) |p| alloc.free(p);
     alloc.destroy(self);
 }
 
@@ -742,12 +737,12 @@ pub fn setTabTitle(self: *Window, tab: *Tab, title: []const u8) !void {
     self.refreshTitle();
 }
 
-/// Remember the working directory a surface reported.
-pub fn setPwd(self: *Window, pwd: []const u8) !void {
-    const alloc = self.app.core_app.alloc;
-    const copy = try alloc.dupeSentinel(u8, pwd, 0);
-    if (self.pwd) |old| alloc.free(old);
-    self.pwd = copy;
+/// The working directory the focused surface of the active tab reported:
+/// the source of `window-subtitle`.
+pub fn focusedPwd(self: *const Window) ?[]const u8 {
+    const tab = self.activeTab() orelse return null;
+    const surface = tab.focusedSurface() orelse return null;
+    return surface.getPwd();
 }
 
 /// Whether closing the window would kill a running process.

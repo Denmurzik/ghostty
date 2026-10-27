@@ -126,7 +126,7 @@ pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bo
         .surface => |s| s,
     };
     const surface = app.surfaceFor(core) orelse return false;
-    try surface.window.setPwd(value.pwd);
+    try surface.setPwd(value.pwd);
     return true;
 }
 

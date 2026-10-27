@@ -102,6 +102,9 @@ content_scale: apprt.ContentScale,
 /// Owned copy of the last title set by core, if any.
 title: ?[:0]const u8,
 
+/// Owned copy of the working directory this surface last reported.
+pwd: ?[:0]u8 = null,
+
 /// Bumped by `bumpPresentTarget` after the window changed parents.
 present_generation: std.atomic.Value(u32) = .init(0),
 
@@ -275,6 +278,7 @@ pub fn deinit(self: *Surface) void {
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
 
     if (self.title) |t| alloc.free(t);
+    if (self.pwd) |p| alloc.free(p);
     alloc.destroy(self);
 }
 
@@ -301,6 +305,23 @@ pub fn close(self: *Surface, process_active: bool) void {
 
 pub fn getTitle(self: *Surface) ?[:0]const u8 {
     return self.title;
+}
+
+/// The working directory this surface last reported, if any.
+pub fn getPwd(self: *const Surface) ?[:0]const u8 {
+    return self.pwd;
+}
+
+/// Remember the working directory the shell reported.
+pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
+    try storePwd(self.app.core_app.alloc, &self.pwd, pwd);
+}
+
+/// Replace the copy in `slot` with one of `pwd`.
+fn storePwd(alloc: Allocator, slot: *?[:0]u8, pwd: []const u8) Allocator.Error!void {
+    const copy = try alloc.dupeSentinel(u8, pwd, 0);
+    if (slot.*) |old| alloc.free(old);
+    slot.* = copy;
 }
 
 /// Remember the title core asked for. The window caption is set separately.
@@ -708,4 +729,25 @@ test "win32 surface: WM_SIZE decoding" {
     const maximized = sizeMessage(user32.SIZE_MAXIMIZED, (1 << 16) | 1);
     try std.testing.expectEqual(packSize(1, 1), maximized.packed_size);
     try std.testing.expect(maximized.visible);
+}
+
+test "win32 tab: new tab inherits the focused surface pwd" {
+    const alloc = std.testing.allocator;
+
+    // Two panes of one tab report different directories; each keeps its own,
+    // so whichever one is focused is the one a new tab starts from.
+    var first: Surface = undefined;
+    var second: Surface = undefined;
+    first.pwd = null;
+    second.pwd = null;
+    defer if (first.pwd) |p| alloc.free(p);
+    defer if (second.pwd) |p| alloc.free(p);
+
+    try std.testing.expect(first.getPwd() == null);
+    try storePwd(alloc, &first.pwd, "/a");
+    try storePwd(alloc, &second.pwd, "/b");
+    try storePwd(alloc, &first.pwd, "/a/sub");
+
+    try std.testing.expectEqualStrings("/a/sub", first.getPwd().?);
+    try std.testing.expectEqualStrings("/b", second.getPwd().?);
 }
