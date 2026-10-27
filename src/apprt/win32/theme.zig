@@ -24,8 +24,9 @@ const COLOR_WINDOWTEXT = 8;
 const COLOR_HIGHLIGHT = 13;
 const COLOR_HIGHLIGHTTEXT = 14;
 
-/// The chrome painter draws over Mica (Task 12 decision, SPEC §18 item 9).
-const painter_over_mica = true;
+/// The strip is painted in the terminal background (macOS-style unified
+/// title row), no Mica under it (M3 Task 29, DECISIONS 2026-10-27).
+const painter_over_mica = false;
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 
@@ -42,6 +43,16 @@ pub const Palette = struct {
     close_hover_bg: Color = .{ .r = 0xC4, .g = 0x2B, .b = 0x1C },
     close_hover_text: Color = .{ .r = 255, .g = 255, .b = 255 },
     divider: Color,
+    /// The capsule behind the tabs and the new-tab button, translucent over `strip_bg`.
+    track_bg: Color = .{ .r = 255, .g = 255, .b = 255, .a = 0x14 },
+    /// The selected tab, over the track.
+    pill_bg: Color = .{ .r = 255, .g = 255, .b = 255, .a = 0x24 },
+    /// Outline of the new-tab button and of a light selected tab.
+    outline: Color = .{ .r = 255, .g = 255, .b = 255, .a = 0x26 },
+    /// Thin lines between unselected tabs.
+    separator: Color = .{ .r = 255, .g = 255, .b = 255, .a = 0x2E },
+    /// Key labels in a tab.
+    text_dim: Color = .{ .r = 255, .g = 255, .b = 255, .a = 0x80 },
 };
 
 /// The system colours that replace the palette in high contrast mode.
@@ -209,41 +220,49 @@ fn computeWith(in: Inputs, sys_dark: bool, active: bool, hc: ?SystemColors) Pale
             .close_hover_bg = sys.highlight,
             .close_hover_text = sys.highlight_text,
             .divider = text,
+            .track_bg = overlay,
+            .pill_bg = .{ .r = text.r, .g = text.g, .b = text.b, .a = 0x50 },
+            .outline = text,
+            .separator = text,
+            .text_dim = text,
         };
     }
 
     const ghostty = in.window_theme == .ghostty;
     const mica = painter_over_mica and !ghostty;
 
-    var p: Palette = if (in.isDark(sys_dark)) .{
-        .dark = true,
-        .mica = mica,
-        .strip_bg = .{ .r = 0x20, .g = 0x20, .b = 0x20 },
-        .tab_active_bg = in.background,
-        .tab_hover_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x10 },
-        .text = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
-        .text_inactive = .{ .r = 0x9E, .g = 0x9E, .b = 0x9E },
-        .button_hover_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x15 },
-        .button_pressed_bg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF, .a = 0x0B },
-        .divider = .{ .r = 0x3C, .g = 0x3C, .b = 0x3C },
-    } else .{
-        .dark = false,
-        .mica = mica,
-        .strip_bg = .{ .r = 0xF3, .g = 0xF3, .b = 0xF3 },
-        .tab_active_bg = in.background,
-        .tab_hover_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x0A },
-        .text = .{ .r = 0, .g = 0, .b = 0, .a = 0xE4 },
-        .text_inactive = .{ .r = 0x5C, .g = 0x5C, .b = 0x5C },
-        .button_hover_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x09 },
-        .button_pressed_bg = .{ .r = 0, .g = 0, .b = 0, .a = 0x06 },
-        .divider = .{ .r = 0xC8, .g = 0xC8, .b = 0xC8 },
+    // As on macOS the title row and the tab row are the terminal's
+    // background; the ink follows its brightness (not the system scheme).
+    const bg: Color = if (ghostty) (in.titlebar_background orelse in.background) else in.background;
+    const dark = luminanceIsDark(bg);
+    const ink: Color = if (dark) .{ .r = 255, .g = 255, .b = 255 } else .{ .r = 0, .g = 0, .b = 0 };
+    const with = struct {
+        fn alpha(c: Color, a: u8) Color {
+            return .{ .r = c.r, .g = c.g, .b = c.b, .a = a };
+        }
     };
 
-    if (ghostty) {
-        p.strip_bg = in.titlebar_background orelse in.background;
-        p.text = in.titlebar_foreground orelse in.foreground;
-    }
-    p.divider = in.split_divider orelse derivedDivider(in.background);
+    var p: Palette = .{
+        .dark = in.isDark(sys_dark),
+        .mica = mica,
+        .strip_bg = bg,
+        .tab_active_bg = in.background,
+        .tab_hover_bg = with.alpha(ink, if (dark) 0x10 else 0x0A),
+        // Primary and secondary label colours of macOS.
+        .text = with.alpha(ink, if (dark) 0xE6 else 0xD9),
+        .text_inactive = with.alpha(ink, 0x80),
+        .text_dim = with.alpha(ink, 0x80),
+        .button_hover_bg = with.alpha(ink, if (dark) 0x1A else 0x10),
+        .button_pressed_bg = with.alpha(ink, if (dark) 0x0E else 0x0A),
+        .divider = in.split_divider orelse derivedDivider(in.background),
+        .track_bg = with.alpha(ink, if (dark) 0x14 else 0x0F),
+        // Lighter than the track: white over a dark one, the window over a light one.
+        .pill_bg = if (dark) with.alpha(ink, 0x24) else .{ .r = 255, .g = 255, .b = 255, .a = 0xB3 },
+        .outline = with.alpha(ink, if (dark) 0x26 else 0x1F),
+        .separator = with.alpha(ink, if (dark) 0x2E else 0x26),
+    };
+
+    if (ghostty) p.text = in.titlebar_foreground orelse in.foreground;
     if (mica) p.strip_bg.a = 0;
     return p;
 }
@@ -381,28 +400,39 @@ test "win32 theme: dark and light palettes" {
     var cfg = try configpkg.Config.default(std.testing.allocator);
     defer cfg.deinit();
 
+    // The strip is the terminal background (default #282C34, dark): the ink is
+    // white, whatever the system scheme says.
     const dark = computeWith(.from(&cfg), true, true, null);
     try std.testing.expect(dark.dark);
-    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, dark.text);
-    try std.testing.expectEqual(Color{ .r = 0x9E, .g = 0x9E, .b = 0x9E }, dark.text_inactive);
+    try std.testing.expectEqual(Color{ .r = 0x28, .g = 0x2C, .b = 0x34 }, dark.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0xE6 }, dark.text);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x80 }, dark.text_inactive);
     try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x10 }, dark.tab_hover_bg);
-    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x15 }, dark.button_hover_bg);
-    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x0B }, dark.button_pressed_bg);
-    try std.testing.expectEqual(Color{ .r = 0x20, .g = 0x20, .b = 0x20, .a = 0 }, dark.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x1A }, dark.button_hover_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x0E }, dark.button_pressed_bg);
+    // The track and the selected pill are lighter than the background.
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x14 }, dark.track_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0x24 }, dark.pill_bg);
     // Default background #282C34 is dark: darkened by 0.4.
     try std.testing.expectEqual(Color{ .r = 24, .g = 26, .b = 31 }, dark.divider);
     try std.testing.expectEqual(Color{ .r = cfg.background.r, .g = cfg.background.g, .b = cfg.background.b }, dark.tab_active_bg);
+    try std.testing.expect(dark.strip_bg.a == 255);
 
+    const sys_light = computeWith(.from(&cfg), false, true, null);
+    try std.testing.expect(!sys_light.dark);
+    try std.testing.expectEqual(dark.text, sys_light.text);
+    try std.testing.expectEqual(dark.strip_bg, sys_light.strip_bg);
+
+    // A light terminal background gives black ink and a white pill on a grey track.
+    cfg.background = .{ .r = 0xFA, .g = 0xFA, .b = 0xFA };
     const light = computeWith(.from(&cfg), false, true, null);
-    try std.testing.expect(!light.dark);
-    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0xE4 }, light.text);
-    try std.testing.expectEqual(Color{ .r = 0x5C, .g = 0x5C, .b = 0x5C }, light.text_inactive);
-    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x0A }, light.tab_hover_bg);
-    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x09 }, light.button_hover_bg);
-    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x06 }, light.button_pressed_bg);
-    try std.testing.expectEqual(Color{ .r = 0xF3, .g = 0xF3, .b = 0xF3, .a = 0 }, light.strip_bg);
-    // The divider follows the terminal background, not the window theme.
-    try std.testing.expectEqual(Color{ .r = 24, .g = 26, .b = 31 }, light.divider);
+    try std.testing.expectEqual(Color{ .r = 0xFA, .g = 0xFA, .b = 0xFA }, light.strip_bg);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0xD9 }, light.text);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x80 }, light.text_inactive);
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0, .a = 0x0F }, light.track_bg);
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255, .a = 0xB3 }, light.pill_bg);
+    cfg.background = .{ .r = 0x28, .g = 0x2C, .b = 0x34 };
+    try std.testing.expectEqual(Color{ .r = 235, .g = 235, .b = 235 }, derivedDivider(.{ .r = 255, .g = 255, .b = 255 }));
     try std.testing.expectEqual(Color{ .r = 235, .g = 235, .b = 235 }, derivedDivider(.{ .r = 255, .g = 255, .b = 255 }));
     try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, derivedDivider(.{ .r = 0, .g = 0, .b = 0 }));
 
@@ -438,7 +468,7 @@ test "win32 theme: titlebar colours only with window-theme ghostty" {
     cfg.@"window-titlebar-foreground" = .{ .r = 0x44, .g = 0x55, .b = 0x66 };
 
     const plain = computeWith(.from(&cfg), true, true, null);
-    try std.testing.expectEqual(@as(u8, 0x20), plain.strip_bg.r);
+    try std.testing.expectEqual(@as(u8, 0x28), plain.strip_bg.r);
     try std.testing.expectEqual(@as(u8, 0xFF), plain.text.r);
 
     cfg.@"window-theme" = .ghostty;
@@ -454,13 +484,13 @@ test "win32 theme: titlebar colours only with window-theme ghostty" {
     try std.testing.expectEqual(Color{ .r = cfg.foreground.r, .g = cfg.foreground.g, .b = cfg.foreground.b }, fallback.text);
 }
 
-test "win32 theme: mica clears strip alpha" {
+test "win32 theme: the strip is opaque, no mica under it" {
     var cfg = try configpkg.Config.default(std.testing.allocator);
     defer cfg.deinit();
 
-    const mica = computeWith(.from(&cfg), true, true, null);
-    try std.testing.expect(mica.mica);
-    try std.testing.expectEqual(@as(u8, 0), mica.strip_bg.a);
+    const p = computeWith(.from(&cfg), true, true, null);
+    try std.testing.expect(!p.mica);
+    try std.testing.expectEqual(@as(u8, 255), p.strip_bg.a);
 
     cfg.@"window-theme" = .ghostty;
     const solid = computeWith(.from(&cfg), true, true, null);

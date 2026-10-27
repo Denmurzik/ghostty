@@ -16,6 +16,7 @@ const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
 const TabStrip = @import("TabStrip.zig");
 const bell = @import("bell.zig");
+const global = @import("../../global.zig");
 const composition_mod = @import("composition.zig");
 const dialogs = @import("dialogs.zig");
 const dpi_mod = @import("dpi.zig");
@@ -27,6 +28,7 @@ const overlay_mod = @import("overlay.zig");
 const placement_mod = @import("placement.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const strip_input_mod = @import("strip_input.zig");
+const tab_anim_mod = @import("tab_anim.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
 const title_edit = @import("title_edit.zig");
@@ -98,6 +100,13 @@ title_override: ?[:0]u8 = null,
 
 strip: TabStrip.Layout = .{},
 strip_input: strip_input_mod.State = .{},
+/// Where the tabs are painted while they slide (`tab_anim.zig`); the DPI
+/// the last layout was made at (0 before the first), animations only run
+/// between layouts of the same DPI.
+tab_anim: tab_anim_mod.State = .{},
+tab_anim_dpi: u32 = 0,
+/// The text of the title row: what the caption shows.
+chrome_title: ?[:0]u8 = null,
 frame: frame_mod.State = .{},
 placement: placement_mod.State = .{},
 taskbar: taskbar_mod.State = .{},
@@ -309,9 +318,11 @@ pub fn destroy(self: *Window) void {
     // DestroyWindow runs the WM_DESTROY handler, which unregisters us.
     _ = win32.user32.DestroyWindow(self.hwnd);
 
-    self.strip.tabs.deinit(alloc);
+    self.strip.deinit(alloc);
+    self.tab_anim.deinit(alloc);
     self.tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
+    if (self.chrome_title) |t| alloc.free(t);
     alloc.destroy(self);
 }
 
@@ -656,18 +667,99 @@ pub fn layout(self: *Window) void {
     const client = self.clientRect();
 
     const m = TabStrip.Metrics.forDpi(self.dpi);
+    const now = nowNs();
+    const mode = frame_mod.stripMode(self);
+    const want_tabs = self.showTabs();
+    const animate = self.tabAnimAllowed();
+
+    // The tab row slides in with the second tab. It slides out over the
+    // room it had, which the terminal gets back when it is gone (the grid
+    // resizes once, not per frame).
+    self.tab_anim.retargetRow(now, want_tabs, animate and mode == .titlebar);
+    const show_row = want_tabs or (mode == .titlebar and self.tab_anim.rowLeaving());
     self.strip.compute(
         alloc,
         m,
         client.w,
-        frame_mod.stripMode(self),
-        self.showTabs(),
+        mode,
+        show_row,
         self.tabs.items.len,
         self.active_tab,
     ) catch |err| log.warn("unable to lay out the tab strip err={}", .{err});
+    self.placeTitle();
+    self.syncTabAnim(animate, now);
 
     if (self.activeTab()) |tab| tab.layout();
     Chrome.invalidate(self);
+}
+
+pub fn nowNs() u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(global.io(), .awake).toNanoseconds()));
+}
+
+/// Whether the tabs may slide to their new places: the window is on
+/// screen, and the last layout was made at this DPI.
+fn tabAnimAllowed(self: *const Window) bool {
+    if (self.tearing_down or self.tab_anim_dpi != self.dpi or self.placement.fullscreen) return false;
+    return win32.user32.IsWindowVisible(self.hwnd) != 0 and win32.user32.IsIconic(self.hwnd) == 0;
+}
+
+/// Tells the animation where the tabs are now (`strip.tabs`) and runs its
+/// timer while something slides.
+fn syncTabAnim(self: *Window, animate: bool, now: u64) void {
+    const alloc = self.app.core_app.alloc;
+    defer self.tab_anim_dpi = self.dpi;
+    defer self.updateAnimTimer();
+
+    const n = self.tabs.items.len;
+    // The row is not shown (no tab rects): nothing slides.
+    if (self.strip.tabs.items.len != n) {
+        self.tab_anim.retarget(alloc, now, false, &.{}, &.{}, &.{}) catch return;
+        return;
+    }
+    const ids = alloc.alloc(u32, n) catch return;
+    defer alloc.free(ids);
+    const titles = alloc.alloc([]const u8, n) catch return;
+    defer alloc.free(titles);
+    for (self.tabs.items, ids, titles) |tab, *id, *title| {
+        id.* = tab.id;
+        title.* = tab.title();
+    }
+    self.tab_anim.retarget(alloc, now, animate, ids, titles, self.strip.tabs.items) catch |err| {
+        log.warn("unable to animate the tabs err={}", .{err});
+    };
+}
+
+fn updateAnimTimer(self: *Window) void {
+    if (!self.tab_anim.running) {
+        _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.tab_anim);
+        return;
+    }
+    if (win32.user32.SetTimer(self.hwnd, messages.timers.window.tab_anim, tab_anim_mod.step_ms, null) == 0) {
+        // No timer, no animation: land at once.
+        _ = self.tab_anim.tick(std.math.maxInt(u64));
+    }
+}
+
+/// `WM_TIMER` of the tab animation: paint the next frame; when it has
+/// landed stop the timer and, if the tab row left, give its room back.
+fn tabAnimStep(self: *Window) void {
+    const leaving = self.tab_anim.rowLeaving();
+    if (self.tab_anim.tick(nowNs())) {
+        Chrome.invalidateStrip(self);
+        return;
+    }
+    _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.tab_anim);
+    if (leaving) self.layout() else Chrome.invalidate(self);
+}
+
+/// Centres the title (and the proxy icon) in the title row.
+pub fn placeTitle(self: *Window) void {
+    const text = self.chrome_title orelse "";
+    var buf: [256]u16 = undefined;
+    const wide = Chrome.toWide(&buf, text);
+    const width = if (wide.len == 0) 0 else Chrome.measureText(wide, Chrome.title_font, self.dpi) catch 0;
+    self.strip.placeTitle(TabStrip.Metrics.forDpi(self.dpi), width, false);
 }
 
 /// The client area below the tab strip, where the active tab goes.
@@ -710,6 +802,14 @@ pub fn refreshTitle(self: *Window) void {
     };
     defer alloc.free(wide);
     _ = win32.user32.SetWindowTextW(self.hwnd, wide);
+
+    // The title row shows the same text as the caption.
+    const shown_text = decorated orelse text;
+    if (alloc.dupeSentinel(u8, shown_text, 0)) |copy| {
+        if (self.chrome_title) |old| alloc.free(old);
+        self.chrome_title = copy;
+        self.placeTitle();
+    } else |err| log.warn("unable to keep the window title err={}", .{err});
 
     // The strip shows the tab titles.
     Chrome.invalidate(self);
@@ -1161,6 +1261,9 @@ fn wndProc(
 
         win32.user32.WM_TIMER => if (wparam == messages.timers.window.title_debounce) {
             self.titleDebounced();
+            return 0;
+        } else if (wparam == messages.timers.window.tab_anim) {
+            self.tabAnimStep();
             return 0;
         },
 

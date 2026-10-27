@@ -97,7 +97,7 @@ pub fn ncHitCode(part: TabStrip.Part, x: i32, width: i32, resize_band: i32) u32 
             @intCast(user32.HTTOPRIGHT)
         else
             @intCast(user32.HTTOP),
-        .nowhere, .tab, .tab_close, .new_tab => @intCast(user32.HTCLIENT),
+        .nowhere, .tab, .tab_close, .new_tab, .proxy_icon => @intCast(user32.HTCLIENT),
     };
 }
 
@@ -384,7 +384,7 @@ pub fn applyDecorations(window: *Window, decorations: Decorations) void {
     const margins: dwmapi.MARGINS = .{
         .cxLeftWidth = 0,
         .cxRightWidth = 0,
-        .cyTopHeight = if (decorations != .client) 0 else if (mica) m.height else 1,
+        .cyTopHeight = if (decorations != .client) 0 else if (mica) m.title_h else 1,
         .cyBottomHeight = 0,
     };
     _ = dwmapi.DwmExtendFrameIntoClientArea(window.hwnd, &margins);
@@ -421,7 +421,7 @@ pub fn stripMode(window: *const Window) TabStrip.Mode {
 
 /// Window size minus content size: frame insets plus the strip height.
 pub fn nonClientSize(window: *const Window) Size {
-    const strip_h: i32 = if (stripMode(window) == .hidden) 0 else TabStrip.Metrics.forDpi(window.dpi).height;
+    const strip_h = TabStrip.height(TabStrip.Metrics.forDpi(window.dpi), stripMode(window), window.showTabs());
 
     switch (window.frame.decorations) {
         .server => {
@@ -469,6 +469,7 @@ test "win32 frame: hit codes incl. top corners" {
     try std.testing.expectEqual(@as(u32, user32.HTCLIENT), ncHitCode(.{ .tab = 2 }, 300, w, band));
     try std.testing.expectEqual(@as(u32, user32.HTCLIENT), ncHitCode(.{ .tab_close = 2 }, 300, w, band));
     try std.testing.expectEqual(@as(u32, user32.HTCLIENT), ncHitCode(.new_tab, 700, w, band));
+    try std.testing.expectEqual(@as(u32, user32.HTCLIENT), ncHitCode(.proxy_icon, 700, w, band));
     try std.testing.expectEqual(@as(u32, user32.HTCLIENT), ncHitCode(.nowhere, 700, w, band));
 
     try std.testing.expectEqual(@as(u32, user32.HTTOPLEFT), ncHitCode(.resize_top, 0, w, band));

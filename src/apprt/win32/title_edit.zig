@@ -70,16 +70,16 @@ pub fn tabRect(window: *const Window, index: usize) ?geom.Rect {
     const right_pad = if (r.w >= 2 * m.close_w) m.close_w else pad;
     return .{
         .x = r.x + pad,
-        .y = geom.scale(8, window.dpi),
+        .y = r.y + geom.scale(3, window.dpi),
         .w = @max(r.w - pad - right_pad, geom.scale(20, window.dpi)),
-        .h = @max(m.height - geom.scale(16, window.dpi), 1),
+        .h = @max(r.h - geom.scale(6, window.dpi), 1),
     };
 }
 
 /// The editor rect for the window and surface titles: the title area, else
 /// the caption, else the active tab.
 pub fn titleRect(window: *const Window) geom.Rect {
-    const pad = geom.scale(8, window.dpi);
+    const pad = geom.scale(4, window.dpi);
     const r: geom.Rect = if (window.strip.title) |t|
         t
     else if (window.strip.caption.w > 0)

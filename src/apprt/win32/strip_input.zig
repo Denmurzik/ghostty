@@ -208,7 +208,7 @@ fn hitTest(window: *const Window, x: i32, y: i32) TabStrip.Part {
 /// The parts the client hover shows; caption buttons are the frame's.
 fn hoverOf(part: TabStrip.Part) TabStrip.Part {
     return switch (part) {
-        .tab, .tab_close, .new_tab => part,
+        .tab, .tab_close, .new_tab, .proxy_icon => part,
         else => .nowhere,
     };
 }

@@ -1,6 +1,8 @@
-//! Painter of the tab strip and the caption buttons: Direct2D drawing and
-//! DirectWrite text into a buffered-paint DC (premultiplied 32bpp DIB), so
-//! that the Mica backdrop shows through the transparent parts of the strip.
+//! Painter of the title row and the tab row and the caption buttons: Direct2D
+//! drawing and DirectWrite text into a buffered-paint DC (premultiplied
+//! 32bpp DIB). The strip is painted in the terminal background, one colour
+//! with the terminal below it; a palette colour with alpha 0 (a later
+//! translucent window) leaves the DIB transparent.
 //!
 //! One D2D factory, one DirectWrite factory and one DC render target per
 //! process, all used from the UI thread only. The target is drawn at 96 DPI
@@ -12,6 +14,8 @@ const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");
 const geom = @import("geom.zig");
 const theme = @import("theme.zig");
+const input = @import("../../input.zig");
+const CommandPalette = @import("CommandPalette.zig");
 
 const com = win32.com;
 const d2d1 = win32.d2d1;
@@ -36,18 +40,30 @@ const glyph_bell = L("\u{EA8F}");
 /// How many DPIs keep their text formats; a window moves between few.
 const format_slots = 4;
 
+/// Point sizes of the tab title and of its key label.
+const tab_pt = 11;
+const key_pt = 10;
+
 pub const Formats = struct {
     dpi: u32,
     /// Leading, vertically centred, no wrap, ellipsis trimming.
     title: *dwrite.IDWriteTextFormat,
+    /// A tab title: centred, no wrap, ellipsis trimming.
+    tab: *dwrite.IDWriteTextFormat,
+    /// The key label of a tab: trailing.
+    key: *dwrite.IDWriteTextFormat,
     /// Centred glyphs.
     icons: *dwrite.IDWriteTextFormat,
     /// Centred both ways, larger; the resize overlay.
     label: *dwrite.IDWriteTextFormat,
     sign: *dwrite.IDWriteInlineObject,
+    tab_sign: *dwrite.IDWriteInlineObject,
 
     fn deinit(self: Formats) void {
+        com.release(self.tab_sign);
         com.release(self.sign);
+        com.release(self.key);
+        com.release(self.tab);
         com.release(self.label);
         com.release(self.icons);
         com.release(self.title);
@@ -96,6 +112,21 @@ pub const Shared = struct {
         errdefer com.release(sign);
         try title.setTrimming(.{ .granularity = .CHARACTER }, sign);
 
+        const tab = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, tab_pt * scale, L("en-us"));
+        errdefer com.release(tab);
+        try tab.setWordWrapping(.NO_WRAP);
+        try tab.setTextAlignment(.CENTER);
+        try tab.setParagraphAlignment(.CENTER);
+        const tab_sign = try self.dwrite.createEllipsisTrimmingSign(tab);
+        errdefer com.release(tab_sign);
+        try tab.setTrimming(.{ .granularity = .CHARACTER }, tab_sign);
+
+        const key = try self.dwrite.createTextFormat(self.title_family, .NORMAL, .NORMAL, .NORMAL, key_pt * scale, L("en-us"));
+        errdefer com.release(key);
+        try key.setWordWrapping(.NO_WRAP);
+        try key.setTextAlignment(.TRAILING);
+        try key.setParagraphAlignment(.CENTER);
+
         const icons = try self.dwrite.createTextFormat(self.icon_family, .NORMAL, .NORMAL, .NORMAL, 10 * scale, L("en-us"));
         errdefer com.release(icons);
         try icons.setWordWrapping(.NO_WRAP);
@@ -111,7 +142,7 @@ pub const Shared = struct {
         const slot = &self.formats[self.next_slot];
         self.next_slot = (self.next_slot + 1) % format_slots;
         if (slot.*) |old| old.deinit();
-        slot.* = .{ .dpi = dpi, .title = title, .icons = icons, .label = label, .sign = sign };
+        slot.* = .{ .dpi = dpi, .title = title, .tab = tab, .key = key, .icons = icons, .label = label, .sign = sign, .tab_sign = tab_sign };
         return &slot.*.?;
     }
 };
@@ -206,47 +237,61 @@ pub fn captionInk(pal: theme.Palette, part: TabStrip.Part, hover: TabStrip.Part,
     return if (window_active) pal.text else pal.text_inactive;
 }
 
-/// Where the pieces of one tab go.
+/// Where the pieces of one tab go. The tab rect `r` is its slot in the
+/// track, the full height of the track.
 pub const TabParts = struct {
-    /// The filled shape: a rounded pill inset from the strip's top and
-    /// bottom edges, so the active tab stays apart from the terminal.
+    /// The filled shape: a capsule inset from the slot, so that neighbours
+    /// and the track's edge stay apart from it.
     chip: geom.Rect,
     bell: ?geom.Rect,
+    /// The title, centred on the tab with room for the key label on both sides.
     title: geom.Rect,
+    /// Where the key label goes (right aligned), absent on narrow tabs.
+    key: ?geom.Rect,
+    /// The close button, over the key label while the tab is hovered.
     close: ?geom.Rect,
 };
 
-pub fn tabParts(r: geom.Rect, dpi: u32, active: bool, show_close: bool, bell: bool) TabParts {
+pub fn tabParts(r: geom.Rect, dpi: u32, show_close: bool, bell: bool) TabParts {
     const m = TabStrip.Metrics.forDpi(dpi);
-    _ = active;
-    const top = geom.scale(4, dpi);
-    const chip: geom.Rect = .{
-        .x = r.x,
-        .y = top,
-        .w = r.w,
-        .h = r.h - 2 * top,
-    };
-    const close: ?geom.Rect = if (show_close and r.w >= 2 * m.close_w)
-        .{ .x = r.right() - m.close_w, .y = 0, .w = m.close_w, .h = r.h }
+    const inset = m.pill_inset;
+    const chip: geom.Rect = .{ .x = r.x + inset, .y = r.y + inset, .w = @max(r.w - 2 * inset, 0), .h = @max(r.h - 2 * inset, 0) };
+    // As in `TabStrip.Layout.hitTest`: a close button needs a wide tab.
+    const wide = r.w >= 2 * m.close_w;
+    const close: ?geom.Rect = if (show_close and wide)
+        .{ .x = r.right() - m.close_w, .y = r.y, .w = m.close_w, .h = r.h }
     else
         null;
-    const right = if (close) |c| c.x else r.right() - m.tab_pad;
-    var left = r.x + m.tab_pad;
+    const side = if (wide) geom.scale(key_zone, dpi) else m.tab_pad;
+    var left = r.x + side;
     var bell_rect: ?geom.Rect = null;
     if (bell) {
         const bw = geom.scale(16, dpi);
-        bell_rect = .{ .x = left, .y = 0, .w = bw, .h = r.h };
+        bell_rect = .{ .x = left, .y = r.y, .w = bw, .h = r.h };
         left += bw + geom.scale(4, dpi);
     }
+    const key_pad = geom.scale(10, dpi);
     return .{
         .chip = chip,
         .bell = bell_rect,
-        .title = .{ .x = left, .y = 0, .w = @max(right - left, 0), .h = r.h },
+        .title = .{ .x = left, .y = r.y, .w = @max(r.right() - side - left, 0), .h = r.h },
+        .key = if (wide) .{ .x = r.right() - geom.scale(key_zone, dpi), .y = r.y, .w = geom.scale(key_zone, dpi) - key_pad, .h = r.h } else null,
         .close = close,
     };
 }
 
+/// Width in DIP reserved at each side of a wide tab's title for the key
+/// label ("Ctrl+1") and the close button.
+const key_zone = 48;
+
+/// The font of the window title.
+pub const title_font: Font = .{ .size_pt = 12 };
+
 /// Text of at most `buf.len` UTF-16 units; cuts the input at a code point.
+pub fn toWide(buf: []u16, s: []const u8) []const u16 {
+    return toUtf16(buf, s);
+}
+
 fn toUtf16(buf: []u16, s: []const u8) []const u16 {
     var len = @min(s.len, buf.len);
     while (true) : (len -= 1) {
@@ -257,9 +302,20 @@ fn toUtf16(buf: []u16, s: []const u8) []const u16 {
 
 // -- Painter --------------------------------------------------------------------
 
+/// The longest key label ("Ctrl+Shift+Alt+Page Down" is never a goto_tab).
+pub const key_cap = 24;
+
 pub const TabView = struct {
     title: []const u8,
     bell: bool = false,
+    /// The label of the `goto_tab:N` key of this tab; empty when unbound.
+    key: []const u8 = "",
+};
+
+/// A tab that is shrinking away after it was closed (`tab_anim.zig`).
+pub const ClosingView = struct {
+    rect: geom.Rect,
+    title: []const u8,
 };
 
 pub const DragView = struct {
@@ -273,15 +329,22 @@ pub const Inputs = struct {
     palette: theme.Palette,
     dpi: u32,
     tabs: []const TabView = &.{},
+    /// Where each tab is painted, when it is not where the layout put it
+    /// (an animation under way); parallel to `tabs`.
+    rects: ?[]const geom.Rect = null,
+    closing: []const ClosingView = &.{},
     active: usize = 0,
     hover: TabStrip.Part = .nowhere,
     pressed: TabStrip.Part = .nowhere,
     maximized: bool = false,
     window_active: bool = true,
-    /// Shown in the `title` rect (tabs hidden).
+    /// The window title, shown in the `title_text` rect.
     title: []const u8 = "",
     drop_index: ?usize = null,
     drag: ?DragView = null,
+    /// Offset of the tab row while it slides in or out (0 at rest, up to
+    /// -`tab_h` when it is gone).
+    row_dy: i32 = 0,
 };
 
 const Painter = struct {
@@ -291,19 +354,50 @@ const Painter = struct {
     fm: *const Formats,
     pal: theme.Palette,
     dpi: u32,
+    /// Added to every y: the tab row while it slides.
+    dy: i32 = 0,
+
+    fn shifted(self: *const Painter, r: geom.Rect) geom.Rect {
+        var out = r;
+        out.y += self.dy;
+        return out;
+    }
 
     fn fill(self: *Painter, r: geom.Rect, c: theme.Color) void {
         self.brush.setColor(colorF(c));
-        self.rt.fillRectangle(rectF(r), self.brush.asBrush());
+        self.rt.fillRectangle(rectF(self.shifted(r)), self.brush.asBrush());
     }
 
     fn fillRound(self: *Painter, r: geom.Rect, radius: i32, c: theme.Color) void {
         self.brush.setColor(colorF(c));
         const rad: f32 = @floatFromInt(radius);
-        self.rt.fillRoundedRectangle(.{ .rect = rectF(r), .radiusX = rad, .radiusY = rad }, self.brush.asBrush());
+        self.rt.fillRoundedRectangle(.{ .rect = rectF(self.shifted(r)), .radiusX = rad, .radiusY = rad }, self.brush.asBrush());
     }
 
-    fn drawText(self: *Painter, r: geom.Rect, text: []const u16, format: *dwrite.IDWriteTextFormat, c: theme.Color) void {
+    /// A full-height capsule (a circle for a square rect).
+    fn fillCapsule(self: *Painter, r: geom.Rect, c: theme.Color) void {
+        self.fillRound(r, @divTrunc(@min(r.w, r.h), 2), c);
+    }
+
+    /// The outline of a capsule, 1 px, drawn inside `r`.
+    fn strokeCapsule(self: *Painter, rect: geom.Rect, c: theme.Color) void {
+        const r = self.shifted(rect);
+        self.brush.setColor(colorF(c));
+        const rad: f32 = @as(f32, @floatFromInt(@min(r.w, r.h))) / 2 - 0.5;
+        self.rt.drawRoundedRectangle(.{
+            .rect = .{
+                .left = @as(f32, @floatFromInt(r.x)) + 0.5,
+                .top = @as(f32, @floatFromInt(r.y)) + 0.5,
+                .right = @as(f32, @floatFromInt(r.right())) - 0.5,
+                .bottom = @as(f32, @floatFromInt(r.bottom())) - 0.5,
+            },
+            .radiusX = rad,
+            .radiusY = rad,
+        }, self.brush.asBrush(), 1);
+    }
+
+    fn drawText(self: *Painter, rect: geom.Rect, text: []const u16, format: *dwrite.IDWriteTextFormat, c: theme.Color) void {
+        const r = self.shifted(rect);
         if (r.w <= 0 or r.h <= 0 or text.len == 0) return;
         const layout = self.dw.createTextLayout(text, format, @floatFromInt(r.w), @floatFromInt(r.h)) catch return;
         defer com.release(layout);
@@ -320,9 +414,9 @@ const Painter = struct {
         self.drawText(r, g, self.fm.icons, c);
     }
 
-    fn title(self: *Painter, r: geom.Rect, utf8: []const u8, c: theme.Color) void {
+    fn label(self: *Painter, r: geom.Rect, utf8: []const u8, format: *dwrite.IDWriteTextFormat, c: theme.Color) void {
         var buf: [256]u16 = undefined;
-        self.drawText(r, toUtf16(&buf, utf8), self.fm.title, c);
+        self.drawText(r, toUtf16(&buf, utf8), format, c);
     }
 
     fn drawTab(
@@ -332,69 +426,115 @@ const Painter = struct {
         active: bool,
         hovered: bool,
         close_hovered: bool,
-        show_close: bool,
+        window_active: bool,
     ) void {
-        const parts = tabParts(r, self.dpi, active, show_close, view.bell);
-        const radius = geom.scale(6, self.dpi);
+        const parts = tabParts(r, self.dpi, hovered, view.bell);
+        if (parts.chip.w <= 0 or parts.chip.h <= 0) return;
         if (active) {
-            self.fillRound(parts.chip, radius, self.pal.tab_active_bg);
+            self.fillCapsule(parts.chip, self.pal.pill_bg);
+            // A light pill (the window over the grey track) needs an edge.
+            if (self.pal.pill_bg.a >= 0x80) self.strokeCapsule(parts.chip, self.pal.outline);
         } else if (hovered) {
-            self.fillRound(parts.chip, radius, self.pal.tab_hover_bg);
+            self.fillCapsule(parts.chip, self.pal.tab_hover_bg);
         }
-        const ink = if (active or hovered) self.pal.text else self.pal.text_inactive;
+        // Like macOS the selected tab reads in the primary colour, the others
+        // in the secondary one; an inactive window dims them all.
+        const ink = if (active and window_active) self.pal.text else self.pal.text_inactive;
         if (parts.bell) |b| self.glyph(b, glyph_bell, ink);
-        self.title(parts.title, view.title, ink);
+        self.label(parts.title, view.title, self.fm.tab, ink);
         if (parts.close) |c| {
+            const d = @min(c.w, c.h) - 2 * geom.scale(5, self.dpi);
             if (close_hovered) {
-                const inset = geom.scale(4, self.dpi);
-                self.fillRound(.{ .x = c.x + inset, .y = geom.scale(8, self.dpi), .w = c.w - 2 * inset, .h = c.h - 2 * geom.scale(8, self.dpi) }, radius, self.pal.button_hover_bg);
+                self.fillCapsule(.{
+                    .x = c.x + @divTrunc(c.w - d, 2),
+                    .y = c.y + @divTrunc(c.h - d, 2),
+                    .w = d,
+                    .h = d,
+                }, self.pal.button_hover_bg);
             }
             self.glyph(c, glyph_close, ink);
+        } else if (view.key.len > 0) {
+            if (parts.key) |k| self.label(k, view.key, self.fm.key, self.pal.text_dim);
         }
     }
 
-    fn drawButton(self: *Painter, r: geom.Rect, g: []const u16, fill_color: ?theme.Color, ink: theme.Color, chip: bool) void {
-        if (fill_color) |c| {
-            if (chip) {
-                const inset = geom.scale(4, self.dpi);
-                self.fillRound(.{ .x = r.x + inset, .y = r.y + inset, .w = r.w - 2 * inset, .h = r.h - 2 * inset }, geom.scale(6, self.dpi), c);
-            } else {
-                self.fill(r, c);
-            }
-        }
+    fn drawNewTab(self: *Painter, r: geom.Rect, hovered: bool, pressed: bool) void {
+        self.fillCapsule(r, self.pal.track_bg);
+        if (pressed) self.fillCapsule(r, self.pal.button_pressed_bg) else if (hovered) self.fillCapsule(r, self.pal.button_hover_bg);
+        self.strokeCapsule(r, self.pal.outline);
+        self.glyph(r, glyph_new_tab, self.pal.text);
+    }
+
+    fn drawButton(self: *Painter, r: geom.Rect, g: []const u16, fill_color: ?theme.Color, ink: theme.Color) void {
+        if (fill_color) |c| self.fill(r, c);
         self.glyph(r, g, ink);
+    }
+
+    fn rectAt(in: Inputs, i: usize) geom.Rect {
+        if (in.rects) |rs| if (i < rs.len) return rs[i];
+        return in.layout.tabs.items[i];
+    }
+
+    fn tabCount(in: Inputs) usize {
+        return if (in.rects) |rs| @min(rs.len, in.layout.tabs.items.len) else in.layout.tabs.items.len;
     }
 
     fn drawStrip(self: *Painter, in: Inputs) void {
         const lay = in.layout;
 
         if (lay.show_tabs) {
-            self.rt.pushAxisAlignedClip(rectF(lay.clip), .ALIASED);
-            for (lay.tabs.items, 0..) |r, i| {
+            // The row slides: everything in it moves, and is cut at its edge.
+            const sliding = in.row_dy != 0;
+            if (sliding) {
+                self.rt.pushAxisAlignedClip(rectF(lay.tab_row), .ALIASED);
+                self.dy = in.row_dy;
+            }
+            self.fillCapsule(lay.track, self.pal.track_bg);
+            self.rt.pushAxisAlignedClip(rectF(self.shifted(lay.clip)), .ALIASED);
+            const n = tabCount(in);
+
+            // Thin lines between tabs, none next to the selected or a hovered one.
+            const sep_w = @max(geom.scale(1, self.dpi), 1);
+            const sep_inset = geom.scale(7, self.dpi);
+            var i: usize = 0;
+            while (i + 1 < n) : (i += 1) {
+                if (i == in.active or i + 1 == in.active) continue;
+                if (hoveredTab(in.hover, i) or hoveredTab(in.hover, i + 1)) continue;
+                if (in.drag) |d| if (d.index == i or d.index == i + 1) continue;
+                const a = rectAt(in, i);
+                self.fill(.{ .x = a.right() - @divTrunc(sep_w, 2), .y = a.y + sep_inset, .w = sep_w, .h = @max(a.h - 2 * sep_inset, 0) }, self.pal.separator);
+            }
+
+            for (in.closing) |c| {
+                self.drawTab(c.rect, .{ .title = c.title }, false, false, false, in.window_active);
+            }
+            i = 0;
+            while (i < n) : (i += 1) {
                 if (in.drag) |d| if (d.index == i) continue;
-                self.drawTabAt(in, i, r);
+                self.drawTabAt(in, i, rectAt(in, i));
             }
             if (in.drag) |d| {
-                if (d.index < lay.tabs.items.len) {
-                    var r = lay.tabs.items[d.index];
+                if (d.index < n) {
+                    var r = rectAt(in, d.index);
                     r.x = d.x;
                     self.drawTabAt(in, d.index, r);
                 }
             }
             if (in.drop_index) |idx| self.drawDropMarker(lay, idx);
             self.rt.popAxisAlignedClip();
+
+            if (lay.new_tab) |r| {
+                self.drawNewTab(r, sameTag(in.hover, .new_tab), sameTag(in.pressed, .new_tab));
+            }
+            if (sliding) {
+                self.rt.popAxisAlignedClip();
+                self.dy = 0;
+            }
         }
 
-        if (lay.new_tab) |r| {
-            const hovered = sameTag(in.hover, .new_tab);
-            const pressed = sameTag(in.pressed, .new_tab);
-            const fill_color: ?theme.Color = if (pressed) self.pal.button_pressed_bg else if (hovered) self.pal.button_hover_bg else null;
-            self.drawButton(r, glyph_new_tab, fill_color, self.pal.text, true);
-        }
-
-        if (lay.title) |r| {
+        if (lay.title_text.w > 0) {
             const ink = if (in.window_active) self.pal.text else self.pal.text_inactive;
-            self.title(r, in.title, ink);
+            self.label(lay.title_text, in.title, self.fm.title, ink);
         }
 
         const parts = [_]struct { rect: ?geom.Rect, part: TabStrip.Part }{
@@ -409,23 +549,24 @@ const Painter = struct {
                 captionGlyph(p.part, in.maximized),
                 captionFill(self.pal, p.part, in.hover, in.pressed),
                 captionInk(self.pal, p.part, in.hover, in.pressed, in.window_active),
-                false,
             );
         }
     }
 
-    fn drawTabAt(self: *Painter, in: Inputs, i: usize, r: geom.Rect) void {
-        const view: TabView = if (i < in.tabs.len) in.tabs[i] else .{ .title = "" };
-        const active = i == in.active;
-        const hovered = switch (in.hover) {
+    fn hoveredTab(hover: TabStrip.Part, i: usize) bool {
+        return switch (hover) {
             .tab, .tab_close => |h| h == i,
             else => false,
         };
+    }
+
+    fn drawTabAt(self: *Painter, in: Inputs, i: usize, r: geom.Rect) void {
+        const view: TabView = if (i < in.tabs.len) in.tabs[i] else .{ .title = "" };
         const close_hovered = switch (in.hover) {
             .tab_close => |h| h == i,
             else => false,
         };
-        self.drawTab(r, view, active, hovered, close_hovered, active or hovered);
+        self.drawTab(r, view, i == in.active, hoveredTab(in.hover, i), close_hovered, in.window_active);
     }
 
     /// A 2 px bar at the insertion slot.
@@ -438,8 +579,8 @@ const Painter = struct {
         else
             lay.clip.x;
         const w = geom.scale(2, self.dpi);
-        const inset = geom.scale(6, self.dpi);
-        self.fill(.{ .x = x - @divTrunc(w, 2), .y = inset, .w = w, .h = lay.bounds.h - 2 * inset }, self.pal.text);
+        const inset = geom.scale(2, self.dpi);
+        self.fill(.{ .x = x - @divTrunc(w, 2), .y = lay.track.y + inset, .w = w, .h = lay.track.h - 2 * inset }, self.pal.text);
     }
 };
 
@@ -493,16 +634,21 @@ fn paintInto(hdc: HDC, size: geom.Rect, in: Inputs) !void {
     try withPainter(hdc, size.w, size.h, in.palette, in.dpi, in, drawStripBody);
 }
 
-const ChipArgs = struct { size: geom.Rect, title: []const u8 };
+const ChipArgs = struct { size: geom.Rect, title: []const u8, bg: theme.Color };
 
+/// The ghost is opaque: the pill over the track over the strip's colour.
 fn drawChipBody(args: ChipArgs, p: *Painter) void {
-    p.drawTab(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, .{ .title = args.title }, true, false, false, false);
+    p.pal.pill_bg = blend(p.pal.pill_bg, blend(p.pal.track_bg, args.bg));
+    p.drawTab(.{ .x = 0, .y = 0, .w = args.size.w, .h = args.size.h }, .{ .title = args.title }, true, false, false, true);
 }
 
 /// One active-style tab into a premultiplied DIB (the drag ghost). False
 /// when nothing was painted.
 pub fn paintTabChip(hdc: HDC, size: geom.Rect, title: []const u8, palette: theme.Palette, dpi: u32) bool {
-    withPainter(hdc, size.w, size.h, palette, dpi, ChipArgs{ .size = size, .title = title }, drawChipBody) catch |err| {
+    var pal = palette;
+    const bg = pal.strip_bg;
+    pal.strip_bg.a = 0;
+    withPainter(hdc, size.w, size.h, pal, dpi, ChipArgs{ .size = size, .title = title, .bg = .{ .r = bg.r, .g = bg.g, .b = bg.b } }, drawChipBody) catch |err| {
         logOnce(err);
         return false;
     };
@@ -520,7 +666,7 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
 /// The width of the title area of the tab at `r` when it is hovered (its
 /// close button is shown), from `tabParts`.
 pub fn titleAreaWidth(r: geom.Rect, dpi: u32, bell: bool) i32 {
-    return tabParts(r, dpi, false, true, bell).title.w;
+    return tabParts(r, dpi, true, bell).title.w;
 }
 
 /// The measure of tab titles for `TabStrip.Layout.tabTrimmed`: the width
@@ -534,7 +680,7 @@ fn measureTitle(ctx: ?*anyopaque, title: []const u8) i32 {
     const window: *const Window = @ptrCast(@alignCast(ctx.?));
     var buf: [256]u16 = undefined;
     // A title cut at the buffer is still wider than any title area.
-    return measureText(toUtf16(&buf, title), .{ .size_pt = 12 }, window.dpi) catch 0;
+    return measureText(toUtf16(&buf, title), .{ .size_pt = tab_pt }, window.dpi) catch 0;
 }
 
 fn measureArea(ctx: ?*anyopaque, tab: geom.Rect, index: usize) i32 {
@@ -614,6 +760,20 @@ fn partOfHover(window: *const Window) TabStrip.Part {
     };
 }
 
+/// The label of the `goto_tab` key of tab `index` (0-based) in `set`, like
+/// the palette writes it; empty when the tab has none.
+pub fn keyLabel(set: *const input.Binding.Set, index: usize, buf: *[key_cap]u8) []const u8 {
+    const trigger = set.getTrigger(.{ .goto_tab = index + 1 }) orelse return "";
+    return CommandPalette.shortcutText(buf, trigger);
+}
+
+/// The tab row's offset while it slides in or out: 0 at rest, `-tab_h`
+/// when it is gone.
+fn rowOffset(row: f64, dpi: u32) i32 {
+    const h = TabStrip.Metrics.forDpi(dpi).tab_h;
+    return -@as(i32, @intFromFloat(@round((1 - std.math.clamp(row, 0, 1)) * @as(f64, @floatFromInt(h)))));
+}
+
 /// Paints the strip. Never fails visibly: on error the strip is filled with
 /// the palette's colour and the error is logged once.
 pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
@@ -627,15 +787,46 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
     const pal = theme.palette(window);
     const alloc = window.app.core_app.alloc;
     const bell_title = window.app.config.@"bell-features".title;
+    const n = window.tabs.items.len;
 
-    const views = alloc.alloc(TabView, window.tabs.items.len) catch |err| {
+    const views = alloc.alloc(TabView, n) catch |err| {
         logOnce(err);
         fillFallback(hdc, bounds, pal.strip_bg, null);
         return;
     };
     defer alloc.free(views);
-    for (window.tabs.items, views) |tab, *view| {
-        view.* = .{ .title = tab.title(), .bell = bell_title and tab.bellRinging() };
+    const keys = alloc.alloc([key_cap]u8, n) catch |err| {
+        logOnce(err);
+        fillFallback(hdc, bounds, pal.strip_bg, null);
+        return;
+    };
+    defer alloc.free(keys);
+    for (window.tabs.items, views, keys, 0..) |tab, *view, *key, i| {
+        view.* = .{
+            .title = tab.title(),
+            .bell = bell_title and tab.bellRinging(),
+            .key = keyLabel(&window.app.config.keybind.set, i, key),
+        };
+    }
+
+    // Tabs that slide are painted where the animation has them.
+    const now = Window.nowNs();
+    const anim = &window.tab_anim;
+    const sliding = anim.running and anim.tabs.items.len == n and lay.tabs.items.len == n;
+    var rects: []geom.Rect = &.{};
+    var closing: []ClosingView = &.{};
+    defer if (sliding) {
+        alloc.free(rects);
+        alloc.free(closing);
+    };
+    if (sliding) {
+        rects = alloc.alloc(geom.Rect, n) catch &.{};
+        closing = alloc.alloc(ClosingView, anim.closing.items.len) catch &.{};
+        for (rects, 0..) |*r, i| r.* = anim.rectAt(i, now);
+        for (closing, 0..) |*c, i| {
+            const v = anim.closingAt(i, now);
+            c.* = .{ .rect = v.rect, .title = v.title };
+        }
     }
 
     var drag: ?DragView = null;
@@ -645,26 +836,22 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         }
     }
 
-    const title: []const u8 = if (window.title_override) |t|
-        t
-    else if (window.activeTab()) |tab|
-        tab.title()
-    else
-        "";
-
     const in: Inputs = .{
         .layout = lay,
         .palette = pal,
         .dpi = window.dpi,
         .tabs = views,
+        .rects = if (sliding and rects.len == n) rects else null,
+        .closing = closing,
         .active = window.active_tab,
         .hover = partOfHover(window),
         .pressed = window.frame.pressed,
         .maximized = user32.IsZoomed(window.hwnd) != 0,
         .window_active = theme.windowActive(window),
-        .title = title,
+        .title = window.chrome_title orelse "",
         .drop_index = window.strip_input.drop_index,
         .drag = drag,
+        .row_dy = if (anim.running) rowOffset(anim.rowAt(now), window.dpi) else 0,
     };
 
     const rc = bounds.toRECT();
@@ -689,6 +876,12 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
 
 pub fn invalidate(window: *Window) void {
     _ = user32.InvalidateRect(window.hwnd, null, 0);
+}
+
+/// Repaints the strip only (an animation frame).
+pub fn invalidateStrip(window: *Window) void {
+    const rc = window.strip.bounds.toRECT();
+    _ = user32.InvalidateRect(window.hwnd, &rc, 0);
 }
 
 // -- General painter ------------------------------------------------------------
@@ -866,33 +1059,59 @@ test "win32 chrome: caption glyphs and fills" {
 }
 
 test "win32 chrome: tab parts" {
-    const r: geom.Rect = .{ .x = 100, .y = 0, .w = 200, .h = 40 };
-    const plain = tabParts(r, 96, false, false, false);
+    // A slot of the track: 200 x 28 at 96 dpi.
+    const r: geom.Rect = .{ .x = 100, .y = 34, .w = 200, .h = 28 };
+    const plain = tabParts(r, 96, false, false);
     try std.testing.expect(plain.close == null);
     try std.testing.expect(plain.bell == null);
-    try std.testing.expectEqual(@as(i32, 110), plain.title.x);
-    try std.testing.expectEqual(@as(i32, 180), plain.title.w);
+    // The title is centred with 48 px kept free at each side for the key
+    // label and the close button.
+    try std.testing.expectEqual(@as(i32, 148), plain.title.x);
+    try std.testing.expectEqual(@as(i32, 104), plain.title.w);
+    try std.testing.expectEqual(@as(i32, 252), plain.key.?.x);
+    try std.testing.expectEqual(@as(i32, 38), plain.key.?.w);
 
-    const full = tabParts(r, 96, true, true, true);
+    const full = tabParts(r, 96, true, true);
     try std.testing.expectEqual(@as(i32, 272), full.close.?.x);
-    try std.testing.expectEqual(@as(i32, 110), full.bell.?.x);
-    try std.testing.expectEqual(@as(i32, 130), full.title.x);
-    try std.testing.expectEqual(@as(i32, 142), full.title.w);
-    // The active chip keeps the same gap above the terminal as below the
-    // strip's top edge.
-    try std.testing.expectEqual(@as(i32, 4), full.chip.y);
-    try std.testing.expectEqual(@as(i32, 36), full.chip.bottom());
+    try std.testing.expectEqual(@as(i32, 148), full.bell.?.x);
+    try std.testing.expectEqual(@as(i32, 168), full.title.x);
+    try std.testing.expectEqual(@as(i32, 84), full.title.w);
+    // The pill is the slot less 2 px all round.
+    try std.testing.expectEqual(@as(i32, 102), full.chip.x);
+    try std.testing.expectEqual(@as(i32, 36), full.chip.y);
+    try std.testing.expectEqual(@as(i32, 24), full.chip.h);
 
-    // Too narrow for a close button, as in `TabStrip.Layout.hitTest`.
-    const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 40 }, 96, true, true, false);
+    // Too narrow for a close button or a key label, as in `TabStrip.Layout.hitTest`.
+    const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 28 }, 96, true, false);
     try std.testing.expect(narrow.close == null);
+    try std.testing.expect(narrow.key == null);
+    try std.testing.expectEqual(@as(i32, 10), narrow.title.x);
 }
 
 test "win32 chrome: title area for the tooltip follows tabParts" {
-    const r: geom.Rect = .{ .x = 100, .y = 0, .w = 200, .h = 40 };
-    try std.testing.expectEqual(tabParts(r, 96, true, true, false).title.w, titleAreaWidth(r, 96, false));
-    try std.testing.expectEqual(@as(i32, 142), titleAreaWidth(r, 96, true));
+    const r: geom.Rect = .{ .x = 100, .y = 34, .w = 200, .h = 28 };
+    try std.testing.expectEqual(tabParts(r, 96, true, false).title.w, titleAreaWidth(r, 96, false));
+    try std.testing.expectEqual(@as(i32, 84), titleAreaWidth(r, 96, true));
     try std.testing.expect(titleAreaWidth(r, 96, true) < titleAreaWidth(r, 96, false));
+}
+
+test "win32 chrome: key label of goto_tab like the palette" {
+    var set: input.Binding.Set = .{};
+    defer set.deinit(std.testing.allocator);
+    try set.put(std.testing.allocator, .{ .key = .{ .unicode = '2' }, .mods = .{ .ctrl = true } }, .{ .goto_tab = 2 });
+
+    var buf: [key_cap]u8 = undefined;
+    try std.testing.expectEqualStrings("Ctrl+2", keyLabel(&set, 1, &buf));
+    // Unbound: nothing.
+    try std.testing.expectEqualStrings("", keyLabel(&set, 0, &buf));
+}
+
+test "win32 chrome: the tab row slides by the missing fraction" {
+    try std.testing.expectEqual(@as(i32, 0), rowOffset(1, 96));
+    try std.testing.expectEqual(@as(i32, -36), rowOffset(0, 96));
+    try std.testing.expectEqual(@as(i32, -18), rowOffset(0.5, 96));
+    try std.testing.expectEqual(@as(i32, -54), rowOffset(0, 144));
+    try std.testing.expectEqual(@as(i32, 0), rowOffset(7, 96));
 }
 
 test "win32 chrome: colours and utf16 titles" {
@@ -910,13 +1129,13 @@ test "win32 chrome: colours and utf16 titles" {
 test "win32 chrome: paints a strip into a DIB" {
     const alloc = std.testing.allocator;
     const width = 600;
-    const height = 40;
+    const height = 66;
 
     var layout: TabStrip.Layout = .{};
     defer layout.deinit(alloc);
     try layout.compute(alloc, TabStrip.Metrics.forDpi(96), width, .titlebar, true, 2, 0);
     const tab0 = layout.tabs.items[0];
-    const close_rect = tabParts(tab0, 96, true, true, false).close.?;
+    const close_rect = tabParts(tab0, 96, true, false).close.?;
 
     const dc = gdi32.CreateCompatibleDC(null) orelse return error.SkipZigTest;
     defer _ = gdi32.DeleteDC(dc);
@@ -935,30 +1154,46 @@ test "win32 chrome: paints a strip into a DIB" {
     const pixels: [*]const [4]u8 = @ptrCast(bits.?);
     defer deinitShared();
 
+    var pal = test_palette;
+    pal.strip_bg = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
+    pal.pill_bg = .{ .r = 0x30, .g = 0x60, .b = 0x90 };
     const views = [_]TabView{ .{ .title = "one" }, .{ .title = "two" } };
-    try paintInto(dc, .{ .x = 0, .y = 0, .w = width, .h = height }, .{
+    const size: geom.Rect = .{ .x = 0, .y = 0, .w = width, .h = height };
+    var in: Inputs = .{
         .layout = &layout,
-        .palette = test_palette,
+        .palette = pal,
         .dpi = 96,
         .tabs = &views,
         .active = 0,
-    });
+        .hover = .{ .tab = 0 },
+    };
+    try paintInto(dc, size, in);
 
-    // Active tab body: opaque tab_active_bg (BGRA).
+    // One background everywhere the chrome does not draw: the title row, the
+    // margin of the tab row.
+    try std.testing.expectEqual([4]u8{ 0x30, 0x20, 0x10, 0xFF }, pixels[10 * width + 200]);
+    try std.testing.expectEqual([4]u8{ 0x30, 0x20, 0x10, 0xFF }, pixels[48 * width + 2]);
+    // Active tab body: the opaque pill (BGRA), on the tab row.
     const mid_x: usize = @intCast(tab0.x + @divTrunc(tab0.w, 2));
-    try std.testing.expectEqual([4]u8{ 0x90, 0x60, 0x30, 0xFF }, pixels[8 * width + mid_x]);
-    // Left of the first tab the Mica shows through.
-    try std.testing.expectEqual(@as(u8, 0), pixels[20 * width + 2][3]);
-    // The close glyph left ink on the active tab.
+    try std.testing.expectEqual([4]u8{ 0x90, 0x60, 0x30, 0xFF }, pixels[40 * width + mid_x]);
+    // The track shows between the pill and the row's edge as a lighter strip.
+    const track_px = pixels[35 * width + mid_x];
+    try std.testing.expect(track_px[0] > 0x30 and track_px[3] == 0xFF);
+    // The close glyph left ink on the hovered tab.
     var inked = false;
-    var y: usize = 0;
-    while (y < height) : (y += 1) {
+    var y: usize = 34;
+    while (y < 62) : (y += 1) {
         var x: usize = @intCast(close_rect.x);
         while (x < close_rect.right()) : (x += 1) {
             if (!std.mem.eql(u8, &pixels[y * width + x], &.{ 0x90, 0x60, 0x30, 0xFF })) inked = true;
         }
     }
     try std.testing.expect(inked);
+
+    // Sliding out by the full row: the tab row's area is the plain background.
+    in.row_dy = -36;
+    try paintInto(dc, size, in);
+    try std.testing.expectEqual([4]u8{ 0x30, 0x20, 0x10, 0xFF }, pixels[40 * width + mid_x]);
 }
 
 test "win32 chrome: shared target recreated after RECREATE_TARGET" {

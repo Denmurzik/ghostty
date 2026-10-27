@@ -431,7 +431,11 @@ fn writeStrip(jw: *std.json.Stringify, window: *Window) !void {
     try jw.beginArray();
     for (strip.tabs.items) |r| try jw.write(rectArray(r));
     try jw.endArray();
-    inline for (.{ "new_tab", "minimize", "maximize", "close" }) |name| {
+    inline for (.{ "title_row", "tab_row", "track", "title_text" }) |name| {
+        try jw.objectField(name);
+        try jw.write(rectArray(@field(strip, name)));
+    }
+    inline for (.{ "new_tab", "minimize", "maximize", "close", "proxy_icon" }) |name| {
         try jw.objectField(name);
         if (@field(strip, name)) |r| try jw.write(rectArray(r)) else try jw.write(null);
     }
