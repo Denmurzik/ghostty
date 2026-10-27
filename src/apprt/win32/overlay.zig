@@ -35,11 +35,9 @@ const panel_class = L("GhosttyOverlayPanel");
 
 /// `WM_MOUSEACTIVATE` result: do not activate, and eat the click.
 const ma_noactivate = 3;
-const gw_owner = 4;
-extern "user32" fn GetWindow(HWND, u32) callconv(.winapi) ?HWND;
 
-pub const Size = struct { w: i32, h: i32 };
-pub const Point = struct { x: i32, y: i32 };
+pub const Size = geom.Size;
+pub const Point = geom.Point;
 
 pub const Anchor = enum {
     surface_top_right,
@@ -99,8 +97,10 @@ pub const Popup = struct {
     pub fn show(p: *Popup) !void {
         try ensureWindow(p);
         p.visible = true;
+        // Content may have changed: draw once, whatever the size.
+        p.drawn = .{ .w = 0, .h = 0 };
         apply(p);
-        p.invalidate();
+        if (p.kind == .panel) p.invalidate();
     }
 
     pub fn hide(p: *Popup) void {
@@ -108,6 +108,8 @@ pub const Popup = struct {
         const hwnd = p.hwnd orelse return;
         _ = user32.KillTimer(hwnd, messages.timers.overlay.hide);
         _ = user32.ShowWindow(hwnd, user32.SW_HIDE);
+        // A panel that hides is not going to take the activation any more.
+        if (p.kind == .panel) p.window.overlays.panel_activation = false;
     }
 
     pub fn invalidate(p: *Popup) void {
@@ -129,8 +131,9 @@ pub const Popup = struct {
     /// Takes the popup down; the memory stays with the feature.
     pub fn destroy(p: *Popup) void {
         p.visible = false;
-        removeFromWindow(p);
+        // No window: the owner is gone and so is its list (`.destroying`).
         const hwnd = p.hwnd orelse return;
+        removeFromWindow(p);
         util.setUserData(hwnd, null);
         p.hwnd = null;
         _ = user32.DestroyWindow(hwnd);
@@ -147,8 +150,9 @@ pub const Popup = struct {
 pub const WindowState = struct {
     popups: std.ArrayList(*Popup) = .empty,
     /// Set by `beginPanelActivation`: the next deactivation of the window
-    /// is caused by its own panel.
+    /// is caused by its own panel (for `panel_activation_ms` at most).
     panel_activation: bool = false,
+    panel_activation_at: u64 = 0,
 };
 
 /// A command for the overlay of a window, posted with
@@ -470,6 +474,15 @@ pub fn panelHasForeground(window: *const Window) bool {
 /// the owner does not take the loss of the activation for its own.
 pub fn beginPanelActivation(window: *Window) void {
     window.overlays.panel_activation = true;
+    window.overlays.panel_activation_at = win32.kernel32.GetTickCount64();
+}
+
+/// How long `beginPanelActivation` stays valid when no activation follows.
+const panel_activation_ms = 1000;
+
+fn activationPending(state: *const WindowState) bool {
+    if (!state.panel_activation) return false;
+    return win32.kernel32.GetTickCount64() -% state.panel_activation_at < panel_activation_ms;
 }
 
 /// `WM_ACTIVATE` / `WM_NCACTIVATE`: the window stays drawn as active while
@@ -478,14 +491,21 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
     const state = &window.overlays;
     switch (msg) {
         user32.WM_ACTIVATE => {
-            if ((wparam & 0xFFFF) != user32.WA_INACTIVE) return null;
+            if ((wparam & 0xFFFF) != user32.WA_INACTIVE) {
+                state.panel_activation = false;
+                return null;
+            }
             if (!isOwnPanel(window, hwndOf(lparam))) return null;
             state.panel_activation = false;
             return 0;
         },
         user32.WM_NCACTIVATE => {
-            if (wparam != 0) return null;
-            if (!state.panel_activation and !isOwnPanel(window, hwndOf(lparam)) and !panelHasForeground(window)) return null;
+            // lparam is an update region here, not the other window.
+            if (wparam != 0) {
+                state.panel_activation = false;
+                return null;
+            }
+            if (!activationPending(state) and !panelHasForeground(window)) return null;
             return 1;
         },
         else => return null,
@@ -498,8 +518,8 @@ pub fn windowChanged(window: *Window, change: hooks.WindowChange) void {
         .moved, .sized, .dpi, .minimized, .restored => {
             for (state.popups.items) |p| {
                 apply(p);
-                // The size in px depends on the dpi.
-                if (change == .dpi) p.invalidate();
+                // The size in px depends on the dpi; a label redraws with it.
+                if (change == .dpi and p.kind == .panel) p.invalidate();
             }
         },
         .destroying => {
@@ -556,7 +576,7 @@ fn reown(p: *Popup, to: *Window) !void {
     const hwnd = p.hwnd orelse return;
     _ = user32.SetWindowLongPtrW(hwnd, user32.GWLP_HWNDPARENT, @bitCast(@intFromPtr(to.hwnd)));
     apply(p);
-    p.invalidate();
+    if (p.kind == .panel) p.invalidate();
 }
 
 pub fn surfaceDestroying(surface: *Surface) void {
@@ -757,7 +777,7 @@ test "win32 overlay: popups follow a moved owner" {
     try std.testing.expectEqual(before.h, after.h);
 
     // The label is owned, not topmost.
-    try std.testing.expectEqual(@as(?HWND, owner.hwnd), GetWindow(hwnd, gw_owner));
+    try std.testing.expectEqual(@as(?HWND, owner.hwnd), user32.GetWindow(hwnd, user32.GW_OWNER));
     const ex: usize = @bitCast(user32.GetWindowLongPtrW(hwnd, user32.GWL_EXSTYLE));
     try std.testing.expect(ex & user32.WS_EX_TOPMOST == 0);
     try std.testing.expect(ex & user32.WS_EX_NOACTIVATE != 0);
@@ -772,10 +792,10 @@ test "win32 overlay: re-owning on tab re-parent" {
     try label.show();
     defer label.destroy();
     const hwnd = label.hwnd.?;
-    try std.testing.expectEqual(@as(?HWND, a.hwnd), GetWindow(hwnd, gw_owner));
+    try std.testing.expectEqual(@as(?HWND, a.hwnd), user32.GetWindow(hwnd, user32.GW_OWNER));
 
     try reown(&label, &b.window);
-    try std.testing.expectEqual(@as(?HWND, b.hwnd), GetWindow(hwnd, gw_owner));
+    try std.testing.expectEqual(@as(?HWND, b.hwnd), user32.GetWindow(hwnd, user32.GW_OWNER));
     try std.testing.expectEqual(@as(usize, 0), a.window.overlays.popups.items.len);
     try std.testing.expectEqual(@as(usize, 1), b.window.overlays.popups.items.len);
     // Positioned on the new owner: its top centre.
@@ -800,12 +820,31 @@ test "win32 overlay: panel activation keeps the owner active" {
     try std.testing.expectEqual(@as(?LRESULT, 1), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
     try std.testing.expectEqual(@as(?LRESULT, 0), windowMessage(&owner.window, user32.WM_ACTIVATE, inactive, ph));
     try std.testing.expect(!owner.window.overlays.panel_activation);
-    try std.testing.expectEqual(@as(?LRESULT, 1), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, ph));
+    // WM_NCACTIVATE carries a region, never the other window: a stray
+    // value must not match, and without the flag nothing is swallowed.
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, ph));
 
     // Any other deactivation is the window's own.
     try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
     try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_ACTIVATE, inactive, 0));
     try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_ACTIVATE, inactive, @bitCast(@intFromPtr(owner.hwnd))));
+    // A request no activation followed (the panel already had the focus)
+    // must not swallow the later alt-tab: it expires...
+    beginPanelActivation(&owner.window);
+    owner.window.overlays.panel_activation_at -%= 5 * panel_activation_ms;
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
+    // ...is dropped when the owner is activated again...
+    beginPanelActivation(&owner.window);
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_ACTIVATE, user32.WA_ACTIVE, 0));
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
+    beginPanelActivation(&owner.window);
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 1, 0));
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
+    // ...and when the panel hides.
+    beginPanelActivation(&owner.window);
+    panel.hide();
+    try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 0, 0));
+
     // Activation is never swallowed.
     try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_ACTIVATE, user32.WA_ACTIVE, ph));
     try std.testing.expectEqual(@as(?LRESULT, null), windowMessage(&owner.window, user32.WM_NCACTIVATE, 1, 0));

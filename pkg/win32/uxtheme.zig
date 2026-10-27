@@ -36,3 +36,6 @@ pub extern "uxtheme" fn BeginBufferedPaint(
 pub extern "uxtheme" fn EndBufferedPaint(HPAINTBUFFER, update_target: foundation.BOOL) callconv(.winapi) foundation.HRESULT;
 /// Sets every pixel of `rect` (null: the whole buffer) to transparent black.
 pub extern "uxtheme" fn BufferedPaintClear(HPAINTBUFFER, rect: ?*const foundation.RECT) callconv(.winapi) foundation.HRESULT;
+
+/// Sets the alpha of every pixel of `rect` (null: the whole buffer).
+pub extern "uxtheme" fn BufferedPaintSetAlpha(HPAINTBUFFER, rect: ?*const foundation.RECT, alpha: u8) callconv(.winapi) foundation.HRESULT;

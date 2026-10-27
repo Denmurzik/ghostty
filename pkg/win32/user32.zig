@@ -989,3 +989,7 @@ pub const EM_SETCUEBANNER = ECM_FIRST + 1;
 pub const EN_KILLFOCUS = 0x0200;
 pub const EN_CHANGE = 0x0300;
 pub const WM_CTLCOLOREDIT = 0x0133;
+
+/// `GetWindow` command: the owner of an owned window.
+pub const GW_OWNER = 4;
+pub extern "user32" fn GetWindow(HWND, cmd: u32) callconv(.winapi) ?HWND;

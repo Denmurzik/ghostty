@@ -231,8 +231,9 @@ test "win32 hooks: testState writes an m3 object" {
     defer aw.deinit();
     var jw: std.json.Stringify = .{ .writer = &aw.writer };
     try jw.beginObject();
-    // The skeleton's state writers do not look at the app.
+    // Only the windows are looked at.
     var app: App = undefined;
+    app.windows = .empty;
     try testState(&app, &jw);
     try jw.endObject();
 

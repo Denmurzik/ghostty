@@ -11,7 +11,6 @@ const win32 = @import("win32");
 const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");
 const geom = @import("geom.zig");
-const overlay = @import("overlay.zig");
 const theme = @import("theme.zig");
 
 const com = win32.com;
@@ -567,10 +566,8 @@ fn fillFallback(hdc: HDC, r: geom.Rect, c: theme.Color, buffer: ?uxtheme.HPAINTB
     defer _ = gdi32.DeleteObject(@ptrCast(brush));
     const rc = r.toRECT();
     _ = gdi32.FillRect(hdc, &rc, brush);
-    if (buffer) |b| _ = BufferedPaintSetAlpha(b, &rc, 255);
+    if (buffer) |b| _ = uxtheme.BufferedPaintSetAlpha(b, &rc, 255);
 }
-
-extern "uxtheme" fn BufferedPaintSetAlpha(uxtheme.HPAINTBUFFER, ?*const win32.foundation.RECT, alpha: u8) callconv(.winapi) win32.foundation.HRESULT;
 
 fn partOfHover(window: *const Window) TabStrip.Part {
     return switch (window.strip_input.hover) {
@@ -626,7 +623,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
         .hover = partOfHover(window),
         .pressed = window.frame.pressed,
         .maximized = user32.IsZoomed(window.hwnd) != 0,
-        .window_active = if (user32.GetForegroundWindow()) |fg| fg == window.hwnd or overlay.panelHasForeground(window) else false,
+        .window_active = theme.windowActive(window),
         .title = title,
         .drop_index = window.strip_input.drop_index,
         .drag = drag,

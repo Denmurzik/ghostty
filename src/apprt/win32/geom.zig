@@ -10,6 +10,9 @@ pub fn scale(v: i32, dpi: u32) i32 {
 
 const scaleDpi = scale;
 
+pub const Size = struct { w: i32, h: i32 };
+pub const Point = struct { x: i32, y: i32 };
+
 pub const Rect = struct {
     x: i32 = 0,
     y: i32 = 0,

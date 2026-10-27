@@ -9,6 +9,7 @@ const Chrome = @import("Chrome.zig");
 const decor = @import("decor.zig");
 const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
+const theme = @import("theme.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_bell);
@@ -21,7 +22,7 @@ const caption_prefix = "\u{1F514} ";
 pub fn ring(surface: *Surface) bool {
     const window = surface.window;
     const features = window.app.config.@"bell-features";
-    const foreground = win32.user32.GetForegroundWindow() == window.hwnd;
+    const foreground = theme.windowActive(window);
 
     // A focused surface needs no reminder of what it just did.
     const focused = foreground and win32.user32.GetFocus() == surface.hwnd;

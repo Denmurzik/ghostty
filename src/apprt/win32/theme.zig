@@ -9,6 +9,7 @@ const frame = @import("frame.zig");
 const terminal = @import("../../terminal/main.zig");
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
+const overlay_host = @import("overlay.zig");
 const Window = @import("Window.zig");
 const util = @import("util.zig");
 
@@ -247,8 +248,15 @@ fn computeWith(in: Inputs, sys_dark: bool, active: bool, hc: ?SystemColors) Pale
     return p;
 }
 
+/// Whether the window counts as the active one: it is the foreground
+/// window, or one of its overlay panels is.
+pub fn windowActive(window: *const Window) bool {
+    const fg = win32.user32.GetForegroundWindow() orelse return false;
+    return fg == window.hwnd or overlay_host.panelHasForeground(window);
+}
+
 pub fn palette(window: *const Window) Palette {
-    const active = if (win32.user32.GetForegroundWindow()) |fg| fg == window.hwnd else false;
+    const active = windowActive(window);
     return computeWith(
         applied orelse .from(&window.app.config),
         system_dark orelse false,

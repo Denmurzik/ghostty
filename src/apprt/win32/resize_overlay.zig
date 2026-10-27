@@ -37,7 +37,7 @@ pub const State = struct {
     text_len: usize = 0,
 };
 
-pub const Size = struct { w: i32, h: i32 };
+pub const Size = geom.Size;
 
 /// The popup rectangle of `size` inside `surface`, `margin` away from the
 /// edges it is attached to. Never starts left of or above the surface.
