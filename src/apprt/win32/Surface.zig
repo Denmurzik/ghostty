@@ -286,6 +286,7 @@ pub fn deinit(self: *Surface) void {
     self.initialized = false;
 
     self.core_surface.deinit();
+    self.app.scheduleMemoryRelease();
 
     // The parent's destruction may already have taken the child with it.
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);

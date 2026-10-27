@@ -46,6 +46,10 @@ pub const WM_GHOSTTY_IPC = messages.WM_GHOSTTY_IPC;
 
 /// Timer id on `msg_hwnd` for the delayed quit after the last window.
 const quit_timer_id: usize = messages.timers.msg_window.quit;
+const release_memory_timer_id: usize = messages.timers.msg_window.release_memory;
+
+/// How long surfaces must stop closing before their memory is given back.
+const release_memory_delay_ms = 300;
 
 const msg_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyMessageWindow");
 
@@ -348,6 +352,21 @@ pub fn lastNormalWindow(self: *App) ?*Window {
     return null;
 }
 
+/// A surface went away: give the driver's and the heap's leftovers back once
+/// the closing settles (closing a tab of 16 panes ends 16 surfaces in a row,
+/// each call restarts the delay).
+pub fn scheduleMemoryRelease(self: *App) void {
+    _ = win32.user32.SetTimer(self.msg_hwnd, release_memory_timer_id, release_memory_delay_ms, null);
+}
+
+fn releaseMemory(self: *App) void {
+    _ = win32.user32.KillTimer(self.msg_hwnd, release_memory_timer_id);
+    const device = self.core_app.device orelse return;
+    device.lockContext();
+    defer device.unlockContext();
+    device.trim();
+}
+
 /// Drop a window from the app's list; false if it was not listed.
 pub fn unregisterWindow(self: *App, window: *Window) bool {
     if (self.last_active == window) self.last_active = null;
@@ -466,7 +485,10 @@ fn msgWndProc(
             return 0;
         },
 
-        win32.user32.WM_TIMER => if (wparam == quit_timer_id) {
+        win32.user32.WM_TIMER => if (wparam == release_memory_timer_id) {
+            self.releaseMemory();
+            return 0;
+        } else if (wparam == quit_timer_id) {
             self.stopQuitTimer();
             win32.user32.PostQuitMessage(0);
             return 0;

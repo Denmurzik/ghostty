@@ -407,16 +407,20 @@ const IDXGIDevice3 = extern struct {
 };
 
 /// Asks the driver to give back the memory it caches for released
-/// resources (swap chain buffers, targets) and compacts the process heap,
-/// which keeps the high-water mark of the closed surfaces' allocations.
-/// Call after surfaces went away, with the context lock held. Failures are
-/// not worth reporting.
-pub fn trim(self: *Device) void {
+/// resources (swap chain buffers, targets). Call with the context lock held
+/// after surfaces went away; the sooner the more it frees. Failures are not
+/// worth reporting.
+pub fn trimDriver(self: *Device) void {
     self.assertContextLocked();
-    if (com.queryInterface(self.device, IDXGIDevice3)) |dxgi_device| {
-        defer com.release(dxgi_device);
-        dxgi_device.vtable.Trim(dxgi_device);
-    } else |_| {}
+    const dxgi_device = com.queryInterface(self.device, IDXGIDevice3) catch return;
+    defer com.release(dxgi_device);
+    dxgi_device.vtable.Trim(dxgi_device);
+}
+
+/// `trimDriver` and a compaction of the process heap, which keeps the
+/// high-water mark of the closed surfaces' allocations.
+pub fn trim(self: *Device) void {
+    self.trimDriver();
     if (GetProcessHeap()) |h| _ = HeapCompact(h, 0);
 }
 

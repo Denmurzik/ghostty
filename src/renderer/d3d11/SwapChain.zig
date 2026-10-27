@@ -142,6 +142,9 @@ pub fn deinit(self: *Self) void {
     // The back buffers may still be queued on the context.
     self.device.context.flush();
     com.release(self.chain);
+    // The driver caches the released buffers; it gives them back the sooner
+    // the earlier it is asked (measured on closing tabs).
+    self.device.trimDriver();
     self.* = undefined;
 }
 

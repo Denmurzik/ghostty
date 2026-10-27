@@ -214,13 +214,6 @@ pub fn threadExit(self: *D3D11) void {
         self.dropSwapChain();
     }
 
-    if (self.present_target != null) {
-        self.device.lockContext();
-        defer self.device.unlockContext();
-        // A closed surface leaves memory behind in the driver and the heap.
-        self.device.trim();
-    }
-
     self.present_target = null;
 }
 

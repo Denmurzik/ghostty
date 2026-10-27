@@ -54,6 +54,8 @@ pub const timers = struct {
         pub const quit: usize = 1;
         /// Debounce of the renderer recovery (`recovery.zig`).
         pub const recovery: usize = 2;
+        /// Gives memory back once surfaces stopped closing (`App.scheduleMemoryRelease`).
+        pub const release_memory: usize = 3;
     };
     pub const tab = struct {
         /// Throttled relayout while a split divider is dragged.
@@ -133,7 +135,7 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
     // A timer id is only meaningful to the window that owns it, so ids
     // must differ within one class; the top-level window has several.
     const classes = .{
-        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery },
+        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory },
         [_]usize{ timers.surface.resize, timers.surface.decor },
         [_]usize{ timers.overlay.hide, timers.overlay.search_debounce },
         [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide },
