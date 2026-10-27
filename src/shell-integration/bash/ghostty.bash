@@ -86,6 +86,19 @@ if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* && -n "$GHOSTTY_BIN_DIR" ]]; then
   fi
 fi
 
+# Git for Windows ships `set bell-style visible` in /etc/inputrc, which
+# flashes the whole screen (DECSCNM) on every readline bell, such as a
+# backspace on an empty line. Ring the terminal bell instead, so that
+# Ghostty's `bell-features` apply, unless the user's own inputrc picks a
+# bell style. `$(<file)` reads without a fork.
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+  builtin declare __ghostty_inputrc="${INPUTRC:-$HOME/.inputrc}"
+  if [[ ! -r "$__ghostty_inputrc" || "$(<"$__ghostty_inputrc")" != *bell-style* ]]; then
+    builtin bind 'set bell-style audible' 2>/dev/null
+  fi
+  builtin unset __ghostty_inputrc
+fi
+
 # Sudo
 if [[ "$GHOSTTY_SHELL_FEATURES" == *"sudo"* && -n "$TERMINFO" ]]; then
   # Wrap `sudo` command to ensure Ghostty terminfo is preserved.
