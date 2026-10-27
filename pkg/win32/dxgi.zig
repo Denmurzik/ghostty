@@ -180,7 +180,7 @@ pub const IDXGIFactory2 = extern struct {
         RegisterOcclusionStatusWindow: *const anyopaque,
         RegisterOcclusionStatusEvent: *const anyopaque,
         UnregisterOcclusionStatus: *const anyopaque,
-        CreateSwapChainForComposition: *const anyopaque,
+        CreateSwapChainForComposition: *const fn (*IDXGIFactory2, *IUnknown, *const SWAP_CHAIN_DESC1, ?*anyopaque, *?*IDXGISwapChain1) callconv(.winapi) HRESULT,
     };
 
     pub inline fn asFactory(self: *IDXGIFactory2) *IDXGIFactory {
@@ -197,6 +197,20 @@ pub const IDXGIFactory2 = extern struct {
     ) Error!*IDXGISwapChain1 {
         var out: ?*IDXGISwapChain1 = null;
         try check(self.vtable.CreateSwapChainForHwnd(self, @ptrCast(device), hwnd, desc, null, null, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// A swap chain without a window, for `IDCompositionVisual::SetContent`.
+    /// Needs a flip swap effect, `Scaling.STRETCH` and a BGRA format; use
+    /// `AlphaMode.PREMULTIPLIED` for per-pixel transparency. `device` is the
+    /// D3D11 device as any COM interface pointer.
+    pub inline fn createSwapChainForComposition(
+        self: *IDXGIFactory2,
+        device: anytype,
+        desc: *const SWAP_CHAIN_DESC1,
+    ) Error!*IDXGISwapChain1 {
+        var out: ?*IDXGISwapChain1 = null;
+        try check(self.vtable.CreateSwapChainForComposition(self, @ptrCast(device), desc, null, &out));
         return out orelse error.ComFailure;
     }
 };
