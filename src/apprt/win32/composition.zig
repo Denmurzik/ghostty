@@ -303,14 +303,29 @@ fn leaveComposition(surface: *Surface) void {
     state.mode.store(0, .release);
 }
 
+const SyncAction = enum { none, enter, leave };
+
+/// What a surface in (or out of) composition mode does to reach `want`.
+fn syncAction(in_composition: bool, want: bool) SyncAction {
+    if (in_composition == want) return .none;
+    return if (want) .enter else .leave;
+}
+
+/// Whether the surfaces of a window should be in composition mode: always on
+/// a glass window, else when the config asks for it.
+fn wantFor(glass: bool, config_wants: bool) bool {
+    return glass or config_wants;
+}
+
 /// Puts a surface of a window that is not translucent-capable in the mode the
 /// config asks for, and asks the renderer to draw once so it takes the new
 /// mode (the renderer reads it only while drawing). hwnd -> composition
 /// creates the tree while the hwnd chain still exists, which works (measured).
 fn syncSurface(surface: *Surface, want: bool) void {
     const state = &surface.composition;
-    if ((state.mode.load(.acquire) == 1) == want) return;
-    if (want) {
+    const action = syncAction(state.mode.load(.acquire) == 1, want);
+    if (action == .none) return;
+    if (action == .enter) {
         enterComposition(surface) catch |err| {
             log.warn("surface {d}: unable to enter composition err={}", .{ surface.id, err });
             return;
@@ -326,7 +341,7 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     _ = from;
     // A surface from a window of the other kind follows the new window.
     decide(to);
-    const want = to.composition.glass or wantComposition(&to.app.config, theme.highContrast());
+    const want = wantFor(to.composition.glass, wantComposition(&to.app.config, theme.highContrast()));
     var it = tab.tree.iterator();
     while (it.next()) |entry| syncSurface(entry.view, want);
 }
@@ -907,4 +922,19 @@ test "win32 composition: chrome alpha byte" {
     try std.testing.expectEqual(@as(u8, 153), alphaToByte(0.6));
     try std.testing.expectEqual(@as(u8, 230), alphaToByte(0.9));
     try std.testing.expectEqual(@as(u8, 255), alphaToByte(7.0));
+}
+
+test "win32 composition: a tab moved between glass and opaque windows follows the new window" {
+    const t = std.testing;
+    // Opaque config (no translucency wanted): only a glass window composes.
+    // Glass -> opaque: the surfaces leave composition mode.
+    try t.expectEqual(SyncAction.leave, syncAction(true, wantFor(false, false)));
+    // Opaque -> glass: they enter it.
+    try t.expectEqual(SyncAction.enter, syncAction(false, wantFor(true, false)));
+    // Same kind of window: nothing changes.
+    try t.expectEqual(SyncAction.none, syncAction(true, wantFor(true, false)));
+    try t.expectEqual(SyncAction.none, syncAction(false, wantFor(false, false)));
+    // An opaque window under a translucent config keeps composing its surfaces.
+    try t.expectEqual(SyncAction.none, syncAction(true, wantFor(false, true)));
+    try t.expectEqual(SyncAction.enter, syncAction(false, wantFor(false, true)));
 }

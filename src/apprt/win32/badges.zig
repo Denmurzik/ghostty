@@ -234,16 +234,17 @@ pub fn surfaceDestroying(surface: *Surface) void {
     }
 }
 
-/// The text of the health bar for `health`; null hides it.
-pub fn healthText(health: renderer.Health) ?[]const u8 {
+/// The text of the health bar for `health`; null hides it. `reason` is what
+/// the recovery found out (shader or WARP), which beats the default.
+pub fn healthText(health: renderer.Health, reason: ?[]const u8) ?[]const u8 {
     return switch (health) {
         .healthy => null,
-        .unhealthy => health_text,
+        .unhealthy => reason orelse health_text,
     };
 }
 
-pub fn rendererHealth(surface: *Surface, health: renderer.Health) void {
-    const text = healthText(health) orelse {
+pub fn rendererHealth(surface: *Surface, health: renderer.Health, reason: ?[]const u8) void {
+    const text = healthText(health, reason) orelse {
         if (surface.badges.health) |label| label.popup.hide();
         return;
     };
@@ -289,8 +290,15 @@ pub fn readonly(app: *App, target: apprt.Target, value: apprt.Action.Value(.read
 }
 
 test "win32 badges: health text by state" {
-    try std.testing.expect(healthText(.healthy) == null);
-    const text = healthText(.unhealthy).?;
+    try std.testing.expect(healthText(.healthy, null) == null);
+    const text = healthText(.unhealthy, null).?;
     try std.testing.expect(std.mem.startsWith(u8, text, "Rendering paused: the GPU was reset."));
     try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+}
+
+test "win32 badges: the recovery reason beats the default health text" {
+    const reason = "Rendering paused: the GPU keeps resetting.";
+    try std.testing.expectEqualStrings(reason, healthText(.unhealthy, reason).?);
+    try std.testing.expectEqualStrings(health_text, healthText(.unhealthy, null).?);
+    try std.testing.expect(healthText(.healthy, reason) == null);
 }

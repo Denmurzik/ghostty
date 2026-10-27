@@ -62,6 +62,11 @@ pub const State = struct {
     /// Custom shaders were turned off after a loss.
     shaders_disabled: bool = false,
 
+    /// Why the surfaces are unhealthy (the text of the last sweep): the
+    /// renderers report `unhealthy` again once they are on the new device,
+    /// and that report must not replace it with the default text.
+    reason: ?[]const u8 = null,
+
     /// Delay of the next sweep while recoveries keep failing.
     backoff_ms: u32 = verify_ms,
 
@@ -148,7 +153,9 @@ pub fn timer(app: *App, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESU
 pub fn rendererHealth(surface: *Surface, health: apprt.Action.Value(.renderer_health)) void {
     if (health == .healthy) {
         // The bar of the switch to WARP is not cleared by a healthy frame.
-        if (surface.app.recovery.warp) badges.setHealthText(surface, warp_final_text);
+        const state = &surface.app.recovery;
+        state.reason = if (state.warp) warp_final_text else null;
+        if (state.warp) badges.setHealthText(surface, warp_final_text);
         return;
     }
     arm(surface.app, debounce_ms);
@@ -223,6 +230,8 @@ fn sweep(app: *App, now_ms: u64) void {
             }
         },
     }
+
+    if (text) |t| state.reason = t;
 
     for (app.windows.items) |window| {
         for (window.tabs.items) |tab| {

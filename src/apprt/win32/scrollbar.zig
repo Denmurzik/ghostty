@@ -25,6 +25,7 @@ const theme = @import("theme.zig");
 const renderer = @import("../../renderer.zig");
 const configpkg = @import("../../config.zig");
 const App = @import("App.zig");
+const Tab = @import("Tab.zig");
 
 const log = std.log.scoped(.win32_scrollbar);
 
@@ -264,6 +265,36 @@ pub fn flash(surface: *Surface) void {
         };
     }
     restartHold(state);
+}
+
+/// A tab left the screen: a hidden popup gets no WM_MOUSELEAVE, so its hover
+/// would stick and keep the scroller from fading.
+pub fn tabShown(tab: *Tab, shown: bool) void {
+    if (shown) return;
+    var it = tab.tree.iterator();
+    while (it.next()) |entry| {
+        const state = &entry.view.scrollbar;
+        if (!clearHover(state)) continue;
+        if (state.popup_made and state.popup.visible) {
+            state.drawn = null;
+            restartHold(state);
+        }
+    }
+}
+
+/// Drops the hover state; whether there was any to drop.
+fn clearHover(state: *State) bool {
+    const had = state.hover or state.tracking_leave;
+    state.hover = false;
+    state.tracking_leave = false;
+    return had;
+}
+
+test "win32 scrollbar: hiding the tab clears a stuck hover" {
+    var state: State = .{ .hover = true, .tracking_leave = true };
+    try std.testing.expect(clearHover(&state));
+    try std.testing.expect(!state.hover and !state.tracking_leave);
+    try std.testing.expect(!clearHover(&state));
 }
 
 fn restartHold(state: *State) void {

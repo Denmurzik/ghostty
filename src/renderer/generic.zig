@@ -58,6 +58,65 @@ test "renderer: redraw message forces one draw" {
     try std.testing.expect(frameNeeded(.{ .sync = true }));
 }
 
+/// The report of a bad renderer health that could not be queued yet.
+const HealthReport = struct {
+    pending: bool = false,
+
+    /// Tries to queue the report without waiting. A full mailbox leaves it
+    /// pending; a report that `current` health overtook is dropped.
+    fn flush(self: *HealthReport, current: Health, mailbox: anytype) void {
+        if (!self.pending) return;
+        if (current != .unhealthy) {
+            self.pending = false;
+            return;
+        }
+        if (mailbox.push(.{ .renderer_health = .unhealthy }, .instant) > 0) self.pending = false;
+    }
+};
+
+test "renderer: an unhealthy report never blocks and is retried" {
+    const Fake = struct {
+        room: bool = false,
+        pushed: usize = 0,
+        fn push(self: *@This(), msg: anytype, timeout: anytype) usize {
+            // Never `.forever`: the caller holds the draw mutex.
+            comptime std.debug.assert(@TypeOf(timeout) == @TypeOf(.instant));
+            _ = msg;
+            if (!self.room) return 0;
+            self.pushed += 1;
+            return 1;
+        }
+    };
+    const Mailbox = struct {
+        fake: *Fake,
+        fn push(self: @This(), msg: anytype, timeout: anytype) usize {
+            return self.fake.push(msg, timeout);
+        }
+    };
+
+    var fake: Fake = .{};
+    var report: HealthReport = .{ .pending = true };
+    const mb: Mailbox = .{ .fake = &fake };
+
+    // Full mailbox: stays pending.
+    report.flush(.unhealthy, mb);
+    try std.testing.expect(report.pending);
+    try std.testing.expectEqual(@as(usize, 0), fake.pushed);
+
+    // Room again: sent once.
+    fake.room = true;
+    report.flush(.unhealthy, mb);
+    try std.testing.expect(!report.pending);
+    report.flush(.unhealthy, mb);
+    try std.testing.expectEqual(@as(usize, 1), fake.pushed);
+
+    // A healthy frame overtook the report: dropped, not sent.
+    report.pending = true;
+    report.flush(.healthy, mb);
+    try std.testing.expect(!report.pending);
+    try std.testing.expectEqual(@as(usize, 1), fake.pushed);
+}
+
 const FileType = @import("../file_type.zig").FileType;
 
 const macos = switch (builtin.target.os.tag) {
@@ -272,6 +331,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
+
+        /// `markUnhealthy` could not queue its report (full mailbox); the
+        /// next draw retries. Guarded by `draw_mutex`.
+        health_report: HealthReport = .{},
 
         /// Health of how well the apprt can present our frames.
         ///
@@ -1057,11 +1120,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         fn markUnhealthy(self: *Self) void {
             if (self.health.load(.seq_cst) == .unhealthy) return;
             self.health.store(.unhealthy, .seq_cst);
-            _ = self.surface_mailbox.push(.{ .renderer_health = .unhealthy }, .{ .forever = {} });
+            self.health_report.pending = true;
+            self.flushHealthReport();
+        }
+
+        /// Queues the report of `markUnhealthy` without blocking: the UI
+        /// thread takes `draw_mutex` in its sweeps, so waiting for room in
+        /// the mailbox here could deadlock. A full mailbox leaves the report
+        /// pending for the next draw. A report that the frame health
+        /// overtook is dropped. Caller holds `draw_mutex`.
+        fn flushHealthReport(self: *Self) void {
+            self.health_report.flush(self.health.load(.seq_cst), self.surface_mailbox);
         }
 
         /// The body of `recoverDevice`. Caller holds `draw_mutex`.
         fn recoverDeviceLocked(self: *Self) void {
+            self.recoverDeviceState();
+
+            // The first good frame on the new device then reports `healthy`,
+            // which hides the health bar of surfaces that never drew unhealthy.
+            self.markUnhealthy();
+        }
+
+        /// Everything `recoverDeviceLocked` does except the report to the
+        /// apprt (the mailbox is not reachable from a unit test).
+        fn recoverDeviceState(self: *Self) void {
             // Everything created from the old device goes first: the swap
             // chain (frames, atlas copies, targets), the shaders and the
             // image textures. The background image is read from its file
@@ -1075,10 +1158,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             _ = self.api.recoverDevice();
-
-            // The first good frame on the new device then reports `healthy`,
-            // which hides the health bar of surfaces that never drew unhealthy.
-            self.markUnhealthy();
 
             self.reinitialize_shaders = true;
             self.target_config_modified +%= 1;
@@ -1854,7 +1933,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // waits before the mutex, so a sync draw (UI thread) is never
             // held up by that wait.
             if (comptime @hasDecl(GraphicsAPI, "isLost")) {
-                if (self.api.isLost()) return;
+                if (self.api.isLost()) {
+                    // Nothing is drawn until the recovery, but a report that
+                    // found the mailbox full must still get out.
+                    self.draw_mutex.lockUncancelable(global.io());
+                    defer self.draw_mutex.unlock(global.io());
+                    self.flushHealthReport();
+                    return;
+                }
             }
             if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) {
                 if (!sync) self.api.waitFrameSlot();
@@ -1896,6 +1982,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .scrollbar = self.scrollbar,
                 }, .instant) > 0) self.scrollbar_dirty = false;
             };
+
+            self.flushHealthReport();
 
             // A replaced device is picked up by the render thread, never by a
             // sync draw on the UI thread.
@@ -3898,4 +3986,62 @@ test "renderer: a single custom shader keeps a 1x1 front texture and never swaps
     // Back to one shader: the front texture shrinks again.
     try state.resize(api, 8, 6, false);
     try std.testing.expectEqual(@as(usize, 1), state.front_texture.width);
+}
+
+test "renderer: device recovery reads the background image from its file again" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const D3D11 = @import("D3D11.zig");
+    const R = Renderer(D3D11);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try std.Io.Dir.cwd().realPathFile(testing.io, "src/font/testdata/glyf_rasterize.png", &path_buf);
+    path_buf[path_len] = 0;
+    const path = path_buf[0..path_len :0];
+
+    D3D11.Device.preferWarp();
+    defer D3D11.Device.resetPreferWarp();
+    defer D3D11.Device.shutdown();
+
+    // Only what the recovery touches is set; the rest stays undefined.
+    var r: R = undefined;
+    r.alloc = testing.allocator;
+    r.config.bg_image = .{ .required = path };
+    r.api = .{
+        .alloc = testing.allocator,
+        .blending = .native,
+        .device = try D3D11.Device.acquire(testing.allocator),
+    };
+    defer D3D11.Device.release(r.api.device);
+    r.swap_chain = null;
+    r.display_realized = true;
+    r.shaders = .uninit;
+    r.images = .empty;
+    r.bg_image = null;
+    r.reinitialize_shaders = false;
+    r.target_config_modified = 0;
+    r.force_redraw = false;
+    defer if (r.bg_image) |img| img.deinit(testing.allocator);
+
+    // Decoded and uploaded to the first device.
+    try r.prepBackgroundImage();
+    try testing.expect(r.bg_image.?.isPending());
+    try r.uploadBackgroundImage();
+    try testing.expectEqual(r.api.device, r.bg_image.?.ready.device);
+    const first_generation = r.api.device.generation;
+
+    // The device is lost: the real recovery drops the texture, moves the
+    // renderer to a new device and decodes the file again.
+    D3D11.Device.markLost(r.api.device, @import("win32").foundation.DXGI_ERROR_DEVICE_REMOVED);
+    r.api.displayRealized();
+    r.recoverDeviceState();
+    try testing.expect(r.api.device.generation > first_generation);
+    try testing.expect(r.bg_image.?.isPending());
+    try testing.expect(r.reinitialize_shaders);
+    try testing.expect(r.force_redraw);
+    try testing.expectEqual(@as(usize, 1), r.target_config_modified);
+
+    // The next frame uploads it to the new device.
+    try r.uploadBackgroundImage();
+    try testing.expectEqual(r.api.device, r.bg_image.?.ready.device);
 }
