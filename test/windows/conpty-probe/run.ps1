@@ -21,6 +21,7 @@ of the shell:
              and the system cursor is IDC_HAND
   osc22      the pointer over the surface: the system cursor is IDC_CROSS
              (the sequence asks for `crosshair`)
+  dcs-tmux   `m3.notify.recorded` holds the wrapped OSC 9 / OSC 777 texts next to the plain control
   csi8       `CSI 8 ; 30 ; 100 t`: the termio log line `CSI 8 t resize request
              cols=100 rows=30` (conhost's own echoes show other sizes, or `echo ignored`)
 
@@ -41,7 +42,7 @@ the probe's own window for osc8/osc22.
 GHOSTTY_WIN32_CONPTY_FLAGS values to run (default 0 and 8).
 
 .PARAMETER Only
-Case names without the `probe-` prefix (osc9, osc777, osc133, osc8, osc22,
+Case names without the `probe-` prefix (osc9, osc777, osc133, osc8, osc22, dcs-tmux,
 kitty-apc, csi8). Default: all.
 
 .PARAMETER Repeat
@@ -317,6 +318,28 @@ function Invoke-ProbeRun([string]$Name, [string]$CasePath, [int]$ConptyFlags) {
             $log = Wait-Until -TimeoutSec 4 -PollMs 250 -Condition { $l = @(Get-LogLines $g 'CSI 8 t resize request cols=100 rows=30'); if ($l.Count) { $l } }
             if ($log) { $arrived = $true; foreach ($l in $log) { $evidence.Add($l) } }
             foreach ($l in @(Get-LogLines $g 'CSI 8 t')) { $evidence.Add($l) }
+        }
+        'dcs-tmux' {
+            # Three notices are expected when the wrapped sequences survive: the text of each
+            # reaches core as a desktop notification (recorded by the test-mode notifier).
+            $recs = @()
+            $null = Wait-Until -TimeoutSec 8 -PollMs 250 -Condition {
+                $recs = @((Get-GhosttyState -Class $g.Class).m3.notify.recorded)
+                $recs | Where-Object { $_.body -eq 'm4-plain' } | Select-Object -First 1
+            }
+            $recs = @((Get-GhosttyState -Class $g.Class).m3.notify.recorded)
+            foreach ($r in $recs) { $evidence.Add(('notice title=[{0}] body=[{1}]' -f $r.title, $r.body)) }
+            $bel = [bool]($recs | Where-Object { $_.body -eq 'm4-dcs-bel' })
+            $st = [bool]($recs | Where-Object { $_.title -eq 'm4' -and $_.body -eq 'dcs-st' })
+            $st2 = [bool]($recs | Where-Object { $_.title -eq 'm4' -and $_.body -eq 'dcs-st2' })
+            $plain = [bool]($recs | Where-Object { $_.body -eq 'm4-plain' })
+            $junk = [bool]($recs | Where-Object { $_.body -match 'dcs|tmux|\x1b' -and $_.body -notin 'm4-dcs-bel', 'dcs-st', 'dcs-st2' })
+            $hook = @(Get-LogLines $g 'unknown DCS hook')
+            foreach ($l in $hook) { $evidence.Add($l) }
+            $evidence.Add(('bel-wrapped={0} st-wrapped={1} st2-doubled-inner-ESC={4} plain-control={2} unknown-DCS-hook-line={3}' -f $bel, $st, $plain, ($hook.Count -gt 0), $st2))
+            if (-not $plain) { throw ('control (plain OSC 9) did not arrive: the run proves nothing; notify state: ' + ((Get-GhosttyState -Class $g.Class).m3.notify | ConvertTo-Json -Compress -Depth 6) + ' ; log: ' + ((Get-LogLines $g 'notif|DCS|OSC') -join ' / ')) }
+            if ($bel -and $st) { $arrived = $true }
+            elseif ($bel -or $st -or $st2 -or $junk) { $trace = $true }
         }
         'osc22' {
             $cross = [GhosttyProbe.Native]::SystemCursor($IDC_CROSS)

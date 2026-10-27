@@ -82,3 +82,31 @@ with 8 in this run, which the G1 re-measure must confirm.
 - Two harness facts the oracles rely on, useful for other scenarios: OSC 8 hover
   is only recognised with Ctrl held, and a DPI-unaware PowerShell sees scaled
   pointer coordinates (the probe calls `SetProcessDpiAwarenessContext(-4)`).
+
+## DCS `tmux;` passthrough (M4 Task 2, input to C2)
+
+Method: `run.ps1 -Flags 0,8 -Repeat 2 -Only dcs-tmux` (Debug `ghostty.exe`,
+Windows 11 10.0.26300, same harness as above). `cases/probe-dcs-tmux.sh` prints
+three sequences, 1.3 s apart because core rate-limits desktop notifications
+to one per second (`rate limiting desktop notifications`), then a plain OSC 9
+as the control. Oracle: the test-mode notifier records every notice that
+reached core (`state.m3.notify.recorded`, title/body); the log line
+`unknown DCS hook:` is recorded separately.
+
+| Sequence | flags 0 | flags 8 | Oracle |
+|---|---|---|---|
+| `ESC P tmux; ESC ESC ] 9 ; m4-dcs-bel BEL ESC \` | arrived x2 | arrived x2 | notice body `m4-dcs-bel` (title `Ghostty`) |
+| `ESC P tmux; ESC ESC ] 777;notify;m4;dcs-st ESC ESC \ ESC \` (brief's spelling) | dropped x2 | dropped x2 | no notice with body `dcs-st` |
+| same, inner ST doubled as tmux requires (`ESC ESC ESC \ ESC \`) | dropped x2 | dropped x2 | no notice with body `dcs-st2` |
+| plain `ESC ] 9 ; m4-plain BEL` (control) | arrived x2 | arrived x2 | notice body `m4-plain` |
+
+`unknown DCS hook:` never appears in any of the 4 logs: Ghostty's parser never
+saw a DCS with final byte `t`. Both runs agree in every row; flags 0 and 8
+behave the same.
+
+Reading: conhost does not forward the DCS as such. The BEL-terminated wrapper
+arrives as the bare inner OSC 9 (conhost unwraps/re-emits the OSC), the
+ST-terminated OSC 777 wrapper is lost entirely (not mangled into anything
+Ghostty logs). So ConPTY gives no usable `ESC P tmux;` passthrough channel in
+either mode; tmux-style DCS-wrapped payloads cannot be relied on to reach
+the terminal.
