@@ -1042,6 +1042,10 @@ palette: Palette = .{},
 ///     reasonable for a good looking blur. Higher blur intensities may
 ///     cause strange rendering and performance issues.
 ///
+/// On Windows the default is `true`: a window with `background-opacity`
+/// below 1 is frosted (system Acrylic, fixed radius). Blur needs a
+/// translucent window; with `background-opacity = 1` it does nothing.
+///
 /// On macOS 26.0 and later, there are additional special values that
 /// can be set to use the native macOS glass effects:
 ///
@@ -1060,7 +1064,7 @@ palette: Palette = .{},
 ///
 /// On X11, blur can only be enabled when using the KWin compositor
 /// as a part of KDE Plasma.
-@"background-blur": BackgroundBlur = .false,
+@"background-blur": BackgroundBlur = if (builtin.os.tag == .windows) .true else .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
 /// Unfocused splits by default are slightly faded out to make it easier to see

@@ -36,7 +36,7 @@ Invoke-E2eScenario 'transparency' {
     }
     $translucent = 135, 16, 151
     $solid = 16, 32, 48
-    $cfg = "background = #102030`nforeground = #e0e0e0`nconfirm-close-surface = false`nwindow-decoration = client`n"
+    $cfg = "background = #102030`nforeground = #e0e0e0`nconfirm-close-surface = false`nwindow-decoration = client`nbackground-blur = false`n"
 
     $back = New-BackdropForm 60 60 1500 1000
     try {

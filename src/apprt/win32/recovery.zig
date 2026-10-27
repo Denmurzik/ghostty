@@ -167,7 +167,7 @@ fn arm(app: *App, ms: u32) void {
 /// renderer is moved to a new device, after the swap chain was dropped, so
 /// the compositor can forget the old chain. The renderer hands the new
 /// chain off again by itself (`PresentTarget.hand_off`).
-/// TODO(task-15a): composition.zig installs its hook here.
+/// `composition.appStarted` installs it.
 pub var composition_hook: ?*const fn (surface: *Surface) void = null;
 
 /// One pass over all surfaces: those whose device was lost are moved to a

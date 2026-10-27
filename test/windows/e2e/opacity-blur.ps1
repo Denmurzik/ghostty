@@ -1,12 +1,12 @@
 # e2e: milestone=M3 timeout=240 order=635
-# opacity-blur: background-blur = true with background-opacity = 0.5 over a
+# opacity-blur: the default background-blur (true on Windows) with background-opacity = 0.5 over a
 # red/green striped backdrop window of our own. The stripes are blurred
 # (luminance spread near 0, mean olive) while Ghostty is active AND while it
 # is inactive (another window of ours has the foreground): the owner wants
 # the blur to persist, which the system Acrylic alone does not (it goes solid
 # on deactivation; composition.windowMessage swallows that). The backdrop
 # type is DWMSBT_TRANSIENTWINDOW (3). Without background-blur the stripes stay
-# sharp.
+# sharp once background-blur = false.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_backdrop.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
@@ -23,7 +23,7 @@ Invoke-E2eScenario 'opacity-blur' {
     $back = New-BackdropForm 60 60 1500 1000 -Stripes
     try {
         Show-BackdropForm $back
-        $g = Start-E2eGhostty -ConfigText "background = #000000`nforeground = #e0e0e0`nconfirm-close-surface = false`nbackground-opacity = 0.5`nbackground-blur = true`nwindow-decoration = client`n"
+        $g = Start-E2eGhostty -ConfigText "background = #000000`nforeground = #e0e0e0`nconfirm-close-surface = false`nbackground-opacity = 0.5`nwindow-decoration = client`n"
         if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
         Move-Window $g.Hwnd 160 160 1000 700
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
@@ -69,7 +69,7 @@ Invoke-E2eScenario 'opacity-blur' {
         # Without background-blur the stripes are sharp (translucent only).
         $path = Join-Path $script:Sbx.Home '.config\ghostty\config.ghostty'
         $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-        $text = $text -replace '(?m)^background-blur = true', 'background-blur = false'
+        $text = $text + "background-blur = false`n"
         [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'reload_config')

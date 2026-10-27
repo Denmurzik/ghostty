@@ -49,6 +49,7 @@ const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
 const messages = @import("messages.zig");
 const theme = @import("theme.zig");
+const recovery = @import("recovery.zig");
 
 const dcomp = win32.dcomp;
 const dxgi = win32.dxgi;
@@ -85,7 +86,7 @@ pub const Look = struct {
     }
 
     fn translucent(self: Look) bool {
-        return self.opacity < 1.0 or self.blur;
+        return self.opacity < 1.0;
     }
 };
 
@@ -466,7 +467,24 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: win32.foundation.WPARAM)
     }
 }
 
+/// `recovery.composition_hook`: the renderer of a surface moved to a new
+/// device and dropped its swap chain. The old chain must leave the visual and
+/// any chain still waiting is stale; the renderer hands the new one over.
+pub fn recoveryHook(surface: *Surface) void {
+    const state = &surface.composition;
+    com.release(state.pending.swap(null, .acq_rel));
+    if (state.visual) |v| {
+        v.setContent(null) catch {};
+        if (surface.app.composition.device) |d| d.commit() catch {};
+    }
+}
+
+pub fn appStarted() void {
+    recovery.composition_hook = recoveryHook;
+}
+
 pub fn appStopping(app: *App) void {
+    recovery.composition_hook = null;
     com.release(app.composition.device);
     app.composition.device = null;
 }
@@ -540,9 +558,9 @@ test "win32 composition: wantComposition" {
     try std.testing.expect(wantComposition(&translucent, false));
     try std.testing.expect(!wantComposition(&translucent, true));
     const blurred = testConfig(1.0, .true);
-    try std.testing.expect(wantComposition(&blurred, false));
+    try std.testing.expect(!wantComposition(&blurred, false));
     const radius = testConfig(1.0, .{ .radius = 20 });
-    try std.testing.expect(wantComposition(&radius, false));
+    try std.testing.expect(!wantComposition(&radius, false));
     // Out-of-range values clamp like the renderer's.
     try std.testing.expect(!wantComposition(&testConfig(2.5, .false), false));
     try std.testing.expect(wantComposition(&testConfig(-1, .false), false));
@@ -765,9 +783,9 @@ test "win32 composition: mode switch creates and destroys targets" {
 
 test "win32 composition: a translucent-capable window goes solid, not hwnd" {
     // The look of a window born translucent whose config became opaque.
-    try std.testing.expectEqual(Backdrop.@"opaque", backdropOf(.{ .opacity = 1.0, .blur = false }, false));
+    try std.testing.expectEqual(Backdrop.@"opaque", backdropOf(.{ .opacity = 1.0, .blur = true }, false));
     try std.testing.expectEqual(Backdrop.transparent, backdropOf(.{ .opacity = 0.5, .blur = false }, false));
-    try std.testing.expectEqual(Backdrop.acrylic, backdropOf(.{ .opacity = 1.0, .blur = true }, false));
+    try std.testing.expectEqual(Backdrop.acrylic, backdropOf(.{ .opacity = 0.9, .blur = true }, false));
     try std.testing.expectEqual(Backdrop.@"opaque", backdropOf(.{ .opacity = 0.5, .blur = true }, true));
 
     const cfg = testConfig(2.5, .{ .radius = 12 });

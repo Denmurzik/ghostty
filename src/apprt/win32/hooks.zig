@@ -43,6 +43,7 @@ pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm };
 /// The end of `App.init`.
 pub fn appStarted(app: *App) void {
     hotkeys.appStarted(app);
+    composition.appStarted();
     notify.appStarted(app);
     config_errors.appStarted(app);
 }
