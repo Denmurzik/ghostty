@@ -63,6 +63,7 @@ test {
     _ = Renderer;
 
     _ = cursor;
+    _ = @import("renderer/health_report.zig");
     _ = message;
     _ = shadertoy;
     _ = size;

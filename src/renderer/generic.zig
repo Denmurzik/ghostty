@@ -58,65 +58,7 @@ test "renderer: redraw message forces one draw" {
     try std.testing.expect(frameNeeded(.{ .sync = true }));
 }
 
-/// The report of a bad renderer health that could not be queued yet.
-const HealthReport = struct {
-    pending: bool = false,
-
-    /// Tries to queue the report without waiting. A full mailbox leaves it
-    /// pending; a report that `current` health overtook is dropped.
-    fn flush(self: *HealthReport, current: Health, mailbox: anytype) void {
-        if (!self.pending) return;
-        if (current != .unhealthy) {
-            self.pending = false;
-            return;
-        }
-        if (mailbox.push(.{ .renderer_health = .unhealthy }, .instant) > 0) self.pending = false;
-    }
-};
-
-test "renderer: an unhealthy report never blocks and is retried" {
-    const Fake = struct {
-        room: bool = false,
-        pushed: usize = 0,
-        fn push(self: *@This(), msg: anytype, timeout: anytype) usize {
-            // Never `.forever`: the caller holds the draw mutex.
-            comptime std.debug.assert(@TypeOf(timeout) == @TypeOf(.instant));
-            _ = msg;
-            if (!self.room) return 0;
-            self.pushed += 1;
-            return 1;
-        }
-    };
-    const Mailbox = struct {
-        fake: *Fake,
-        fn push(self: @This(), msg: anytype, timeout: anytype) usize {
-            return self.fake.push(msg, timeout);
-        }
-    };
-
-    var fake: Fake = .{};
-    var report: HealthReport = .{ .pending = true };
-    const mb: Mailbox = .{ .fake = &fake };
-
-    // Full mailbox: stays pending.
-    report.flush(.unhealthy, mb);
-    try std.testing.expect(report.pending);
-    try std.testing.expectEqual(@as(usize, 0), fake.pushed);
-
-    // Room again: sent once.
-    fake.room = true;
-    report.flush(.unhealthy, mb);
-    try std.testing.expect(!report.pending);
-    report.flush(.unhealthy, mb);
-    try std.testing.expectEqual(@as(usize, 1), fake.pushed);
-
-    // A healthy frame overtook the report: dropped, not sent.
-    report.pending = true;
-    report.flush(.healthy, mb);
-    try std.testing.expect(!report.pending);
-    try std.testing.expectEqual(@as(usize, 1), fake.pushed);
-}
-
+const HealthReport = @import("health_report.zig").HealthReport;
 const FileType = @import("../file_type.zig").FileType;
 
 const macos = switch (builtin.target.os.tag) {
@@ -332,8 +274,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
-        /// `markUnhealthy` could not queue its report (full mailbox); the
-        /// next draw retries. Guarded by `draw_mutex`.
+        /// A health the apprt was not told about yet (full mailbox); the next
+        /// draw retries. Only used by APIs that can lose their device; guarded
+        /// by `draw_mutex`.
         health_report: HealthReport = .{},
 
         /// Health of how well the apprt can present our frames.
@@ -1120,17 +1063,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         fn markUnhealthy(self: *Self) void {
             if (self.health.load(.seq_cst) == .unhealthy) return;
             self.health.store(.unhealthy, .seq_cst);
-            self.health_report.pending = true;
+            self.health_report.set(.unhealthy);
             self.flushHealthReport();
         }
 
-        /// Queues the report of `markUnhealthy` without blocking: the UI
-        /// thread takes `draw_mutex` in its sweeps, so waiting for room in
-        /// the mailbox here could deadlock. A full mailbox leaves the report
-        /// pending for the next draw. A report that the frame health
-        /// overtook is dropped. Caller holds `draw_mutex`.
+        /// Queues the pending health report without blocking (`HealthReport`).
+        /// Caller holds `draw_mutex`.
         fn flushHealthReport(self: *Self) void {
-            self.health_report.flush(self.health.load(.seq_cst), self.surface_mailbox);
+            self.health_report.flush(self.surface_mailbox);
         }
 
         /// The body of `recoverDevice`. Caller holds `draw_mutex`.
@@ -1935,10 +1875,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (comptime @hasDecl(GraphicsAPI, "isLost")) {
                 if (self.api.isLost()) {
                     // Nothing is drawn until the recovery, but a report that
-                    // found the mailbox full must still get out.
-                    self.draw_mutex.lockUncancelable(global.io());
-                    defer self.draw_mutex.unlock(global.io());
-                    self.flushHealthReport();
+                    // found the mailbox full must still get out. Not on a sync
+                    // draw (UI thread): that one must not wait for the mutex,
+                    // and the render thread retries anyway.
+                    if (!sync) {
+                        self.draw_mutex.lockUncancelable(global.io());
+                        defer self.draw_mutex.unlock(global.io());
+                        self.flushHealthReport();
+                    }
                     return;
                 }
             }
@@ -2311,10 +2255,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.health.store(health, .seq_cst);
 
                 // Our health value changed, so we notify the surface so that it
-                // can do something about it.
-                _ = self.surface_mailbox.push(.{
-                    .renderer_health = health,
-                }, .{ .forever = {} });
+                // can do something about it. A device that can be lost never
+                // waits here: this runs under `draw_mutex`.
+                if (comptime @hasDecl(GraphicsAPI, "isLost")) {
+                    self.health_report.set(health);
+                    self.flushHealthReport();
+                } else {
+                    _ = self.surface_mailbox.push(.{
+                        .renderer_health = health,
+                    }, .{ .forever = {} });
+                }
             }
 
             // Always release our semaphore. The swap chain is
