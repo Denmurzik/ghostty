@@ -84,7 +84,7 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     $c = $g.Class
 
     # resize_window first: later in the run conhost was seen to drop an application's CSI 8 t
-    # (the repeat below covers a miss). CSI 8 ; rows ; cols t, which core turns into pixels:
+    # (the pty's own resize history decides). CSI 8 ; rows ; cols t, which core turns into pixels:
     # the content rect below the strip is exactly cols x rows cells.
     $s0 = Get-WinState -Class $c
     $cell = $s0.cell
@@ -93,16 +93,11 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     # Core sizes in points (pixels / scale, rounded up), so the window lands up to a
     # scale's worth of pixels over the exact grid.
     $slack = [int][Math]::Ceiling($s0.dpi / 96.0) + 1
-    $s = $null
-    foreach ($attempt in 1..4) {
-        Send-Line $h "printf '\033[8;30;100t'"
-        try { $s = Wait-WinState -Class $c -Predicate { [Math]::Abs($_.client[2] - $_.client[0] - $ew) -le $slack } -TimeoutSec 2.5; break } catch { if ($attempt -eq 4) { throw } }
-    }
+    Send-Line $h "printf '\033[8;30;100t'"
+    $s = Wait-WinState -Class $c -Predicate { [Math]::Abs($_.client[2] - $_.client[0] - $ew) -le $slack } -TimeoutSec 5
     $content = $s.client[3] - $s.client[1] - $s.strip.bounds[3]
     if ([Math]::Abs($content - $eh) -gt $slack) { throw "content height below the strip is $content, expected $eh" }
 
-    $h = $g.Hwnd
-    $c = $g.Class
     $st = Get-WinState -Class $c
     $orig = Get-WinRect $st
     $monRect = [GhosttyE2e.Place]::MonitorRect($h)

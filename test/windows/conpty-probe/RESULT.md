@@ -21,7 +21,7 @@ both runs agree in every row.
 | OSC 133 A/B/C/D (`osc133`) | arrived x2 | arrived x2 | logs `deferred action=.command_finished` and `command took` (C then D reached the surface) |
 | OSC 8 hyperlink (`osc8`) | arrived x2 | arrived x2 | Ctrl held, pointer on the link: system cursor is `IDC_HAND` and the log has `deferred action=.mouse_over_link` |
 | OSC 22 pointer shape (`osc22`, `crosshair`) | arrived x2 | arrived x2 | pointer over the surface: system cursor is `IDC_CROSS` |
-| `CSI 8 ; 30 ; 100 t` (`csi8`, printed at start-up) | arrived x1 | arrived x1 | termio log `CSI 8 t resize request cols=100 rows=30`. Not reliable later in a session: after fullscreen/maximize round trips conhost dropped it in most runs; conhost also sends its own `CSI 8 t` after every pty resize (log `CSI 8 t echo of a pty resize ignored cols=167 rows=51` 40 ms after the fullscreen resize) |
+| `CSI 8 ; 30 ; 100 t` (`csi8`, printed at start-up) | arrived x2 | arrived x1, dropped x1 | termio log `CSI 8 t resize request cols=100 rows=30` (the dropped run has no trace of it). conhost drops it now and then, and did in most scenario runs late in a session, after fullscreen/maximize round trips; conhost also sends its own `CSI 8 t` after every pty resize (log `CSI 8 t echo of a pty resize ignored cols=167 rows=51` 40 ms after the fullscreen resize) |
 
 No row is `mangled`. Raw rows with evidence: `%TEMP%\conpty-probe\results.csv`
 of the run (rows are `case,flags,run,verdict,evidence`).
