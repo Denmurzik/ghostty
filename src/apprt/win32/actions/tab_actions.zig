@@ -127,6 +127,8 @@ pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bo
     };
     const surface = app.surfaceFor(core) orelse return false;
     try surface.setPwd(value.pwd);
+    // The proxy icon of the title row follows the directory.
+    surface.window.surfaceTitleChanged(surface);
     return true;
 }
 

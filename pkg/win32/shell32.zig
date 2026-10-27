@@ -204,3 +204,61 @@ pub extern "shell32" fn SHOpenFolderAndSelectItems(
     apidl: ?[*]const *anyopaque,
     flags: u32,
 ) callconv(.winapi) foundation.HRESULT;
+
+// Folder icon and drag data of a path (shobjidl_core.h, shlobj_core.h)
+
+pub const IID_IShellItemImageFactory = foundation.GUID.parse("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+
+/// `SIIGBF`.
+pub const SIIGBF_RESIZETOFIT = 0x0;
+pub const SIIGBF_BIGGERSIZEOK = 0x1;
+pub const SIIGBF_ICONONLY = 0x4;
+
+/// 3 IUnknown slots + GetImage = 4 slots.
+pub const IShellItemImageFactory = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = IID_IShellItemImageFactory;
+
+    pub const VTable = extern struct {
+        base: com.IUnknown.VTable,
+        /// The bitmap is a 32 bit DIB with premultiplied alpha; the caller deletes it.
+        GetImage: *const fn (*IShellItemImageFactory, size: user32.SIZE, flags: u32, out: *?*anyopaque) callconv(.winapi) foundation.HRESULT,
+    };
+
+    pub inline fn getImage(self: *IShellItemImageFactory, size: user32.SIZE, flags: u32) !*anyopaque {
+        var bitmap: ?*anyopaque = null;
+        try foundation.check(self.vtable.GetImage(self, size, flags, &bitmap));
+        return bitmap orelse error.Unexpected;
+    }
+};
+
+/// `out` receives a new reference to the interface `riid` of the item at `path`.
+pub extern "shell32" fn SHCreateItemFromParsingName(
+    path: [*:0]const u16,
+    bind_context: ?*anyopaque,
+    riid: *const foundation.GUID,
+    out: *?*anyopaque,
+) callconv(.winapi) foundation.HRESULT;
+
+/// A data object (`CF_HDROP`, `CFSTR_SHELLIDLIST`, ...) for the `cidl` items
+/// `apidl` (child ids relative to `parent`). `out` receives `riid`.
+pub extern "shell32" fn SHCreateDataObject(
+    parent: ?*anyopaque,
+    cidl: u32,
+    apidl: ?[*]const *anyopaque,
+    inner: ?*anyopaque,
+    riid: *const foundation.GUID,
+    out: *?*anyopaque,
+) callconv(.winapi) foundation.HRESULT;
+
+/// The returned `ITEMIDLIST` is released with `ILFree`.
+pub extern "shell32" fn ILClone(pidl: *anyopaque) callconv(.winapi) ?*anyopaque;
+/// The last id of `pidl`, which stays owned by it.
+pub extern "shell32" fn ILFindLastID(pidl: *anyopaque) callconv(.winapi) *anyopaque;
+/// Cuts the last id off `pidl` in place.
+pub extern "shell32" fn ILRemoveLastID(pidl: *anyopaque) callconv(.winapi) foundation.BOOL;
+
+test "win32 shell32: IShellItemImageFactory slot count" {
+    try std.testing.expectEqual(4 * @sizeOf(usize), @sizeOf(IShellItemImageFactory.VTable));
+}

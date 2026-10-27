@@ -16,6 +16,7 @@ const geom = @import("geom.zig");
 const theme = @import("theme.zig");
 const input = @import("../../input.zig");
 const CommandPalette = @import("CommandPalette.zig");
+const proxy_icon = @import("proxy_icon.zig");
 
 const com = win32.com;
 const d2d1 = win32.d2d1;
@@ -861,6 +862,7 @@ pub fn paint(window: *Window, hdc: HDC, dirty: geom.Rect) void {
     const target_dc = mem orelse hdc;
     if (paintInto(target_dc, bounds, in)) {
         lost_retried = false;
+        proxy_icon.draw(window, target_dc, in.window_active);
     } else |err| {
         logOnce(err);
         fillFallback(target_dc, bounds, pal.strip_bg, hbp);

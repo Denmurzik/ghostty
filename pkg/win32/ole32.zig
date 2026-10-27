@@ -115,3 +115,43 @@ pub extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, coinit: u32) callcon
 pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 /// Releases memory allocated by the shell or COM.
 pub extern "ole32" fn CoTaskMemFree(?*anyopaque) callconv(.winapi) void;
+
+// Drag source (oleidl.h)
+
+pub const DROPEFFECT_MOVE = 2;
+pub const DROPEFFECT_LINK = 4;
+
+pub const DRAGDROP_S_DROP: HRESULT = 0x00040100;
+pub const DRAGDROP_S_CANCEL: HRESULT = 0x00040101;
+pub const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = 0x00040102;
+
+pub const IID_IDropSource = foundation.GUID.parse("00000121-0000-0000-c000-000000000046");
+
+/// Runs the modal drag loop of `data` until it is dropped or cancelled; the
+/// result is `DRAGDROP_S_DROP` or `DRAGDROP_S_CANCEL`. `effect` receives
+/// what the target did.
+pub extern "ole32" fn DoDragDrop(
+    data: *IDataObject,
+    source: *IDropSource,
+    ok_effects: u32,
+    effect: *u32,
+) callconv(.winapi) HRESULT;
+
+/// 3 IUnknown slots + QueryContinueDrag and GiveFeedback = 5 slots.
+/// Implemented by the application (`apprt/win32/proxy_icon.zig`).
+pub const IDropSource = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = IID_IDropSource;
+
+    pub const VTable = extern struct {
+        base: com.IUnknown.VTable,
+        QueryContinueDrag: *const fn (*IDropSource, escape_pressed: foundation.BOOL, key_state: u32) callconv(.winapi) HRESULT,
+        GiveFeedback: *const fn (*IDropSource, effect: u32) callconv(.winapi) HRESULT,
+    };
+};
+
+test "win32 ole32: IDropSource slot count" {
+    const std = @import("std");
+    try std.testing.expectEqual(5 * @sizeOf(usize), @sizeOf(IDropSource.VTable));
+}

@@ -97,6 +97,7 @@ pub fn handleEarly(app: *App, alloc: Allocator, request: []const u8, early: ?*Se
         .@"toggle-quick-terminal" => toggleQuickTerminal(app, alloc),
         .action => action(app, alloc, req),
         .dpi => setDpi(app, alloc, req),
+        .pwd => setPwd(app, alloc, req),
         .@"color-scheme" => colorScheme(app, alloc, req),
         .state => state(app, alloc),
         .@"export-io" => exportIo(app, alloc, req),
@@ -109,6 +110,7 @@ const Op = enum {
     @"toggle-quick-terminal",
     action,
     dpi,
+    pwd,
     @"color-scheme",
     state,
     @"export-io",
@@ -116,7 +118,7 @@ const Op = enum {
     fn isTest(self: Op) bool {
         return switch (self) {
             .@"new-window", .@"new-tab", .@"toggle-quick-terminal" => false,
-            .action, .dpi, .@"color-scheme", .state, .@"export-io" => true,
+            .action, .dpi, .pwd, .@"color-scheme", .state, .@"export-io" => true,
         };
     }
 };
@@ -249,6 +251,18 @@ fn setDpi(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
     const window = targetWindow(app, req.window) orelse
         return reply(alloc, .failed, "", "no such window", null);
     window.applyDpi(req.dpi, null);
+    return reply(alloc, .ok, "", "", null);
+}
+
+/// Test op: the focused surface of the window reports `path` as its working
+/// directory (as OSC 7 will, once it is translated for Windows).
+fn setPwd(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
+    const window = targetWindow(app, req.window) orelse
+        return reply(alloc, .failed, "", "no such window", null);
+    const tab = window.activeTab() orelse return reply(alloc, .failed, "", "no tab", null);
+    const surface = tab.focusedSurface() orelse return reply(alloc, .failed, "", "no surface", null);
+    surface.setPwd(req.path) catch return reply(alloc, .failed, "", "out of memory", null);
+    window.surfaceTitleChanged(surface);
     return reply(alloc, .ok, "", "", null);
 }
 

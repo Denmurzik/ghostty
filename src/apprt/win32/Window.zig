@@ -26,6 +26,7 @@ const geom = @import("geom.zig");
 const hooks_mod = @import("hooks.zig");
 const overlay_mod = @import("overlay.zig");
 const placement_mod = @import("placement.zig");
+const proxy_icon = @import("proxy_icon.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const strip_input_mod = @import("strip_input.zig");
 const tab_anim_mod = @import("tab_anim.zig");
@@ -107,6 +108,8 @@ tab_anim: tab_anim_mod.State = .{},
 tab_anim_dpi: u32 = 0,
 /// The text of the title row: what the caption shows.
 chrome_title: ?[:0]u8 = null,
+/// The folder icon of the title row (`proxy_icon.zig`).
+proxy: proxy_icon.State = .{},
 frame: frame_mod.State = .{},
 placement: placement_mod.State = .{},
 taskbar: taskbar_mod.State = .{},
@@ -320,6 +323,7 @@ pub fn destroy(self: *Window) void {
 
     self.strip.deinit(alloc);
     self.tab_anim.deinit(alloc);
+    self.proxy.deinit(alloc);
     self.tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
     if (self.chrome_title) |t| alloc.free(t);
@@ -354,7 +358,7 @@ pub fn showPlain(self: *Window) void {
     _ = win32.user32.UpdateWindow(self.hwnd);
 }
 
-pub fn activeTab(self: *Window) ?*Tab {
+pub fn activeTab(self: *const Window) ?*Tab {
     if (self.active_tab >= self.tabs.items.len) return null;
     return self.tabs.items[self.active_tab];
 }
@@ -759,7 +763,7 @@ pub fn placeTitle(self: *Window) void {
     var buf: [256]u16 = undefined;
     const wide = Chrome.toWide(&buf, text);
     const width = if (wide.len == 0) 0 else Chrome.measureText(wide, Chrome.title_font, self.dpi) catch 0;
-    self.strip.placeTitle(TabStrip.Metrics.forDpi(self.dpi), width, false);
+    self.strip.placeTitle(TabStrip.Metrics.forDpi(self.dpi), width, proxy_icon.refresh(self));
 }
 
 /// The client area below the tab strip, where the active tab goes.

@@ -10,6 +10,7 @@ const QuickTerminal = @import("QuickTerminal.zig");
 const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
+const proxy_icon = @import("proxy_icon.zig");
 const title_edit = @import("title_edit.zig");
 const App = @import("App.zig");
 const Tab = @import("Tab.zig");
@@ -58,6 +59,9 @@ pub const State = struct {
     pointer_x: i32 = 0,
     /// The inline title editor, while there is one.
     edit: ?title_edit.Session = null,
+    /// Where the proxy icon was pressed: a click when the button goes up
+    /// over it, a drag of the folder once the pointer moved off.
+    proxy_press: ?geom.Point = null,
     /// The tooltip window, created with the first tooltip.
     tooltip: ?win32.foundation.HWND = null,
     tooltip_visible: bool = false,
@@ -79,7 +83,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
                     return 0;
                 },
                 // The second press of a double click is not another click.
-                .tab_close, .new_tab => return 0,
+                .tab_close, .new_tab, .proxy_icon => return 0,
                 else => {},
             };
             switch (part) {
@@ -95,6 +99,10 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
                     addTab(window);
                     focusActive(window);
                 },
+                .proxy_icon => {
+                    window.strip_input.proxy_press = .{ .x = x, .y = y };
+                    _ = user32.SetCapture(window.hwnd);
+                },
                 else => return null,
             }
             return 0;
@@ -104,6 +112,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             trackLeave(window);
             const x = user32.getXLparam(lparam);
             setHover(window, hoverOf(hitTest(window, x, user32.getYLparam(lparam))));
+            if (window.strip_input.proxy_press) |press| proxyMove(window, press, x, user32.getYLparam(lparam), wparam);
             if (window.strip_input.session != null) {
                 hideTooltip(window);
                 if (wparam & MK_LBUTTON == 0) {
@@ -116,6 +125,10 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
         },
 
         user32.WM_LBUTTONUP => {
+            if (window.strip_input.proxy_press != null) {
+                proxyRelease(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
+                return 0;
+            }
             if (window.strip_input.session == null) return null;
             finish(window, .release, true);
             return 0;
@@ -123,6 +136,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
 
         // The capture was taken (Alt+Tab, a dialog): the drag is over.
         user32.WM_CAPTURECHANGED => {
+            window.strip_input.proxy_press = null;
             // The focus is leaving (Alt+Tab, a dialog): do not take it back.
             if (window.strip_input.session != null) finish(window, .cancel, false);
             return null;
@@ -143,12 +157,12 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
         user32.WM_RBUTTONUP => {
             if (window.strip_input.session != null) return null;
             const part = hitTest(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
-            const index = switch (part) {
-                .tab, .tab_close => |i| i,
-                else => return null,
-            };
             const at = toScreen(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
-            tab_menu.show(window, index, at.x, at.y);
+            switch (part) {
+                .tab, .tab_close => |index| tab_menu.show(window, index, at.x, at.y),
+                .proxy_icon => proxy_icon.showMenu(window, at.x, at.y),
+                else => return null,
+            }
             return 0;
         },
 
@@ -198,6 +212,32 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
 
         else => return null,
     }
+}
+
+/// The pointer moved with the proxy icon pressed: past the drag threshold the
+/// folder is dragged out.
+fn proxyMove(window: *Window, press: geom.Point, x: i32, y: i32, wparam: WPARAM) void {
+    if (wparam & MK_LBUTTON == 0) {
+        window.strip_input.proxy_press = null;
+        _ = user32.ReleaseCapture();
+        return;
+    }
+    const m = TabStrip.Metrics.forDpi(window.dpi);
+    if (@abs(x - press.x) < m.drag_threshold and @abs(y - press.y) < m.drag_threshold) return;
+    window.strip_input.proxy_press = null;
+    _ = user32.ReleaseCapture();
+    proxy_icon.startDrag(window);
+}
+
+/// The button went up with the proxy icon pressed: a click when it is still over it.
+fn proxyRelease(window: *Window, x: i32, y: i32) void {
+    window.strip_input.proxy_press = null;
+    _ = user32.ReleaseCapture();
+    switch (hitTest(window, x, y)) {
+        .proxy_icon => proxy_icon.click(window),
+        else => {},
+    }
+    focusActive(window);
 }
 
 fn hitTest(window: *const Window, x: i32, y: i32) TabStrip.Part {

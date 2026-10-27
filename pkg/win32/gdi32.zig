@@ -85,3 +85,19 @@ pub extern "gdi32" fn CreateFontW(
 
 pub const HRGN = user32.HRGN;
 pub extern "gdi32" fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) callconv(.winapi) ?HRGN;
+
+/// Alpha-blends `src` onto `dest` with `blend`; returns TRUE on success.
+/// Exported by gdi32 (msimg32's `AlphaBlend` forwards to it).
+pub extern "gdi32" fn GdiAlphaBlend(
+    dest: user32.HDC,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: user32.HDC,
+    src_x: i32,
+    src_y: i32,
+    src_w: i32,
+    src_h: i32,
+    blend: user32.BLENDFUNCTION,
+) callconv(.winapi) foundation.BOOL;
