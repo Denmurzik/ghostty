@@ -2,7 +2,7 @@
 # maximize-fullscreen: the placement actions. Fullscreen covers the monitor,
 # hides the strip and restores the exact rect; maximize toggles; float_window
 # sets WS_EX_TOPMOST; toggle_window_decorations switches to `none` through
-# frame.apply; the pty's own CSI 8 t echo of a resize leaves the rect alone;
+# frame.apply; resize_window sets the content size below the strip;
 # `fullscreen = true` starts fullscreen; window-width/height in cells give an
 # exact cell grid in every decoration mode (SPEC section 18 item 9 /
 # pre-flight 9); WM_GETMINMAXINFO min track height includes the strip.
@@ -82,6 +82,27 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     Wait-BashReady $g
     $h = $g.Hwnd
     $c = $g.Class
+
+    # resize_window first: later in the run conhost was seen to drop an application's CSI 8 t
+    # (the repeat below covers a miss). CSI 8 ; rows ; cols t, which core turns into pixels:
+    # the content rect below the strip is exactly cols x rows cells.
+    $s0 = Get-WinState -Class $c
+    $cell = $s0.cell
+    $ew = 100 * $cell[0]
+    $eh = 30 * $cell[1]
+    # Core sizes in points (pixels / scale, rounded up), so the window lands up to a
+    # scale's worth of pixels over the exact grid.
+    $slack = [int][Math]::Ceiling($s0.dpi / 96.0) + 1
+    $s = $null
+    foreach ($attempt in 1..4) {
+        Send-Line $h "printf '\033[8;30;100t'"
+        try { $s = Wait-WinState -Class $c -Predicate { [Math]::Abs($_.client[2] - $_.client[0] - $ew) -le $slack } -TimeoutSec 2.5; break } catch { if ($attempt -eq 4) { throw } }
+    }
+    $content = $s.client[3] - $s.client[1] - $s.strip.bounds[3]
+    if ([Math]::Abs($content - $eh) -gt $slack) { throw "content height below the strip is $content, expected $eh" }
+
+    $h = $g.Hwnd
+    $c = $g.Class
     $st = Get-WinState -Class $c
     $orig = Get-WinRect $st
     $monRect = [GhosttyE2e.Place]::MonitorRect($h)
@@ -100,6 +121,9 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     $s = Wait-WinState -Class $c -Predicate { $_.fullscreen -eq $false } -TimeoutSec 5
     Assert-Rect (Get-WinRect $s) $orig 1 'restored window'
     if ($s.strip.mode -ne 'titlebar') { throw "restored strip.mode is $($s.strip.mode), expected titlebar" }
+    # conhost echoes every resize as a CSI 8 t a moment later; it must not move the window.
+    Start-Sleep -Milliseconds 800
+    Assert-Rect (Get-WinRect (Get-WinState -Class $c)) $orig 1 'window after the pty echo of the fullscreen resize'
 
     # Maximize twice: maximized, then restored.
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_maximize')
@@ -115,14 +139,6 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_float_on_top')
     if (-not (Wait-Until { -not (Test-Topmost $h) } 5)) { throw 'toggle_window_float_on_top did not clear WS_EX_TOPMOST' }
 
-    # resize_window (CSI 8 ; rows ; cols t) cannot be driven from here: conhost swallows the
-    # sequence from applications (test/windows/conpty-probe). The only CSI 8 t that reaches
-    # core is conhost's own echo of a resize, a moment after it; it must not move the window
-    # (it used to drag it back to the fullscreen grid), so the rect holds after a settle.
-    Start-Sleep -Milliseconds 800
-    $s = Get-WinState -Class $c
-    Assert-Rect (Get-WinRect $s) $orig 1 'window after the pty echo of the fullscreen resize'
-
     # Min track height includes the strip.
     $min = Get-MinTrack $h
     $stripH = $s.strip.bounds[3] - $s.strip.bounds[1]
@@ -130,6 +146,10 @@ Invoke-E2eScenario 'maximize-fullscreen' {
     if ($min.h -lt $stripH + $s.cell[1]) { throw "min track height $($min.h) is below strip $stripH + one cell $($s.cell[1])" }
 
     # Decorations: none, and the former close-button point is not HTCLOSE.
+    # The strip moved with the resize above.
+    $pt = $s.strip.close
+    $closeX = [int](($pt[0] + $pt[2]) / 2)
+    $closeY = [int](($pt[1] + $pt[3]) / 2)
     if ((Get-HitCode $h $closeX $closeY) -ne 20) { throw 'precondition: close button point is not HTCLOSE' }
     [void](Invoke-GhosttyAction -Class $c -Action 'toggle_window_decorations')
     $s = Wait-WinState -Class $c -Predicate { $_.decorations -eq 'none' } -TimeoutSec 5
@@ -161,5 +181,5 @@ Invoke-E2eScenario 'maximize-fullscreen' {
         $g.Process.Kill()
         [void]$g.Process.WaitForExit(5000)
     }
-    Write-E2eInfo 'fullscreen, maximize, float, decorations, no pty-echo resize, start-up fullscreen and the 80x24 grid per decoration pass'
+    Write-E2eInfo 'fullscreen, maximize, float, decorations, resize_window, start-up fullscreen and the 80x24 grid per decoration pass'
 }

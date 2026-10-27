@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const ResizeEchoes = @import("resize_echoes.zig").ResizeEchoes;
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const global = @import("../global.zig");
@@ -92,6 +93,11 @@ pub const StreamHandler = struct {
     /// This is set to true when we've seen a title escape sequence. We use
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
+
+    /// Windows: the sizes sent to the pseudo console, whose `CSI 8 t` echo
+    /// is not a request to resize the window. Guarded by the renderer mutex.
+    resize_echoes: if (builtin.os.tag == .windows) ResizeEchoes else void =
+        if (builtin.os.tag == .windows) .{} else {},
 
     pub const Stream = terminal.Stream(StreamHandler);
 
@@ -311,7 +317,16 @@ pub const StreamHandler = struct {
             },
             .request_xt_checksum => self.reportXtChecksum(value),
             .size_report => self.sendSizeReport(value),
-            .resize_window => self.surfaceMessageWriter(.{ .resize_window = value }),
+            .resize_window => {
+                if (comptime builtin.os.tag == .windows) {
+                    if (self.resize_echoes.consume(value.columns, value.rows)) {
+                        log.debug("CSI 8 t echo of a pty resize ignored cols={} rows={}", .{ value.columns, value.rows });
+                        return;
+                    }
+                }
+                log.debug("CSI 8 t resize request cols={} rows={}", .{ value.columns, value.rows });
+                self.surfaceMessageWriter(.{ .resize_window = value });
+            },
             .xtversion => try self.reportXtversion(),
             .device_attributes => try self.deviceAttributes(value),
             .device_status => try self.deviceStatusReport(value.request),

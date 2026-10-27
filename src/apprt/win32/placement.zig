@@ -131,7 +131,7 @@ pub fn pointsToPixels(window: *const Window, width: u32, height: u32) struct { w
 }
 
 fn scalePoints(v: u32, dpi: u32) u32 {
-    const px = (@as(u64, v) * dpi + 48) / 96;
+    const px = (@as(u64, v) * dpi) / 96;
     return @intCast(@min(px, std.math.maxInt(u32)));
 }
 
@@ -221,7 +221,7 @@ test "win32 placement: core points scale to physical pixels" {
     try std.testing.expectEqual(@as(u32, 2840), scalePoints(1623, 168));
     // A zero dimension still means "keep".
     try std.testing.expectEqual(@as(u32, 0), scalePoints(0, 168));
-    try std.testing.expectEqual(@as(u32, 1362), scalePoints(778, 168));
+    try std.testing.expectEqual(@as(u32, 1361), scalePoints(778, 168));
 }
 
 test "win32 placement: resize keeps a zero dimension" {

@@ -192,10 +192,6 @@ search: ?Search = null,
 /// Used to rate limit BEL handling.
 last_bell_time: ?std.Io.Timestamp = null,
 
-/// The grids the terminal had lately, to tell a resize request echoed back
-/// by the pty from one a program made (see `RecentGrids`).
-recent_grids: RecentGrids = .{},
-
 /// The effect of an input event. This can be used by callers to take
 /// the appropriate action after an input event. For example, key
 /// input can be forwarded to the OS for further processing if it
@@ -1987,41 +1983,6 @@ fn recomputeInitialSize(
     ) catch return error.AppActionFailed;
 }
 
-/// A pty answers a resize with a `CSI 8 ; rows ; cols t` of its own (ConPTY
-/// does, a moment later), which reaches `resizeWindow` like a program's
-/// request. Acting on it would drag the window back to a size it just left,
-/// e.g. the fullscreen grid after fullscreen ended. So a request for a grid
-/// the terminal had within `window_ms` is that echo, or a no-op.
-const RecentGrids = struct {
-    const window_ms = 500;
-    const Entry = struct { columns: u16, rows: u16, at: std.Io.Timestamp };
-
-    /// The current grid first, then the one before it.
-    entries: [2]?Entry = .{ null, null },
-
-    fn note(self: *RecentGrids, grid: rendererpkg.GridSize, now: std.Io.Timestamp) void {
-        if (self.entries[0]) |*cur| {
-            if (cur.columns == grid.columns and cur.rows == grid.rows) {
-                cur.at = now;
-                return;
-            }
-        }
-        self.entries[1] = self.entries[0];
-        self.entries[0] = .{ .columns = grid.columns, .rows = grid.rows, .at = now };
-    }
-
-    /// Whether `columns` x `rows` (both set) was the grid within the window.
-    fn contains(self: *const RecentGrids, columns: u16, rows: u16, now: std.Io.Timestamp) bool {
-        if (columns == 0 or rows == 0) return false;
-        for (self.entries) |maybe| {
-            const e = maybe orelse continue;
-            if (e.columns != columns or e.rows != rows) continue;
-            if (e.at.durationTo(now).toMilliseconds() <= window_ms) return true;
-        }
-        return false;
-    }
-};
-
 /// Handle a request from the running program (CSI 8 t) to resize the
 /// window to the given grid size.
 fn resizeWindow(
@@ -2030,11 +1991,6 @@ fn resizeWindow(
 ) !void {
     if (!self.config.vt_window_resize_allowed) {
         log.info("resize_window requested, but disabled via config", .{});
-        return;
-    }
-
-    if (self.recent_grids.contains(size.columns, size.rows, .now(global.io(), .awake))) {
-        log.debug("resize_window to the current grid ignored (pty echo)", .{});
         return;
     }
 
@@ -2589,7 +2545,6 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
 
     // Notify the terminal
     self.queueIo(.{ .resize = self.size }, .unlocked);
-    self.recent_grids.note(self.size.grid(), .now(global.io(), .awake));
 
     // Update our terminal default size if necessary.
     self.recomputeInitialSize() catch |err| {
@@ -2709,8 +2664,6 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
         log.warn("WARNING: very small terminal grid detected with padding " ++
             "set. Is your padding reasonable?", .{});
     }
-
-    self.recent_grids.note(grid_size, .now(global.io(), .awake));
 
     // Mail the IO thread
     self.queueIo(.{ .resize = self.size }, .unlocked);
@@ -6823,40 +6776,4 @@ test "promptClickRelativeRow" {
         );
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
     }
-}
-
-test "RecentGrids: a resize request for a grid the terminal just had is ignored" {
-    const testing = std.testing;
-    const ms = std.time.ns_per_ms;
-    var grids: RecentGrids = .{};
-    const t0: std.Io.Timestamp = .{ .nanoseconds = 1000 * ms };
-    try testing.expect(!grids.contains(100, 30, t0));
-
-    // 80x24, then fullscreen's 167x51.
-    grids.note(.{ .columns = 80, .rows = 24 }, t0);
-    grids.note(.{ .columns = 167, .rows = 51 }, .{ .nanoseconds = 1100 * ms });
-    const now: std.Io.Timestamp = .{ .nanoseconds = 1150 * ms };
-    try testing.expect(grids.contains(167, 51, now));
-    try testing.expect(grids.contains(80, 24, now));
-    try testing.expect(!grids.contains(100, 30, now));
-    // A zero dimension means "keep it", never an echo.
-    try testing.expect(!grids.contains(0, 51, now));
-    try testing.expect(!grids.contains(167, 0, now));
-}
-
-test "RecentGrids: an old grid is a real request again" {
-    const testing = std.testing;
-    const ms = std.time.ns_per_ms;
-    var grids: RecentGrids = .{};
-    grids.note(.{ .columns = 80, .rows = 24 }, .{ .nanoseconds = 1000 * ms });
-    try testing.expect(grids.contains(80, 24, .{ .nanoseconds = 1500 * ms }));
-    try testing.expect(!grids.contains(80, 24, .{ .nanoseconds = 1501 * ms }));
-    // The same grid noted again keeps its slot and renews its time.
-    grids.note(.{ .columns = 80, .rows = 24 }, .{ .nanoseconds = 1400 * ms });
-    try testing.expect(grids.contains(80, 24, .{ .nanoseconds = 1900 * ms }));
-    // Only the last two grids are remembered.
-    grids.note(.{ .columns = 90, .rows = 24 }, .{ .nanoseconds = 1900 * ms });
-    grids.note(.{ .columns = 100, .rows = 24 }, .{ .nanoseconds = 1900 * ms });
-    try testing.expect(!grids.contains(80, 24, .{ .nanoseconds = 1900 * ms }));
-    try testing.expect(grids.contains(90, 24, .{ .nanoseconds = 1900 * ms }));
 }

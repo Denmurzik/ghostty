@@ -539,6 +539,9 @@ pub fn resize(
         // Hold the same lock used by processOutput before notifying it, so
         // its redraw cannot be parsed against the old terminal dimensions.
         try self.backend.resize(grid_size, size.terminal());
+        if (comptime builtin.os.tag == .windows) {
+            self.terminal_stream.handler.resize_echoes.record(grid_size.columns, grid_size.rows);
+        }
 
         // Update the size of our terminal state
         try self.terminal.resize(

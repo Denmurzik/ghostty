@@ -31,6 +31,7 @@ pub const DerivedConfig = Termio.DerivedConfig;
 pub const Mailbox = mailbox.Mailbox;
 pub const Message = message.Message;
 pub const StreamHandler = stream_handler.StreamHandler;
+pub const ResizeEchoes = @import("termio/resize_echoes.zig").ResizeEchoes;
 
 test {
     @import("std").testing.refAllDecls(@This());

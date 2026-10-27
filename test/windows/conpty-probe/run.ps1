@@ -21,6 +21,8 @@ of the shell:
              and the system cursor is IDC_HAND
   osc22      the pointer over the surface: the system cursor is IDC_CROSS
              (the sequence asks for `crosshair`)
+  csi8       `CSI 8 ; 30 ; 100 t`: the termio log line `CSI 8 t resize request
+             cols=100 rows=30` (conhost's own echoes show other sizes, or `echo ignored`)
 
 Verdict per row: arrived (oracle satisfied), dropped (no trace of the
 sequence in Ghostty), mangled (a trace, but not the one the oracle needs: the
@@ -40,7 +42,7 @@ GHOSTTY_WIN32_CONPTY_FLAGS values to run (default 0 and 8).
 
 .PARAMETER Only
 Case names without the `probe-` prefix (osc9, osc777, osc133, osc8, osc22,
-kitty-apc). Default: all.
+kitty-apc, csi8). Default: all.
 
 .PARAMETER Repeat
 Runs of every (case, flags) pair, to see determinism.
@@ -308,6 +310,13 @@ function Invoke-ProbeRun([string]$Name, [string]$CasePath, [int]$ConptyFlags) {
             foreach ($l in $log) { $evidence.Add($l) }
             if ($cur -eq $hand -or $log.Count) { $arrived = $true }
             if (-not $arrived) { $evidence.Add(('cursor handle 0x{0:x} (hand 0x{1:x})' -f $cur.ToInt64(), $hand.ToInt64())) }
+        }
+        'csi8' {
+            # The stream handler logs every CSI 8 t it parses; conhost's own echoes of a resize
+            # are consumed there (`echo ignored`), so only an application's 100x30 request counts.
+            $log = Wait-Until -TimeoutSec 4 -PollMs 250 -Condition { $l = @(Get-LogLines $g 'CSI 8 t resize request cols=100 rows=30'); if ($l.Count) { $l } }
+            if ($log) { $arrived = $true; foreach ($l in $log) { $evidence.Add($l) } }
+            foreach ($l in @(Get-LogLines $g 'CSI 8 t')) { $evidence.Add($l) }
         }
         'osc22' {
             $cross = [GhosttyProbe.Native]::SystemCursor($IDC_CROSS)
