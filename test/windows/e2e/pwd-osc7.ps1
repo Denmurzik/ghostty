@@ -6,7 +6,7 @@
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
 Invoke-E2eScenario 'pwd-osc7' {
-    # Outside %TEMP%: Git Bash shows that as /tmp, which has no drive path.
+    # A drive path outside %TEMP% (Git Bash shows that as /tmp: see below).
     # A name with a space; the unit tests cover # and non-ASCII names.
     $dir = 'C:\Program Files\Common Files'
     if (-not (Test-Path -LiteralPath $dir)) { throw "E2E-SKIP: $dir does not exist" }
@@ -38,6 +38,12 @@ Invoke-E2eScenario 'pwd-osc7' {
     Wait-Pwd $g $dir 'new tab inherits the directory'
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_split:right')
     Wait-Pwd $g $dir 'split inherits the directory'
+
+    # A folder under %TEMP% is /tmp/... in Git Bash (pwd -W gives the drive path).
+    $temp_dir = Join-Path $script:Sbx.Tmp 'pwd dir #1 Проект'
+    New-Item -ItemType Directory -Force -Path $temp_dir | Out-Null
+    Send-Line $g.Hwnd 'cd "$TEMP/pwd dir #1 Проект"'
+    Wait-Pwd $g $temp_dir 'git bash cd under /tmp'
     Stop-OwnGhostty
 
     # --- pwsh ---

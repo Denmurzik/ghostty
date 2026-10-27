@@ -198,7 +198,14 @@ function __ghostty_precmd() {
     # otherwise end our OSC 7 early and start a sequence of its own, such
     # as an OSC 52 clipboard write. Backslashes are safe here because
     # printf only expands escapes in the format string, not in %s values.
-    builtin printf "\e]7;kitty-shell-cwd://%s%s\a" "${HOSTNAME//[[:cntrl:]]/}" "${PWD//[[:cntrl:]]/}"
+    builtin local report_pwd="$PWD"
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+      # MSYS paths (/tmp, /home/x, ~ outside the Users folder) mean nothing
+      # to Windows: report the Windows path (C:/x) that `pwd -W` builds
+      # without a fork. This runs only when $PWD changed since the last prompt.
+      report_pwd="/$(builtin pwd -W)"
+    fi
+    builtin printf "\e]7;kitty-shell-cwd://%s%s\a" "${HOSTNAME//[[:cntrl:]]/}" "${report_pwd//[[:cntrl:]]/}"
   fi
 
   _ghostty_executing=0
