@@ -664,6 +664,112 @@ pub fn invalidate(window: *Window) void {
     _ = user32.InvalidateRect(window.hwnd, null, 0);
 }
 
+// -- General painter ------------------------------------------------------------
+
+/// A font for `Item.text`. `icons` selects Segoe Fluent Icons (MDL2) for
+/// glyph code points, else the UI font.
+pub const Font = struct {
+    icons: bool = false,
+    size_pt: f32 = 13,
+    weight: dwrite.FontWeight = .NORMAL,
+};
+
+pub const HAlign = enum { leading, center };
+
+/// One thing to draw, in px with the origin at the top-left of the popup.
+pub const Item = union(enum) {
+    /// An antialiased rounded rectangle. With `stroke` the border is a
+    /// ring of `stroke_w` px inside `rect` in that colour; `fill` must be
+    /// opaque then (blend translucent colours with `blend` first).
+    box: struct {
+        rect: geom.Rect,
+        radius: i32,
+        fill: theme.Color,
+        stroke: ?theme.Color = null,
+        stroke_w: i32 = 1,
+    },
+    /// Text vertically centred in `rect`, clipped to it.
+    text: struct {
+        rect: geom.Rect,
+        text: []const u16,
+        font: Font = .{},
+        color: theme.Color,
+        halign: HAlign = .center,
+    },
+};
+
+/// `top` composited over the opaque `bottom` (the result is opaque).
+pub fn blend(top: theme.Color, bottom: theme.Color) theme.Color {
+    const a: u32 = top.a;
+    const inv = 255 - a;
+    return .{
+        .r = @intCast((@as(u32, top.r) * a + @as(u32, bottom.r) * inv + 127) / 255),
+        .g = @intCast((@as(u32, top.g) * a + @as(u32, bottom.g) * inv + 127) / 255),
+        .b = @intCast((@as(u32, top.b) * a + @as(u32, bottom.b) * inv + 127) / 255),
+    };
+}
+
+fn makeFormat(sh: *Shared, font: Font, halign: HAlign, dpi: u32) !*dwrite.IDWriteTextFormat {
+    const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
+    const family = if (font.icons) sh.icon_family else sh.title_family;
+    const format = try sh.dwrite.createTextFormat(family, font.weight, .NORMAL, .NORMAL, font.size_pt * scale, L("en-us"));
+    errdefer com.release(format);
+    try format.setWordWrapping(.NO_WRAP);
+    try format.setTextAlignment(if (halign == .center) .CENTER else .LEADING);
+    try format.setParagraphAlignment(.CENTER);
+    return format;
+}
+
+/// Width in px of `text` in `font` at `dpi`.
+pub fn measureText(text: []const u16, font: Font, dpi: u32) !i32 {
+    const sh = try shared();
+    const format = try makeFormat(sh, font, .leading, dpi);
+    defer com.release(format);
+    const layout = try sh.dwrite.createTextLayout(text, format, 4096, 256);
+    defer com.release(layout);
+    const metrics = try layout.getMetrics();
+    return @intFromFloat(@ceil(metrics.widthIncludingTrailingWhitespace));
+}
+
+fn drawItemsBody(items: []const Item, p: *Painter) void {
+    const sh = shared() catch return;
+    for (items) |item| switch (item) {
+        .box => |b| {
+            if (b.stroke) |s| {
+                p.fillRound(b.rect, b.radius, s);
+                const w = b.stroke_w;
+                const inner: geom.Rect = .{ .x = b.rect.x + w, .y = b.rect.y + w, .w = b.rect.w - 2 * w, .h = b.rect.h - 2 * w };
+                if (inner.w > 0 and inner.h > 0) p.fillRound(inner, @max(b.radius - w, 0), b.fill);
+            } else {
+                p.fillRound(b.rect, b.radius, b.fill);
+            }
+        },
+        .text => |t| {
+            const format = makeFormat(sh, t.font, t.halign, p.dpi) catch continue;
+            defer com.release(format);
+            p.drawText(t.rect, t.text, format, t.color);
+        },
+    };
+}
+
+/// Paints `items` over a transparent background into `hdc` (a label's
+/// premultiplied DIB, origin at the popup's). A lost device is retried
+/// once, a failure is logged once.
+pub fn paintItems(hdc: HDC, size: geom.Rect, items: []const Item, palette: theme.Palette, dpi: u32) !void {
+    var pal = palette;
+    pal.strip_bg.a = 0;
+    withPainter(hdc, size.w, size.h, pal, dpi, items, drawItemsBody) catch |err| {
+        if (err != error.DeviceLost) {
+            logOnce(err);
+            return err;
+        }
+        withPainter(hdc, size.w, size.h, pal, dpi, items, drawItemsBody) catch |err2| {
+            logOnce(err2);
+            return err2;
+        };
+    };
+}
+
 // -- Tests ----------------------------------------------------------------------
 
 const test_palette: theme.Palette = .{
@@ -821,4 +927,13 @@ test "win32 chrome: shared target recreated after RECREATE_TARGET" {
     try std.testing.expect((try shared()).target == null);
     try paintInto(dc, size, in);
     try std.testing.expect((try shared()).target != null);
+}
+
+test "win32 chrome: blend over an opaque colour" {
+    const white: theme.Color = .{ .r = 255, .g = 255, .b = 255 };
+    const black: theme.Color = .{ .r = 0, .g = 0, .b = 0 };
+    try std.testing.expectEqual(white, blend(.{ .r = 255, .g = 255, .b = 255, .a = 255 }, black));
+    try std.testing.expectEqual(black, blend(.{ .r = 255, .g = 255, .b = 255, .a = 0 }, black));
+    const half = blend(.{ .r = 255, .g = 255, .b = 255, .a = 128 }, black);
+    try std.testing.expectEqual(@as(u8, 128), half.r);
 }

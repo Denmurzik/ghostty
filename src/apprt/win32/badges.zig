@@ -8,7 +8,9 @@ const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const geom = @import("geom.zig");
 const overlay = @import("overlay.zig");
+const theme = @import("theme.zig");
 
 const log = std.log.scoped(.win32_badges);
 
@@ -23,6 +25,27 @@ const height_px = 26;
 /// Gap to the surface edge, as the 8 pt padding of the macOS badges.
 const margin_px = 8;
 
+/// The macOS `ReadonlyBadge`: 8 x 4 pt padding, 5 pt between icon and text,
+/// 12 pt text, 6 pt corner, 1.5 pt orange border.
+const badge_pad_x = 8;
+const badge_pad_y = 4;
+const badge_gap = 5;
+const badge_icon_w = 14;
+const badge_radius = 6;
+const badge_line = 16;
+const badge_font: Chrome.Font = .{ .size_pt = 12, .weight = .MEDIUM };
+const badge_icon_font: Chrome.Font = .{ .icons = true, .size_pt = 12 };
+const glyph_lock = std.unicode.utf8ToUtf16LeStringLiteral("\u{E72E}");
+/// `Color(hue: 0.08, saturation: 0.5, brightness: 0.8)`.
+const badge_ink: theme.Color = .{ .r = 204, .g = 151, .b = 102 };
+/// `Color.orange`.
+const orange: theme.Color = .{ .r = 255, .g = 149, .b = 0 };
+
+/// The macOS `ChildExitedMessageBar`: full width, 8 x 4 pt padding, the
+/// message in the primary colour on a half-opaque tint.
+const bar_line = 16;
+const bar_font: Chrome.Font = .{ .size_pt = 13 };
+
 const health_text = "Rendering paused: the GPU was reset. Recovering\u{2026}";
 
 pub const State = struct {
@@ -34,7 +57,17 @@ pub const State = struct {
 
 /// A label popup and the text it paints.
 pub const TextLabel = struct {
+    pub const Style = enum {
+        /// Grey rounded rectangle, centred text (toasts).
+        plain,
+        /// The macOS read-only badge.
+        readonly,
+        /// The full-width warning bar.
+        health,
+    };
+
     popup: overlay.Popup,
+    style: Style = .plain,
     text: [label_units]u16 = undefined,
     text_len: usize = 0,
 
@@ -43,9 +76,10 @@ pub const TextLabel = struct {
         surface: *Surface,
         anchor: overlay.Anchor,
         margin: i32,
+        style: TextLabel.Style,
     ) !*TextLabel {
         const label = try alloc.create(TextLabel);
-        label.* = .{ .popup = .{
+        label.* = .{ .style = style, .popup = .{
             .kind = .label,
             .anchor = anchor,
             .window = surface.window,
@@ -68,7 +102,13 @@ pub const TextLabel = struct {
     pub fn set(label: *TextLabel, utf8: []const u8) void {
         const n = convert(label, utf8);
         label.text_len = n;
-        label.popup.size = .{ .w = width(label.text[0..n], label.popup.window.dpi), .h = height_px };
+        const dpi = label.popup.window.dpi;
+        label.popup.size = switch (label.style) {
+            .plain => .{ .w = width(label.text[0..n], dpi), .h = height_px },
+            .readonly => .{ .w = logical(readonlyWidth(label.text[0..n], dpi), dpi), .h = 2 * badge_pad_y + badge_line },
+            // The host stretches it to the surface.
+            .health => .{ .w = 0, .h = 2 * badge_pad_y + bar_line },
+        };
     }
 
     /// Shows the label with its current text.
@@ -82,9 +122,13 @@ pub const TextLabel = struct {
 
     fn paint(p: *overlay.Popup, ctx: overlay.PaintContext) void {
         const label: *const TextLabel = @ptrCast(@alignCast(p.ctx orelse return));
-        Chrome.paintLabel(ctx.hdc, ctx.rect, label.text16(), ctx.palette, ctx.dpi) catch |err| {
-            log.warn("unable to paint a label err={}", .{err});
-        };
+        switch (label.style) {
+            .plain => Chrome.paintLabel(ctx.hdc, ctx.rect, label.text16(), ctx.palette, ctx.dpi) catch |err| {
+                log.warn("unable to paint a label err={}", .{err});
+            },
+            .readonly => paintReadonly(label, ctx),
+            .health => paintBar(label, ctx),
+        }
     }
 };
 
@@ -106,6 +150,69 @@ fn convert(label: *TextLabel, utf8: []const u8) usize {
         n += need;
     }
     return n;
+}
+
+/// The colour of the material the badges sit on (macOS `.regularMaterial`,
+/// which is translucent; here its resting colour).
+pub fn materialFill(dark: bool) theme.Color {
+    return if (dark) .{ .r = 0x32, .g = 0x32, .b = 0x32 } else .{ .r = 0xEC, .g = 0xEC, .b = 0xEC };
+}
+
+/// `.primary` of the system appearance.
+pub fn primaryInk(dark: bool) theme.Color {
+    return if (dark) .{ .r = 255, .g = 255, .b = 255 } else .{ .r = 0, .g = 0, .b = 0 };
+}
+
+fn withAlpha(c: theme.Color, a: u8) theme.Color {
+    var out = c;
+    out.a = a;
+    return out;
+}
+
+/// Logical (96 dpi) size covering `px` pixels at `dpi`; one more absorbs the rounding.
+pub fn logical(px: i32, dpi: u32) i32 {
+    return @divTrunc(px * 96 + @as(i32, @intCast(dpi)) - 1, @as(i32, @intCast(dpi))) + 1;
+}
+
+fn readonlyWidth(text: []const u16, dpi: u32) i32 {
+    const text_w = Chrome.measureText(text, badge_font, dpi) catch @divTrunc(@as(i32, @intCast(text.len)) * 7 * @as(i32, @intCast(dpi)), 96);
+    return 2 * geom.scale(badge_pad_x, dpi) + geom.scale(badge_icon_w, dpi) + geom.scale(badge_gap, dpi) + text_w;
+}
+
+fn paintReadonly(label: *const TextLabel, ctx: overlay.PaintContext) void {
+    const dpi = ctx.dpi;
+    const fill = materialFill(ctx.palette.dark);
+    const r = ctx.rect;
+    const stroke_w = @max(1, @divTrunc(geom.scale(3, dpi) + 1, 2));
+    const x0 = geom.scale(badge_pad_x, dpi);
+    const icon_w = geom.scale(badge_icon_w, dpi);
+    const text_x = x0 + icon_w + geom.scale(badge_gap, dpi);
+    const items = [_]Chrome.Item{
+        .{ .box = .{
+            .rect = r,
+            .radius = geom.scale(badge_radius, dpi),
+            .fill = fill,
+            .stroke = Chrome.blend(withAlpha(orange, 153), fill),
+            .stroke_w = stroke_w,
+        } },
+        .{ .text = .{ .rect = .{ .x = x0, .y = 0, .w = icon_w, .h = r.h }, .text = glyph_lock, .font = badge_icon_font, .color = badge_ink } },
+        .{ .text = .{ .rect = .{ .x = text_x, .y = 0, .w = r.w - text_x, .h = r.h }, .text = label.text16(), .font = badge_font, .color = badge_ink, .halign = .leading } },
+    };
+    Chrome.paintItems(ctx.hdc, r, &items, ctx.palette, dpi) catch |err| {
+        log.warn("unable to paint the read-only badge err={}", .{err});
+    };
+}
+
+fn paintBar(label: *const TextLabel, ctx: overlay.PaintContext) void {
+    // The tint of the warning: orange at half opacity over the window colour.
+    const base = materialFill(ctx.palette.dark);
+    const items = [_]Chrome.Item{
+        .{ .box = .{ .rect = ctx.rect, .radius = 0, .fill = Chrome.blend(withAlpha(orange, 128), base) } },
+        .{ .text = .{ .rect = ctx.rect, .text = label.text16(), .font = bar_font, .color = primaryInk(ctx.palette.dark) } },
+    };
+    Chrome.paintItems(ctx.hdc, ctx.rect, &items, ctx.palette, ctx.dpi) catch |err| {
+        log.warn("unable to paint the health bar err={}", .{err});
+    };
 }
 
 /// Logical width of a label with `text`: the measured text and the padding.
@@ -147,7 +254,7 @@ pub fn rendererHealth(surface: *Surface, health: renderer.Health) void {
 /// of the final failure).
 pub fn setHealthText(surface: *Surface, text: []const u8) void {
     const label = surface.badges.health orelse blk: {
-        const l = TextLabel.create(surface.app.core_app.alloc, surface, .surface_top_full, 0) catch |err| {
+        const l = TextLabel.create(surface.app.core_app.alloc, surface, .surface_top_full, 0, .health) catch |err| {
             log.warn("unable to make the health bar err={}", .{err});
             return;
         };
@@ -172,7 +279,7 @@ pub fn readonly(app: *App, target: apprt.Target, value: apprt.Action.Value(.read
     }
 
     const label = state.readonly orelse blk: {
-        const l = try TextLabel.create(app.core_app.alloc, surface, .surface_top_right, margin_px);
+        const l = try TextLabel.create(app.core_app.alloc, surface, .surface_top_right, margin_px, .readonly);
         state.readonly = l;
         break :blk l;
     };

@@ -50,7 +50,7 @@ pub fn clipboardWritten(surface: *Surface, cleared: bool) void {
 fn show(surface: *Surface, kind: Kind) void {
     const state = &surface.badges;
     const label = state.toast orelse blk: {
-        const l = badges.TextLabel.create(surface.app.core_app.alloc, surface, .window_bottom_center, margin_px) catch |err| {
+        const l = badges.TextLabel.create(surface.app.core_app.alloc, surface, .window_bottom_center, margin_px, .plain) catch |err| {
             log.warn("unable to make a toast err={}", .{err});
             return;
         };
