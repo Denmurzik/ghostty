@@ -201,8 +201,8 @@ function __ghostty_precmd() {
     builtin local report_pwd="$PWD"
     if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
       # MSYS paths (/tmp, /home/x, ~ outside the Users folder) mean nothing
-      # to Windows: report the Windows path (C:/x) that `pwd -W` builds
-      # without a fork. This runs only when $PWD changed since the last prompt.
+      # to Windows: report the Windows path (C:/x) from `pwd -W`. The
+      # subshell forks, so it runs only when $PWD changed since the last prompt.
       report_pwd="/$(builtin pwd -W)"
     fi
     builtin printf "\e]7;kitty-shell-cwd://%s%s\a" "${HOSTNAME//[[:cntrl:]]/}" "${report_pwd//[[:cntrl:]]/}"
