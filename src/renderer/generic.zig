@@ -185,6 +185,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// when a program places an image.
         images_rebuilt: bool = false,
 
+        /// Set by the `.redraw` message: the next frame must be drawn even
+        /// though no cell or image changed (the apprt decorates the frame
+        /// target and asked to see the result).
+        force_redraw: bool = false,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -1318,6 +1323,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Only vsync if we have cell or image changes or animation
                 (self.cells_rebuilt or
                     self.images_rebuilt or
+                    self.force_redraw or
                     self.animationWake() != null);
 
             display_link.setRunning(should_run);
@@ -1852,6 +1858,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             self.cells_rebuilt = false;
             self.images_rebuilt = false;
+            self.force_redraw = false;
 
             // Wait for a frame to be available.
             const frame = swap_chain.nextFrame();

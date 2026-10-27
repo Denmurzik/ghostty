@@ -27,12 +27,13 @@ pub const Entry = enum {
     image_ps,
     bg_image_vs,
     bg_image_ps,
+    decor_ps,
 
     /// The shader model target for this entry, derived from its suffix.
     fn target(self: Entry) [:0]const u8 {
         return switch (self) {
             .full_screen_vs, .cell_text_vs, .image_vs, .bg_image_vs => "vs_5_0",
-            .bg_color_ps, .cell_bg_ps, .cell_text_ps, .image_ps, .bg_image_ps => "ps_5_0",
+            .bg_color_ps, .cell_bg_ps, .cell_text_ps, .image_ps, .bg_image_ps, .decor_ps => "ps_5_0",
         };
     }
 
@@ -44,6 +45,7 @@ pub const Entry = enum {
             .cell_text_vs, .cell_text_ps => "cell_text.hlsl",
             .image_vs, .image_ps => "image.hlsl",
             .bg_image_vs, .bg_image_ps => "bg_image.hlsl",
+            .decor_ps => "decor.hlsl",
         };
     }
 };
@@ -60,6 +62,7 @@ pub fn source(entry: Entry) []const u8 {
         .cell_text_vs, .cell_text_ps => @embedFile("../shaders/hlsl/cell_text.hlsl"),
         .image_vs, .image_ps => @embedFile("../shaders/hlsl/image.hlsl"),
         .bg_image_vs, .bg_image_ps => @embedFile("../shaders/hlsl/bg_image.hlsl"),
+        .decor_ps => @embedFile("../shaders/hlsl/decor.hlsl"),
     };
 }
 
@@ -88,7 +91,7 @@ pub fn bytecode(entry: Entry) ![]const u8 {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
 
-    const slot = &cache[@intFromEnum(entry)];
+    const slot = &cache[@backingInt(entry)];
     if (slot.*) |code| return code;
 
     const c = compiler orelse load: {

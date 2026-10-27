@@ -108,6 +108,10 @@ fn submit(self: *const Self) error{DeviceLost}!void {
     // A lost device draws nothing more; a new one serves new surfaces.
     try api.device.checkLost();
 
+    // The apprt's decorations go on the finished target, so they reach the
+    // swap chain and the frame dump alike.
+    api.drawDecor(self.target);
+
     if (api.present_target != null) self.present() catch |err| switch (err) {
         error.DeviceLost => return error.DeviceLost,
         // The frame itself was drawn; a swap chain that cannot show it

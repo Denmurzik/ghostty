@@ -1,11 +1,12 @@
 //! Bell feedback: tab and window title decoration, taskbar flash, system
-//! beep and audio. `bell-features = border` is deferred to M3 (DComp overlays).
+//! beep and audio, and the border the renderer draws around the surface.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
+const decor = @import("decor.zig");
 const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
 const util = @import("util.zig");
@@ -30,6 +31,11 @@ pub fn ring(surface: *Surface) bool {
             if (window.activeTab() == surface.tab) window.refreshTitle();
             Chrome.invalidate(window);
         }
+    }
+
+    if (features.border) {
+        const focused = foreground and win32.user32.GetFocus() == surface.hwnd;
+        decor.showBellBorder(surface, focused);
     }
 
     if (features.attention and !foreground) {

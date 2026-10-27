@@ -983,6 +983,14 @@ pub fn activateInspector(self: *Surface) !void {
     self.queueIo(.{ .inspector = true }, .unlocked);
 }
 
+/// Ask the renderer for one more frame even though the terminal did not
+/// change, e.g. after the apprt changed what it draws over the frame.
+pub fn queueRedraw(self: *Surface) void {
+    _ = self.renderer_thread.mailbox.push(global.io(), .redraw, .{ .forever = {} });
+    self.renderer_thread.wakeup.notify() catch |err|
+        log.warn("failed to wake up renderer err={}", .{err});
+}
+
 /// Report to the renderer how well the apprt can present the frames
 /// the renderer exports. See `renderer.Health` and the renderer's
 /// `presentation_health` state for the semantics.

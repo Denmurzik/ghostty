@@ -22,6 +22,7 @@ pub const Device = @import("d3d11/Device.zig");
 pub const GraphicsAPI = D3D11;
 pub const Target = @import("d3d11/Target.zig");
 pub const Frame = @import("d3d11/Frame.zig");
+pub const Decor = @import("d3d11/Decor.zig");
 pub const RenderPass = @import("d3d11/RenderPass.zig");
 pub const Pipeline = @import("d3d11/Pipeline.zig");
 const bufferpkg = @import("d3d11/buffer.zig");
@@ -129,6 +130,13 @@ pacing_log: bool = false,
 frame_begin_ns: u64 = 0,
 frame_slot_ns: u64 = 0,
 
+/// The decor pass, created by the first frame whose decor word is non-zero.
+/// Only touched under the device context lock.
+decor_pass: ?Decor = null,
+
+/// Set once creating the decor pass failed, so it is not retried every frame.
+decor_failed: bool = false,
+
 /// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
 dump: ?Frame.Dump = null,
 
@@ -194,6 +202,13 @@ pub fn threadEnter(self: *D3D11, surface: *apprt.Surface) !void {
 /// thread. Releases the swap chain before the window can go away: the
 /// apprt destroys the window only after the render thread was joined.
 pub fn threadExit(self: *D3D11) void {
+    if (self.decor_pass != null) {
+        self.device.lockContext();
+        defer self.device.unlockContext();
+        self.decor_pass.?.deinit();
+        self.decor_pass = null;
+    }
+
     if (self.swap_chain != null) {
         self.device.lockContext();
         defer self.device.unlockContext();
@@ -346,6 +361,25 @@ pub fn drawFrameEnd(self: *D3D11) void {
     self.device.unlockContext();
     // The frame dump's file I/O stays out of the context lock.
     if (self.dump) |*d| d.flush(self.alloc);
+}
+
+/// Draws the apprt's decorations (`PresentTarget.decor`) over `target`.
+/// Nothing happens, and nothing is allocated, while the word is zero. The
+/// caller holds the context lock.
+pub fn drawDecor(self: *D3D11, target: *const Target) void {
+    const word_ptr = (self.present_target orelse return).decor orelse return;
+    const word: Decor.Word = @bitCast(word_ptr.load(.monotonic));
+    if (word.isZero()) return;
+
+    if (self.decor_pass == null) {
+        if (self.decor_failed) return;
+        self.decor_pass = Decor.init(self.device) catch |err| {
+            log.warn("unable to create the decor pass err={}", .{err});
+            self.decor_failed = true;
+            return;
+        };
+    }
+    self.decor_pass.?.draw(target, word, self.blending.isLinear());
 }
 
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for
@@ -969,5 +1003,6 @@ test {
     _ = RenderPass;
     _ = Target;
     _ = Frame;
+    _ = Decor;
     _ = SwapChain;
 }

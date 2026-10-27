@@ -379,6 +379,8 @@ fn drainMailbox(self: *Thread) !void {
                 }
             },
 
+            .redraw => self.renderer.force_redraw = true,
+
             .reset_cursor_blink => {
                 self.flags.cursor_blink_visible = true;
                 if (self.cursor_c.state() == .active) {

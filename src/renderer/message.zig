@@ -22,6 +22,11 @@ pub const Message = union(enum) {
     /// and still have focus.
     visible: bool,
 
+    /// Draw one frame even if nothing in the terminal changed. Sent by
+    /// `Surface.queueRedraw` when the apprt changed what it adds to the
+    /// frame (e.g. dims an unfocused split).
+    redraw,
+
     /// Reset the cursor blink by immediately showing the cursor then
     /// restarting the timer.
     reset_cursor_blink,
