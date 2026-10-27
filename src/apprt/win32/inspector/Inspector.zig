@@ -125,11 +125,13 @@ pub const Inspector = struct {
         });
         errdefer window.destroy(alloc);
 
+        ImHeap.install();
         const ig_ctx = cimgui.c.ImGui_CreateContext(null) orelse return error.OutOfMemory;
         live_contexts += 1;
         errdefer {
             cimgui.c.ImGui_DestroyContext(ig_ctx);
             live_contexts -= 1;
+            if (live_contexts == 0) ImHeap.release();
         }
         cimgui.c.ImGui_SetCurrentContext(ig_ctx);
         CoreInspector.setup();
@@ -196,6 +198,7 @@ pub const Inspector = struct {
         cimgui.c.ImGui_DestroyContext(self.ig_ctx);
         cimgui.c.ImGui_SetCurrentContext(null);
         live_contexts -= 1;
+        if (live_contexts == 0) ImHeap.release();
 
         self.window.destroy(alloc);
         releaseDevice(self.device);
@@ -578,9 +581,13 @@ test "win32 inspector: open and close frees the imgui context" {
     f.insp.tick();
     try testing.expectEqual(frames + 1, f.insp.frames);
     try testing.expect(f.insp.swap_chain != null);
+    // imgui lives in a heap of its own while a context does.
+    if (before == 0) try testing.expect(ImHeap.handle != null);
 
     f.insp.close();
     try testing.expectEqual(before, live_contexts);
+    // The heap goes with the last context.
+    if (before == 0) try testing.expect(ImHeap.handle == null);
     try testing.expect(f.surface.inspector == null);
     try testing.expectEqual(@as(usize, 0), open_list.items.len);
 }
@@ -694,3 +701,36 @@ test "win32 inspector: a present that queued nothing frees the slot" {
     try testing.expectEqual(@as(u64, 0), queuedAt(dxgi.STATUS_OCCLUDED, now));
     try testing.expectEqual(now, queuedAt(0, now));
 }
+
+/// imgui's allocations live in a heap of their own, destroyed with the last
+/// context: the process heap keeps the pages a closed inspector used.
+const ImHeap = struct {
+    extern "kernel32" fn HeapCreate(options: u32, initial: usize, max: usize) callconv(.winapi) ?win32.foundation.HANDLE;
+    extern "kernel32" fn HeapDestroy(heap: win32.foundation.HANDLE) callconv(.winapi) i32;
+    extern "kernel32" fn HeapAlloc(heap: win32.foundation.HANDLE, flags: u32, size: usize) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn HeapFree(heap: win32.foundation.HANDLE, flags: u32, ptr: ?*anyopaque) callconv(.winapi) i32;
+
+    var handle: ?win32.foundation.HANDLE = null;
+
+    /// Installs the allocator; the heap itself is made by the first
+    /// allocation. Idempotent.
+    fn install() void {
+        cimgui.c.ImGui_SetAllocatorFunctions(alloc, free, null);
+    }
+
+    fn alloc(size: usize, _: ?*anyopaque) callconv(.c) ?*anyopaque {
+        if (handle == null) handle = HeapCreate(0, 0, 0);
+        return HeapAlloc(handle orelse return null, 0, size);
+    }
+
+    fn free(ptr: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+        if (ptr == null) return;
+        if (handle) |h| _ = HeapFree(h, 0, ptr);
+    }
+
+    /// Everything imgui allocated is freed by now.
+    fn release() void {
+        if (handle) |h| _ = HeapDestroy(h);
+        handle = null;
+    }
+};
