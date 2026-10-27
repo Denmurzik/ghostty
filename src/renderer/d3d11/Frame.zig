@@ -1095,3 +1095,43 @@ test "d3d11 custom shader: fragCoord y is down" {
     try testing.expect(top[0] < 32);
     try testing.expect(bottom[0] > 224);
 }
+
+test "d3d11 custom shader: all shaders dropped renders straight to the target" {
+    var fx: Fixture = try .init(.native, 16, 16);
+    defer fx.deinit();
+
+    // generic falls back to no post pass when `post_pipelines` is empty
+    // (`has_custom_shaders` false), so the frame is drawn into the target.
+    var dropped = try fx.api.initShaders(testing.allocator, &.{"not hlsl {"});
+    defer dropped.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), dropped.post_pipelines.len);
+
+    var uniforms = try bufferpkg.Buffer(shaderspkg.Uniforms).init(fx.api.uniformBufferOptions(), 1);
+    defer uniforms.deinit();
+
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+
+    var u = fx.uniforms(8, 16, 1, 1);
+    u.bg_color = .{ 0x10, 0x20, 0x30, 255 };
+    try uniforms.sync(&.{u});
+
+    var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+    {
+        var pass = frame.renderPass(&.{.{
+            .target = .{ .target = fx.target },
+            .clear_color = .{ 0, 0, 0, 0 },
+        }});
+        defer pass.complete();
+        pass.step(.{
+            .pipeline = fx.shaders.pipelines.bg_color,
+            .uniforms = uniforms.buffer,
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+    }
+    frame.complete(false);
+
+    const pixels = try fx.pixels();
+    defer testing.allocator.free(pixels);
+    try expectPixel(.{ 0x30, 0x20, 0x10, 255 }, pixelAt(pixels, 16, 8, 8), 2);
+}

@@ -109,6 +109,9 @@ pub fn bytecode(entry: Entry) ![]const u8 {
 /// Bytecode of runtime sources (custom shaders) by SHA-256 of
 /// source, entry and profile. A failed compile is cached as null so a
 /// broken shader is compiled and reported once. Guarded by `mutex`.
+/// Entries (and their page-allocator bytecode) are kept for the life of
+/// the process, one per distinct source: a reloaded edited shader leaves
+/// its old version behind, which is small next to the compiler itself.
 var source_cache: std.AutoHashMapUnmanaged([32]u8, ?[]const u8) = .empty;
 
 /// How many runtime compiles actually ran. Guarded by `mutex`.
@@ -117,8 +120,8 @@ var source_compiles: usize = 0;
 /// Compiles `source` for `profile` (e.g. "ps_5_0"). Like `bytecode`, the
 /// result is owned by the cache and valid for the life of the process,
 /// and a repeated call with the same arguments does not compile again.
-/// The compiler is loaded on the first call, so nothing is paid for until
-/// a custom shader is configured.
+/// Nothing is compiled here until a custom shader is configured (the
+/// builtin shaders already load the compiler at startup).
 pub fn compileSource(
     source_: [:0]const u8,
     entry: [:0]const u8,

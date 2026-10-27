@@ -123,8 +123,9 @@ pub const Shaders = struct {
 const custom_shader_entry = "main";
 
 /// A post pipeline per custom shader: the full screen triangle with the
-/// user's pixel shader. A source that fails to compile or to create is
-/// logged and skipped.
+/// user's pixel shader. Like the Metal and OpenGL backends, one that fails
+/// to compile or to create drops all custom shaders (logging which), so
+/// the terminal renders without any rather than with a partial chain.
 fn initPostPipelines(
     alloc: Allocator,
     device: *Device,
@@ -140,8 +141,8 @@ fn initPostPipelines(
 
     for (custom_shaders, 0..) |src, i| {
         const code = hlsl.compileSource(src, custom_shader_entry, "ps_5_0") catch |err| {
-            log.warn("custom shader {d} skipped, compile failed: {}", .{ i, err });
-            continue;
+            log.warn("custom shader {d} failed to compile, custom shaders disabled: {}", .{ i, err });
+            return dropPostPipelines(alloc, &pipelines);
         };
         const pipeline: Pipeline = Pipeline.init(null, .{
             .device = device,
@@ -149,17 +150,19 @@ fn initPostPipelines(
             .pixel_bytecode = code,
             .blending_enabled = true,
         }) catch |err| {
-            log.warn("custom shader {d} skipped, pipeline failed: {}", .{ i, err });
-            continue;
+            log.warn("custom shader {d} pipeline failed, custom shaders disabled: {}", .{ i, err });
+            return dropPostPipelines(alloc, &pipelines);
         };
         pipelines.appendAssumeCapacity(pipeline);
     }
 
-    if (pipelines.items.len == 0) {
-        pipelines.deinit(alloc);
-        return &.{};
-    }
     return try pipelines.toOwnedSlice(alloc);
+}
+
+fn dropPostPipelines(alloc: Allocator, pipelines: *std.ArrayListUnmanaged(Pipeline)) []const Pipeline {
+    for (pipelines.items) |p| p.deinit();
+    pipelines.deinit(alloc);
+    return &.{};
 }
 
 fn deinitPostPipelines(alloc: Allocator, pipelines: []const Pipeline) void {
@@ -384,5 +387,16 @@ test "d3d11 shaders: all builtin pipelines initialise on WARP" {
     try std.testing.expectEqual(@as(usize, 32), shaders.pipelines.cell_text.stride);
     try std.testing.expectEqual(@as(usize, 48), shaders.pipelines.image.stride);
     try std.testing.expectEqual(@as(usize, 8), shaders.pipelines.bg_image.stride);
+    try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
+}
+
+test "d3d11 custom shader: one failing shader drops all custom shaders" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    const good = "float4 main() : SV_Target0 { return 0; } // drop-all-good";
+    var shaders: Shaders = try .init(alloc, device, &.{ good, "not hlsl {" });
+    defer shaders.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
 }
