@@ -65,11 +65,17 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
         # Click: the folder is recorded as opened.
         $cx = [int](($icon[0] + $icon[2]) / 2)
         $cy = [int](($icon[1] + $icon[3]) / 2)
-        Send-MouseClick -Hwnd $g.Hwnd -X $cx -Y $cy
-        $rec = Wait-Until -TimeoutSec 5 -PollMs 100 -Condition {
-            @((Get-GhosttyState -Class $g.Class).m3.opened) | Where-Object { $_.url -eq $folder -and $_.verdict -eq 'open' } | Select-Object -First 1
+        # A click that arrives while the desktop is busy may be lost: try up to three times.
+        $rec = $null
+        for ($try = 0; $try -lt 3 -and -not $rec; $try++) {
+            [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+            Send-MouseMove -Hwnd $g.Hwnd -X ($cx + 3) -Y $cy
+            Send-MouseClick -Hwnd $g.Hwnd -X $cx -Y $cy
+            $rec = Wait-Until -TimeoutSec 3 -PollMs 100 -Condition {
+                @((Get-GhosttyState -Class $g.Class).m3.opened) | Where-Object { $_.url -eq $folder -and $_.verdict -eq 'open' } | Select-Object -First 1
+            }
         }
-        if (-not $rec) { throw "the click did not record $folder as open: $(@((Get-GhosttyState -Class $g.Class).m3.opened) | ConvertTo-Json -Compress -Depth 4)" }
+        if (-not $rec) { throw "the click did not record $folder as open: $((Get-GhosttyState -Class $g.Class).m3 | ConvertTo-Json -Compress -Depth 6)" }
         Write-E2eInfo 'click recorded as open'
 
         # Drag onto the terminal: the folder is pasted (msys form in Git Bash).
@@ -78,6 +84,7 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
         Send-Typed $g.Hwnd "echo -n "
         Start-Sleep -Milliseconds 400
         $below = [int]$s.bounds[3] + 100
+        [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
         Send-MouseDrag -Hwnd $g.Hwnd -X $cx -Y $cy -ToX 300 -ToY $below -Steps 25 -HoldMs 400
         Start-Sleep -Milliseconds 1200
         Send-Typed $g.Hwnd " > `"`$TEMP/gt-proxy.txt`""

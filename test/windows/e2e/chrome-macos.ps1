@@ -153,14 +153,20 @@ function Test-Look([string]$Tag, [string]$Background, [string]$Foreground) {
         $before = Get-ScreenShot $zone.X $zone.Y $zone.Width $zone.Height
         $cx = [int](($t[0] + $t[2]) / 2)
         $cy = [int](($t[1] + $t[3]) / 2)
-        Send-MouseMove -Hwnd $g.Hwnd -X ($cx - 5) -Y $cy
-        Start-Sleep -Milliseconds 100
-        Send-MouseMove -Hwnd $g.Hwnd -X $cx -Y $cy
-        Start-Sleep -Milliseconds 400
-        $after = Get-ScreenShot $zone.X $zone.Y $zone.Width $zone.Height
+        # A pointer move that arrives while the desktop is busy may be lost: try up to three times.
         $diff = 0
-        for ($y = 0; $y -lt $before.Height; $y++) { for ($x = 0; $x -lt $before.Width; $x++) { if ((Get-Luma $before.GetPixel($x, $y)) -ne (Get-Luma $after.GetPixel($x, $y))) { $diff++ } } }
-        $before.Dispose(); $after.Dispose()
+        for ($try = 0; $try -lt 3 -and $diff -lt 12; $try++) {
+            [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+            Send-MouseMove -Hwnd $g.Hwnd -X ($cx - 5) -Y $cy
+            Start-Sleep -Milliseconds 100
+            Send-MouseMove -Hwnd $g.Hwnd -X $cx -Y $cy
+            Start-Sleep -Milliseconds 400
+            $after = Get-ScreenShot $zone.X $zone.Y $zone.Width $zone.Height
+            $diff = 0
+            for ($y = 0; $y -lt $before.Height; $y++) { for ($x = 0; $x -lt $before.Width; $x++) { if ((Get-Luma $before.GetPixel($x, $y)) -ne (Get-Luma $after.GetPixel($x, $y))) { $diff++ } } }
+            $after.Dispose()
+        }
+        $before.Dispose()
         Write-E2eInfo "$Tag hover: $diff pixels of the key zone changed"
         if ($diff -lt 12) { throw "$Tag : hovering a tab did not show the close button ($diff pixels changed)" }
         Save-Shot '3tabs-hover'
