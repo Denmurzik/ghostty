@@ -26,7 +26,7 @@ Invoke-E2eScenario 'palette' {
     if ((Get-Pal).rows -lt 1) { throw 'the palette lists no commands' }
     Save-Evidence 'palette-open' $g -Window
 
-    Send-Typed $g.Hwnd 'split right'
+    Invoke-SendInput -Hwnd $g.Hwnd -Text 'split right' -Panel
     if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-Pal).query -eq 'split right' })) {
         throw "the query is '$((Get-Pal).query)', expected 'split right'"
     }
@@ -36,7 +36,7 @@ Invoke-E2eScenario 'palette' {
     Save-Evidence 'palette-filtered' $g -Window
 
     # Enter: the palette closes, the command runs on the surface that was focused.
-    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter'
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter' -Panel
     if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { -not (Get-Pal).open })) { throw 'Enter did not close the palette' }
     $st = Wait-SurfaceCount $g 2
     if (-not (@($st.Surfaces | Where-Object { $_.focused }).Count -ge 1)) { throw 'no surface has the focus after the command' }
@@ -49,7 +49,7 @@ Invoke-E2eScenario 'palette' {
 
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'toggle_command_palette')
     if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { $p = Get-Pal; $p.open -and $p.focused })) { throw 'the palette did not open for Esc' }
-    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'esc'
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'esc' -Panel
     if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { -not (Get-Pal).open })) { throw 'Esc did not close the palette' }
     [void](Wait-SurfaceCount $g 2)
 }

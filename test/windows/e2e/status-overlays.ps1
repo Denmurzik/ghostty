@@ -19,6 +19,7 @@ Invoke-E2eScenario 'status-overlays' {
         $g = Start-E2eGhostty -ConfigText $cfg
         [void](Wait-ChildNamed $g @('cmd.exe') 15)
         if (-not (Set-ForegroundSafe -Hwnd $g.Hwnd)) { throw 'E2E-SKIP: could not take the foreground' }
+        Set-WindowLayout $g.Hwnd '00000409'
 
         function Get-VisibleLabels { @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyOverlayLabel') | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) }) }
         function Wait-Labels([int]$Count, [double]$TimeoutSec) {

@@ -256,6 +256,8 @@ Brings a window to the foreground even though Windows normally refuses
 function Set-ForegroundSafe {
     param([Parameter(Mandatory)][IntPtr]$Hwnd)
 
+    # Already there: no Alt tap, which would close an open menu or panel.
+    if ([GhosttyHarness.Native]::GetForegroundWindow() -eq $Hwnd) { return $true }
     [void][GhosttyHarness.Native]::AllowSetForegroundWindow($script:ASFW_ANY)
     # A lone Alt tap lifts the foreground lock for the next call.
     [GhosttyHarness.Native]::keybd_event($script:VK_MENU, 0, 0, [UIntPtr]::Zero)

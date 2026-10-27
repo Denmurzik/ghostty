@@ -29,7 +29,7 @@ Invoke-E2eScenario 'tab-menu' {
         @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, $Class) | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) })
     }
     function Wait-Popup([string]$Class, [bool]$Present, [string]$What, [double]$TimeoutSec = 4) {
-        $ok = Wait-Until -TimeoutSec $TimeoutSec -PollMs 50 -Condition { ((Get-Popup $Class).Count -gt 0) -eq $Present }
+        $ok = Wait-Until -TimeoutSec $TimeoutSec -PollMs 50 -Condition { (@(Get-Popup $Class).Count -gt 0) -eq $Present }
         if (-not $ok) { throw "$What : the $Class window is $(if ($Present) { 'missing' } else { 'still there' })" }
     }
 
@@ -43,7 +43,7 @@ Invoke-E2eScenario 'tab-menu' {
 
     # Items: Close Tab, Close Other Tabs, ... Down twice selects "Close Other Tabs"
     # (the first Down selects the first item).
-    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'down', 'down', 'enter'
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'down', 'down', 'enter' -Panel
     Wait-Popup '#32768' $false 'Enter on the menu item'
     $w = Wait-Win 'one tab left' { param($w) @($w.tabs).Count -eq 1 }
 

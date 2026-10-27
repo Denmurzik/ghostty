@@ -32,18 +32,16 @@ Invoke-E2eScenario 'search' {
     }
 
     Assert-BarFocused 'typing'
-    Invoke-SendInput -Hwnd $g.Hwnd -Text 'alpha'
+    Invoke-SendInput -Hwnd $g.Hwnd -Text 'alpha' -Panel
     # The command line itself holds `alpha` once more: 3 in the output + 1 typed.
     if (-not (Wait-Until -TimeoutSec 1 -PollMs 50 -Condition { (Get-Search).total -ge 3 })) {
         throw "search total did not reach 3 within 1 s: $((Get-Search) | ConvertTo-Json -Compress)"
     }
-    if (-not (Wait-Until -TimeoutSec 3 -PollMs 100 -Condition { $null -ne (Get-Search).selected })) {
-        throw 'no match is selected'
-    }
+    # As on macOS no match is selected until the first Enter ("-/N" counter).
     foreach ($round in 1, 2) {
         $before = (Get-Search).selected
         Assert-BarFocused "Enter $round"
-        Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter'
+        Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter' -Panel
         if (-not (Wait-Until -TimeoutSec 3 -PollMs 100 -Condition { (Get-Search).selected -ne $before })) {
             throw "Enter $round did not advance the selected match (still $before)"
         }
@@ -51,7 +49,7 @@ Invoke-E2eScenario 'search' {
 
     # Esc with text in the field: the bar stays, the surface has the focus.
     Assert-BarFocused 'Esc'
-    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'esc'
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'esc' -Panel
     if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { $s = Get-Search; $s.visible -and -not $s.focused })) {
         throw "Esc with text did not move the focus to the surface and keep the bar: $((Get-Search) | ConvertTo-Json -Compress)"
     }
@@ -63,6 +61,6 @@ Invoke-E2eScenario 'search' {
 
     # Echo oracle: the keyboard reaches the shell again.
     $file = Join-Path $g.Sandbox.Tmp 'gt-search.txt'
-    Send-Line $g.Hwnd "echo search-ok > '$($file -replace '\','/')'"
+    Send-Line $g.Hwnd "echo search-ok > '$($file -replace '\\','/')'"
     if (-not (Wait-File $file 10)) { throw 'typing after the search reached no shell' }
 }

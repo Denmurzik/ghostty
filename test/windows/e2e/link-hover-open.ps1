@@ -32,17 +32,21 @@ Invoke-E2eScenario 'link-hover-open' {
     # The links sit at the start of rows 0 and 1.
     Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+l'
     Start-Sleep -Milliseconds 300
-    Send-Line $g.Hwnd ("printf '\033]8;;$url\033\ghostty-link\033]8;;\033\\n\033]8;;ms-settings:\033\settings-link\033]8;;\033\\n'")
+    Send-Line $g.Hwnd ("printf '\033]8;;$url\033\\ghostty-link\033]8;;\033\\\n\033]8;;ms-settings:\033\\settings-link\033]8;;\033\\\n'")
     Start-Sleep -Milliseconds 800
     $surface = Get-SurfaceHwnd
     [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
 
     # Row heights are unknown here: probe the first rows for the link.
+    # OSC 8 links are only live while Ctrl (or Super) is held.
     $hovered = $false
-    foreach ($y in 20, 40, 60, 80) {
+    [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+    try {
+    foreach ($y in 20..300 | Where-Object { $_ % 10 -eq 0 }) {
         Send-MouseMove -Hwnd $surface -X 30 -Y $y
-        if (Wait-Until -TimeoutSec 1 -PollMs 50 -Condition { @(Get-VisibleLabels).Count -ge 1 }) { $hovered = $true; $row = $y; break }
+        if (Wait-Until -TimeoutSec 0.5 -PollMs 50 -Condition { @(Get-VisibleLabels).Count -ge 1 }) { $hovered = $true; $row = $y; break }
     }
+    } finally { [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero) }
     if (-not $hovered) {
         # L1: if ConPTY drops OSC 8 the steps below are an owner-approved gap.
         Save-Evidence 'no-label' $g -Window

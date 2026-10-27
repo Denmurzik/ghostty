@@ -42,6 +42,7 @@ public delegate bool EnumProc(IntPtr h, IntPtr l);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint tid);
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
@@ -517,8 +518,21 @@ function Invoke-SendInput {
         [string[]]$Keys,
         [string]$Text,
         [string[]]$Scancodes,
-        [int]$DelayMs = 15
+        [int]$DelayMs = 15,
+        # Type into the window of the same process that has the foreground (a
+        # panel such as the search bar or the palette is a top-level popup of
+        # its own): taking the foreground for the main window would pull the
+        # focus out of the panel's EDIT.
+        [switch]$Panel
     )
+
+    if ($Panel) {
+        $fg = [GhosttyE2e.Win]::GetForegroundWindow()
+        $fgPid = [uint32]0; $mainPid = [uint32]0
+        [void][GhosttyE2e.Win]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+        [void][GhosttyE2e.Win]::GetWindowThreadProcessId($Hwnd, [ref]$mainPid)
+        if ($fg -ne [IntPtr]::Zero -and $fgPid -eq $mainPid) { $Hwnd = $fg }
+    }
 
     # The input language follows the foreground window (it is per session
     # unless the user chose per-window layouts), so a dialog or a focus
