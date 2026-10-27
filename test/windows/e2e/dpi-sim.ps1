@@ -83,7 +83,7 @@ Invoke-E2eScenario 'dpi-sim' {
 
     # 144
     Set-Dpi 144
-    $w = Assert-Dpi 144 1.5 60
+    $w = Assert-Dpi 144 1.5 ([int][math]::Round($baseStrip * 1.5 / $baseScale))
     $cell = [int]$w.cell[1]
     if ([math]::Abs($cell - $baseCell * 1.5 / $baseScale) -gt 1.5) { throw "cell height at 144: $cell, want about $($baseCell * 1.5 / $baseScale)" }
     if (-not @($w.tabs)[0].zoomed) { throw 'the split zoom was lost by the dpi change' }
