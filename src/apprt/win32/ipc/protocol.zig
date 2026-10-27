@@ -45,6 +45,9 @@ pub const Request = struct {
     action: []const u8 = "",
     dpi: u32 = 0,
     scheme: []const u8 = "",
+    /// `export-io` (test op): the text to export and the file it goes to.
+    text: []const u8 = "",
+    path: []const u8 = "",
     /// GetTickCount64() value after which the server must not act; 0 = none.
     deadline_ms: u64 = 0,
 };

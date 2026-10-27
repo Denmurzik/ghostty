@@ -9,17 +9,21 @@ const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const CoreSurface = @import("../../Surface.zig");
 const App = @import("App.zig");
+const CommandPalette = @import("CommandPalette.zig");
 const Chrome = @import("Chrome.zig");
 const Overrides = @import("Overrides.zig");
 const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
 const TabStrip = @import("TabStrip.zig");
 const bell = @import("bell.zig");
+const composition_mod = @import("composition.zig");
 const dialogs = @import("dialogs.zig");
 const dpi_mod = @import("dpi.zig");
 const drop = @import("drop.zig");
 const frame_mod = @import("frame.zig");
 const geom = @import("geom.zig");
+const hooks_mod = @import("hooks.zig");
+const overlay_mod = @import("overlay.zig");
 const placement_mod = @import("placement.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const strip_input_mod = @import("strip_input.zig");
@@ -50,12 +54,16 @@ pub const Hook = *const fn (
 /// The feature hooks, in dispatch order. Each one sees a message before
 /// the window's own cases.
 const hooks = [_]Hook{
+    hooks_mod.windowMessage,
     frame_mod.handle,
     strip_input_mod.handle,
     theme.handle,
     taskbar_mod.handle,
     drop.handle,
 };
+
+/// What the window is for: the quick terminal is a window of its own kind.
+pub const Kind = enum { normal, quick };
 
 /// What `WM_GHOSTTY_CLOSE_TAB` closes (wparam), relative to the tab whose
 /// id is in lparam.
@@ -96,6 +104,12 @@ frame: frame_mod.State = .{},
 placement: placement_mod.State = .{},
 taskbar: taskbar_mod.State = .{},
 overlay: resize_overlay.State = .{},
+
+/// M3 feature state, one field per feature module.
+kind: Kind = .normal,
+overlays: overlay_mod.WindowState = .{},
+palette: CommandPalette.State = .{},
+composition: composition_mod.WindowState = .{},
 
 /// Client-area limits reported by core, if any. Applied by
 /// WM_GETMINMAXINFO.
@@ -879,12 +893,16 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
     // so occlusion is forwarded from here.
     if (wparam == win32.user32.SIZE_MINIMIZED) {
         self.setMinimized(true);
+        hooks_mod.windowChanged(self, .minimized);
         return;
     }
     if (wparam != win32.user32.SIZE_RESTORED and wparam != win32.user32.SIZE_MAXIMIZED) return;
 
     self.setMinimized(false);
     self.layout();
+    // SIZE_RESTORED also ends a maximize: features treat `.restored` as idempotent.
+    if (wparam == win32.user32.SIZE_RESTORED) hooks_mod.windowChanged(self, .restored);
+    hooks_mod.windowChanged(self, .sized);
 }
 
 /// Tell the active tab whether the window is minimized (its surfaces are
@@ -943,6 +961,7 @@ pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) 
         var it = tab.tree.iterator();
         while (it.next()) |entry| entry.view.flushSize();
     }
+    hooks_mod.windowChanged(self, .dpi);
 }
 
 fn setOuterRect(self: *Window, r: geom.Rect) void {
@@ -1124,6 +1143,8 @@ fn wndProc(
             return 0;
         },
 
+        win32.user32.WM_MOVE => hooks_mod.windowChanged(self, .moved),
+
         win32.user32.WM_SIZE => {
             self.handleSize(wparam);
             return 0;
@@ -1154,10 +1175,13 @@ fn wndProc(
         },
 
         win32.user32.WM_ACTIVATE => {
-            if ((wparam & 0xFFFF) != win32.user32.WA_INACTIVE) self.app.last_active = self;
+            const active = (wparam & 0xFFFF) != win32.user32.WA_INACTIVE;
+            if (active) self.app.last_active = self;
+            hooks_mod.windowChanged(self, if (active) .activated else .deactivated);
         },
 
         win32.user32.WM_DESTROY => {
+            hooks_mod.windowChanged(self, .destroying);
             self.app.windowDestroyed(self);
             return 0;
         },

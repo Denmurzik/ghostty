@@ -14,6 +14,7 @@ const Overrides = @import("Overrides.zig");
 const SplitLayout = @import("SplitLayout.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const hooks_mod = @import("hooks.zig");
 const title_edit = @import("title_edit.zig");
 const util = @import("util.zig");
 const geom = @import("geom.zig");
@@ -247,6 +248,7 @@ pub fn setVisible(self: *Tab, visible: bool) void {
     if (visible) self.layout();
 
     self.applyOcclusion(visible);
+    hooks_mod.tabShown(self, visible);
 }
 
 /// Tell core which surfaces are on screen. Only the leaves the layout shows
@@ -342,6 +344,8 @@ pub fn layout(self: *Tab) void {
         c.view.core_surface.occlusionCallback(c.visible) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
     }
+
+    hooks_mod.tabLayoutChanged(self);
 }
 
 /// Flags for placing one pane. A hidden pane keeps its position and size:
@@ -422,6 +426,7 @@ pub fn split(
     surface.applySize(surface.size.load(.acquire));
 
     self.focused = surface;
+    hooks_mod.tabLayoutChanged(self);
     if (self.window.activeTab() == self) self.focus();
     return surface;
 }
@@ -471,6 +476,7 @@ pub fn removeSurface(self: *Tab, s: *Surface) void {
     // joined as the old tree is released.
     _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_HIDE);
     self.replaceTree(new_tree);
+    hooks_mod.tabLayoutChanged(self);
     if (self.window.activeTab() == self) self.focus();
 }
 
@@ -504,6 +510,7 @@ pub fn needsConfirmClose(self: *const Tab) bool {
 
 /// Move the tab to another top-level window.
 pub fn setWindow(self: *Tab, window: *Window) void {
+    const from = self.window;
     const rescale = self.window.dpi != window.dpi;
     // The progress bar of the moved surface stays on the old button otherwise.
     var moved = self.tree.iterator();
@@ -517,6 +524,7 @@ pub fn setWindow(self: *Tab, window: *Window) void {
         // The swap chain was made for the old parent chain.
         entry.view.bumpPresentTarget();
     }
+    hooks_mod.tabReparented(self, from, window);
 }
 
 /// The surface to focus once `at` is removed: the previous leaf, else the

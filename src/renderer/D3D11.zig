@@ -70,6 +70,11 @@ pub const PresentTarget = struct {
     /// chain only when a present then fails (see `recreateOnPresentFailure`).
     /// Null: never bumped.
     generation: ?*const std.atomic.Value(u32) = null,
+
+    /// Decoration word written by the apprt (UI thread): unfocused-split
+    /// dimming and the bell border, read by the render thread each frame.
+    /// Null: no decorations.
+    decor: ?*const std.atomic.Value(u64) = null,
 };
 
 /// Pack a size into one word so it can be read and written atomically.

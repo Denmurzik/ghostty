@@ -3,7 +3,7 @@
 //! request into one response.
 //!
 //! The user-facing ops (`new-window`, `new-tab`, `toggle-quick-terminal`)
-//! are always served. The test ops (`action`, `dpi`, `color-scheme`,
+//! are always served. The test ops (`action`, `dpi`, `color-scheme`, `export-io`,
 //! `state`) answer `unknown op` unless the process was started with
 //! `GHOSTTY_WIN32_TEST_IPC=1`.
 const std = @import("std");
@@ -23,6 +23,9 @@ const instance = @import("../instance.zig");
 const theme = @import("../theme.zig");
 const protocol = @import("protocol.zig");
 const Server = @import("Server.zig");
+const QuickTerminal = @import("../QuickTerminal.zig");
+const export_io = @import("../export_io.zig");
+const hooks = @import("../hooks.zig");
 
 const log = std.log.scoped(.win32_ipc_ops);
 
@@ -91,11 +94,12 @@ pub fn handleEarly(app: *App, alloc: Allocator, request: []const u8, early: ?*Se
     return switch (op) {
         .@"new-window" => newWindow(app, alloc, a, req, early),
         .@"new-tab" => newTab(app, alloc, a, req, early),
-        .@"toggle-quick-terminal" => reply(alloc, .failed, "", "quick terminal is not available yet", null),
+        .@"toggle-quick-terminal" => toggleQuickTerminal(app, alloc),
         .action => action(app, alloc, req),
         .dpi => setDpi(app, alloc, req),
         .@"color-scheme" => colorScheme(app, alloc, req),
         .state => state(app, alloc),
+        .@"export-io" => exportIo(app, alloc, req),
     };
 }
 
@@ -107,11 +111,12 @@ const Op = enum {
     dpi,
     @"color-scheme",
     state,
+    @"export-io",
 
     fn isTest(self: Op) bool {
         return switch (self) {
             .@"new-window", .@"new-tab", .@"toggle-quick-terminal" => false,
-            .action, .dpi, .@"color-scheme", .state => true,
+            .action, .dpi, .@"color-scheme", .state, .@"export-io" => true,
         };
     }
 };
@@ -124,9 +129,9 @@ fn reply(
     data_json: ?[]const u8,
 ) []u8 {
     return protocol.encodeResponse(alloc, code, stdout, stderr, data_json) catch {
-        // Out of memory twice over: a fixed answer still has to exist.
-        return alloc.dupe(u8, "{\"v\":1,\"code\":1,\"stdout\":\"\",\"stderr\":\"out of memory\",\"data\":null}") catch
-            @panic("out of memory answering an IPC request");
+        // Out of memory twice over: nothing can be allocated for an answer. An
+        // empty one frees as a no-op; the client sees a closed pipe and fails.
+        return &.{};
     };
 }
 
@@ -255,6 +260,24 @@ fn colorScheme(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
     return reply(alloc, .ok, "", "", null);
 }
 
+fn toggleQuickTerminal(app: *App, alloc: Allocator) []u8 {
+    if (!QuickTerminal.ipcToggle(app)) {
+        return reply(alloc, .failed, "", "quick terminal is not available yet", null);
+    }
+    return reply(alloc, .ok, "", "", null);
+}
+
+/// Test op: what the inspector's export button emits, which a script cannot
+/// click. `path` is the destination; no dialog is shown.
+fn exportIo(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
+    const surface = targetSurface(app, req.surface) orelse
+        return reply(alloc, .failed, "", "no such surface", null);
+    if (req.path.len == 0) return reply(alloc, .bad_request, "", "missing path", null);
+    const saved = export_io.saveTest(app, .{ .surface = surface.core() }, .{ .contents = req.text }, req.path);
+    if (!saved) return reply(alloc, .failed, "", "export failed", null);
+    return reply(alloc, .ok, "", "", null);
+}
+
 fn state(app: *App, alloc: Allocator) []u8 {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
@@ -282,6 +305,7 @@ fn writeState(w: *std.Io.Writer, app: *App) !void {
     try jw.beginArray();
     for (app.windows.items) |window| try writeWindow(&jw, window);
     try jw.endArray();
+    try hooks.testState(app, &jw);
     try jw.endObject();
 }
 

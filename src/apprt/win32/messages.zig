@@ -31,7 +31,20 @@ pub const WM_GHOSTTY_TRAY = win32.user32.WM_APP + 9;
 pub const WM_GHOSTTY_DROP = win32.user32.WM_APP + 10;
 /// Posted to a top-level window to close every window of the app.
 pub const WM_GHOSTTY_CLOSE_ALL = win32.user32.WM_APP + 11;
-// WM_APP + 12 ... WM_APP + 15 are reserved for M3.
+/// Posted to the message window when a toast notification is clicked
+/// (wparam = surface id).
+pub const WM_GHOSTTY_NOTIFY_CLICK = win32.user32.WM_APP + 12;
+/// Posted to a surface when a composition swap chain waits to be attached
+/// (wparam = present-target generation); the chain itself waits in
+/// `composition.SurfaceState`.
+pub const WM_GHOSTTY_SET_CONTENT = win32.user32.WM_APP + 13;
+/// Posted to a top-level window to run a dialog from the message loop
+/// (wparam = `hooks.DialogKind`, lparam = heap payload owned by the handler).
+pub const WM_GHOSTTY_POSTED_DIALOG = win32.user32.WM_APP + 14;
+/// Posted to a top-level window to run an overlay command (lparam = heap
+/// `overlay.Command`, freed by the handler).
+pub const WM_GHOSTTY_OVERLAY_CMD = win32.user32.WM_APP + 15;
+// WM_APP + 16 ... WM_APP + 31 are reserved for M4 and later.
 
 /// `WM_TIMER` ids, unique per window class (a timer id is only meaningful
 /// to the window that owns the timer).
@@ -39,6 +52,8 @@ pub const timers = struct {
     pub const msg_window = struct {
         /// Delayed quit (`quit-after-last-window-closed-delay`).
         pub const quit: usize = 1;
+        /// Debounce of the renderer recovery (`recovery.zig`).
+        pub const recovery: usize = 2;
     };
     pub const tab = struct {
         /// Throttled relayout while a split divider is dragged.
@@ -51,16 +66,31 @@ pub const timers = struct {
     pub const surface = struct {
         /// Applies the coalesced size of a live resize to core.
         pub const resize: usize = 1;
+        /// Expiry of the bell border (`decor.zig`).
+        pub const decor: usize = 2;
+    };
+    /// The overlay windows (`overlay.zig`).
+    pub const overlay = struct {
+        /// Hides a label or toast after its duration.
+        pub const hide: usize = 1;
+        /// Debounce of the search query (`SearchBar.zig`).
+        pub const search_debounce: usize = 2;
+    };
+    pub const inspector = struct {
+        /// 30 Hz render tick (`Inspector.zig`).
+        pub const render: usize = 1;
     };
     pub const window = struct {
         /// Reserved: strip auto-scroll while a tab is dragged.
         pub const strip_autoscroll: usize = 1;
         /// Drops a stale taskbar progress report (`taskbar.zig`).
         pub const taskbar_stale: usize = 0x2600;
+        /// Slide animation and autohide of the quick terminal.
+        pub const quick_slide: usize = 2;
     };
 };
 
-test "win32 skeleton: private message ids are unique and keep M1's values" {
+test "win32 skeleton: M3 message ids are unique and keep M1/M2 values" {
     const ids = [_]u32{
         WM_GHOSTTY_WAKEUP,
         WM_GHOSTTY_CLIPBOARD_READ,
@@ -73,20 +103,27 @@ test "win32 skeleton: private message ids are unique and keep M1's values" {
         WM_GHOSTTY_TRAY,
         WM_GHOSTTY_DROP,
         WM_GHOSTTY_CLOSE_ALL,
+        WM_GHOSTTY_NOTIFY_CLICK,
+        WM_GHOSTTY_SET_CONTENT,
+        WM_GHOSTTY_POSTED_DIALOG,
+        WM_GHOSTTY_OVERLAY_CMD,
     };
     for (ids, 0..) |id, i| {
         try std.testing.expect(id > win32.user32.WM_APP);
-        try std.testing.expect(id <= win32.user32.WM_APP + 15);
+        try std.testing.expect(id <= win32.user32.WM_APP + 31);
         for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
     }
 
+    try std.testing.expectEqual(win32.user32.WM_APP + 11, WM_GHOSTTY_CLOSE_ALL);
+    try std.testing.expectEqual(win32.user32.WM_APP + 12, WM_GHOSTTY_NOTIFY_CLICK);
+    try std.testing.expectEqual(win32.user32.WM_APP + 15, WM_GHOSTTY_OVERLAY_CMD);
     try std.testing.expectEqual(App.WM_GHOSTTY_WAKEUP, WM_GHOSTTY_WAKEUP);
     try std.testing.expectEqual(App.WM_GHOSTTY_QUIT, WM_GHOSTTY_QUIT);
     try std.testing.expectEqual(App.WM_GHOSTTY_QUIT_TIMER, WM_GHOSTTY_QUIT_TIMER);
     try std.testing.expectEqual(clipboard.WM_GHOSTTY_CLIPBOARD_READ, WM_GHOSTTY_CLIPBOARD_READ);
 }
 
-test "win32 skeleton: timer ids are unique per window class" {
+test "win32 skeleton: timer ids are unique per class incl. M3" {
     try std.testing.expectEqual(@as(usize, 1), timers.msg_window.quit);
     try std.testing.expectEqual(@as(usize, 1), timers.tab.divider_drag);
     try std.testing.expectEqual(@as(usize, 1), timers.resize_overlay.hide);
@@ -95,11 +132,15 @@ test "win32 skeleton: timer ids are unique per window class" {
 
     // A timer id is only meaningful to the window that owns it, so ids
     // must differ within one class; the top-level window has several.
-    const window_ids = [_]usize{
-        timers.window.strip_autoscroll,
-        timers.window.taskbar_stale,
+    const classes = .{
+        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery },
+        [_]usize{ timers.surface.resize, timers.surface.decor },
+        [_]usize{ timers.overlay.hide, timers.overlay.search_debounce },
+        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide },
     };
-    for (window_ids, 0..) |id, i| {
-        for (window_ids[i + 1 ..]) |other| try std.testing.expect(id != other);
+    inline for (classes) |ids| {
+        for (ids, 0..) |id, i| {
+            for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
+        }
     }
 }

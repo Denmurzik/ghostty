@@ -18,14 +18,22 @@ const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
 const Overrides = @import("Overrides.zig");
+const Inspector = @import("inspector/Inspector.zig");
+const SearchBar = @import("SearchBar.zig");
 const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
+const badges_mod = @import("badges.zig");
 const clipboard = @import("clipboard.zig");
+const composition_mod = @import("composition.zig");
+const decor_mod = @import("decor.zig");
 const dialogs = @import("dialogs.zig");
 const dpi = @import("dpi.zig");
 const drop = @import("drop.zig");
+const hooks_mod = @import("hooks.zig");
 const ime = @import("ime.zig");
+const key_state_mod = @import("key_state.zig");
 const keyboard = @import("keyboard.zig");
+const link_mod = @import("link.zig");
 const messages = @import("messages.zig");
 const mouse = @import("mouse.zig");
 const resize_overlay = @import("resize_overlay.zig");
@@ -110,6 +118,17 @@ keyboard_state: keyboard.State,
 mouse_state: mouse.State,
 ime_state: ime.State,
 clipboard_state: clipboard.State,
+
+/// M3 feature state, one field per feature module. The renderer thread reads
+/// `decor_word` through the present target.
+decor_word: std.atomic.Value(u64) = .init(0),
+search: SearchBar.State = .{},
+link: link_mod.State = .{},
+badges: badges_mod.State = .{},
+key_state: key_state_mod.State = .{},
+decor: decor_mod.State = .{},
+composition: composition_mod.SurfaceState = .{},
+inspector: ?*Inspector.Inspector = null,
 
 /// Create the child window filling `tab`'s container and the core surface
 /// inside it. The surface has no owner yet (`refs` is zero): the split tree
@@ -208,6 +227,8 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
             log.warn("focus callback failed err={}", .{err});
     }
 
+    hooks_mod.surfaceCreated(self);
+
     return self;
 }
 
@@ -241,6 +262,8 @@ pub fn destroy(self: *Surface) void {
 /// list; core's `App.deinit` calls this on whatever is left.
 pub fn deinit(self: *Surface) void {
     const alloc = self.app.core_app.alloc;
+
+    hooks_mod.surfaceDestroying(self);
 
     clipboard.cancelPending(self);
     taskbar.surfaceClosed(self.window, self.id);
@@ -347,6 +370,7 @@ pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
         .size = &self.size,
         .id = self.id,
         .generation = &self.present_generation,
+        .decor = &self.decor_word,
     };
 }
 
@@ -510,7 +534,9 @@ fn handleFocus(self: *Surface, focused: bool) void {
         self.bell_ringing = false;
         self.window.refreshTitle();
         Chrome.invalidate(self.window);
+        hooks_mod.tabLayoutChanged(self.tab);
     }
+    hooks_mod.surfaceFocus(self, focused);
     if (!self.initialized) return;
     self.core_surface.focusCallback(focused) catch |err|
         log.warn("focus callback failed err={}", .{err});
@@ -535,6 +561,8 @@ fn wndProc(
     const self = util.fromUserData(Surface, hwnd) orelse
         return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
+    if (hooks_mod.surfaceMessage(self, msg, wparam, lparam)) |result| return result;
+
     switch (msg) {
         win32.user32.WM_SIZE => {
             self.handleSize(wparam, lparam);
@@ -557,6 +585,9 @@ fn wndProc(
             scrollbar_mod.handle(self, wparam);
             return 0;
         },
+
+        // The default procedure still has to produce the WM_SIZE and WM_MOVE.
+        win32.user32.WM_WINDOWPOSCHANGED => hooks_mod.surfaceRectChanged(self),
 
         win32.user32.WM_SETFOCUS => {
             self.handleFocus(true);

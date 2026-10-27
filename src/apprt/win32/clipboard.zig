@@ -20,6 +20,7 @@ const CoreSurface = @import("../../Surface.zig");
 const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
 const dialogs = @import("dialogs.zig");
+const hooks_mod = @import("hooks.zig");
 const messages = @import("messages.zig");
 const util = @import("util.zig");
 
@@ -155,7 +156,11 @@ pub fn setClipboard(
         if (terminal.clipboard.isTextMime(content.mime)) break content.data;
     } else return error.NoTextContent;
 
-    if (!confirm) return write(surface.hwnd, text);
+    if (!confirm) {
+        try write(surface.hwnd, text);
+        if (t == .standard) hooks_mod.clipboardWritten(surface, text.len == 0);
+        return;
+    }
 
     const alloc = surface.app.core_app.alloc;
     const copy = try alloc.dupeSentinel(u8, text, 0);

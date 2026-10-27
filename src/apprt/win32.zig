@@ -31,4 +31,25 @@ test {
     _ = @import("win32/ipc/Server.zig");
     _ = @import("win32/ipc/client.zig");
     _ = @import("win32/ipc/ops.zig");
+    _ = @import("win32/hooks.zig");
+    _ = @import("win32/overlay.zig");
+    _ = @import("win32/decor.zig");
+    _ = @import("win32/hotkeys.zig");
+    _ = @import("win32/visibility.zig");
+    _ = @import("win32/QuickTerminal.zig");
+    _ = @import("win32/notify.zig");
+    _ = @import("win32/link.zig");
+    _ = @import("win32/shell_open.zig");
+    _ = @import("win32/SearchBar.zig");
+    _ = @import("win32/CommandPalette.zig");
+    _ = @import("win32/palette_filter.zig");
+    _ = @import("win32/key_state.zig");
+    _ = @import("win32/badges.zig");
+    _ = @import("win32/app_toast.zig");
+    _ = @import("win32/composition.zig");
+    _ = @import("win32/config_errors.zig");
+    _ = @import("win32/export_io.zig");
+    _ = @import("win32/tab_menu.zig");
+    _ = @import("win32/recovery.zig");
+    _ = @import("win32/inspector/Inspector.zig");
 }

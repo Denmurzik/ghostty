@@ -6,11 +6,11 @@ const configpkg = @import("../../../config.zig");
 const App = @import("../App.zig");
 const Chrome = @import("../Chrome.zig");
 const Window = @import("../Window.zig");
+const hooks = @import("../hooks.zig");
 const messages = @import("../messages.zig");
 const theme = @import("../theme.zig");
 const tray = @import("../tray.zig");
 const util = @import("../util.zig");
-const link_policy = @import("../link_policy.zig");
 
 const Config = configpkg.Config;
 
@@ -111,6 +111,11 @@ pub fn reload_config(app: *App, target: apprt.Target, value: apprt.Action.Value(
         return true;
     }
 
+    // Seen by the config_change this reload produces: its hooks tell a reload
+    // from a soft apply.
+    app.reload_pending = true;
+    defer app.reload_pending = false;
+
     var config = Config.load(app.core_app.alloc) catch |err| {
         log.warn("unable to reload the config err={}", .{err});
         return false;
@@ -138,6 +143,7 @@ pub fn config_change(app: *App, target: apprt.Target, value: apprt.Action.Value(
         .app => {
             theme.configChanged(app, value.config);
             tray.syncTo(app, value.config.@"quit-after-last-window-closed");
+            hooks.configChanged(app, value.config, app.reload_pending);
             // With no window open nothing else would start (or cancel) the quit.
             if (app.windows.items.len == 0) {
                 if (value.config.@"quit-after-last-window-closed") {
@@ -168,56 +174,9 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
     return shellOpen(alloc, path);
 }
 
-/// `text` and `html` are paths Ghostty wrote itself (screen and scrollback
-/// files) and open like the config file. `unknown` and `osc8` come from
-/// terminal output, so nothing there may run a program: web and mail URLs go
-/// to the shell, local paths are only selected in Explorer (see
-/// `link_policy`). Always true so the core never falls back to `os.open`.
-pub fn open_url(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url)) !bool {
-    _ = target;
-    const alloc = app.core_app.alloc;
-
-    if (link_policy.isTrusted(value.kind)) {
-        _ = shellOpen(alloc, value.url);
-        return true;
-    }
-
-    var buf: [link_policy.max_len]u8 = undefined;
-    switch (link_policy.classify(&buf, value.url)) {
-        .refuse => |why| log.warn("refusing to open link kind={t} why={s}", .{ value.kind, why }),
-        .open => |url| {
-            const wide = util.utf16z(alloc, url) catch |err| {
-                log.warn("unable to convert link err={}", .{err});
-                return true;
-            };
-            defer alloc.free(wide);
-            const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
-            const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
-            if (rc <= 32) log.warn("unable to open link rc={}", .{rc});
-        },
-        .reveal => |path| {
-            const params = std.fmt.allocPrint(alloc, "/select,\"{s}\"", .{path}) catch |err| {
-                log.warn("unable to build explorer arguments err={}", .{err});
-                return true;
-            };
-            defer alloc.free(params);
-            const wide = util.utf16z(alloc, params) catch |err| {
-                log.warn("unable to convert explorer arguments err={}", .{err});
-                return true;
-            };
-            defer alloc.free(wide);
-            const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
-            const explorer = std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe");
-            const rc = win32.shell32.ShellExecuteW(null, open, explorer, wide.ptr, null, win32.user32.SW_SHOWNORMAL);
-            if (rc <= 32) log.warn("unable to reveal link rc={}", .{rc});
-        },
-    }
-    return true;
-}
-
 /// Opens a file Ghostty wrote with the shell's "open" verb; without an
 /// association it goes to Notepad.
-fn shellOpen(alloc: std.mem.Allocator, path: []const u8) bool {
+pub fn shellOpen(alloc: std.mem.Allocator, path: []const u8) bool {
     const wide = util.utf16z(alloc, path) catch |err| {
         log.warn("unable to convert path err={}", .{err});
         return false;

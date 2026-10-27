@@ -17,7 +17,10 @@ const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const Chrome = @import("Chrome.zig");
 const actions = @import("actions.zig");
+const composition_mod = @import("composition.zig");
 const dialogs = @import("dialogs.zig");
+const hooks = @import("hooks.zig");
+const hotkeys_mod = @import("hotkeys.zig");
 const instance = @import("instance.zig");
 const ipc = struct {
     const ops = @import("ipc/ops.zig");
@@ -25,8 +28,13 @@ const ipc = struct {
     const Server = @import("ipc/Server.zig");
 };
 const messages = @import("messages.zig");
+const notify_mod = @import("notify.zig");
+const QuickTerminal = @import("QuickTerminal.zig");
+const recovery_mod = @import("recovery.zig");
+const shell_open_mod = @import("shell_open.zig");
 const tray_mod = @import("tray.zig");
 const util = @import("util.zig");
+const visibility_mod = @import("visibility.zig");
 const Config = configpkg.Config;
 
 const log = std.log.scoped(.win32_app);
@@ -68,6 +76,19 @@ tray: tray_mod.State = .{},
 /// This launch was handed to the running instance: no window is created and
 /// `run` returns at once, so the process exits 0.
 forwarded: bool = false,
+
+/// M3 feature state, one field per feature module.
+hotkeys: hotkeys_mod.State = .{},
+quick: QuickTerminal.State = .{},
+notify: notify_mod.State = .{},
+recovery: recovery_mod.State = .{},
+visibility: visibility_mod.State = .{},
+shell_open: shell_open_mod.State = .{},
+composition: composition_mod.AppState = .{},
+
+/// Set while a hard config reload runs, so that the `config_change` it
+/// produces is told apart from a soft apply.
+reload_pending: bool = false,
 
 /// Guards the quit confirmation dialog against a second quit request
 /// (its message loop keeps dispatching).
@@ -135,6 +156,8 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     if (self.serving()) tray_mod.init(self) catch |err| {
         log.warn("unable to create the notification icon err={}", .{err});
     };
+
+    hooks.appStarted(self);
 }
 
 /// Run the message loop until WM_QUIT.
@@ -154,6 +177,7 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
+    hooks.appStopping(self);
     tray_mod.deinit(self);
 
     // The message loop is over: no WM_GHOSTTY_IPC can touch a freed request.
@@ -399,6 +423,8 @@ fn msgWndProc(
 
     const self = util.fromUserData(App, hwnd) orelse
         return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+
+    if (hooks.appMessage(self, msg, wparam, lparam)) |result| return result;
 
     switch (msg) {
         WM_GHOSTTY_WAKEUP => {

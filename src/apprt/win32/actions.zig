@@ -4,6 +4,18 @@
 const std = @import("std");
 const apprt = @import("../../apprt.zig");
 const App = @import("App.zig");
+const CommandPalette = @import("CommandPalette.zig");
+const Inspector = @import("inspector/Inspector.zig");
+const QuickTerminal = @import("QuickTerminal.zig");
+const SearchBar = @import("SearchBar.zig");
+const badges = @import("badges.zig");
+const composition = @import("composition.zig");
+const export_io = @import("export_io.zig");
+const hooks = @import("hooks.zig");
+const key_state = @import("key_state.zig");
+const link = @import("link.zig");
+const notify = @import("notify.zig");
+const visibility = @import("visibility.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -30,10 +42,10 @@ pub fn status(comptime key: apprt.Action.Key) Status {
         .new_tab, .close_tab, .goto_tab, .move_tab, .set_tab_title, .set_title, .copy_title_to_clipboard, .pwd, .move_tab_to_new_window => .implemented,
         .new_split, .goto_split, .resize_split, .equalize_splits, .toggle_split_zoom => .implemented,
         .mouse_shape, .mouse_visibility, .render, .show_child_exited, .scrollbar => .implemented,
-        .toggle_quick_terminal, .toggle_command_palette, .inspector, .render_inspector, .export_terminal_io, .desktop_notification, .command_finished, .mouse_over_link, .start_search, .end_search, .search_total, .search_selected, .key_sequence, .key_table, .renderer_health, .readonly, .toggle_background_opacity, .toggle_visibility => .{ .deferred = .{
-            .milestone = "M3",
-            .reason = "SPEC section 17 M3 list",
-        } },
+        .toggle_quick_terminal, .toggle_command_palette, .toggle_visibility, .toggle_background_opacity => .implemented,
+        .inspector, .render_inspector, .export_terminal_io => .implemented,
+        .desktop_notification, .command_finished, .mouse_over_link, .renderer_health, .readonly => .implemented,
+        .start_search, .end_search, .search_total, .search_selected, .key_sequence, .key_table => .implemented,
         .check_for_updates, .show_on_screen_keyboard, .secure_input, .undo, .redo => .{ .deferred = .{
             .milestone = "M5",
             .reason = "Windows extras, analog of a macOS-only feature",
@@ -45,6 +57,18 @@ pub fn status(comptime key: apprt.Action.Key) Status {
         .toggle_tab_overview => .{ .unsupported = "no tab overview on Windows; not required by DECISIONS" },
         .show_gtk_inspector => .{ .unsupported = "GTK only" },
     };
+}
+
+/// The renderer reported its health; the badges and the recovery hang off
+/// the surface.
+fn rendererHealth(app: *App, target: apprt.Target, value: apprt.Action.Value(.renderer_health)) bool {
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    hooks.rendererHealth(surface, value);
+    return true;
 }
 
 pub fn perform(
@@ -76,7 +100,7 @@ pub fn perform(
         .open_config => handlers.app_actions.open_config(app, target, value),
         .color_change => handlers.app_actions.color_change(app, target, value),
         .quit_timer => handlers.app_actions.quit_timer(app, target, value),
-        .open_url => handlers.app_actions.open_url(app, target, value),
+        .open_url => link.open(app, target, value),
         .close_window => handlers.window_actions.close_window(app, target, value),
         .initial_size => handlers.window_actions.initial_size(app, target, value),
         .size_limit => handlers.window_actions.size_limit(app, target, value),
@@ -110,6 +134,24 @@ pub fn perform(
         .render => handlers.surface_actions.render(app, target, value),
         .show_child_exited => handlers.surface_actions.show_child_exited(app, target, value),
         .scrollbar => handlers.surface_actions.scrollbar(app, target, value),
+        .toggle_quick_terminal => QuickTerminal.toggle(app),
+        .toggle_visibility => visibility.toggle(app),
+        .toggle_command_palette => CommandPalette.toggle(app, target),
+        .inspector => Inspector.action(app, target, value),
+        .render_inspector => Inspector.render(app, target),
+        .export_terminal_io => export_io.save(app, target, value),
+        .desktop_notification => notify.desktop(app, target, value),
+        .command_finished => notify.commandFinished(app, target, value),
+        .mouse_over_link => link.hover(app, target, value),
+        .start_search => SearchBar.start(app, target, value),
+        .end_search => SearchBar.end(app, target, value),
+        .search_total => SearchBar.total(app, target, value),
+        .search_selected => SearchBar.selected(app, target, value),
+        .key_sequence => key_state.sequence(app, target, value),
+        .key_table => key_state.table(app, target, value),
+        .renderer_health => rendererHealth(app, target, value),
+        .readonly => badges.readonly(app, target, value),
+        .toggle_background_opacity => composition.toggleOpacity(app, target),
         else => comptime unreachable,
     };
 }
@@ -122,7 +164,7 @@ test "win32 actions: every Action.Key is classified" {
     }
 }
 
-test "win32 actions: M2 scope list matches the plan" {
+test "win32 actions: M3 scope list" {
     const keys = @typeInfo(apprt.Action.Key).@"enum".field_names;
     var implemented: usize = 0;
     var deferred: usize = 0;
@@ -134,14 +176,14 @@ test "win32 actions: M2 scope list matches the plan" {
             .unsupported => unsupported += 1,
         }
     }
-    try std.testing.expectEqual(44, implemented);
-    try std.testing.expectEqual(24, deferred);
+    try std.testing.expectEqual(62, implemented);
+    try std.testing.expectEqual(6, deferred);
     try std.testing.expectEqual(2, unsupported);
 
-    const m3 = comptime status(.start_search).deferred;
-    try std.testing.expectEqualStrings("M3", m3.milestone);
     try std.testing.expectEqualStrings("M5", comptime status(.undo).deferred.milestone);
     try std.testing.expectEqualStrings("post-v1", comptime status(.selection_changed).deferred.milestone);
+    try std.testing.expect(comptime status(.start_search) == .implemented);
+    try std.testing.expect(comptime status(.open_url) == .implemented);
     try std.testing.expect(comptime status(.quit) == .implemented);
     try std.testing.expect(comptime status(.show_gtk_inspector) == .unsupported);
 }
