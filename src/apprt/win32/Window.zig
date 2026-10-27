@@ -920,6 +920,9 @@ fn setMinimized(self: *Window, minimized: bool) void {
 /// from its client size without a suggestion). Hidden surfaces get the
 /// scale now and their size when their tab is shown.
 pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) void {
+    // The quick terminal keeps the DPI of its monitor while it slides
+    // across the edge (it may pass over a neighbour with another DPI).
+    if (self.kind == .quick and self.app.quick.anim != null) return;
     const old_dpi = self.dpi;
     const iconic = win32.user32.IsIconic(self.hwnd) != 0;
     // The content size at the old DPI, before the frame metrics change.

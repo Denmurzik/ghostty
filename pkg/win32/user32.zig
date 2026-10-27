@@ -240,6 +240,7 @@ pub extern "user32" fn SetWindowLongPtrW(HWND, index: i32, value: isize) callcon
 pub extern "user32" fn GetWindowLongPtrW(HWND, index: i32) callconv(.winapi) isize;
 pub extern "user32" fn SetWindowTextW(HWND, [*:0]const u16) callconv(.winapi) BOOL;
 pub extern "user32" fn IsWindow(?HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn SetWindowRgn(HWND, ?HRGN, redraw: BOOL) callconv(.winapi) i32;
 pub extern "user32" fn InvalidateRect(?HWND, ?*const RECT, erase: BOOL) callconv(.winapi) BOOL;
 pub extern "user32" fn ValidateRect(?HWND, ?*const RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn BeginPaint(HWND, *PAINTSTRUCT) callconv(.winapi) ?HDC;

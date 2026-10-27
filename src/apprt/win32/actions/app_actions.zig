@@ -5,6 +5,7 @@ const apprt = @import("../../../apprt.zig");
 const configpkg = @import("../../../config.zig");
 const App = @import("../App.zig");
 const Chrome = @import("../Chrome.zig");
+const QuickTerminal = @import("../QuickTerminal.zig");
 const Window = @import("../Window.zig");
 const hooks = @import("../hooks.zig");
 const messages = @import("../messages.zig");
@@ -59,7 +60,7 @@ pub fn close_all_windows(app: *App, target: apprt.Target, value: apprt.Action.Va
     _ = value;
     const window = app.windowForTarget(target) orelse
         app.last_active orelse
-        (if (app.windows.items.len == 0) return false else app.windows.items[app.windows.items.len - 1]);
+        (app.lastNormalWindow() orelse return false);
     return win32.user32.PostMessageW(window.hwnd, messages.WM_GHOSTTY_CLOSE_ALL, 0, 0) != 0;
 }
 
@@ -152,7 +153,7 @@ pub fn config_change(app: *App, target: apprt.Target, value: apprt.Action.Value(
             tray.syncTo(app, value.config.@"quit-after-last-window-closed");
             hooks.configChanged(app, value.config, app.reload_pending);
             // With no window open nothing else would start (or cancel) the quit.
-            if (app.windows.items.len == 0) {
+            if (QuickTerminal.countOpen(app.windows.items, app.quick.shown) == 0) {
                 if (value.config.@"quit-after-last-window-closed") {
                     app.startQuitTimerFor(value.config);
                 } else app.stopQuitTimer();

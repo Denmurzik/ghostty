@@ -230,8 +230,7 @@ fn targetWindow(app: *App, id: u32) ?*Window {
         return null;
     }
     if (app.last_active) |w| return w;
-    if (app.windows.items.len == 0) return null;
-    return app.windows.items[app.windows.items.len - 1];
+    return app.lastNormalWindow();
 }
 
 fn action(app: *App, alloc: Allocator, req: protocol.Request) []u8 {

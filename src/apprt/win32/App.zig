@@ -337,6 +337,17 @@ pub fn stopQuitTimer(self: *App) void {
     _ = win32.user32.KillTimer(self.msg_hwnd, quit_timer_id);
 }
 
+/// The most recently created normal window: the owner of dialogs and the
+/// fallback target; a hidden quick terminal is no owner.
+pub fn lastNormalWindow(self: *App) ?*Window {
+    var i = self.windows.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (self.windows.items[i].kind == .normal) return self.windows.items[i];
+    }
+    return null;
+}
+
 /// Drop a window from the app's list; false if it was not listed.
 pub fn unregisterWindow(self: *App, window: *Window) bool {
     if (self.last_active == window) self.last_active = null;
@@ -477,11 +488,8 @@ fn handleQuit(self: *App) void {
         app: *App,
         fn confirm(a: @This()) bool {
             // Owner: the most recent window. Without one nothing can be lost.
-            if (a.app.windows.items.len == 0) return true;
-            return dialogs.confirmCloseKind(
-                a.app.windows.items[a.app.windows.items.len - 1].hwnd,
-                .app,
-            );
+            const owner = a.app.lastNormalWindow() orelse return true;
+            return dialogs.confirmCloseKind(owner.hwnd, .app);
         }
     };
     if (self.quit_gate.decide(

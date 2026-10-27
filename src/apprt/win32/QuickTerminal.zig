@@ -41,6 +41,10 @@ pub const State = struct {
     /// The foreground window of another application when the terminal was
     /// shown; focus goes back to it when the terminal is toggled away.
     prev_foreground: ?HWND = null,
+    /// The work area and DPI of the monitor the terminal was shown on. A
+    /// slide may pass over a neighbour; the sizes stay those of this one.
+    work: geom.Rect = .{},
+    dpi: u32 = 96,
 };
 
 // -- Geometry (pure) --------------------------------------------------------
@@ -89,6 +93,16 @@ pub fn targetRect(
         .right => .{ .x = work.right() - w, .y = cy, .w = w, .h = h },
         .center => .{ .x = cx, .y = cy, .w = w, .h = h },
     };
+}
+
+/// The part of `r` inside `work`; empty (zero size) when they do not touch.
+pub fn clipTo(r: geom.Rect, work: geom.Rect) geom.Rect {
+    const x = @max(r.x, work.x);
+    const y = @max(r.y, work.y);
+    const right = @min(r.right(), work.right());
+    const bottom = @min(r.bottom(), work.bottom());
+    if (right <= x or bottom <= y) return .{ .x = x, .y = y };
+    return .{ .x = x, .y = y, .w = right - x, .h = bottom - y };
 }
 
 /// The rectangle just past the anchored edge, where a slide starts and
@@ -160,7 +174,13 @@ pub fn acceptsTabDrop(kind: Window.Kind) bool {
 
 pub fn monitorFor(screen: Config.QuickTerminalScreen) ?user32.HMONITOR {
     switch (screen) {
-        .main, .@"macos-menu-bar" => {},
+        // Like macOS' main screen: where the focused window is.
+        .main => {
+            if (user32.GetForegroundWindow()) |fg| {
+                if (user32.MonitorFromWindow(fg, user32.MONITOR_DEFAULTTONEAREST)) |m| return m;
+            }
+        },
+        .@"macos-menu-bar" => {},
         .mouse => {
             var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
             if (user32.GetCursorPos(&pt) != 0) {
@@ -191,9 +211,8 @@ fn durationNs(config: *const Config) u64 {
 
 const Placement = struct { shown: geom.Rect, hidden: geom.Rect };
 
-/// The rectangles on `monitor` at `dpi`.
-fn placementOn(config: *const Config, monitor: user32.HMONITOR, dpi: u32) ?Placement {
-    const work = workArea(monitor) orelse return null;
+/// The rectangles in `work` at `dpi`.
+fn placementIn(config: *const Config, work: geom.Rect, dpi: u32) Placement {
     const position = config.@"quick-terminal-position";
     const shown = targetRect(position, config.@"quick-terminal-size", work, dpi);
     return .{ .shown = shown, .hidden = hiddenRect(position, shown, work) };
@@ -201,6 +220,20 @@ fn placementOn(config: *const Config, monitor: user32.HMONITOR, dpi: u32) ?Place
 
 fn setRect(hwnd: HWND, r: geom.Rect) void {
     _ = user32.SetWindowPos(hwnd, null, r.x, r.y, r.w, r.h, user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+}
+
+/// `setRect` for a slide: the part of the window outside `work` is not
+/// shown, so it does not appear on a neighbouring monitor.
+fn setSlideRect(hwnd: HWND, r: geom.Rect, work: geom.Rect) void {
+    setRect(hwnd, r);
+    const v = clipTo(r, work);
+    const rgn = win32.gdi32.CreateRectRgn(v.x - r.x, v.y - r.y, v.right() - r.x, v.bottom() - r.y) orelse return;
+    // The window owns the region once it is set.
+    if (user32.SetWindowRgn(hwnd, rgn, 1) == 0) _ = win32.gdi32.DeleteObject(rgn);
+}
+
+fn unclip(hwnd: HWND) void {
+    _ = user32.SetWindowRgn(hwnd, null, 1);
 }
 
 fn currentRect(hwnd: HWND) geom.Rect {
@@ -228,8 +261,7 @@ pub fn configChanged(app: *App, config: *const Config) void {
     const window = state.window orelse return;
     if (!state.shown) return;
 
-    const monitor = user32.MonitorFromWindow(window.hwnd, user32.MONITOR_DEFAULTTONEAREST) orelse return;
-    const place = placementOn(config, monitor, window.dpi) orelse return;
+    const place = placementIn(config, state.work, state.dpi);
     // A slide in progress heads for the new place.
     if (state.anim) |*a| {
         a.to = place.shown;
@@ -310,14 +342,16 @@ fn show(app: *App, window: *Window) void {
         state.prev_foreground = if (fg != null and !ownWindow(fg)) fg else null;
     }
 
-    const monitor = monitorFor(config.@"quick-terminal-screen") orelse return;
-    // Onto the monitor first: moving between monitors of different DPI
-    // updates the window's DPI, which the sizes depend on.
-    const work = workArea(monitor) orelse return;
     if (!was_visible) {
+        const monitor = monitorFor(config.@"quick-terminal-screen") orelse return;
+        const work = workArea(monitor) orelse return;
+        // Onto the monitor first: moving between monitors of different DPI
+        // updates the window's DPI, which the sizes depend on.
         _ = user32.SetWindowPos(window.hwnd, null, work.x, work.y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+        state.work = work;
+        state.dpi = window.dpi;
     }
-    const place = placementOn(config, monitor, window.dpi) orelse return;
+    const place = placementIn(config, state.work, state.dpi);
     const duration = durationNs(config);
 
     state.shown = true;
@@ -327,7 +361,7 @@ fn show(app: *App, window: *Window) void {
     } else {
         const from = if (was_visible) currentRect(window.hwnd) else place.hidden;
         state.anim = .{ .from = from, .to = place.shown, .start_ns = now, .duration_ns = duration, .hiding = false };
-        setRect(window.hwnd, from);
+        setSlideRect(window.hwnd, from, state.work);
     }
 
     if (!was_visible) {
@@ -348,21 +382,16 @@ fn hide(app: *App, window: *Window, restore_focus: bool) void {
     state.shown = false;
     const prev = state.prev_foreground;
     state.prev_foreground = null;
-    if (restore_focus) {
+    // Only while the terminal is the foreground window: the user may have
+    // moved on to another application since.
+    if (restore_focus and user32.GetForegroundWindow() == window.hwnd) {
         if (prev) |p| {
             if (user32.IsWindow(p) != 0) _ = user32.SetForegroundWindow(p);
         }
     }
 
-    // Out to the monitor the window is on.
-    const monitor = user32.MonitorFromWindow(window.hwnd, user32.MONITOR_DEFAULTTONEAREST) orelse {
-        finish(window);
-        return;
-    };
-    const place = placementOn(config, monitor, window.dpi) orelse {
-        finish(window);
-        return;
-    };
+    // Out through the edge of the monitor it was shown on.
+    const place = placementIn(config, state.work, state.dpi);
     const duration = durationNs(config);
     if (state.anim) |a| {
         state.anim = reverse(a, now, duration, place.shown, place.hidden);
@@ -376,13 +405,13 @@ fn startSlide(window: *Window) void {
     const anim = window.app.quick.anim orelse return;
     // Nothing to animate: land at once.
     if (anim.duration_ns == 0 or std.meta.eql(anim.from, anim.to)) {
-        setRect(window.hwnd, anim.to);
+        setSlideRect(window.hwnd, anim.to, window.app.quick.work);
         landed(window.app, window);
         return;
     }
     if (user32.SetTimer(window.hwnd, messages.timers.window.quick_slide, step_ms, null) == 0) {
         log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
-        setRect(window.hwnd, anim.to);
+        setSlideRect(window.hwnd, anim.to, window.app.quick.work);
         landed(window.app, window);
     }
 }
@@ -393,7 +422,7 @@ fn step(app: *App, window: *Window) void {
         return;
     };
     const f = frameAt(anim, nowNs());
-    setRect(window.hwnd, f.rect);
+    setSlideRect(window.hwnd, f.rect, app.quick.work);
     if (f.done) landed(app, window);
 }
 
@@ -402,7 +431,7 @@ fn landed(app: *App, window: *Window) void {
     _ = user32.KillTimer(window.hwnd, messages.timers.window.quick_slide);
     const hiding = if (app.quick.anim) |a| a.hiding else !app.quick.shown;
     app.quick.anim = null;
-    if (hiding) finish(window);
+    if (hiding) finish(window) else unclip(window.hwnd);
 }
 
 fn finish(window: *Window) void {
@@ -491,6 +520,19 @@ test "win32 quick: pixel size scales with monitor DPI" {
     const d = targetRect(.top, .{}, work, 144);
     try testing.expectEqual(@as(i32, 600), d.h);
     try testing.expectEqual(@as(i32, 2880), d.w);
+}
+
+test "win32 quick: slide is clipped to the work area" {
+    const out: geom.Rect = .{ .x = 0, .y = -200, .w = 1920, .h = 520 };
+    try testing.expectEqual(geom.Rect{ .x = 0, .y = 0, .w = 1920, .h = 320 }, clipTo(out, work_1080));
+    const inside: geom.Rect = .{ .x = 0, .y = 0, .w = 1920, .h = 520 };
+    try testing.expectEqual(inside, clipTo(inside, work_1080));
+    // Fully outside: nothing is visible.
+    const gone: geom.Rect = .{ .x = 0, .y = -520, .w = 1920, .h = 520 };
+    try testing.expectEqual(@as(i32, 0), clipTo(gone, work_1080).h);
+    // The neighbour on the right is cut off.
+    const right: geom.Rect = .{ .x = 1700, .y = 100, .w = 400, .h = 840 };
+    try testing.expectEqual(@as(i32, 220), clipTo(right, work_1080).w);
 }
 
 test "win32 quick: hiddenRect off edge" {
