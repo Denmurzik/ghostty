@@ -78,6 +78,10 @@ pub fn build(b: *std.Build) !void {
         "test-lib-vt-schema",
         "Validate the libghostty-vt ABI type manifest",
     );
+    const test_tmux_shim_step = b.step(
+        "test-tmux-shim",
+        "Run the tmux.exe shim tests (Windows)",
+    );
     const test_valgrind_step = b.step(
         "test-valgrind",
         "Run tests under valgrind",
@@ -93,6 +97,10 @@ pub fn build(b: *std.Build) !void {
 
     // Ghostty executable, the actual runnable Ghostty program.
     const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);
+
+    // The Windows tmux.exe shim (std only, no SharedDeps).
+    const tmux_shim = buildpkg.GhosttyTmuxShim.init(b, &config, test_filters);
+    if (config.target.result.os.tag == .windows) tmux_shim.addTests(test_tmux_shim_step);
 
     // Ghostty docs
     const docs = try buildpkg.GhosttyDocs.init(b, &deps);
@@ -213,6 +221,9 @@ pub fn build(b: *std.Build) !void {
             exe.install();
             resources.install();
             if (i18n) |v| v.install();
+            if (config.target.result.os.tag == .windows and config.app_runtime == .win32) {
+                tmux_shim.install();
+            }
         }
     } else if (!config.emit_lib_vt) {
         // The macOS Ghostty Library

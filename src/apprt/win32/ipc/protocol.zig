@@ -50,7 +50,43 @@ pub const Request = struct {
     path: []const u8 = "",
     /// GetTickCount64() value after which the server must not act; 0 = none.
     deadline_ms: u64 = 0,
+    /// `tmux` op: working directory, environment block ("K=V" entries),
+    /// stdin text (load-buffer) and the caller's TMUX_PANE.
+    cwd: []const u8 = "",
+    env: []const []const u8 = &.{},
+    stdin: ?[]const u8 = null,
+    pane: []const u8 = "",
 };
+
+/// What the tmux pipe accepts (stdin and environment included).
+pub const max_request_tmux: u32 = 4 << 20;
+
+/// Largest stdin payload `tmux.exe` forwards (load-buffer).
+pub const max_stdin_tmux: u32 = 512 << 10;
+
+const tmux_pipe_prefix = "\\\\.\\pipe\\ghostty-tmux-";
+
+/// `\\.\pipe\ghostty-tmux-<pid>-<16 hex digits>`.
+pub fn tmuxPipeName(buf: []u8, pid: u32, nonce: u64) ![]const u8 {
+    return std.fmt.bufPrint(buf, tmux_pipe_prefix ++ "{d}-{x:0>16}", .{ pid, nonce });
+}
+
+/// The value of `TMUX`: `<pipe>,<pid>,0`.
+pub fn tmuxEnvValue(buf: []u8, pipe: []const u8, pid: u32) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s},{d},0", .{ pipe, pid });
+}
+
+/// The server pid inside a tmux pipe name: the digits between
+/// `ghostty-tmux-` and the next `-`.
+pub fn pidFromTmuxPipe(name: []const u8) ?u32 {
+    const marker = "ghostty-tmux-";
+    const at = std.mem.indexOf(u8, name, marker) orelse return null;
+    const rest = name[at + marker.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
+    if (end == 0) return null;
+    for (rest[0..end]) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u32, rest[0..end], 10) catch null;
+}
 
 pub fn expired(req: Request, now_ms: u64) bool {
     return req.deadline_ms != 0 and now_ms > req.deadline_ms;
@@ -272,4 +308,48 @@ test "win32 ipc protocol: pipe name sanitizes class" {
     try testing.expectEqualStrings("a_b___", sanitizeClass(&cb, "a b/ж"));
     const long: [200]u8 = @splat('x');
     try testing.expectEqual(@as(usize, 80), sanitizeClass(&cb, &long).len);
+}
+
+test "win32 ipc protocol: tmux pipe name, env value and pid" {
+    const t = std.testing;
+    var b1: [128]u8 = undefined;
+    var b2: [192]u8 = undefined;
+    const name = try tmuxPipeName(&b1, 42, 0xff);
+    try t.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff", name);
+    try t.expectEqualStrings(
+        "\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff,42,0",
+        try tmuxEnvValue(&b2, name, 42),
+    );
+    try t.expectEqual(@as(?u32, 42), pidFromTmuxPipe(name));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-x"));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-7"));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux--ab"));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("garbage"));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-99999999999-ab"));
+}
+
+test "win32 ipc protocol: tmux request fields roundtrip" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const bytes = try encodeRequest(t.allocator, .{
+        .v = 1,
+        .op = "tmux",
+        .args = &.{ "load-buffer", "-" },
+        .cwd = "C:\\x",
+        .env = &.{ "A=1", "B=" },
+        .stdin = "hi\n",
+        .pane = "%3",
+    });
+    defer t.allocator.free(bytes);
+    const back = try parseRequest(arena.allocator(), bytes);
+    try t.expectEqualStrings("C:\\x", back.cwd);
+    try t.expectEqual(@as(usize, 2), back.env.len);
+    try t.expectEqualStrings("B=", back.env[1]);
+    try t.expectEqualStrings("hi\n", back.stdin.?);
+    try t.expectEqualStrings("%3", back.pane);
+
+    const plain = try parseRequest(arena.allocator(), "{\"v\":1,\"op\":\"x\"}");
+    try t.expect(plain.stdin == null);
+    try t.expectEqual(@as(usize, 0), plain.env.len);
 }
