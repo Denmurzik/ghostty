@@ -874,6 +874,8 @@ test "termio renderer wakeup notifies the original Async" {
     // Termio must hold a pointer: an `xev.Async` can't be copied
     // (the IOCP backend keeps its wakeup state inside the struct).
     try testing.expect(@FieldType(Termio, "renderer_wakeup") == *xev.Async);
+    try testing.expect(@FieldType(StreamHandler, "renderer_wakeup") == *xev.Async);
+    try testing.expect(@FieldType(termio.Options, "renderer_wakeup") == *xev.Async);
 
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
