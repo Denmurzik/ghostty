@@ -64,3 +64,4 @@ Reference: the owner's screenshot of Ghostty for macOS (Tahoe titlebar tabs) + `
 - Inactive windows dim title text like macOS.
 - Transparency/blur (with M3 Tasks 14/15): blur must stay on when the window is inactive (not only while focused) — the system Acrylic/Mica backdrops go solid on deactivation, so use a backdrop that persists.
 - Order: first the look with opaque background (supersedes M3 Task 29's scope), then unified transparency with Tasks 14/15.
+- 2026-10-27 (owner): the translucent window is FROSTED like Acrylic (blur + tint), not plain see-through, and stays frosted while the window is inactive. Applies to the whole window (title row + tab row + terminal). `background-blur` defaults to on when `background-opacity < 1`.
