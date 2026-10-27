@@ -192,8 +192,7 @@ pub fn threadExit(self: *D3D11) void {
     if (self.swap_chain != null) {
         self.device.lockContext();
         defer self.device.unlockContext();
-        self.swap_chain.?.deinit();
-        self.swap_chain = null;
+        self.dropSwapChain();
     }
 
     self.present_target = null;
@@ -270,9 +269,11 @@ pub fn presentGeneration(self: *const D3D11) u32 {
 /// chain worked with that window state, so older bumps need no recreation.
 pub fn presentSucceeded(self: *D3D11, generation: u32) void {
     self.swap_chain_generation = generation;
+    // A later failure is news again.
+    self.swap_chain_failure_logged = false;
 }
 
-/// Logs a swap chain failure the first time only.
+/// Logs a swap chain failure the first time only, until a present succeeds.
 pub fn logSwapChainFailure(self: *D3D11, what: []const u8, err: anyerror) void {
     if (self.swap_chain_failure_logged) return;
     self.swap_chain_failure_logged = true;
@@ -836,6 +837,17 @@ test "d3d11 swapchain: a bump alone keeps the swap chain, a failed present after
     try second.present(true);
     api.presentSucceeded(api.presentGeneration());
     try std.testing.expect(!api.recreateOnPresentFailure(error.ComFailure));
+}
+
+test "d3d11 swapchain: a successful present re-arms the failure log" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+
+    // The error log fails the test runner, so only the flag is driven.
+    api.swap_chain_failure_logged = true;
+    api.logSwapChainFailure("create", error.OutOfMemory); // silent while armed
+    api.presentSucceeded(0);
+    try std.testing.expect(!api.swap_chain_failure_logged);
 }
 
 test "d3d11 swapchain: a bump between the present and its acceptance stays pending" {
