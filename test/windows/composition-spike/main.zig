@@ -1,3 +1,4 @@
+//! WARNING: this spike captures the screen (through run.ps1) and is not guarded; run it only on a clear desktop.
 //! Composition spike (risk R10). A standalone GUI exe, not Ghostty: a top-level
 //! window with a dropped caption, a DirectComposition target on a child HWND
 //! that shows a premultiplied composition swap chain presented from a worker

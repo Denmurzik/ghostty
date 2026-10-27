@@ -987,6 +987,27 @@ if (-not ('GhosttyE2e.Capture' -as [type])) {
 [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RC r);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+public delegate bool EnumProc(IntPtr h, IntPtr l);
+public struct Top { public IntPtr H; public int L, T, R, B; public uint Pid; }
+// The visible, uncloaked, non-minimized top-level windows, topmost first.
+public static System.Collections.Generic.List<Top> ZOrder() {
+    var list = new System.Collections.Generic.List<Top>();
+    EnumWindows(delegate (IntPtr h, IntPtr l) {
+        if (!IsWindowVisible(h) || IsIconic(h)) return true;
+        int cloaked = 0;
+        DwmGetWindowAttribute(h, 14, out cloaked, 4);
+        if (cloaked != 0) return true;
+        RC r; if (!GetWindowRect(h, out r)) return true;
+        uint pid; GetWindowThreadProcessId(h, out pid);
+        list.Add(new Top { H = h, L = r.Left, T = r.Top, R = r.Right, B = r.Bottom, Pid = pid });
+        return true;
+    }, IntPtr.Zero);
+    return list;
+}
 "@
 }
 
@@ -1000,6 +1021,26 @@ function Test-OwnCaptureProcess([uint32]$ProcessId) {
     if ($p -and $p.Name -like 'ghostty*' -and [string]$p.CommandLine -like '*--class=ghostty-*') { $ok = $true }
     $script:CaptureOwnerCache[$ProcessId] = $ok
     $ok
+}
+
+# Exact z-order check: walking the top-level windows from the top, a window
+# that is not ours and intersects the rect is a hit when it is above any of
+# our windows that intersect the rect, or when none of ours does (the capture
+# would show the owner's desktop).
+function Test-CaptureZOrderClear([int]$X, [int]$Y, [int]$W, [int]$H) {
+    $r = $X + $W
+    $b = $Y + $H
+    $foreign = $false
+    $ownBelow = $false
+    $seenOwn = $false
+    $list = [GhosttyE2e.Capture]::ZOrder()
+    foreach ($win in $list) {
+        if ($win.L -ge $r -or $win.R -le $X -or $win.T -ge $b -or $win.B -le $Y) { continue }
+        if (Test-OwnCaptureProcess $win.Pid) { $seenOwn = $true; if ($foreign) { $script:CaptureForeign = "pid $($foreign) above ours"; return $false } }
+        elseif (-not $foreign) { $foreign = $win.Pid }
+    }
+    if (-not $seenOwn) { $script:CaptureForeign = "none of our windows in the rect"; return $false }
+    $true
 }
 
 # True when every sampled point of the rect belongs to one of our windows.
@@ -1025,7 +1066,7 @@ function Test-CaptureRectClear([int]$X, [int]$Y, [int]$W, [int]$H) {
 
 function Assert-CaptureRectClear([int]$X, [int]$Y, [int]$W, [int]$H) {
     for ($try = 0; $try -lt 3; $try++) {
-        if (Test-CaptureRectClear $X $Y $W $H) { return }
+        if ((Test-CaptureZOrderClear $X $Y $W $H) -and (Test-CaptureRectClear $X $Y $W $H)) { return }
         Start-Sleep -Milliseconds 500
     }
     throw "E2E-SKIP: desktop busy (a window that is not ours is in the capture area: $($script:CaptureForeign))"

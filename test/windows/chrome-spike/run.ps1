@@ -1,3 +1,4 @@
+# WARNING: this spike captures the screen (CopyFromScreen) and is not guarded; run it only on a clear desktop.
 <#
 .SYNOPSIS
 Runs the chrome spike (risk R9) and prints the measurements that decide the
