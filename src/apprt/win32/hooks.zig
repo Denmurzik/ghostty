@@ -77,6 +77,10 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
             notify.clicked(app, wparam);
             return 0;
         },
+        messages.WM_GHOSTTY_WAKEUP => {
+            Inspector.wakeup(app);
+            return null;
+        },
         win32.user32.WM_TIMER => return recovery.timer(app, wparam),
         else => return null,
     }

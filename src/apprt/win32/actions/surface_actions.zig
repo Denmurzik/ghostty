@@ -5,7 +5,6 @@ const mouse = @import("../mouse.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const scrollbar_mod = @import("../scrollbar.zig");
-const Inspector = @import("../inspector/Inspector.zig");
 
 /// The apprt surface an action is aimed at.
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
@@ -37,11 +36,11 @@ pub fn show_child_exited(app: *App, target: apprt.Target, value: apprt.Action.Va
     return false;
 }
 
-/// Drawing is driven by the renderer thread. Core sends this after each frame
-/// it pushed, which is when an open inspector has new data to show.
+/// Drawing is driven by the renderer thread; nothing to do here.
 pub fn render(app: *App, target: apprt.Target, value: void) !bool {
+    _ = app;
+    _ = target;
     _ = value;
-    _ = Inspector.render(app, target) catch false;
     return true;
 }
 

@@ -24,6 +24,7 @@ const SwapChain = @import("../../../renderer/d3d11/SwapChain.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const dpi_mod = @import("../dpi.zig");
+const messages = @import("../messages.zig");
 const Window = @import("Window.zig");
 
 const com = win32.com;
@@ -264,6 +265,11 @@ pub const Inspector = struct {
         defer dev.unlockContext();
         self.present(size.w, size.h) catch |err| {
             if (err == error.DeviceLost) dev.markLostFromDevice();
+            // The poll consumed the slot signal; a new chain starts afresh.
+            if (self.swap_chain) |*sc| {
+                sc.deinit();
+                self.swap_chain = null;
+            }
             return err;
         };
     }
@@ -363,6 +369,14 @@ fn drawCore(self: *Inspector) void {
     const core = self.core orelse return;
     const insp = core.inspector orelse return;
     insp.render(core);
+}
+
+/// The app woke up: core may have new data for the open inspectors. One
+/// integer test when none is open.
+pub fn wakeup(app: *App) void {
+    _ = app;
+    if (open_list.items.len == 0) return;
+    for (open_list.items) |insp| insp.markDirty();
 }
 
 pub fn appStopping(app: *App) void {
@@ -556,19 +570,16 @@ test "win32 inspector: render_inspector coalesces to the tick" {
     try testing.expectEqual(frames + 1, f.insp.frames);
 }
 
-test "win32 inspector: a frame of the surface marks its inspector dirty" {
+test "win32 inspector: the app wakeup marks an open inspector dirty" {
     const f = try Fixture.init(.{});
     defer f.deinit();
     defer f.insp.close();
 
-    const core = try testing.allocator.create(CoreSurface);
-    defer testing.allocator.destroy(core);
-    core.rt_surface = f.surface;
     const app: *App = @ptrFromInt(@alignOf(App));
 
     f.insp.tick();
     try testing.expect(!f.insp.dirty);
-    try testing.expect(try @import("../actions/surface_actions.zig").render(app, .{ .surface = core }, {}));
+    try testing.expect(@import("../hooks.zig").appMessage(app, messages.WM_GHOSTTY_WAKEUP, 0, 0) == null);
     try testing.expect(f.insp.dirty);
 }
 
