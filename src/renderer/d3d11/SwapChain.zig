@@ -666,3 +666,16 @@ test "d3d11 frame slot: concurrent waits and presents keep pending in bounds" {
     for (&threads) |*t| t.join();
     try testing.expect(!out_of_bounds.load(.monotonic));
 }
+
+test "d3d11 frame slot: a second wait after a consumed slot does not block" {
+    var p: Pacer = .{};
+    p.presented(0);
+
+    // The first wait takes the slot; the second finds nothing pending and
+    // never reaches the waitable.
+    var w: FakeWaiter = .{ .results = &.{.signaled} };
+    try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
+    try testing.expect(p.wait(2 * ns_per_ms, 100, FakeRef{ .inner = &w }));
+    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(usize, 1), w.calls);
+}

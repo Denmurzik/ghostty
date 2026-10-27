@@ -354,7 +354,6 @@ pub fn drawFrameEnd(self: *D3D11) void {
 pub fn waitFrameSlot(self: *D3D11) void {
     self.device.lockContext();
     defer self.device.unlockContext();
-    self.frame_slot_ns = 0;
 
     const sc = if (self.swap_chain) |*sc| sc else return;
     if (!sc.waitArmed()) return;
@@ -390,7 +389,9 @@ fn nowNs() u64 {
 
 /// `GHOSTTY_D3D11_PACING_LOG=1`: one line per frame, from the end of the
 /// slot wait to the end of the present.
-pub fn logPacing(self: *const D3D11) void {
+pub fn logPacing(self: *D3D11) void {
+    // The slot wait belongs to the frame that just ended; the next starts at 0.
+    defer self.frame_slot_ns = 0;
     if (!self.pacing_log) return;
     const build = nowNs() -| self.frame_begin_ns;
     log.info("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3}", .{

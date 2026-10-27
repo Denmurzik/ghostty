@@ -1732,6 +1732,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// this frame and not by the one after. `drawFrame` waits again, which
         /// finds the slot free.
         pub fn waitFrameSlot(self: *Self) void {
+            if (comptime @hasDecl(GraphicsAPI, "isLost")) {
+                if (self.api.isLost()) return;
+            }
             if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) self.api.waitFrameSlot();
         }
 
