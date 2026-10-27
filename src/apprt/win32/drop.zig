@@ -1,4 +1,5 @@
-//! Files dropped from Explorer, pasted as shell-quoted paths. An OLE
+//! Files dropped from Explorer, pasted as shell-quoted paths, and dropped
+//! text, pasted like Ctrl+V (unsafe text asks first). An OLE
 //! `IDropTarget` is registered per top-level window; its callbacks only copy
 //! data and post `WM_GHOSTTY_DROP`, and the core paste runs from that
 //! message so the core is never re-entered from inside OLE.
@@ -13,6 +14,7 @@ const configpkg = @import("../../config.zig");
 const Window = @import("Window.zig");
 const Surface = @import("Surface.zig");
 const messages = @import("messages.zig");
+const clipboard = @import("clipboard.zig");
 
 const ole32 = win32.ole32;
 const user32 = win32.user32;
@@ -283,12 +285,18 @@ pub fn pathIsSafe(path: []const u8) bool {
 
 const gpa = std.heap.smp_allocator;
 
+/// Largest dropped text that is accepted, in UTF-16 bytes.
+pub const max_text_bytes = 10 * 1024 * 1024;
+
+pub const Kind = enum { files, text };
+
 /// Posted by `Drop`; owned by the message handler.
 const Payload = struct {
     id: u32,
     window: *Window,
     surface_id: u32,
-    text: []u8,
+    kind: Kind,
+    text: [:0]u8,
 };
 
 /// Drops waiting for their `WM_GHOSTTY_DROP` (UI thread only). The message
@@ -303,8 +311,9 @@ const Target = struct {
     refs: std.atomic.Value(u32) = .init(1),
     /// Null once the window revoked the registration.
     window: ?*Window,
-    /// Whether the data object being dragged offers `CF_HDROP`.
-    has_files: bool = false,
+    /// What the data object being dragged offers: `CF_HDROP`, or (only when
+    /// it has none) `CF_UNICODETEXT`.
+    kind: ?Kind = null,
 
     const vtable: ole32.IDropTarget.VTable = .{
         .base = .{ .QueryInterface = queryInterface, .AddRef = addRef, .Release = release },
@@ -342,14 +351,14 @@ const Target = struct {
 
     fn effectFor(self: *Target, pt: POINT, allowed: u32) u32 {
         const window = self.window orelse return ole32.DROPEFFECT_NONE;
-        if (!self.has_files or allowed & ole32.DROPEFFECT_COPY == 0) return ole32.DROPEFFECT_NONE;
+        if (self.kind == null or allowed & ole32.DROPEFFECT_COPY == 0) return ole32.DROPEFFECT_NONE;
         if (surfaceAt(window, pt) == null) return ole32.DROPEFFECT_NONE;
         return ole32.DROPEFFECT_COPY;
     }
 
     fn dragEnter(this: *ole32.IDropTarget, data: ?*ole32.IDataObject, _: u32, pt: POINT, effect: *u32) callconv(.winapi) HRESULT {
         const self = from(this);
-        self.has_files = if (data) |d| d.queryGetData(&hdropFormat()) == win32.foundation.S_OK else false;
+        self.kind = if (data) |d| kindOf(d) else null;
         effect.* = self.effectFor(pt, effect.*);
         return win32.foundation.S_OK;
     }
@@ -361,27 +370,31 @@ const Target = struct {
     }
 
     fn dragLeave(this: *ole32.IDropTarget) callconv(.winapi) HRESULT {
-        from(this).has_files = false;
+        from(this).kind = null;
         return win32.foundation.S_OK;
     }
 
     fn onDrop(this: *ole32.IDropTarget, data: ?*ole32.IDataObject, _: u32, pt: POINT, effect: *u32) callconv(.winapi) HRESULT {
         const self = from(this);
-        self.has_files = false;
+        self.kind = null;
         effect.* = ole32.DROPEFFECT_NONE;
 
         const window = self.window orelse return win32.foundation.S_OK;
         const surface = surfaceAt(window, pt) orelse return win32.foundation.S_OK;
         const obj = data orelse return win32.foundation.S_OK;
 
-        const text = textFromData(obj, surface.shell_kind) catch |err| {
-            log.warn("unable to read the dropped files err={}", .{err});
+        const kind = kindOf(obj) orelse return win32.foundation.S_OK;
+        const text = (switch (kind) {
+            .files => textFromData(obj, surface.shell_kind),
+            .text => unicodeTextFromData(obj),
+        }) catch |err| {
+            log.warn("unable to read the dropped {t} err={}", .{ kind, err });
             return win32.foundation.S_OK;
         };
         const id = next_payload_id;
         next_payload_id +%= 1;
         if (next_payload_id == 0) next_payload_id = 1;
-        pending.append(gpa, .{ .id = id, .window = window, .surface_id = surface.id, .text = text }) catch {
+        pending.append(gpa, .{ .id = id, .window = window, .surface_id = surface.id, .kind = kind, .text = text }) catch {
             gpa.free(text);
             return win32.foundation.S_OK;
         };
@@ -400,8 +413,47 @@ fn hdropFormat() ole32.FORMATETC {
     return .{ .cfFormat = ole32.CF_HDROP };
 }
 
+fn unicodeTextFormat() ole32.FORMATETC {
+    return .{ .cfFormat = user32.CF_UNICODETEXT };
+}
+
+/// What the data object offers; files win over text.
+fn kindOf(data: *ole32.IDataObject) ?Kind {
+    if (data.queryGetData(&hdropFormat()) == win32.foundation.S_OK) return .files;
+    if (data.queryGetData(&unicodeTextFormat()) == win32.foundation.S_OK) return .text;
+    return null;
+}
+
+/// UTF-16LE bytes of dropped text to NUL-terminated UTF-8: cut at the first
+/// NUL, unpaired surrogates become U+FFFD, line endings are kept as given.
+pub fn textFromUtf16(alloc: Allocator, bytes: []const u8) Allocator.Error![:0]u8 {
+    var end: usize = 0;
+    while (end + 1 < bytes.len and unit(bytes, end / 2) != 0) end += 2;
+    const utf8 = try utf16ToUtf8Lossy(alloc, bytes[0..end]);
+    defer alloc.free(utf8);
+    return alloc.dupeSentinel(u8, utf8, 0);
+}
+
+/// Copies the `CF_UNICODETEXT` text out of `data`.
+fn unicodeTextFromData(data: *ole32.IDataObject) ![:0]u8 {
+    var medium: ole32.STGMEDIUM = .{};
+    try win32.foundation.check(data.getData(&unicodeTextFormat(), &medium));
+    defer ole32.ReleaseStgMedium(&medium);
+    if (medium.tymed != ole32.TYMED_HGLOBAL) return error.UnexpectedMedium;
+    const hglobal = medium.hGlobal orelse return error.UnexpectedMedium;
+
+    const size = kernel32.GlobalSize(hglobal);
+    if (size > max_text_bytes) {
+        log.warn("refusing dropped text of {} bytes (limit {})", .{ size, max_text_bytes });
+        return error.TooLarge;
+    }
+    const ptr: [*]const u8 = @ptrCast(kernel32.GlobalLock(hglobal) orelse return error.LockFailed);
+    defer _ = kernel32.GlobalUnlock(hglobal);
+    return textFromUtf16(gpa, ptr[0..size]);
+}
+
 /// Copies the `CF_HDROP` paths out of `data` and quotes them for `kind`.
-fn textFromData(data: *ole32.IDataObject, kind: ShellKind) ![]u8 {
+fn textFromData(data: *ole32.IDataObject, kind: ShellKind) ![:0]u8 {
     var medium: ole32.STGMEDIUM = .{};
     try win32.foundation.check(data.getData(&hdropFormat(), &medium));
     defer ole32.ReleaseStgMedium(&medium);
@@ -419,7 +471,9 @@ fn textFromData(data: *ole32.IDataObject, kind: ShellKind) ![]u8 {
         return error.UnsafePath;
     };
     const views: []const []const u8 = @ptrCast(paths);
-    return quote(gpa, kind, views);
+    const quoted = try quote(gpa, kind, views);
+    defer gpa.free(quoted);
+    return gpa.dupeSentinel(u8, quoted, 0);
 }
 
 /// The visible surface of `window` under the screen point.
@@ -490,8 +544,12 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
     const surface = window.findSurface(payload.surface_id) orelse return 0;
     _ = user32.SetForegroundWindow(window.hwnd);
     _ = user32.SetFocus(surface.hwnd);
-    surface.core_surface.textCallback(payload.text) catch |err|
-        log.warn("unable to paste the dropped paths err={}", .{err});
+    switch (payload.kind) {
+        .files => surface.core_surface.textCallback(payload.text) catch |err|
+            log.warn("unable to paste the dropped paths err={}", .{err}),
+        // Unsafe text (a newline) asks first, as Ctrl+V does.
+        .text => if (payload.text.len > 0) clipboard.pasteText(surface, payload.text),
+    }
     return 0;
 }
 
@@ -621,6 +679,64 @@ test "win32 drop: unpaired surrogate becomes U+FFFD" {
     defer freePaths(a, paths);
     try testing.expectEqual(@as(usize, 1), paths.len);
     try testing.expectEqualStrings("a\u{FFFD}b\u{FFFD}", paths[0]);
+}
+
+fn utf16Bytes(a: Allocator, units: []const u16) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    for (units) |u| try out.appendSlice(a, &std.mem.toBytes(std.mem.nativeToLittle(u16, u)));
+    return out.toOwnedSlice(a);
+}
+
+test "win32 drop: text payload conversion" {
+    const a = testing.allocator;
+    // NUL cut: what follows the first NUL is dropped.
+    const nul = try utf16Bytes(a, &.{ 'a', 'b', 0, 'c', 0 });
+    defer a.free(nul);
+    const t1 = try textFromUtf16(a, nul);
+    defer a.free(t1);
+    try testing.expectEqualStrings("ab", t1);
+    try testing.expectEqual(@as(u8, 0), t1[t1.len]);
+
+    // Surrogate repair, and a valid pair kept.
+    const sur = try utf16Bytes(a, &.{ 'x', 0xD800, 'y', 0xDC00, 0xD83D, 0xDE00 });
+    defer a.free(sur);
+    const t2 = try textFromUtf16(a, sur);
+    defer a.free(t2);
+    try testing.expectEqualStrings("x\u{FFFD}y\u{FFFD}\u{1F600}", t2);
+
+    // CRLF is kept as given; Cyrillic round-trips.
+    const crlf = try utf16Bytes(a, &.{ 'a', '\r', '\n', 0x44F });
+    defer a.free(crlf);
+    const t3 = try textFromUtf16(a, crlf);
+    defer a.free(t3);
+    try testing.expectEqualStrings("a\r\n\u{44F}", t3);
+
+    const empty = try textFromUtf16(a, &.{});
+    defer a.free(empty);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "win32 drop: files keep priority over text" {
+    const Fake = struct {
+        var formats: []const u16 = &.{};
+        fn queryGetData(_: *ole32.IDataObject, fmt: *const ole32.FORMATETC) callconv(.winapi) HRESULT {
+            for (formats) |f| if (f == fmt.cfFormat) return win32.foundation.S_OK;
+            return ole32.DV_E_FORMATETC;
+        }
+    };
+    var vtable: ole32.IDataObject.VTable = undefined;
+    vtable.QueryGetData = Fake.queryGetData;
+    var obj: ole32.IDataObject = .{ .vtable = &vtable };
+
+    Fake.formats = &.{ user32.CF_UNICODETEXT, ole32.CF_HDROP };
+    try testing.expectEqual(Kind.files, kindOf(&obj).?);
+    Fake.formats = &.{user32.CF_UNICODETEXT};
+    try testing.expectEqual(Kind.text, kindOf(&obj).?);
+    Fake.formats = &.{ole32.CF_HDROP};
+    try testing.expectEqual(Kind.files, kindOf(&obj).?);
+    Fake.formats = &.{};
+    try testing.expectEqual(@as(?Kind, null), kindOf(&obj));
 }
 
 test "win32 drop: IDropTarget and IDataObject slot counts" {

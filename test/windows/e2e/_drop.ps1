@@ -28,12 +28,13 @@ function Get-ScreenRect([IntPtr]$Hwnd) {
     [pscustomobject]@{ L = $r.L; T = $r.T; R = $r.R; B = $r.B }
 }
 
-# Starts dragging -Files (full Windows paths) from a source window and leaves
+# Starts dragging -Files (full Windows paths) or -Text (CF_UNICODETEXT) from a source window and leaves
 # the left button held with the pointer at client point (-X, -Y) of -ToHwnd,
 # i.e. mid-drag. Returns a handle for Stop-OleFileDrag.
-function Start-OleFileDrag {
+function Start-OleDrag {
     param(
-        [Parameter(Mandatory)][string[]]$Files,
+        [string[]]$Files = @(),
+        [string]$Text = $null,
         [Parameter(Mandatory)][IntPtr]$ToHwnd,
         [Parameter(Mandatory)][int]$X,
         [Parameter(Mandatory)][int]$Y
@@ -45,6 +46,7 @@ function Start-OleFileDrag {
     $rs.Open()
     $state = [hashtable]::Synchronized(@{ Stop = $false })
     $rs.SessionStateProxy.SetVariable('files', $Files)
+    $rs.SessionStateProxy.SetVariable('text', $Text)
     $rs.SessionStateProxy.SetVariable('state', $state)
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
@@ -60,10 +62,14 @@ function Start-OleFileDrag {
         $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
         $form.Location = New-Object System.Drawing.Point(($wa.Right - 140), ($wa.Bottom - 100))
         $form.Add_MouseDown({
-            $list = New-Object System.Collections.Specialized.StringCollection
-            [void]$list.AddRange([string[]]$files)
             $data = New-Object System.Windows.Forms.DataObject
-            $data.SetFileDropList($list)
+            if ($null -ne $text) {
+                $data.SetText($text)
+            } else {
+                $list = New-Object System.Collections.Specialized.StringCollection
+                [void]$list.AddRange([string[]]$files)
+                $data.SetFileDropList($list)
+            }
             [void]$form.DoDragDrop($data, [System.Windows.Forms.DragDropEffects]::Copy)
         })
         $form.Show()
@@ -112,4 +118,15 @@ function Stop-OleFileDrag($Drag) {
     [void]$Drag.Async.AsyncWaitHandle.WaitOne(5000)
     $Drag.Shell.Dispose()
     $Drag.Runspace.Dispose()
+}
+
+function Start-OleFileDrag {
+    param([Parameter(Mandatory)][string[]]$Files, [Parameter(Mandatory)][IntPtr]$ToHwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
+    Start-OleDrag -Files $Files -ToHwnd $ToHwnd -X $X -Y $Y
+}
+
+# Same, for a data object that carries only text (CF_UNICODETEXT).
+function Start-OleTextDrag {
+    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][IntPtr]$ToHwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
+    Start-OleDrag -Text $Text -ToHwnd $ToHwnd -X $X -Y $Y
 }
