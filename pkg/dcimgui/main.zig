@@ -12,6 +12,23 @@ pub extern fn ImGui_ImplOpenGL3_RenderDrawData(draw_data: *c.ImDrawData) callcon
 // pointer table so a subsequent Init can re-initialize the loader.
 pub extern fn ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup() callconv(.c) void;
 
+// Direct3D 11 backend. The device and context are `ID3D11Device*` and
+// `ID3D11DeviceContext*`.
+pub extern fn ImGui_ImplDX11_Init(device: *anyopaque, device_context: *anyopaque) callconv(.c) bool;
+pub extern fn ImGui_ImplDX11_Shutdown() callconv(.c) void;
+pub extern fn ImGui_ImplDX11_NewFrame() callconv(.c) void;
+pub extern fn ImGui_ImplDX11_RenderDrawData(draw_data: *c.ImDrawData) callconv(.c) void;
+pub extern fn ImGui_ImplDX11_CreateDeviceObjects() callconv(.c) bool;
+pub extern fn ImGui_ImplDX11_InvalidateDeviceObjects() callconv(.c) void;
+
+// Win32 platform backend. `ImGui_ImplWin32_WndProcHandler` is `#if 0` in the
+// header, so its signature is declared by hand.
+pub extern fn ImGui_ImplWin32_Init(hwnd: *anyopaque) callconv(.c) bool;
+pub extern fn ImGui_ImplWin32_Shutdown() callconv(.c) void;
+pub extern fn ImGui_ImplWin32_NewFrame() callconv(.c) void;
+pub extern fn ImGui_ImplWin32_WndProcHandler(hwnd: ?*anyopaque, msg: u32, wparam: usize, lparam: isize) callconv(.c) isize;
+pub extern fn ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd: *anyopaque) callconv(.c) f32;
+
 // Metal backend
 pub extern fn ImGui_ImplMetal_Init(device: *anyopaque) callconv(.c) bool;
 pub extern fn ImGui_ImplMetal_Shutdown() callconv(.c) void;

@@ -629,9 +629,12 @@ pub fn add(
         .freetype = true,
         .@"backend-metal" = target.result.os.tag.isDarwin(),
         .@"backend-osx" = target.result.os.tag == .macos,
+        // Windows draws through Direct3D 11 and takes input from Win32.
+        .@"backend-dx11" = target.result.os.tag == .windows,
+        .@"backend-win32" = target.result.os.tag == .windows,
         // OpenGL3 backend should only be built on non-Apple targets.
         // Apple platforms use Metal (and macOS may also use the OSX backend).
-        .@"backend-opengl3" = !target.result.os.tag.isDarwin(),
+        .@"backend-opengl3" = !target.result.os.tag.isDarwin() and target.result.os.tag != .windows,
     })) |dep| {
         step.root_module.addImport("dcimgui", dep.module("dcimgui"));
         step.root_module.linkLibrary(dep.artifact("dcimgui"));
