@@ -11,6 +11,8 @@ const Self = @This();
 
 const std = @import("std");
 const win32 = @import("win32");
+const com = win32.com;
+const d3d11 = win32.d3d11;
 const Device = @import("Device.zig");
 const Pipeline = @import("Pipeline.zig");
 const RenderPass = @import("RenderPass.zig");
@@ -42,15 +44,26 @@ const Constants = extern struct {
     dim: [4]f32 align(16),
     border: [4]f32,
     border_px: f32,
-    is_linear: f32,
     size: [2]f32,
 };
 
 pipeline: Pipeline,
 constants: bufferpkg.Buffer(Constants),
 
+/// `B8G8R8A8_UNORM` views of the targets drawn on (a target's texture is
+/// typeless), replaced round-robin. A view keeps its texture alive.
+views: [view_cache]View = @splat(.{ .resource = null, .rtv = null }),
+next_view: usize = 0,
+
 /// The number of draw calls issued. For tests.
 draw_calls: usize = 0,
+
+const view_cache = 4;
+
+const View = struct {
+    resource: ?*anyopaque,
+    rtv: ?*d3d11.ID3D11RenderTargetView,
+};
 
 pub fn init(device: *Device) !Self {
     const pipeline: Pipeline = try .init(null, .{
@@ -70,8 +83,31 @@ pub fn init(device: *Device) !Self {
 }
 
 pub fn deinit(self: *Self) void {
+    for (self.views) |v| com.release(v.rtv);
     self.constants.deinit();
     self.pipeline.deinit();
+}
+
+/// The cached gamma-space view of `target`'s texture, created on first use.
+fn unormView(self: *Self, target: *const Target) ?*d3d11.ID3D11RenderTargetView {
+    const key: *anyopaque = target.texture.texture;
+    for (self.views) |v| {
+        if (v.resource == key) return v.rtv;
+    }
+
+    const rtv = target.device.device.createRenderTargetView(target.texture.texture.asResource(), &.{
+        .Format = .B8G8R8A8_UNORM,
+        .ViewDimension = .TEXTURE2D,
+        .u = .{ .Texture2D = .{ .MipSlice = 0 } },
+    }) catch |err| {
+        log.warn("unable to create the decor view err={}", .{err});
+        return null;
+    };
+    const slot = &self.views[self.next_view];
+    self.next_view = (self.next_view + 1) % view_cache;
+    com.release(slot.rtv);
+    slot.* = .{ .resource = key, .rtv = rtv };
+    return rtv;
 }
 
 fn channel(rgb: u24, shift: u5) f32 {
@@ -88,25 +124,25 @@ fn premultiplied(rgb: u24, alpha: f32) [4]f32 {
     };
 }
 
-fn constantsFor(word: Word, width: usize, height: usize, is_linear: bool) Constants {
+fn constantsFor(word: Word, width: usize, height: usize) Constants {
     return .{
         .dim = premultiplied(word.dim_rgb, @as(f32, @floatFromInt(word.dim_alpha)) / 255.0),
         .border = if (word.border) premultiplied(word.border_rgb, border_alpha) else @splat(0),
         .border_px = if (word.border) @floatFromInt(word.border_px) else 0,
-        .is_linear = if (is_linear) 1 else 0,
         .size = .{ @floatFromInt(width), @floatFromInt(height) },
     };
 }
 
-/// Draws `word` over `target`. `is_linear` is whether the target's views
-/// are sRGB (linear blending). Nothing happens for a zero word.
-pub fn draw(self: *Self, target: *const Target, word: Word, is_linear: bool) void {
+/// Draws `word` over `target`, blending in gamma space like the macOS overlays
+/// do: through a `B8G8R8A8_UNORM` view, also when the target's own views are
+/// sRGB (linear blending). Nothing happens for a zero word.
+pub fn draw(self: *Self, target: *const Target, word: Word) void {
     if (word.isZero()) return;
 
     const device = target.device;
     device.assertContextLocked();
 
-    self.constants.sync(&.{constantsFor(word, target.width, target.height, is_linear)}) catch |err| {
+    self.constants.sync(&.{constantsFor(word, target.width, target.height)}) catch |err| {
         log.warn("unable to upload the decor constants err={}", .{err});
         return;
     };
@@ -114,8 +150,11 @@ pub fn draw(self: *Self, target: *const Target, word: Word, is_linear: bool) voi
     const ctx = device.context;
     ctx.psSetConstantBuffers(2, &.{self.constants.buffer.resource});
 
+    const rtv = self.unormView(target) orelse return;
+    var gamma = target.*;
+    gamma.texture.rtv = rtv;
     const attachments = [_]RenderPass.Options.Attachment{.{
-        .target = .{ .target = target.* },
+        .target = .{ .target = gamma },
     }};
     var pass = RenderPass.begin(.{ .attachments = &attachments });
     pass.step(.{
@@ -142,8 +181,8 @@ fn expectPixel(want: [4]u8, got: [4]u8, tolerance: u8) !void {
 }
 
 /// A target cleared to `clear` (premultiplied RGBA).
-fn testTarget(device: *Device, width: usize, height: usize, clear: [4]f32) !Target {
-    const target = try Target.init(.{ .device = device, .width = width, .height = height, .srgb = false });
+fn testTarget(device: *Device, width: usize, height: usize, clear: [4]f32, srgb: bool) !Target {
+    const target = try Target.init(.{ .device = device, .width = width, .height = height, .srgb = srgb });
     device.lockContext();
     defer device.unlockContext();
     const attachments = [_]RenderPass.Options.Attachment{.{
@@ -158,14 +197,14 @@ test "d3d11 decor: dim blends the fill colour" {
     const alloc = std.testing.allocator;
     const device = try Device.init(alloc, .{ .driver = .warp });
     defer device.deinit(alloc);
-    var target = try testTarget(device, 16, 16, .{ 0, 0, 0, 1 });
+    var target = try testTarget(device, 16, 16, .{ 0, 0, 0, 1 }, false);
     defer target.deinit();
     var decor: Self = try .init(device);
     defer decor.deinit();
 
     device.lockContext();
     defer device.unlockContext();
-    decor.draw(&target, .{ .dim_alpha = 0x4D, .dim_rgb = 0xffffff }, false);
+    decor.draw(&target, .{ .dim_alpha = 0x4D, .dim_rgb = 0xffffff });
 
     const pixels = try target.readPixelsAlloc(alloc);
     defer alloc.free(pixels);
@@ -174,11 +213,29 @@ test "d3d11 decor: dim blends the fill colour" {
     try std.testing.expectEqual(@as(usize, 1), decor.draw_calls);
 }
 
+test "d3d11 decor: dim on a linear target blends in gamma space" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+    var target = try testTarget(device, 16, 16, .{ 0, 0, 0, 1 }, true);
+    defer target.deinit();
+    var decor: Self = try .init(device);
+    defer decor.deinit();
+
+    device.lockContext();
+    defer device.unlockContext();
+    decor.draw(&target, .{ .dim_alpha = 0x4D, .dim_rgb = 0xffffff });
+
+    const pixels = try target.readPixelsAlloc(alloc);
+    defer alloc.free(pixels);
+    try expectPixel(.{ 0x4D, 0x4D, 0x4D, 255 }, pixelAt(pixels, 16, 8, 8), 1);
+}
+
 test "d3d11 decor: border touches only edge pixels" {
     const alloc = std.testing.allocator;
     const device = try Device.init(alloc, .{ .driver = .warp });
     defer device.deinit(alloc);
-    var target = try testTarget(device, 64, 32, .{ 0, 0, 0, 1 });
+    var target = try testTarget(device, 64, 32, .{ 0, 0, 0, 1 }, false);
     defer target.deinit();
     var decor: Self = try .init(device);
     defer decor.deinit();
@@ -186,7 +243,7 @@ test "d3d11 decor: border touches only edge pixels" {
     device.lockContext();
     defer device.unlockContext();
     // Red, at half opacity over black.
-    decor.draw(&target, .{ .border = true, .border_px = 2, .border_rgb = 0x0000ff }, false);
+    decor.draw(&target, .{ .border = true, .border_px = 2, .border_rgb = 0x0000ff });
 
     const pixels = try target.readPixelsAlloc(alloc);
     defer alloc.free(pixels);
@@ -203,14 +260,14 @@ test "d3d11 decor: zero word draws nothing" {
     const alloc = std.testing.allocator;
     const device = try Device.init(alloc, .{ .driver = .warp });
     defer device.deinit(alloc);
-    var target = try testTarget(device, 8, 8, .{ 0, 0, 0, 1 });
+    var target = try testTarget(device, 8, 8, .{ 0, 0, 0, 1 }, false);
     defer target.deinit();
     var decor: Self = try .init(device);
     defer decor.deinit();
 
     device.lockContext();
     defer device.unlockContext();
-    decor.draw(&target, .{}, false);
+    decor.draw(&target, .{});
     try std.testing.expectEqual(@as(usize, 0), decor.draw_calls);
 }
 

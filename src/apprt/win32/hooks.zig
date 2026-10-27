@@ -173,7 +173,11 @@ pub fn surfaceMessage(surface: *Surface, msg: u32, wparam: WPARAM, lparam: LPARA
     _ = lparam;
     switch (msg) {
         messages.WM_GHOSTTY_SET_CONTENT => return composition.setContent(surface, wparam),
-        win32.user32.WM_TIMER => return decor.timer(surface, wparam),
+        // A key press ends the bell border: one flag test.
+        win32.user32.WM_KEYDOWN => {
+            decor.keyDown(surface);
+            return null;
+        },
         else => return null,
     }
 }

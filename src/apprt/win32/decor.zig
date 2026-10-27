@@ -13,9 +13,6 @@ const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const Tab = @import("Tab.zig");
 const geom = @import("geom.zig");
-const messages = @import("messages.zig");
-
-const log = std.log.scoped(.win32_decor);
 
 const Color = configpkg.Config.Color;
 
@@ -25,11 +22,14 @@ pub const Word = Decor.Word;
 pub const State = struct {
     /// The surface rang and `bell-features = border` shows it.
     bell_border: bool = false,
-};
 
-/// How long the border of a focused surface stays: a focus-in would clear
-/// it, but the surface already has the focus.
-const bell_border_ms: u32 = 1000;
+    /// Ends the bell border; whether there was one.
+    pub fn clearBell(self: *State) bool {
+        const was = self.bell_border;
+        self.bell_border = false;
+        return was;
+    }
+};
 
 /// The border width, in points.
 const bell_border_pt: i32 = 3;
@@ -82,30 +82,64 @@ pub fn compute(in: Input) Word {
     return word;
 }
 
-/// The word of surface `i` of `count` in a tab: `active` is the focused
-/// one, `zoomed` the zoomed one if any. Zoom leaves one visible surface,
-/// which is never dimmed.
-fn wordFor(
-    i: usize,
-    count: usize,
-    active: usize,
-    zoomed: ?usize,
+/// One surface of a tab, as `refresh` sees it.
+const Entry = struct {
+    /// It is the tab's focused surface.
+    focused: bool,
+    /// It is the zoomed surface.
+    zoomed: bool,
     bell_border: bool,
+    word: *std.atomic.Value(u64),
+    /// Asked for a frame when its word changed; null in tests.
+    surface: ?*Surface = null,
+};
+
+/// Computes and stores the word of every entry of a tab of `count`
+/// surfaces, `it` yielding them. Zoom leaves one visible surface, which is
+/// never dimmed. A changed word asks the renderer for a frame.
+fn refresh(
+    it: anytype,
+    count: usize,
+    any_zoomed: bool,
     config: *const configpkg.Config,
     dpi: u32,
-) Word {
-    return compute(.{
-        .tab_surfaces = if (zoomed != null) 1 else count,
-        .focused_in_tab = i == active,
-        .zoomed_other = if (zoomed) |z| z != i else false,
-        .bell_border = bell_border,
-        .opacity = config.@"unfocused-split-opacity",
-        .fill = config.@"unfocused-split-fill",
-        .background = config.background,
-        .bell_color = bell_color,
-        .dpi = dpi,
-    });
+) void {
+    var iter = it;
+    while (iter.next()) |e| {
+        const word = compute(.{
+            .tab_surfaces = if (any_zoomed) 1 else count,
+            .focused_in_tab = e.focused,
+            .zoomed_other = any_zoomed and !e.zoomed,
+            .bell_border = e.bell_border,
+            .opacity = config.@"unfocused-split-opacity",
+            .fill = config.@"unfocused-split-fill",
+            .background = config.background,
+            .bell_color = bell_color,
+            .dpi = dpi,
+        });
+        const raw: u64 = @bitCast(word);
+        if (e.word.swap(raw, .monotonic) == raw) continue;
+        if (e.surface) |s| if (s.initialized) s.core_surface.queueRedraw();
+    }
 }
+
+/// The entries of a tab's split tree.
+const TabEntries = struct {
+    it: Surface.Tree.Iterator,
+    focused: ?*Surface,
+    zoomed: ?Surface.Tree.Node.Handle,
+
+    fn next(self: *TabEntries) ?Entry {
+        const e = self.it.next() orelse return null;
+        return .{
+            .focused = self.focused == e.view,
+            .zoomed = if (self.zoomed) |z| z == e.handle else false,
+            .bell_border = e.view.decor.bell_border,
+            .word = &e.view.decor_word,
+            .surface = e.view,
+        };
+    }
+};
 
 /// Recompute every surface of `tab`, store the words and ask the renderers
 /// of the changed ones for a frame.
@@ -115,29 +149,14 @@ pub fn refreshTab(tab: *Tab) void {
 
 fn refreshTabWith(tab: *Tab, config: *const configpkg.Config) void {
     var count: usize = 0;
-    var active: usize = std.math.maxInt(usize);
-    var zoomed: ?usize = null;
-    const focused = tab.focusedSurface();
-    var it = tab.tree.iterator();
-    while (it.next()) |entry| : (count += 1) {
-        if (focused == entry.view) active = count;
-        if (tab.tree.zoomed) |z| if (z == entry.handle) {
-            zoomed = count;
-        };
-    }
+    var counter = tab.tree.iterator();
+    while (counter.next()) |_| count += 1;
 
-    it = tab.tree.iterator();
-    var i: usize = 0;
-    while (it.next()) |entry| : (i += 1) {
-        const s = entry.view;
-        store(s, wordFor(i, count, active, zoomed, s.decor.bell_border, config, tab.window.dpi));
-    }
-}
-
-fn store(s: *Surface, word: Word) void {
-    const raw: u64 = @bitCast(word);
-    if (s.decor_word.swap(raw, .monotonic) == raw) return;
-    if (s.initialized) s.core_surface.queueRedraw();
+    refresh(TabEntries{
+        .it = tab.tree.iterator(),
+        .focused = tab.focusedSurface(),
+        .zoomed = tab.tree.zoomed,
+    }, count, tab.tree.zoomed != null, config, tab.window.dpi);
 }
 
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
@@ -151,15 +170,17 @@ pub fn surfaceCreated(surface: *Surface) void {
 }
 
 /// `WM_SETFOCUS` / `WM_KILLFOCUS` of the surface. The dim follows the tab's
-/// focused surface, which a focus-in changes before this runs, so losing
-/// the focus (a deactivated window, a palette) changes nothing; a focus-in
-/// ends the bell border.
+/// focused surface, which `Surface.handleFocus` already refreshed through
+/// `tabLayoutChanged`, so only a focus-in that ends the bell border needs a
+/// refresh of its own.
 pub fn surfaceFocus(surface: *Surface, focused: bool) void {
-    if (focused and surface.decor.bell_border) {
-        surface.decor.bell_border = false;
-        _ = win32.user32.KillTimer(surface.hwnd, messages.timers.surface.decor);
-    }
-    refreshTab(surface.tab);
+    if (focused and surface.decor.clearBell()) refreshTab(surface.tab);
+}
+
+/// A key press on the surface ends the bell border (macOS does the same).
+/// One flag test on the key path.
+pub fn keyDown(surface: *Surface) void {
+    if (surface.decor.bell_border and surface.decor.clearBell()) refreshTab(surface.tab);
 }
 
 /// After every relayout of the split tree and every change of the focused
@@ -168,22 +189,10 @@ pub fn tabLayoutChanged(tab: *Tab) void {
     refreshTab(tab);
 }
 
-/// Shows the bell border of `surface`. A focused surface drops it after a
-/// second; an unfocused one keeps it until it gets the focus.
-pub fn showBellBorder(surface: *Surface, focused: bool) void {
+/// Shows the bell border of `surface` until a key press or the focus.
+pub fn showBellBorder(surface: *Surface) void {
     surface.decor.bell_border = true;
-    if (focused and win32.user32.SetTimer(surface.hwnd, messages.timers.surface.decor, bell_border_ms, null) == 0)
-        log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
     refreshTab(surface.tab);
-}
-
-/// `WM_TIMER` (bell border expiry) on the surface window.
-pub fn timer(surface: *Surface, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESULT {
-    if (wparam != messages.timers.surface.decor) return null;
-    _ = win32.user32.KillTimer(surface.hwnd, messages.timers.surface.decor);
-    surface.decor.bell_border = false;
-    refreshTab(surface.tab);
-    return 0;
 }
 
 /// The words are not reported: the scenarios read them off the frame dumps.
@@ -191,14 +200,6 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     _ = app;
     try jw.beginObject();
     try jw.endObject();
-}
-
-fn testConfig() configpkg.Config {
-    var c: configpkg.Config = undefined;
-    c.@"unfocused-split-opacity" = 0.7;
-    c.@"unfocused-split-fill" = null;
-    c.background = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
-    return c;
 }
 
 const test_input: Input = .{
@@ -268,27 +269,79 @@ test "win32 decor: bell border word" {
     try std.testing.expect(w.border and w.dim_alpha != 0);
 }
 
+fn testConfig() configpkg.Config {
+    var c: configpkg.Config = undefined;
+    c.@"unfocused-split-opacity" = 0.7;
+    c.@"unfocused-split-fill" = null;
+    c.background = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
+    return c;
+}
+
+/// Entries over a slice, for `refresh`.
+const SliceEntries = struct {
+    items: []const Entry,
+    i: usize = 0,
+
+    fn next(self: *SliceEntries) ?Entry {
+        if (self.i >= self.items.len) return null;
+        defer self.i += 1;
+        return self.items[self.i];
+    }
+};
+
+fn entry(word: *std.atomic.Value(u64), focused: bool) Entry {
+    return .{ .focused = focused, .zoomed = false, .bell_border = false, .word = word };
+}
+
+fn load(word: *const std.atomic.Value(u64)) Word {
+    return @bitCast(word.load(.monotonic));
+}
+
 test "win32 decor: window deactivation does not dim the active split" {
-    // The words depend on the tab's focused surface only: a window losing
-    // the activation (`surfaceFocus(active, false)`) leaves it unchanged.
+    // `surfaceFocus(active, false)` changes nothing: the refresh follows
+    // the tab's focused surface, which a deactivated window keeps.
     const config = testConfig();
-    const before = [2]Word{ wordFor(0, 2, 0, null, false, &config, 96), wordFor(1, 2, 0, null, false, &config, 96) };
-    try std.testing.expect(before[0].isZero());
-    try std.testing.expect(!before[1].isZero());
-    const after = [2]Word{ wordFor(0, 2, 0, null, false, &config, 96), wordFor(1, 2, 0, null, false, &config, 96) };
-    try std.testing.expectEqual(before, after);
+    var a: std.atomic.Value(u64) = .init(0);
+    var b: std.atomic.Value(u64) = .init(0);
+    const entries = [_]Entry{ entry(&a, true), entry(&b, false) };
+    refresh(SliceEntries{ .items = &entries }, 2, false, &config, 96);
+    try std.testing.expect(load(&a).isZero());
+    try std.testing.expect(!load(&b).isZero());
+
+    // A focus-out never clears a bell border, so it asks for no refresh.
+    var state: State = .{};
+    try std.testing.expect(!state.clearBell());
+    refresh(SliceEntries{ .items = &entries }, 2, false, &config, 96);
+    try std.testing.expect(load(&a).isZero());
 }
 
 test "win32 decor: split insert without focus change refreshes the tab" {
     const config = testConfig();
-    try std.testing.expect(wordFor(0, 1, 0, null, false, &config, 96).isZero());
+    var a: std.atomic.Value(u64) = .init(0);
+    var b: std.atomic.Value(u64) = .init(0);
 
-    // `tabLayoutChanged` after a 1 -> 2 split: the old surface keeps the
+    const one = [_]Entry{entry(&a, true)};
+    refresh(SliceEntries{ .items = &one }, 1, false, &config, 96);
+    try std.testing.expect(load(&a).isZero());
+
+    // `tabLayoutChanged` after the 1 -> 2 split: the old surface keeps the
     // focus, the new one dims.
-    try std.testing.expect(wordFor(0, 2, 0, null, false, &config, 96).isZero());
-    try std.testing.expect(!wordFor(1, 2, 0, null, false, &config, 96).isZero());
+    const two = [_]Entry{ entry(&a, true), entry(&b, false) };
+    refresh(SliceEntries{ .items = &two }, 2, false, &config, 96);
+    try std.testing.expect(load(&a).isZero());
+    try std.testing.expectEqual(@as(u8, 0x4D), load(&b).dim_alpha);
 
-    // Zoom: the zoomed surface shows alone, the others are hidden.
-    try std.testing.expect(wordFor(0, 2, 1, 1, false, &config, 96).isZero());
-    try std.testing.expect(wordFor(1, 2, 1, 1, false, &config, 96).isZero());
+    // Zoom the first: neither is dimmed.
+    var zoomed = two;
+    zoomed[0].zoomed = true;
+    refresh(SliceEntries{ .items = &zoomed }, 2, true, &config, 96);
+    try std.testing.expect(load(&a).isZero());
+    try std.testing.expect(load(&b).isZero());
+}
+
+test "win32 decor: a bell border is cleared once" {
+    var state: State = .{ .bell_border = true };
+    try std.testing.expect(state.clearBell());
+    try std.testing.expect(!state.bell_border);
+    try std.testing.expect(!state.clearBell());
 }

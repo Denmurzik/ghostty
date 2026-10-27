@@ -379,7 +379,7 @@ pub fn drawDecor(self: *D3D11, target: *const Target) void {
             return;
         };
     }
-    self.decor_pass.?.draw(target, word, self.blending.isLinear());
+    self.decor_pass.?.draw(target, word);
 }
 
 /// Blocks until the swap chain has a free frame slot. Nothing to wait for

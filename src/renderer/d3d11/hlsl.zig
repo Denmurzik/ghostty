@@ -91,7 +91,7 @@ pub fn bytecode(entry: Entry) ![]const u8 {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
 
-    const slot = &cache[@backingInt(entry)];
+    const slot = &cache[@intFromEnum(entry)];
     if (slot.*) |code| return code;
 
     const c = compiler orelse load: {

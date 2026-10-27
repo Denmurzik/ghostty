@@ -31,6 +31,33 @@ const compat_file = @import("../lib/compat/file.zig");
 
 const getConstraint = @import("../font/nerd_font_attributes.zig").getConstraint;
 
+/// Whether a frame has to be drawn at all, otherwise the previous one is
+/// identical.
+pub fn frameNeeded(f: struct {
+    size_changed: bool = false,
+    swap_chain_rebuilt: bool = false,
+    cells_rebuilt: bool = false,
+    images_rebuilt: bool = false,
+    force_redraw: bool = false,
+    animating: bool = false,
+    sync: bool = false,
+}) bool {
+    return f.size_changed or
+        f.swap_chain_rebuilt or
+        f.cells_rebuilt or
+        f.images_rebuilt or
+        f.force_redraw or
+        f.animating or
+        f.sync;
+}
+
+test "renderer: redraw message forces one draw" {
+    try std.testing.expect(!frameNeeded(.{}));
+    try std.testing.expect(frameNeeded(.{ .force_redraw = true }));
+    try std.testing.expect(frameNeeded(.{ .cells_rebuilt = true }));
+    try std.testing.expect(frameNeeded(.{ .sync = true }));
+}
+
 const FileType = @import("../file_type.zig").FileType;
 
 const macos = switch (builtin.target.os.tag) {
@@ -1744,6 +1771,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) self.api.waitFrameSlot();
         }
 
+        /// A frame was asked for (`.redraw`) and is being drawn now.
+        fn takeRedraw(self: *Self) void {
+            self.force_redraw = false;
+        }
+
         /// Draw the frame to the screen.
         ///
         /// If `sync` is true, this will synchronously block until
@@ -1839,13 +1871,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //
             // While any animation is in progress (a pending animation wake)
             // every draw must actually render.
-            const needs_redraw =
-                size_changed or
-                swap_chain_rebuilt or
-                self.cells_rebuilt or
-                self.images_rebuilt or
-                self.animationWake() != null or
-                sync;
+            const needs_redraw = frameNeeded(.{
+                .size_changed = size_changed,
+                .swap_chain_rebuilt = swap_chain_rebuilt,
+                .cells_rebuilt = self.cells_rebuilt,
+                .images_rebuilt = self.images_rebuilt,
+                .force_redraw = self.force_redraw,
+                .animating = self.animationWake() != null,
+                .sync = sync,
+            });
 
             if (!needs_redraw) {
                 if (comptime builtin.os.tag == .windows) {
@@ -1858,7 +1892,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             self.cells_rebuilt = false;
             self.images_rebuilt = false;
-            self.force_redraw = false;
+            self.takeRedraw();
 
             // Wait for a frame to be available.
             const frame = swap_chain.nextFrame();

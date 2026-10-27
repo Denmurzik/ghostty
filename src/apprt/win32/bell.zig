@@ -23,9 +23,10 @@ pub fn ring(surface: *Surface) bool {
     const features = window.app.config.@"bell-features";
     const foreground = win32.user32.GetForegroundWindow() == window.hwnd;
 
+    // A focused surface needs no reminder of what it just did.
+    const focused = foreground and win32.user32.GetFocus() == surface.hwnd;
+
     if (features.title) {
-        // A focused surface needs no reminder of what it just did.
-        const focused = foreground and win32.user32.GetFocus() == surface.hwnd;
         if (!focused and !surface.bell_ringing) {
             surface.bell_ringing = true;
             if (window.activeTab() == surface.tab) window.refreshTitle();
@@ -33,10 +34,7 @@ pub fn ring(surface: *Surface) bool {
         }
     }
 
-    if (features.border) {
-        const focused = foreground and win32.user32.GetFocus() == surface.hwnd;
-        decor.showBellBorder(surface, focused);
-    }
+    if (features.border) decor.showBellBorder(surface);
 
     if (features.attention and !foreground) {
         var info: win32.user32.FLASHWINFO = .{
