@@ -3817,7 +3817,9 @@ else
 ///   * `detect` (default) - A launch without arguments opens a new window in
 ///     the running instance and exits. A launch with arguments (other than a
 ///     bare `--working-directory`) starts its own process.
-///   * `true` - Like `detect`; a command (`-e`, `--command`, `initial-command`)
+///     A config that sets `initial-command` also starts its own process.
+///   * `true` - The same as `detect`; it exists for parity with
+///     `gtk-single-instance`. A command (`-e`, `--command`, `initial-command`)
 ///     is never forwarded, such a launch starts its own process.
 ///   * `false` - Every launch starts its own process.
 ///
