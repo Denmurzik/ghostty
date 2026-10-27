@@ -36,6 +36,9 @@ pub fn parse(arena: Allocator, s: []const u8) error{ Unsupported, OutOfMemory }!
     var env: std.ArrayList([]const u8) = .empty;
     if (idx < toks.items.len and isWord(toks.items[idx], "env")) {
         idx += 1;
+        // `env -i`, `env -u NAME`, ...: options are not supported.
+        if (idx < toks.items.len and !toks.items[idx].quoted and
+            std.mem.startsWith(u8, toks.items[idx].text, "-")) return error.Unsupported;
         while (idx < toks.items.len and isAssignment(toks.items[idx])) : (idx += 1) {
             try env.append(arena, toks.items[idx].text);
         }
@@ -133,7 +136,13 @@ fn tokenize(arena: Allocator, s: []const u8, out: *std.ArrayList(Token)) error{ 
                     try buf.append(arena, e);
                     i += 2;
                 },
-                '$', '`', '*', '?', '[', ';', '|', '&', '<', '>', '(', ')', '~' => return error.Unsupported,
+                '$', '`', '*', '?', '[', ';', '|', '&', '<', '>', '(', ')', '~', '{', '}', '!' => return error.Unsupported,
+                // A word starting with an unquoted `#` is a shell comment.
+                '#' => {
+                    if (buf.items.len == 0 and !quoted) return error.Unsupported;
+                    try buf.append(arena, c);
+                    i += 1;
+                },
                 else => {
                     try buf.append(arena, c);
                     i += 1;
@@ -199,6 +208,19 @@ test "tmux shim sh_command: unsupported" {
     try expectUnsupported("'abc");
     try expectUnsupported("a && b");
     try expectUnsupported("~/x");
+    try expectUnsupported("echo {a,b}");
+    try expectUnsupported("a !b");
+    try expectUnsupported("a #comment");
+    try expectUnsupported("env -i x");
+}
+
+test "tmux shim sh_command: # inside a word and quoted braces stay literal" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cmd = try parse(arena_state.allocator(), "a#b '{x}'");
+    try std.testing.expectEqual(@as(usize, 2), cmd.argv.len);
+    try std.testing.expectEqualStrings("a#b", cmd.argv[0]);
+    try std.testing.expectEqualStrings("{x}", cmd.argv[1]);
 }
 
 test "tmux shim sh_command: no cd, no env" {
