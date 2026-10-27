@@ -247,20 +247,41 @@ function Test-Animation([string]$Background, [string]$Foreground) {
             [pscustomobject]@{ Diffs = $diffs; Rects = @(@($before, $mid, $after) | Select-Object -Unique) }
         }
 
-        # The second tab: the row slides in.
-        $r = Watch-Strip 'new_tab' 10
-        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the new tab differs from its end state ($($r.Diffs -join ','))" }
-        if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid in: $($r.Rects -join ' | ')" }
-        # A third tab slides in too (tabs animate, the terminal does not resize).
-        $r = Watch-Strip 'new_tab' 10
-        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the third tab differs from its end state ($($r.Diffs -join ','))" }
-        if ($r.Rects.Count -gt 1) { throw "anim: the terminal resized with a third tab: $($r.Rects -join ' | ')" }
+        # Brings the window to `$N` tabs and waits until it rests.
+        function Set-Tabs([int]$N) {
+            for ($i = 0; $i -lt 12; $i++) {
+                $c = @((Get-Win).tabs).Count
+                if ($c -eq $N) { break }
+                [void](Invoke-GhosttyAction -Class $g.Class -Action $(if ($c -lt $N) { 'new_tab' } else { 'close_tab' }))
+                Start-Sleep -Milliseconds 300
+            }
+            Start-Sleep -Milliseconds 800
+            if (@((Get-Win).tabs).Count -ne $N) { throw "anim: cannot bring the window to $N tabs" }
+        }
+        # Runs `$Action` from `$From` tabs until a frame of the slide is caught: a
+        # busy desktop can delay the first capture past the 0.2 s of the slide, so a
+        # missed slide is tried again (three times). `$MaxResizes` is how often the
+        # terminal's rect may change while it runs.
+        function Test-Slide([string]$What, [int]$From, [string]$Action, [int]$MaxResizes) {
+            for ($try = 0; $try -lt 3; $try++) {
+                Set-Tabs $From
+                $r = Watch-Strip $Action 10
+                if ($r.Rects.Count - 1 -gt $MaxResizes) { throw "anim: the terminal resized $($r.Rects.Count - 1) times during $What : $($r.Rects -join ' | ')" }
+                if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -ge 1) { return }
+                Write-E2eInfo "anim: $What was not caught in a frame ($($r.Diffs -join ',')), trying again"
+            }
+            throw "anim: no frame of $What differs from its end state"
+        }
+
+        # The second tab: the row slides in; the terminal's rect changes once (at the start).
+        Test-Slide 'the tab row sliding in' 1 'new_tab' 1
+        # A third tab slides in too; the terminal does not resize.
+        Test-Slide 'the third tab growing' 2 'new_tab' 0
         # Closing back to one tab: the row slides out, the terminal grows once, at the end.
-        [void](Invoke-GhosttyAction -Class $g.Class -Action 'close_tab')
-        Start-Sleep -Milliseconds 600
-        $r = Watch-Strip 'close_tab' 10
-        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the closing tab differs from its end state ($($r.Diffs -join ','))" }
-        if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid out: $($r.Rects -join ' | ')" }
+        Test-Slide 'the tab row sliding out' 2 'close_tab' 1
+        # Closing one of three: the tab shrinks away, no resize.
+        Test-Slide 'a tab shrinking' 3 'close_tab' 0
+        Set-Tabs 1
         $w = Get-Win
         if (@($w.tabs).Count -ne 1 -or $w.strip.bounds[3] -ne 30) { throw "anim: the end state is not one tab with the title row only: strip $($w.strip.bounds -join ',')" }
     } finally {
