@@ -473,7 +473,10 @@ fn wheelScrollAmount(action: u32) u32 {
     return amount;
 }
 
+/// A surface window of this thread. The forward is a synchronous send, so
+/// another Ghostty process (busy, or elevated under UIPI) must not get it.
 fn isSurfaceWindow(hwnd: win32.foundation.HWND) bool {
+    if (win32.user32.GetWindowThreadProcessId(hwnd, null) != win32.kernel32.GetCurrentThreadId()) return false;
     var buf: [surface_class_name.len + 1]u16 = undefined;
     const len = win32.user32.GetClassNameW(hwnd, &buf, buf.len);
     if (len <= 0) return false;
