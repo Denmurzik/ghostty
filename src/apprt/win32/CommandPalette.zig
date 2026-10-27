@@ -15,6 +15,7 @@ const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
 const input = @import("../../input.zig");
 const App = @import("App.zig");
+const Chrome = @import("Chrome.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const filter = @import("palette_filter.zig");
@@ -44,23 +45,12 @@ const CLEARTYPE_QUALITY = 5;
 const FW_LIGHT = 300;
 const FW_NORMAL = 400;
 const FW_BOLD = 700;
-const NULL_PEN = 8;
-const TRANSPARENT = 1;
-const DT_LEFT = 0x0;
-const DT_RIGHT = 0x2;
-const DT_VCENTER = 0x4;
-const DT_SINGLELINE = 0x20;
-const DT_CALCRECT = 0x400;
-const DT_NOPREFIX = 0x800;
 const COLOR_HIGHLIGHT = 13;
 const MA_NOACTIVATE = 3;
 const subclass_id = 1;
 
-extern "gdi32" fn SetBkMode(user32.HDC, i32) callconv(.winapi) i32;
 extern "gdi32" fn SetTextColor(user32.HDC, u32) callconv(.winapi) u32;
 extern "gdi32" fn SetBkColor(user32.HDC, u32) callconv(.winapi) u32;
-extern "gdi32" fn RoundRect(user32.HDC, i32, i32, i32, i32, i32, i32) callconv(.winapi) i32;
-extern "user32" fn DrawTextW(user32.HDC, [*]const u16, i32, *win32.foundation.RECT, u32) callconv(.winapi) i32;
 
 // -- State -------------------------------------------------------------------------
 
@@ -920,6 +910,31 @@ fn editBrush(panel: *Panel, c: theme.Color) LRESULT {
 
 // -- Paint -------------------------------------------------------------------------
 
+const max_items = 12 * 40 + 8;
+
+/// The items of one paint and the UTF-16 text they point to.
+const Scene = struct {
+    items: [max_items]Chrome.Item = undefined,
+    n: usize = 0,
+    text: [max_rows * 640]u16 = undefined,
+    used: usize = 0,
+
+    fn add(s: *Scene, item: Chrome.Item) void {
+        if (s.n >= s.items.len) return;
+        s.items[s.n] = item;
+        s.n += 1;
+    }
+
+    /// UTF-16 of `utf8` kept for the scene, cut at 256 units.
+    fn wide(s: *Scene, utf8: []const u8) []const u16 {
+        const room = @min(s.text.len - s.used, 256);
+        const n = utf16Clip(s.text[s.used..][0..room], utf8);
+        const out = s.text[s.used..][0..n];
+        s.used += n;
+        return out;
+    }
+};
+
 fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     const panel = Panel.of(p);
     const window = p.window;
@@ -928,20 +943,20 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     if (panel.font_dpi != ctx.dpi or panel.dark_applied == null) layoutChildren(panel);
 
     const c = currentColors(window);
-    const hdc = ctx.hdc;
     const w = ctx.rect.w;
     const dpi = ctx.dpi;
     const g = Geometry.forWidth(w, dpi);
     const s = geom.scale;
+    const body: Chrome.Font = .{ .size_pt = 14 };
+    const small: Chrome.Font = .{ .size_pt = 11 };
 
-    fillRect(hdc, ctx.rect, c.bg);
-    fillRect(hdc, .{ .x = 0, .y = g.divider_y, .w = w, .h = 1 }, c.divider);
-    _ = SetBkMode(hdc, TRANSPARENT);
+    var scene: Scene = .{};
+    scene.add(.{ .box = .{ .rect = .{ .x = 0, .y = g.divider_y, .w = w, .h = 1 }, .radius = 0, .fill = c.divider } });
 
     const total = state.rows.len;
     if (total == 0) {
         const r: geom.Rect = .{ .x = s(query_inset, dpi), .y = g.list_top, .w = w - 2 * s(query_inset, dpi), .h = ctx.rect.h - g.list_top };
-        drawText(hdc, panel.font, L("No matches"), r, c.secondary, DT_LEFT);
+        scene.add(.{ .text = .{ .rect = r, .text = L("No matches"), .font = body, .color = c.secondary, .halign = .leading } });
     }
 
     const shown = @min(total -| state.scroll, visibleCount(total, clientHeightDip(window)));
@@ -950,38 +965,45 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
         const item = panel.items[state.rows[pos]];
         const r = g.row(w, dpi, i);
         if (pos == state.sel) {
-            roundFill(hdc, r, s(row_radius, dpi), c.selected);
+            scene.add(.{ .box = .{ .rect = r, .radius = s(row_radius, dpi), .fill = c.selected } });
         } else if (panel.hover == i) {
-            roundFill(hdc, r, s(row_radius, dpi), c.hover);
+            scene.add(.{ .box = .{ .rect = r, .radius = s(row_radius, dpi), .fill = c.hover } });
         }
 
         const pad = s(row_pad, dpi);
         var inner: geom.Rect = .{ .x = r.x + pad, .y = r.y, .w = r.w - 2 * pad, .h = r.h };
         if (item.shortcut.len > 0) {
-            var buf: [96]u16 = undefined;
-            const n = std.unicode.utf8ToUtf16Le(&buf, item.shortcut) catch 0;
-            const width = measure(hdc, panel.small_font, buf[0..n]);
-            drawText(hdc, panel.small_font, buf[0..n], inner, c.secondary, DT_RIGHT);
+            const text = scene.wide(item.shortcut);
+            const width = Chrome.measureText(text, small, dpi) catch 0;
+            scene.add(.{ .text = .{
+                .rect = .{ .x = inner.right() - width, .y = inner.y, .w = width, .h = inner.h },
+                .text = text,
+                .font = small,
+                .color = c.secondary,
+                .halign = .leading,
+            } });
             inner.w -= width + pad;
         }
         const has_desc = item.description.len > 0;
         const half = @divTrunc(inner.h, 2);
         const title_rect: geom.Rect = if (has_desc) .{ .x = inner.x, .y = inner.y, .w = inner.w, .h = half + s(2, dpi) } else inner;
-        drawTitle(panel, hdc, item.title, title_rect, c);
+        addTitle(panel, &scene, item.title, title_rect, c, dpi);
         if (has_desc) {
             const sub: geom.Rect = .{ .x = inner.x, .y = inner.y + half, .w = inner.w, .h = half - s(2, dpi) };
-            var buf: [256]u16 = undefined;
-            const n = utf16Clip(&buf, item.description);
-            drawText(hdc, panel.small_font, buf[0..n], sub, c.secondary, DT_LEFT);
+            scene.add(.{ .text = .{ .rect = sub, .text = scene.wide(item.description), .font = small, .color = c.secondary, .halign = .leading, .trim = true } });
         }
     }
 
-    frameRect(hdc, ctx.rect, c.border);
+    scene.add(.{ .stroke = .{ .rect = ctx.rect, .radius = 0, .width = 1, .color = c.border } });
+    Chrome.paintItems(ctx.hdc, ctx.rect, scene.items[0..scene.n], ctx.palette, dpi, c.bg) catch |err| {
+        log.warn("unable to paint the palette err={}", .{err});
+    };
 }
 
-/// The title with the characters the query matched in bold and the accent.
-fn drawTitle(panel: *Panel, hdc: user32.HDC, title: []const u8, r: geom.Rect, c: Colors) void {
-    const alloc = panel.popup.window.app.core_app.alloc;
+/// The title, with the characters the query matched in bold and the accent.
+fn addTitle(panel: *Panel, scene: *Scene, title: []const u8, r: geom.Rect, c: Colors, dpi: u32) void {
+    const normal: Chrome.Font = .{ .size_pt = 14 };
+    const bold: Chrome.Font = .{ .size_pt = 14, .weight = .BOLD };
     var mask_buf: [256]bool = undefined;
     const mask: ?[]bool = blk: {
         if (panel.query.items.len == 0 or title.len > mask_buf.len) break :blk null;
@@ -989,12 +1011,9 @@ fn drawTitle(panel: *Panel, hdc: user32.HDC, title: []const u8, r: geom.Rect, c:
         break :blk mask_buf[0..title.len];
     };
     const m = mask orelse {
-        var buf: [256]u16 = undefined;
-        const n = utf16Clip(&buf, title);
-        drawText(hdc, panel.font, buf[0..n], r, c.text, DT_LEFT);
+        scene.add(.{ .text = .{ .rect = r, .text = scene.wide(title), .font = normal, .color = c.text, .halign = .leading, .trim = true } });
         return;
     };
-    _ = alloc;
 
     var x = r.x;
     var i: usize = 0;
@@ -1003,12 +1022,17 @@ fn drawTitle(panel: *Panel, hdc: user32.HDC, title: []const u8, r: geom.Rect, c:
         const start = i;
         const hit = runHit(title, m, i);
         while (i < title.len and runHit(title, m, i) == hit) i += cpLen(title[i]);
-        var buf: [256]u16 = undefined;
-        const n = std.unicode.utf8ToUtf16Le(&buf, title[start..i]) catch break;
-        const font = if (hit) panel.bold_font else panel.font;
-        const seg: geom.Rect = .{ .x = x, .y = r.y, .w = r.right() - x, .h = r.h };
-        drawText(hdc, font, buf[0..n], seg, if (hit) c.accent else c.text, DT_LEFT);
-        x += measure(hdc, font, buf[0..n]);
+        const text = scene.wide(title[start..i]);
+        const font = if (hit) bold else normal;
+        const width = Chrome.measureText(text, font, dpi) catch break;
+        scene.add(.{ .text = .{
+            .rect = .{ .x = x, .y = r.y, .w = @min(width, r.right() - x), .h = r.h },
+            .text = text,
+            .font = font,
+            .color = if (hit) c.accent else c.text,
+            .halign = .leading,
+        } });
+        x += width;
     }
 }
 
@@ -1026,55 +1050,13 @@ fn runHit(text: []const u8, mask: []const bool, i: usize) bool {
 fn utf16Clip(out: []u16, text: []const u8) usize {
     var n: usize = 0;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-    while (it.nextCodepoint()) |cp| {
+    while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch 0xFFFD;
         const need: usize = if (cp >= 0x10000) 2 else 1;
         if (n + need > out.len) break;
-        n += std.unicode.utf8ToUtf16Le(out[n..], text[it.i - (std.unicode.utf8CodepointSequenceLength(cp) catch 1) .. it.i]) catch break;
+        n += std.unicode.utf8ToUtf16Le(out[n..], slice) catch break;
     }
     return n;
-}
-
-fn measure(hdc: user32.HDC, font: ?gdi32.HFONT, text: []const u16) i32 {
-    const old = if (font) |f| gdi32.SelectObject(hdc, @ptrCast(f)) else null;
-    defer if (old) |o| {
-        _ = gdi32.SelectObject(hdc, o);
-    };
-    var rc: win32.foundation.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-    return rc.right - rc.left;
-}
-
-fn fillRect(hdc: user32.HDC, r: geom.Rect, c: theme.Color) void {
-    const brush = gdi32.CreateSolidBrush(colorRef(c)) orelse return;
-    defer _ = gdi32.DeleteObject(@ptrCast(brush));
-    _ = gdi32.FillRect(hdc, &r.toRECT(), brush);
-}
-
-fn frameRect(hdc: user32.HDC, r: geom.Rect, c: theme.Color) void {
-    fillRect(hdc, .{ .x = r.x, .y = r.y, .w = r.w, .h = 1 }, c);
-    fillRect(hdc, .{ .x = r.x, .y = r.bottom() - 1, .w = r.w, .h = 1 }, c);
-    fillRect(hdc, .{ .x = r.x, .y = r.y, .w = 1, .h = r.h }, c);
-    fillRect(hdc, .{ .x = r.right() - 1, .y = r.y, .w = 1, .h = r.h }, c);
-}
-
-fn roundFill(hdc: user32.HDC, r: geom.Rect, rad: i32, c: theme.Color) void {
-    const brush = gdi32.CreateSolidBrush(colorRef(c)) orelse return;
-    defer _ = gdi32.DeleteObject(@ptrCast(brush));
-    const old_brush = gdi32.SelectObject(hdc, @ptrCast(brush));
-    const old_pen = gdi32.SelectObject(hdc, gdi32.GetStockObject(NULL_PEN) orelse return);
-    _ = RoundRect(hdc, r.x, r.y, r.right() + 1, r.bottom() + 1, 2 * rad, 2 * rad);
-    if (old_pen) |o| _ = gdi32.SelectObject(hdc, o);
-    if (old_brush) |o| _ = gdi32.SelectObject(hdc, o);
-}
-
-fn drawText(hdc: user32.HDC, font: ?gdi32.HFONT, text: []const u16, r: geom.Rect, c: theme.Color, align_flag: u32) void {
-    const old = if (font) |f| gdi32.SelectObject(hdc, @ptrCast(f)) else null;
-    defer if (old) |o| {
-        _ = gdi32.SelectObject(hdc, o);
-    };
-    _ = SetTextColor(hdc, colorRef(c));
-    var rc = r.toRECT();
-    _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rc, align_flag | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 // -- Test state --------------------------------------------------------------------
