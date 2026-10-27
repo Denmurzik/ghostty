@@ -704,7 +704,7 @@ pub fn nowNs() u64 {
 /// Whether the tabs may slide to their new places: the window is on
 /// screen, and the last layout was made at this DPI.
 fn tabAnimAllowed(self: *const Window) bool {
-    if (self.tearing_down or self.tab_anim_dpi != self.dpi or self.placement.fullscreen) return false;
+    if (self.tab_anim_dpi != self.dpi or self.placement.fullscreen) return false;
     return win32.user32.IsWindowVisible(self.hwnd) != 0 and win32.user32.IsIconic(self.hwnd) == 0;
 }
 

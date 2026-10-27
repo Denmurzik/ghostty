@@ -214,38 +214,43 @@ function Test-Animation([string]$Background, [string]$Foreground) {
         $width = (Get-Win).strip.bounds[2]
         Send-MouseMove -Hwnd $g.Hwnd -X 300 -Y 300
 
+        # The action returns once the tab is made and the animation has started:
+        # the strip is then captured in a tight loop (no IPC), then the end state.
         function Watch-Strip([string]$Action, [int]$Frames) {
-            $shots = @()
-            $rects = @((Get-SurfaceRect))
+            $before = Get-SurfaceRect
             $sw = [Diagnostics.Stopwatch]::StartNew()
             [void](Invoke-GhosttyAction -Class $g.Class -Action $Action)
+            $t0 = $sw.ElapsedMilliseconds
+            $shots = New-Object System.Collections.ArrayList
+            $times = New-Object System.Collections.ArrayList
             for ($i = 0; $i -lt $Frames; $i++) {
-                $shots += , (Get-ScreenShot $o.X $o.Y $width 66)
-                $rects += (Get-SurfaceRect)
+                [void]$shots.Add((Get-ScreenShot $o.X $o.Y $width 66))
+                [void]$times.Add($sw.ElapsedMilliseconds - $t0)
             }
-            Start-Sleep -Milliseconds 500
+            $mid = Get-SurfaceRect
+            Start-Sleep -Milliseconds 600
             $final = Get-ScreenShot $o.X $o.Y $width 66
-            $rects += (Get-SurfaceRect)
+            $after = Get-SurfaceRect
             $diffs = @($shots | ForEach-Object { Get-ShotDiff $_ $final })
             foreach ($s in $shots) { $s.Dispose() }
             $final.Dispose()
-            Write-E2eInfo "anim $Action : $Frames frames in $($sw.ElapsedMilliseconds) ms, diffs to the end state $($diffs -join ',')"
-            Write-E2eInfo "anim $Action : surface rects $((@($rects | Select-Object -Unique)) -join ' | ')"
-            [pscustomobject]@{ Diffs = $diffs; Rects = @($rects | Select-Object -Unique) }
+            Write-E2eInfo "anim $Action : frames at ms $($times -join ','), action took $t0 ms, diffs to the end state $($diffs -join ',')"
+            Write-E2eInfo "anim $Action : surface rect $before -> $mid -> $after"
+            [pscustomobject]@{ Diffs = $diffs; Rects = @(@($before, $mid, $after) | Select-Object -Unique) }
         }
 
         # The second tab: the row slides in.
-        $r = Watch-Strip 'new_tab' 8
+        $r = Watch-Strip 'new_tab' 10
         if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the new tab differs from its end state ($($r.Diffs -join ','))" }
         if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid in: $($r.Rects -join ' | ')" }
         # A third tab slides in too (tabs animate, the terminal does not resize).
-        $r = Watch-Strip 'new_tab' 8
+        $r = Watch-Strip 'new_tab' 10
         if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the third tab differs from its end state ($($r.Diffs -join ','))" }
         if ($r.Rects.Count -gt 1) { throw "anim: the terminal resized with a third tab: $($r.Rects -join ' | ')" }
         # Closing back to one tab: the row slides out, the terminal grows once, at the end.
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'close_tab')
         Start-Sleep -Milliseconds 600
-        $r = Watch-Strip 'close_tab' 8
+        $r = Watch-Strip 'close_tab' 10
         if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the closing tab differs from its end state ($($r.Diffs -join ','))" }
         if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid out: $($r.Rects -join ' | ')" }
         $w = Get-Win

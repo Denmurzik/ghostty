@@ -79,6 +79,10 @@ pub const ClosingRect = struct { rect: geom.Rect, title: []const u8 };
 pub const State = struct {
     start_ns: u64 = 0,
     running: bool = false,
+    /// No frame was timed yet: the first `tick` starts the clock. A change often
+    /// comes with work that stalls the UI thread (a closed tab's threads are
+    /// joined); the slide must not be over before it was seen.
+    fresh: bool = false,
     /// In layout order.
     tabs: std.ArrayList(Entry) = .empty,
     closing: std.ArrayList(Entry) = .empty,
@@ -94,6 +98,7 @@ pub const State = struct {
     /// The eased fraction of the animation done at `now_ns`.
     fn progress(self: *const State, now_ns: u64) f64 {
         if (!self.running) return 1;
+        if (self.fresh) return 0;
         const dt = now_ns -| self.start_ns;
         if (dt >= duration_ns) return 1;
         return ease(@as(f64, @floatFromInt(dt)) / @as(f64, @floatFromInt(duration_ns)));
@@ -175,6 +180,7 @@ pub const State = struct {
         if (animate) {
             self.start_ns = now_ns;
             self.running = true;
+            self.fresh = true;
         } else if (self.closing.items.len == 0 and self.row_from == self.row_to) {
             self.running = false;
         }
@@ -193,6 +199,7 @@ pub const State = struct {
             for (self.tabs.items) |*e| e.from = lerpRect(e.from, e.to, p);
             self.start_ns = now_ns;
             self.running = true;
+            self.fresh = true;
         } else {
             self.row_from = to;
             if (self.closing.items.len == 0) self.running = false;
@@ -214,6 +221,11 @@ pub const State = struct {
     /// can stop and the painter uses the layout).
     pub fn tick(self: *State, now_ns: u64) bool {
         if (!self.running) return false;
+        if (self.fresh) {
+            self.fresh = false;
+            self.start_ns = @max(self.start_ns, now_ns);
+            return true;
+        }
         if (now_ns -| self.start_ns < duration_ns) return true;
         self.running = false;
         self.closing.clearRetainingCapacity();
@@ -275,6 +287,8 @@ test "win32 tab anim: a new tab pushes the others and grows" {
     try testing.expectEqual(r(108, 100), st.rectAt(1, 1000 * t));
     try testing.expectEqual(@as(i32, 0), st.rectAt(2, 1000 * t).w);
     try testing.expectEqual(@as(i32, 144), st.rectAt(2, 1000 * t).x);
+    // The first tick starts the clock (here: at once).
+    try testing.expect(st.tick(1000 * t));
     // Half way (the curve is symmetric): halfway between old and new.
     const mid = st.rectAt(1, 1000 * t + duration_ns / 2);
     try testing.expectEqual(@as(i32, 92), mid.x);
@@ -295,6 +309,7 @@ test "win32 tab anim: a closed tab shrinks away and is dropped at the end" {
     try st.retarget(alloc, 0, true, &.{ 1, 2, 3 }, &.{ "a", "b", "c" }, &.{ r(8, 67), r(75, 67), r(142, 66) });
     try st.retarget(alloc, 10 * t, true, &.{ 1, 3 }, &.{ "a", "c" }, &.{ r(8, 100), r(108, 100) });
     try testing.expect(st.running);
+    try testing.expect(st.tick(10 * t));
     try testing.expectEqual(@as(usize, 1), st.closing.items.len);
     const c0 = st.closingAt(0, 10 * t);
     try testing.expectEqualStrings("b", c0.title);
@@ -307,6 +322,13 @@ test "win32 tab anim: a closed tab shrinks away and is dropped at the end" {
 
     try testing.expect(!st.tick(10 * t + duration_ns));
     try testing.expectEqual(@as(usize, 0), st.closing.items.len);
+
+    // A stall before the first frame (a tab's threads are joined): the slide
+    // is not over when the timer finally fires, it starts then.
+    try st.retarget(alloc, 5000 * t, true, &.{ 1, 3, 4 }, &.{ "a", "c", "d" }, &.{ r(8, 68), r(76, 68), r(144, 64) });
+    try testing.expect(st.tick(5000 * t + 900 * t));
+    try testing.expect(st.running);
+    try testing.expect(!st.tick(5000 * t + 900 * t + duration_ns));
 }
 
 test "win32 tab anim: reorder slides, same tabs snap, retarget continues" {
@@ -318,6 +340,7 @@ test "win32 tab anim: reorder slides, same tabs snap, retarget continues" {
     try st.retarget(alloc, 0, true, &.{ 1, 2 }, &.{ "a", "b" }, &.{ r(8, 100), r(108, 100) });
     try st.retarget(alloc, t, true, &.{ 2, 1 }, &.{ "b", "a" }, &.{ r(8, 100), r(108, 100) });
     try testing.expect(st.running);
+    try testing.expect(st.tick(t));
     try testing.expectEqual(@as(i32, 108), st.rectAt(0, t).x);
     try testing.expectEqual(@as(i32, 8), st.rectAt(1, t).x);
     try testing.expectEqual(@as(i32, 8), st.rectAt(0, t + duration_ns).x);
@@ -334,10 +357,14 @@ test "win32 tab anim: reorder slides, same tabs snap, retarget continues" {
 
     // A change in the middle of an animation starts from where the tab is painted.
     try st.retarget(alloc, 10 * t, true, &.{ 2, 1 }, &.{ "b", "a" }, &.{ r(12, 150), r(162, 150) });
+    try testing.expect(st.tick(10 * t));
     const mid = 10 * t + duration_ns / 2;
     const painted = st.rectAt(0, mid);
     try st.retarget(alloc, mid, true, &.{ 1, 2 }, &.{ "a", "b" }, &.{ r(12, 150), r(162, 150) });
     try testing.expectEqual(painted, st.rectAt(1, mid));
+    try testing.expect(painted.x != 12 and painted.x != 162);
+    // Until the first frame is timed the tabs stay where they were.
+    try testing.expectEqual(painted, st.rectAt(1, mid + 5000 * t));
 }
 
 test "win32 tab anim: the row slides in and out, the terminal keeps the room while it leaves" {
@@ -349,6 +376,7 @@ test "win32 tab anim: the row slides in and out, the terminal keeps the room whi
     // Starts hidden; it slides in.
     st.retargetRow(0, true, true);
     try testing.expect(st.running);
+    try testing.expect(st.tick(0));
     try testing.expect(!st.rowLeaving());
     try testing.expectEqual(@as(f64, 0), st.rowAt(0));
     try testing.expectApproxEqAbs(@as(f64, 0.5), st.rowAt(duration_ns / 2), 1e-3);
@@ -358,6 +386,7 @@ test "win32 tab anim: the row slides in and out, the terminal keeps the room whi
 
     // Out again.
     st.retargetRow(1000 * t, false, true);
+    try testing.expect(st.tick(1000 * t));
     try testing.expect(st.rowLeaving());
     try testing.expectEqual(@as(f64, 1), st.rowAt(1000 * t));
     try testing.expectEqual(@as(f64, 0), st.rowAt(1000 * t + duration_ns));
