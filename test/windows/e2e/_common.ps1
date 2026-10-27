@@ -991,6 +991,7 @@ if (-not ('GhosttyE2e.Capture' -as [type])) {
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+[DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] public static extern int DwmGetFrameBounds(IntPtr h, int attr, out RC v, int size);
 public delegate bool EnumProc(IntPtr h, IntPtr l);
 public struct Top { public IntPtr H; public int L, T, R, B; public uint Pid; }
 // The visible, uncloaked, non-minimized top-level windows, topmost first.
@@ -1084,8 +1085,13 @@ function Get-ScreenShot([int]$X, [int]$Y, [int]$W, [int]$H) {
 # Saves the exact window rect of `$Hwnd`; a margin only when the scenario'"'"'s own
 # backdrop form covers it (a foreign window below ours would show in it).
 function Save-WindowShot([IntPtr]$Hwnd, [string]$Path, [int]$Margin = 0) {
+    # The visible frame (DWMWA_EXTENDED_FRAME_BOUNDS): GetWindowRect also
+    # covers the invisible resize borders, where a foreign window shows.
     $r = New-Object GhosttyE2e.Capture+RC
-    [void][GhosttyE2e.Capture]::GetWindowRect($Hwnd, [ref]$r)
+    $rcSize = [Runtime.InteropServices.Marshal]::SizeOf([type][GhosttyE2e.Capture+RC])
+    if ([GhosttyE2e.Capture]::DwmGetFrameBounds($Hwnd, 9, [ref]$r, $rcSize) -ne 0) {
+        [void][GhosttyE2e.Capture]::GetWindowRect($Hwnd, [ref]$r)
+    }
     $bmp = Get-ScreenShot ($r.Left - $Margin) ($r.Top - $Margin) ($r.Right - $r.Left + 2 * $Margin) ($r.Bottom - $r.Top + 2 * $Margin)
     try { $bmp.Save($Path, [Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
 }

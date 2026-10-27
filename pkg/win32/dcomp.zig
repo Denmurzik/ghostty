@@ -40,7 +40,7 @@ fn resolveCreateDevice2() error{DCompUnavailable}!CreateDevice2Fn {
         return error.DCompUnavailable;
     const proc = kernel32.GetProcAddress(module, "DCompositionCreateDevice2") orelse
         return error.DCompUnavailable;
-    create_device2 = @ptrCast(proc);
+    create_device2 = @ptrCast(@alignCast(proc));
     return create_device2.?;
 }
 
