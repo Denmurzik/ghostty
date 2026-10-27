@@ -105,6 +105,10 @@ fn handleKey(
     const lparam_sc = withScancode(lparam, vk, hkl);
     const scancode: u16 = @intCast((@as(usize, @bitCast(lparam_sc)) >> 16) & 0xFF);
 
+    // Fake shifts and Alt+numpad digits are not keys of the user's.
+    if (key.isFakeShift(lparam_sc, vk)) return 0;
+    if (key.isAltNumpadDigit(vk, bits & lparam_alt != 0)) return 0;
+
     const key_state = key.captureKeyState();
     var event: input.KeyEvent = .{
         .action = if (!is_down) .release else if (bits & lparam_was_down != 0) .repeat else .press,
@@ -129,8 +133,9 @@ fn handleKey(
     var preedit: ?[]const u8 = null;
     if (dead) {
         // A dead key: show the accent and wait for the next key.
+        // The accent is only preedit: with text, core would look it up as a
+        // unicode binding, and GTK passes none for a composing key.
         event.composing = true;
-        event.utf8 = text;
         preedit = text;
         state.dead_pending = true;
     } else if (text.len > 0) {
@@ -138,7 +143,7 @@ fn handleKey(
         state.dead_pending = false;
 
         event.utf8 = key.stripControl(text, &stripped_buf);
-        if (event.mods.shift and event.utf8.len > 0) event.consumed_mods.shift = true;
+        event.consumed_mods.shift = key.shiftConsumed(event.mods.shift, event.utf8);
 
         const has_altgr = hasAltGr(state, hkl);
         const altgr = key.applyAltGr(
@@ -256,7 +261,7 @@ fn drainChars(surface: *Surface, sys: bool, buf: []u8) Drained {
         else
             surface.keyboard_state.joiner.feed(unit, &out) orelse continue;
 
-        len += appendCapped(buf[len..], utf8);
+        if (key.appendWhole(buf[len..], utf8)) len += utf8.len;
         if (is_dead) {
             dead = true;
             break;
@@ -272,12 +277,6 @@ fn encodeUnit(unit: u16, out: *[key.Utf16Joiner.max_out]u8) []const u8 {
         break :blk std.unicode.utf8Encode(0xFFFD, out) catch unreachable;
     };
     return out[0..n];
-}
-
-fn appendCapped(dest: []u8, src: []const u8) usize {
-    const n = @min(dest.len, src.len);
-    @memcpy(dest[0..n], src[0..n]);
-    return n;
 }
 
 /// A character without a key-down we handled: `SendInput` unicode

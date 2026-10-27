@@ -225,13 +225,49 @@ pub fn isSyntheticAltGrCtrlRelease(vk: u16, lparam: win32.foundation.LPARAM, swa
 /// is truncated to `buf.len`.
 pub fn stripControl(text: []const u8, buf: []u8) []const u8 {
     var n: usize = 0;
-    for (text) |c| {
-        if (c < 0x20 or c == 0x7F) continue;
-        if (n == buf.len) break;
-        buf[n] = c;
-        n += 1;
+    var i: usize = 0;
+    while (i < text.len) {
+        // Invalid bytes count as one-byte units; they are copied as is.
+        const len = @min(std.unicode.utf8ByteSequenceLength(text[i]) catch 1, text.len - i);
+        defer i += len;
+        if (len == 1 and (text[i] < 0x20 or text[i] == 0x7F)) continue;
+        // Never cut a code point: stop at the first one that does not fit.
+        if (n + len > buf.len) break;
+        @memcpy(buf[n..][0..len], text[i..][0..len]);
+        n += len;
     }
     return buf[0..n];
+}
+
+/// Append `src` to `dest` if all of it fits; true when it did. A code
+/// point is never cut in the middle.
+pub fn appendWhole(dest: []u8, src: []const u8) bool {
+    if (src.len > dest.len) return false;
+    @memcpy(dest[0..src.len], src);
+    return true;
+}
+
+/// Whether Alt is held and `vk` is a numpad digit: a step of an Alt+numpad
+/// character code. The composed character arrives as a lone WM_CHAR, so
+/// the digits themselves are not keys for core.
+pub fn isAltNumpadDigit(vk: u16, alt_down: bool) bool {
+    return alt_down and vk >= user32.VK_NUMPAD0 and vk <= user32.VK_NUMPAD9;
+}
+
+/// Whether Shift stays a modifier of a key that produced `text`. Shift
+/// that picked the character (a letter, a symbol) is consumed by it; the
+/// space bar is unchanged by Shift, so `shift+space` stays a binding.
+pub fn shiftConsumed(shift: bool, text: []const u8) bool {
+    return shift and text.len > 0 and !std.mem.eql(u8, text, " ");
+}
+
+/// The fake Shift Windows injects around some extended keys (Insert, Home,
+/// arrows with NumLock on): scancode E0 2A/E0 36 on a Shift key.
+pub fn isFakeShift(lparam: win32.foundation.LPARAM, vk: u16) bool {
+    if (vk != user32.VK_SHIFT and vk != user32.VK_LSHIFT and vk != user32.VK_RSHIFT) return false;
+    const bits: usize = @bitCast(lparam);
+    const scancode: u32 = @intCast((bits >> 16) & 0xFF);
+    return bits & (1 << 24) != 0 and (scancode == 0x2A or scancode == 0x36);
 }
 
 /// Joins UTF-16 code units, delivered one WM_CHAR at a time, into UTF-8.
@@ -454,6 +490,51 @@ test "win32 key: stripControl removes C0" {
     try testing.expectEqualStrings("Жж😀", stripControl("Жж\x01😀", &buf));
     var tiny: [2]u8 = undefined;
     try testing.expectEqualStrings("ab", stripControl("abc", &tiny));
+}
+
+test "win32 key: alt+numpad sequence yields one text event" {
+    // Every digit of the code is held back while Alt is down...
+    for (user32.VK_NUMPAD0..user32.VK_NUMPAD9 + 1) |vk| {
+        try testing.expect(isAltNumpadDigit(@intCast(vk), true));
+        try testing.expect(!isAltNumpadDigit(@intCast(vk), false));
+    }
+    try testing.expect(!isAltNumpadDigit('1', true));
+    try testing.expect(!isAltNumpadDigit(user32.VK_RETURN, true));
+
+    // ...and the composed character is the only text that gets through.
+    var out: [Utf16Joiner.max_out]u8 = undefined;
+    var j: Utf16Joiner = .{};
+    try testing.expectEqualStrings("é", j.feed(0xE9, &out).?);
+}
+
+test "win32 key: shift+space keeps shift" {
+    try testing.expect(!shiftConsumed(true, " "));
+    try testing.expect(shiftConsumed(true, "A"));
+    try testing.expect(shiftConsumed(true, "Ж"));
+    try testing.expect(!shiftConsumed(false, "a"));
+    try testing.expect(!shiftConsumed(true, ""));
+}
+
+test "win32 key: utf8 buffer never splits a code point" {
+    var buf: [4]u8 = undefined;
+    // "ab" then a 3-byte character that does not fit in the last 2 bytes.
+    try testing.expectEqualStrings("ab", stripControl("ab€", buf[0..4]));
+    try testing.expectEqualStrings("a", stripControl("a😀", buf[0..4]));
+    try testing.expectEqualStrings("😀", stripControl("😀😀", buf[0..4]));
+
+    var dest: [3]u8 = undefined;
+    try testing.expect(!appendWhole(&dest, "ab€"));
+    try testing.expect(appendWhole(&dest, "€"));
+    try testing.expectEqualStrings("€", &dest);
+}
+
+test "win32 key: fake shifts are recognized" {
+    try testing.expect(isFakeShift(lparamOf(0x2A, true), user32.VK_SHIFT));
+    try testing.expect(isFakeShift(lparamOf(0x36, true), user32.VK_RSHIFT));
+    // The real keys are not extended.
+    try testing.expect(!isFakeShift(lparamOf(0x2A, false), user32.VK_SHIFT));
+    try testing.expect(!isFakeShift(lparamOf(0x36, false), user32.VK_RSHIFT));
+    try testing.expect(!isFakeShift(lparamOf(0x2A, true), user32.VK_HOME));
 }
 
 test "win32 key: typed text is a keyless press, not a paste" {
