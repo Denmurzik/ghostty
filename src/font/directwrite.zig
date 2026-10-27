@@ -393,6 +393,8 @@ pub const DirectWrite = struct {
         /// Open a candidate and check that it covers the requested
         /// codepoint. Unreadable and non-local fonts are skipped.
         fn open(self: *Iterator, f: *Font) !?DeferredFace {
+            // A simulated bold or oblique is the regular file again.
+            if (f.getSimulations() != 0) return null;
             if (self.codepoint != 0) {
                 if (!(f.hasCharacter(self.codepoint) catch false)) return null;
             }
@@ -808,11 +810,21 @@ test "windows directwrite: timings" {
         total += a.durationTo(std.Io.Timestamp.now(io, .awake)).toNanoseconds();
     }
 
+    // A codepoint no font covers walks every installed face.
+    const w0 = std.Io.Timestamp.now(io, .awake);
+    var miss = try dw.walk(std.testing.allocator, lib, .{ .codepoint = 0x10FFFD });
+    while (try miss.next()) |extra| {
+        var e = extra;
+        e.deinit();
+    }
+    miss.deinit();
+    const walk_ms = @as(f64, @floatFromInt(w0.durationTo(std.Io.Timestamp.now(io, .awake)).toNanoseconds())) / 1e6;
+
     const first_ms = @as(f64, @floatFromInt(t0.durationTo(t1).toNanoseconds())) / 1e6;
     const per_cp_ms = @as(f64, @floatFromInt(total)) / 1e6 / test_codepoints.len;
     if (global.environ().getAlloc(std.testing.allocator, "GHOSTTY_FONT_TIMING")) |v| {
         std.testing.allocator.free(v);
-        std.debug.print("directwrite: first discover {d:.1} ms, fallback {d:.2} ms per codepoint\n", .{ first_ms, per_cp_ms });
+        std.debug.print("directwrite: first discover {d:.1} ms, fallback {d:.2} ms per codepoint, full-miss walk {d:.1} ms\n", .{ first_ms, per_cp_ms, walk_ms });
     } else |_| {}
     try std.testing.expect(first_ms < 1000);
 }
@@ -840,4 +852,8 @@ test "windows directwrite: face names are UTF-8" {
     defer face.deinit();
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("Consolas", try face.name(&buf));
+
+    // A buffer too small for the conversion must not overrun.
+    var tiny: [4]u8 = undefined;
+    _ = try face.name(&tiny);
 }

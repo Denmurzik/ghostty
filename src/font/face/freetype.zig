@@ -208,6 +208,7 @@ pub const Face = struct {
                     entry.platform_id == freetype.c.TT_PLATFORM_APPLE_UNICODE) skip: {
                     if (string.len % 2 != 0) break :skip;
                     if (string.len > 1024) break :skip;
+                    if (string.len / 2 * 3 > buf.len) break :skip;
                     var tmp: [512]u16 = undefined;
                     const max = string.len / 2;
                     for (@as([]const u16, @ptrCast(@alignCast(string))), 0..) |c, j| tmp[j] = @byteSwap(c);
