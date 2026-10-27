@@ -121,6 +121,15 @@ pub const Compiler = struct {
         }
 
         const blob = code orelse return error.CompileFailed;
+        if (errors) |e| {
+            // On success the error blob carries the compiler's warnings.
+            const text = std.mem.trimEnd(u8, e.bytes(), "\r\n\x00 ");
+            if (text.len > 0) log.debug("D3DCompile of {s} ({s}) warnings\n{s}", .{
+                opts.source_name,
+                opts.target,
+                text,
+            });
+        }
         return alloc.dupe(u8, blob.bytes());
     }
 };

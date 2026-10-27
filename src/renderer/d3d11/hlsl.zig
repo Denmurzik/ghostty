@@ -12,6 +12,7 @@ const com = win32.com;
 const foundation = win32.foundation;
 const d3dcompiler = win32.d3dcompiler;
 const global = @import("../../global.zig");
+const shadertoy = @import("../shadertoy.zig");
 
 const log = std.log.scoped(.d3d11);
 
@@ -91,7 +92,7 @@ pub fn bytecode(entry: Entry) ![]const u8 {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
 
-    const slot = &cache[@intFromEnum(entry)];
+    const slot = &cache[@backingInt(entry)];
     if (slot.*) |code| return code;
 
     const c = compiler orelse load: {
@@ -103,6 +104,68 @@ pub fn bytecode(entry: Entry) ![]const u8 {
     const code = try compileEntry(c, std.heap.page_allocator, entry);
     slot.* = code;
     return code;
+}
+
+/// Bytecode of runtime sources (custom shaders) by SHA-256 of
+/// source, entry and profile. A failed compile is cached as null so a
+/// broken shader is compiled and reported once. Guarded by `mutex`.
+var source_cache: std.AutoHashMapUnmanaged([32]u8, ?[]const u8) = .empty;
+
+/// How many runtime compiles actually ran. Guarded by `mutex`.
+var source_compiles: usize = 0;
+
+/// Compiles `source` for `profile` (e.g. "ps_5_0"). Like `bytecode`, the
+/// result is owned by the cache and valid for the life of the process,
+/// and a repeated call with the same arguments does not compile again.
+/// The compiler is loaded on the first call, so nothing is paid for until
+/// a custom shader is configured.
+pub fn compileSource(
+    source_: [:0]const u8,
+    entry: [:0]const u8,
+    profile: [:0]const u8,
+) ![]const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(source_);
+    hasher.update("\x00");
+    hasher.update(entry);
+    hasher.update("\x00");
+    hasher.update(profile);
+    var key: [32]u8 = undefined;
+    hasher.final(&key);
+
+    const io = global.io();
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+
+    const alloc = std.heap.page_allocator;
+    if (source_cache.get(key)) |cached| return cached orelse error.CompileFailed;
+
+    const c = compiler orelse load: {
+        compiler = try d3dcompiler.Compiler.load();
+        break :load compiler.?;
+    };
+
+    source_compiles += 1;
+    const code = c.compile(alloc, .{
+        .source = source_,
+        .source_name = "custom-shader.hlsl",
+        .entry = entry,
+        .target = profile,
+        .flags = compile_flags,
+    }) catch |err| {
+        try source_cache.put(alloc, key, null);
+        return err;
+    };
+    try source_cache.put(alloc, key, code);
+    return code;
+}
+
+/// The number of runtime compiles `compileSource` has run. Test helper.
+pub fn sourceCompileCount() usize {
+    const io = global.io();
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    return source_compiles;
 }
 
 /// Compiles every entry so the first frame does not pay for it. Failures
@@ -234,4 +297,57 @@ test "d3d11 hlsl: cbuffer packoffsets match Uniforms" {
     }
 
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(Uniforms));
+}
+
+/// Test helper: ShaderToy source to the HLSL the renderer compiles.
+pub fn toyToHlslForTest(alloc: Allocator, toy: []const u8) ![:0]const u8 {
+    comptime std.debug.assert(builtin.is_test);
+
+    var glsl: std.Io.Writer.Allocating = .init(alloc);
+    defer glsl.deinit();
+    try shadertoy.glslFromShader(&glsl.writer, toy);
+    const glsl_z = try glsl.toOwnedSliceSentinel(0);
+    defer alloc.free(glsl_z);
+
+    var spv: std.Io.Writer.Allocating = .init(alloc);
+    defer spv.deinit();
+    try shadertoy.spirvFromGlsl(&spv.writer, null, glsl_z);
+
+    // SPIR-V is read as words, so the copy must be 4-byte aligned.
+    var words: std.ArrayListAligned(u8, .of(u32)) = .empty;
+    defer words.deinit(alloc);
+    try words.appendSlice(alloc, spv.written());
+    return try shadertoy.hlslFromSpv(alloc, words.items);
+}
+
+test "d3d11 custom shader: crt test shader compiles to ps_5_0" {
+    const alloc = std.testing.allocator;
+    const hlsl_src = try toyToHlslForTest(alloc, @embedFile("../shaders/test_shadertoy_crt.glsl"));
+    defer alloc.free(hlsl_src);
+
+    const code = try compileSource(hlsl_src, "main", "ps_5_0");
+    try std.testing.expectEqualStrings("DXBC", code[0..4]);
+}
+
+test "d3d11 custom shader: same source compiles once" {
+    // The comment makes the source unique to this test.
+    const src = "float4 main() : SV_Target0 { return 0; } // same-source-compiles-once";
+    const before = sourceCompileCount();
+    const a = try compileSource(src, "main", "ps_5_0");
+    const b = try compileSource(src, "main", "ps_5_0");
+    try std.testing.expectEqual(a.ptr, b.ptr);
+    try std.testing.expectEqual(before + 1, sourceCompileCount());
+
+    // A different profile is a different entry.
+    _ = try compileSource(src, "main", "ps_4_0");
+    try std.testing.expectEqual(before + 2, sourceCompileCount());
+}
+
+test "d3d11 custom shader: failed compile is cached and logged once" {
+    const src = "this is not hlsl {";
+    const before = sourceCompileCount();
+    try std.testing.expectError(error.CompileFailed, compileSource(src, "main", "ps_5_0"));
+    try std.testing.expectError(error.CompileFailed, compileSource(src, "main", "ps_5_0"));
+    // The compiler (which logs the diagnostics) ran once.
+    try std.testing.expectEqual(before + 1, sourceCompileCount());
 }

@@ -4,6 +4,9 @@ const com = win32.com;
 const d3d11 = win32.d3d11;
 const Device = @import("Device.zig");
 
+/// The largest constant buffer D3D11 allows (4096 float4 registers).
+const max_constant_bytes = 64 * 1024;
+
 /// What a buffer is bound as.
 pub const Role = enum {
     /// Per-instance vertex data (IA vertex slot 0).
@@ -141,25 +144,16 @@ pub fn Buffer(comptime T: type) type {
                 .StructureByteStride = if (opts.role == .structured) @sizeOf(T) else 0,
             };
 
-            // Initial data must cover the whole (padded) buffer, so pad it
-            // through a scratch copy when the role rounds the size up.
-            var scratch: [256]u8 align(16) = undefined;
-            var initial: d3d11.SUBRESOURCE_DATA = undefined;
-            if (data) |d| {
-                initial = .{
-                    .pSysMem = d.ptr,
+            // Initial data must cover the whole (padded) buffer.
+            const buffer = if (data) |d| buffer: {
+                const src = std.mem.sliceAsBytes(d);
+                if (byte_width != bytes) break :buffer try createPadded(device, &desc, src);
+                break :buffer try device.createBuffer(&desc, &.{
+                    .pSysMem = src.ptr,
                     .SysMemPitch = 0,
                     .SysMemSlicePitch = 0,
-                };
-                if (byte_width != bytes) {
-                    if (byte_width > scratch.len) return error.InvalidArgument;
-                    @memset(&scratch, 0);
-                    @memcpy(scratch[0..bytes], std.mem.sliceAsBytes(d));
-                    initial.pSysMem = &scratch;
-                }
-            }
-
-            const buffer = try device.createBuffer(&desc, if (data != null) &initial else null);
+                });
+            } else try device.createBuffer(&desc, null);
             errdefer com.release(buffer);
 
             const srv: ?*d3d11.ID3D11ShaderResourceView = if (opts.role == .structured)
@@ -181,6 +175,25 @@ pub fn Buffer(comptime T: type) type {
             };
         }
     };
+}
+
+/// Creates a buffer whose initial data is `src` followed by zeroes up to
+/// `desc.ByteWidth`. Kept out of `create` so only this path pays for the
+/// scratch stack frame.
+fn createPadded(
+    device: *d3d11.ID3D11Device,
+    desc: *const d3d11.BUFFER_DESC,
+    src: []const u8,
+) !*d3d11.ID3D11Buffer {
+    var scratch: [max_constant_bytes]u8 align(16) = undefined;
+    if (desc.ByteWidth > scratch.len) return error.InvalidArgument;
+    @memset(scratch[0..desc.ByteWidth], 0);
+    @memcpy(scratch[0..src.len], src);
+    return try device.createBuffer(desc, &.{
+        .pSysMem = &scratch,
+        .SysMemPitch = 0,
+        .SysMemSlicePitch = 0,
+    });
 }
 
 /// Copies a buffer into a CPU-readable staging copy and returns the mapped
@@ -288,4 +301,27 @@ test "d3d11 buffer: constant role rounds size to 16" {
     try std.testing.expectEqual(@as(u32, 0xAABBCCDD), std.mem.readInt(u32, rb.data[0..4], .little));
     // The padding is zeroed.
     try std.testing.expectEqualSlices(u8, &@as([12]u8, @splat(0)), rb.data[4..16]);
+}
+
+test "d3d11 buffer: constant role initFill of 4.7 KB" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    // The size of `shadertoy.Uniforms`, which is not a multiple of 16.
+    const Payload = extern struct { bytes: [4723]u8 };
+    var payload: Payload = undefined;
+    for (&payload.bytes, 0..) |*b, i| b.* = @truncate(i *% 7);
+
+    var buf = try Buffer(Payload).initFill(.{ .device = device, .role = .constant }, &.{payload});
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(u32, 4736), buf.buffer.resource.getDesc().ByteWidth);
+
+    device.lockContext();
+    defer device.unlockContext();
+
+    const rb = try ReadBack.begin(device, buf.buffer.resource, 4736);
+    defer rb.end();
+    try std.testing.expectEqualSlices(u8, &payload.bytes, rb.data[0..4723]);
+    try std.testing.expectEqualSlices(u8, &@as([13]u8, @splat(0)), rb.data[4723..4736]);
 }

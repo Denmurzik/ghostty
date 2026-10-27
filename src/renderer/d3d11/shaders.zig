@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 
 const Device = @import("Device.zig");
 const Pipeline = @import("Pipeline.zig");
+const hlsl = @import("hlsl.zig");
 
 const log = std.log.scoped(.d3d11);
 
@@ -25,8 +26,6 @@ pub const Shaders = struct {
     /// can be used to apply a lot of effects. Each shader is run in sequence
     /// against the output of the previous shader.
     ///
-    /// Always empty for now: the D3D11 backend cannot compile custom
-    /// shaders yet.
     post_pipelines: []const Pipeline,
 
     /// Set to true when deinited, if you try to deinit a defunct set
@@ -41,24 +40,15 @@ pub const Shaders = struct {
 
     /// Initialize our shader set.
     ///
-    /// "custom_shaders" is an optional list of postprocess shaders to run
-    /// against the final drawable texture. Custom shaders are not supported
-    /// by the D3D11 backend yet: a non-empty list logs a warning and is
-    /// ignored so Ghostty still works.
+    /// "custom_shaders" is an optional list of postprocess shaders (HLSL
+    /// from `shadertoy.hlslFromSpv`) to run against the final drawable
+    /// texture. One that fails to compile is logged and skipped so Ghostty
+    /// still renders.
     pub fn init(
         alloc: Allocator,
         device: *Device,
         custom_shaders: []const [:0]const u8,
     ) !Shaders {
-        _ = alloc;
-
-        if (custom_shaders.len > 0) {
-            log.warn(
-                "custom shaders are not supported by the d3d11 renderer yet, ignoring {d}",
-                .{custom_shaders.len},
-            );
-        }
-
         const bg_color: Pipeline = try .init(null, .{
             .device = device,
             .vertex = .full_screen_vs,
@@ -102,6 +92,9 @@ pub const Shaders = struct {
         });
         errdefer bg_image.deinit();
 
+        const post_pipelines = try initPostPipelines(alloc, device, custom_shaders);
+        errdefer deinitPostPipelines(alloc, post_pipelines);
+
         return .{
             .pipelines = .{
                 .bg_color = bg_color,
@@ -110,20 +103,70 @@ pub const Shaders = struct {
                 .image = image,
                 .bg_image = bg_image,
             },
-            .post_pipelines = &.{},
+            .post_pipelines = post_pipelines,
         };
     }
 
     pub fn deinit(self: *Shaders, alloc: Allocator) void {
-        _ = alloc;
         if (self.defunct) return;
         self.defunct = true;
+
+        deinitPostPipelines(alloc, self.post_pipelines);
 
         inline for (@typeInfo(@TypeOf(self.pipelines)).@"struct".field_names) |name| {
             @field(self.pipelines, name).deinit();
         }
     }
 };
+
+/// Entry point spirv-cross gives the HLSL pixel shader.
+const custom_shader_entry = "main";
+
+/// A post pipeline per custom shader: the full screen triangle with the
+/// user's pixel shader. A source that fails to compile or to create is
+/// logged and skipped.
+fn initPostPipelines(
+    alloc: Allocator,
+    device: *Device,
+    custom_shaders: []const [:0]const u8,
+) ![]const Pipeline {
+    if (custom_shaders.len == 0) return &.{};
+
+    var pipelines: std.ArrayListUnmanaged(Pipeline) = try .initCapacity(alloc, custom_shaders.len);
+    errdefer {
+        for (pipelines.items) |p| p.deinit();
+        pipelines.deinit(alloc);
+    }
+
+    for (custom_shaders, 0..) |src, i| {
+        const code = hlsl.compileSource(src, custom_shader_entry, "ps_5_0") catch |err| {
+            log.warn("custom shader {d} skipped, compile failed: {}", .{ i, err });
+            continue;
+        };
+        const pipeline: Pipeline = Pipeline.init(null, .{
+            .device = device,
+            .vertex = .full_screen_vs,
+            .pixel_bytecode = code,
+            .blending_enabled = true,
+        }) catch |err| {
+            log.warn("custom shader {d} skipped, pipeline failed: {}", .{ i, err });
+            continue;
+        };
+        pipelines.appendAssumeCapacity(pipeline);
+    }
+
+    if (pipelines.items.len == 0) {
+        pipelines.deinit(alloc);
+        return &.{};
+    }
+    return try pipelines.toOwnedSlice(alloc);
+}
+
+fn deinitPostPipelines(alloc: Allocator, pipelines: []const Pipeline) void {
+    if (pipelines.len == 0) return;
+    for (pipelines) |p| p.deinit();
+    alloc.free(pipelines);
+}
 
 /// Byte offset of every `Uniforms` field in the HLSL `Globals` cbuffer, as
 /// given by the `packoffset`s in `shaders/hlsl/common.hlsli` (register
@@ -321,7 +364,7 @@ test "d3d11 shaders: vertex layouts match the HLSL inputs" {
     try std.testing.expectEqual(@as(usize, 2), bg_image.len);
     try std.testing.expectEqual(dxgi.Format.R32_FLOAT, bg_image[0].Format);
     try std.testing.expectEqual(@as(u32, 0), bg_image[0].AlignedByteOffset);
-    try std.testing.expectEqual(@as(u32, 62), @intFromEnum(bg_image[1].Format));
+    try std.testing.expectEqual(@as(u32, 62), @backingInt(bg_image[1].Format));
     try std.testing.expectEqual(@as(u32, 4), bg_image[1].AlignedByteOffset);
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BgImage));
 }
@@ -341,15 +384,5 @@ test "d3d11 shaders: all builtin pipelines initialise on WARP" {
     try std.testing.expectEqual(@as(usize, 32), shaders.pipelines.cell_text.stride);
     try std.testing.expectEqual(@as(usize, 48), shaders.pipelines.image.stride);
     try std.testing.expectEqual(@as(usize, 8), shaders.pipelines.bg_image.stride);
-    try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
-}
-
-test "d3d11 shaders: custom shaders are ignored" {
-    const alloc = std.testing.allocator;
-    const device = try Device.init(alloc, .{ .driver = .warp });
-    defer device.deinit(alloc);
-
-    var shaders: Shaders = try .init(alloc, device, &.{"void main() {}"});
-    defer shaders.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), shaders.post_pipelines.len);
 }

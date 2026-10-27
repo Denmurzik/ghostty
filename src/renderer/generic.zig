@@ -929,7 +929,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer shaders.deinit(self.alloc);
 
             self.shaders = shaders;
-            self.has_custom_shaders = has_custom_shaders;
+            // A backend may skip a shader it cannot compile; without any
+            // post pipeline the frame must go straight to the target.
+            self.has_custom_shaders = has_custom_shaders and shaders.post_pipelines.len > 0;
         }
 
         /// Callback called by renderer.Thread when it begins.

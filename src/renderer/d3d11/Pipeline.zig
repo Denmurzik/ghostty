@@ -21,7 +21,10 @@ pub const Options = struct {
     /// The builtin vertex function.
     vertex: hlsl.Entry,
     /// The builtin pixel function.
-    pixel: hlsl.Entry,
+    pixel: hlsl.Entry = .bg_color_ps,
+    /// Compiled pixel shader bytecode that replaces `pixel`, for custom
+    /// shaders. The bytes must outlive the call only.
+    pixel_bytecode: ?[]const u8 = null,
 
     /// Vertex step function
     step_fn: StepFunction = .per_vertex,
@@ -58,7 +61,7 @@ pub fn init(comptime VertexAttributes: ?type, opts: Options) !Self {
     const device = opts.device.device;
 
     const vs_code = try hlsl.bytecode(opts.vertex);
-    const ps_code = try hlsl.bytecode(opts.pixel);
+    const ps_code = opts.pixel_bytecode orelse try hlsl.bytecode(opts.pixel);
 
     const vertex_shader = try device.createVertexShader(vs_code);
     errdefer com.release(vertex_shader);
@@ -177,7 +180,7 @@ pub fn inputElements(
 
 // DXGI_FORMAT values the shared `dxgi.Format` enum does not name.
 fn fmt(comptime v: u32) dxgi.Format {
-    return @enumFromInt(v);
+    return @fromBackingInt(@intCast(v));
 }
 
 fn attributeFormat(comptime T: type, comptime size: usize) dxgi.Format {

@@ -363,6 +363,9 @@ const math = @import("../../math.zig");
 const bufferpkg = @import("buffer.zig");
 const shaderspkg = @import("shaders.zig");
 const Texture = @import("Texture.zig");
+const Sampler = @import("Sampler.zig");
+const hlslpkg = @import("hlsl.zig");
+const shadertoy = @import("../shadertoy.zig");
 
 /// Records the health a frame reported.
 const Recorder = struct {
@@ -990,4 +993,105 @@ test "d3d11 frame: a throttled dump stays pending until the interval elapsed" {
     try testing.expect(dump.pending != null);
     try testing.expectEqual(@as(?u64, null), dump.trailingDelayMs(later));
     dump.flush(testing.allocator);
+}
+
+const custom_toy_invert =
+    \\void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    \\    vec4 c = texture(iChannel0, fragCoord / iResolution.xy);
+    \\    fragColor = vec4(1.0 - c.rgb, c.a);
+    \\}
+;
+
+const custom_toy_gradient_y =
+    \\void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    \\    float v = fragCoord.y / iResolution.y;
+    \\    fragColor = vec4(v, v, v, 1.0);
+    \\}
+;
+
+/// Draws the background colour (`bg`) into a texture, then runs `toy`
+/// from that texture into the fixture's target, like generic does with one
+/// custom shader. Returns the target's pixels.
+fn renderCustom(fx: *Fixture, toy: []const u8, bg: [4]u8) ![]u8 {
+    const hlsl_src = try hlslpkg.toyToHlslForTest(testing.allocator, toy);
+    defer testing.allocator.free(hlsl_src);
+    var custom = try fx.api.initShaders(testing.allocator, &.{hlsl_src});
+    defer custom.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), custom.post_pipelines.len);
+
+    var uniforms = try bufferpkg.Buffer(shaderspkg.Uniforms).init(fx.api.uniformBufferOptions(), 1);
+    defer uniforms.deinit();
+    var toy_uniforms = try bufferpkg.Buffer(shadertoy.Uniforms).init(fx.api.uniformBufferOptions(), 1);
+    defer toy_uniforms.deinit();
+
+    const sampler = try Sampler.init(fx.api.samplerOptions());
+    defer sampler.deinit();
+
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+
+    const back = try Texture.init(fx.api.textureOptions(), fx.target.width, fx.target.height, null);
+    defer back.deinit();
+
+    var u = fx.uniforms(8, 16, 1, 1);
+    u.bg_color = bg;
+    try uniforms.sync(&.{u});
+    var tu = std.mem.zeroes(shadertoy.Uniforms);
+    tu.resolution = .{ @floatFromInt(fx.target.width), @floatFromInt(fx.target.height), 1 };
+    try toy_uniforms.sync(&.{tu});
+
+    var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+    {
+        var pass = frame.renderPass(&.{.{
+            .target = .{ .texture = back },
+            .clear_color = .{ 0, 0, 0, 0 },
+        }});
+        defer pass.complete();
+        pass.step(.{
+            .pipeline = fx.shaders.pipelines.bg_color,
+            .uniforms = uniforms.buffer,
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+    }
+    {
+        var pass = frame.renderPass(&.{.{
+            .target = .{ .target = fx.target },
+            .clear_color = .{ 0, 0, 0, 0 },
+        }});
+        defer pass.complete();
+        pass.step(.{
+            .pipeline = custom.post_pipelines[0],
+            .uniforms = toy_uniforms.buffer,
+            .textures = &.{back},
+            .samplers = &.{sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+    }
+    frame.complete(false);
+
+    return try fx.pixels();
+}
+
+test "d3d11 custom shader: invert shader renders inverted background" {
+    var fx: Fixture = try .init(.native, 16, 16);
+    defer fx.deinit();
+
+    const pixels = try renderCustom(&fx, custom_toy_invert, .{ 0x10, 0x20, 0x30, 255 });
+    defer testing.allocator.free(pixels);
+    // #102030 inverted is #EFDFCF (BGRA).
+    for ([_][2]usize{ .{ 0, 0 }, .{ 8, 8 }, .{ 15, 15 } }) |p| {
+        try expectPixel(.{ 0xCF, 0xDF, 0xEF, 255 }, pixelAt(pixels, 16, p[0], p[1]), 2);
+    }
+}
+
+test "d3d11 custom shader: fragCoord y is down" {
+    var fx: Fixture = try .init(.native, 16, 16);
+    defer fx.deinit();
+
+    const pixels = try renderCustom(&fx, custom_toy_gradient_y, .{ 0, 0, 0, 255 });
+    defer testing.allocator.free(pixels);
+    const top = pixelAt(pixels, 16, 4, 0);
+    const bottom = pixelAt(pixels, 16, 4, 15);
+    try testing.expect(top[0] < 32);
+    try testing.expect(bottom[0] > 224);
 }

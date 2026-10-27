@@ -34,9 +34,8 @@ pub const shaders = @import("d3d11/shaders.zig");
 pub const hlsl = @import("d3d11/hlsl.zig");
 pub const slots = @import("d3d11/slots.zig");
 
-// Custom shaders are GLSL-sourced until a later milestone adds HLSL
-// output; until then they are logged and skipped.
-pub const custom_shader_target: shadertoy.Target = .glsl;
+// Custom shaders are converted from shadertoy GLSL to HLSL (SPIR-V Cross).
+pub const custom_shader_target: shadertoy.Target = .hlsl;
 // D3D11 is Y-down like Metal.
 pub const custom_shader_y_is_down = true;
 
