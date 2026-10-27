@@ -31,7 +31,7 @@ const Stdin = struct {
             var n: u32 = 0;
             if (win.ReadFile(h, &chunk, chunk.len, &n, null) == 0) {
                 // A closed write end of a pipe is end of input.
-                if (win.GetLastError() == 109) break;
+                if (win.GetLastError() == win.ERROR_BROKEN_PIPE) break;
                 return error.ReadFailed;
             }
             if (n == 0) break;
@@ -135,7 +135,9 @@ fn writeOut(which: u32, alloc: Allocator, bytes: []const u8) void {
         if (std.unicode.wtf8ToWtf16LeAlloc(alloc, bytes)) |wide| {
             var off: usize = 0;
             while (off < wide.len) {
-                const chunk: u32 = @intCast(@min(wide.len - off, 16 * 1024));
+                var chunk: u32 = @intCast(@min(wide.len - off, 16 * 1024));
+                // Do not split a surrogate pair across two writes.
+                if (off + chunk < wide.len and std.unicode.utf16IsHighSurrogate(wide[off + chunk - 1])) chunk -= 1;
                 var written: u32 = 0;
                 if (win.WriteConsoleW(h, wide[off..].ptr, chunk, &written, null) == 0 or written == 0) return;
                 off += written;
@@ -208,9 +210,10 @@ fn trace(
 fn stats(arena: Allocator, wall_ms: u64) void {
     var counters: win.PROCESS_MEMORY_COUNTERS = .{};
     _ = win.K32GetProcessMemoryInfo(win.GetCurrentProcess(), &counters, @sizeOf(win.PROCESS_MEMORY_COUNTERS));
-    const line = std.fmt.allocPrint(arena, "tmux-stats peak_private_kb={d} wall_ms={d}\n", .{
+    const line = std.fmt.allocPrint(arena, "tmux-stats peak_private_kb={d} wall_ms={d} build={s}\n", .{
         counters.PeakPagefileUsage / 1024,
         wall_ms,
+        @tagName(@import("builtin").mode),
     }) catch return;
     writeOut(win.STD_ERROR_HANDLE, arena, line);
 }

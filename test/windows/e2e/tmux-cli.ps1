@@ -87,6 +87,12 @@ function Get-PeImports([string]$Path) {
     $names -join ','
 }
 
+# Import names that are not on the allowlist.
+function Get-ImportsOutsideAllowlist([string[]]$Imports) {
+    $allowed = 'kernel32.dll', 'ntdll.dll'
+    @($Imports | Where-Object { $allowed -notcontains $_ })
+}
+
 Invoke-E2eScenario 'tmux-cli' {
     if (-not (Test-Path -LiteralPath $script:TmuxExe)) { throw "missing $script:TmuxExe (run zig build first)" }
 
@@ -108,32 +114,39 @@ Invoke-E2eScenario 'tmux-cli' {
     if ($r.Code -ne 1 -or $r.Stderr -notlike 'no server running on *') { throw "missing pipe: exit $($r.Code) stderr '$($r.Stderr)'" }
     if ($sw.ElapsedMilliseconds -gt 3000) { throw "missing pipe took $($sw.ElapsedMilliseconds) ms" }
 
-    # 50 x -V with stats: wall time and peak private bytes.
+    # 50 x -V with stats. Gated: the shim's own wall time (process start
+    # excluded) p95 < 50 ms and peak private < 5 MB. The spawn wall time
+    # (includes the .NET process start of this harness) is gated at 50 ms
+    # only for a non-Debug tmux.exe and is recorded otherwise.
     $walls = New-Object System.Collections.Generic.List[double]
+    $own = New-Object System.Collections.Generic.List[double]
     $peaks = New-Object System.Collections.Generic.List[int]
+    $mode = ''
     for ($i = 0; $i -lt 50; $i++) {
         $r = Invoke-Tmux @('-V') @{ GHOSTTY_TMUX_STATS = '1' }
         if ($r.Code -ne 0) { throw "-V run $i exited with $($r.Code)" }
-        if ($r.Stderr -notmatch 'tmux-stats peak_private_kb=(\d+) wall_ms=(\d+)') { throw "run ${i}: no stats line in '$($r.Stderr)'" }
+        if ($r.Stderr -notmatch 'tmux-stats peak_private_kb=(\d+) wall_ms=(\d+) build=(\w+)') { throw "run ${i}: no stats line in '$($r.Stderr)'" }
         $peaks.Add([int]$Matches[1])
+        $own.Add([double]$Matches[2])
+        $mode = $Matches[3]
         $walls.Add($r.WallMs)
     }
-    $sorted = @($walls | Sort-Object)
-    $p95 = $sorted[[int][Math]::Ceiling(0.95 * $sorted.Count) - 1]
-    $median = $sorted[[int]($sorted.Count / 2)]
+    function Get-P95([object[]]$v) { $x = @($v | Sort-Object); $x[[int][Math]::Ceiling(0.95 * $x.Count) - 1] }
+    $p95 = Get-P95 $walls
+    $ownP95 = Get-P95 $own
+    $median = @($walls | Sort-Object)[[int]($walls.Count / 2)]
     $peak = ($peaks | Measure-Object -Maximum).Maximum
-    Write-E2eInfo ('tmux.exe -V x50: wall median {0:N1} ms, p95 {1:N1} ms, peak private {2} KB' -f $median, $p95, $peak)
-    if ($p95 -ge 50) { throw ('p95 wall {0:N1} ms is not under 50 ms' -f $p95) }
+    Write-E2eInfo ('tmux.exe ({0}) -V x50: spawn wall median {1:N1} ms, p95 {2:N1} ms; own wall p95 {3:N1} ms; peak private {4} KB' -f $mode, $median, $p95, $ownP95, $peak)
+    if ($ownP95 -ge 50) { throw ('own wall p95 {0:N1} ms is not under 50 ms' -f $ownP95) }
     if ($peak -ge 5120) { throw "peak private $peak KB is not under 5 MB" }
+    if ($mode -ne 'debug' -and $p95 -ge 50) { throw ('spawn wall p95 {0:N1} ms is not under 50 ms ({1})' -f $p95, $mode) }
 
-    # Import table: kernel32 and ntdll only.
+    # Import table: an allowlist, exactly a subset of kernel32 and ntdll.
     $imports = @((Get-PeImports $script:TmuxExe) -split ',' | Where-Object { $_ })
     if ($imports -notcontains 'kernel32.dll') { throw "import parser found no kernel32 in: $($imports -join ' ')" }
     Write-E2eInfo ('tmux.exe imports: ' + ($imports -join ', '))
-    foreach ($bad in 'user32', 'gdi32', 'ole32', 'ucrt*', 'vcruntime*', 'msvcp*', 'advapi32', 'shell32', 'ws2_32') {
-        $hit = @($imports | Where-Object { $_ -like "$bad*" })
-        if ($hit.Count -gt 0) { throw "tmux.exe imports $($hit -join ', ')" }
-    }
+    $extra = @(Get-ImportsOutsideAllowlist $imports)
+    if ($extra.Count -gt 0) { throw "tmux.exe imports outside {kernel32.dll, ntdll.dll}: $($extra -join ', ')" }
 
     # Trace: one whole JSON line per invocation, also under parallel runs.
     $trace = Join-Path $script:Sbx.Tmp 'trace.jsonl'

@@ -80,7 +80,10 @@ pub fn run(
         }
         return fail(arena, "no server running on default\n", .{});
     };
-    const expected_pid = protocol.pidFromTmuxPipe(pipe);
+    // Only a Ghostty tmux pipe is ever opened: no file, UNC or foreign pipe
+    // path gets the request (it carries the environment).
+    const expected_pid = protocol.tmuxPipePid(pipe) orelse
+        return fail(arena, "not a Ghostty tmux socket\n", .{});
 
     for (g.rest) |a| {
         if (!std.unicode.utf8ValidateSlice(a)) return fail(arena, "ghostty: invalid UTF-8 in arguments\n", .{});
@@ -233,14 +236,14 @@ test "tmux shim run: -S beats TMUX" {
     var tr: FakeTransport = .{ .reply = ok_reply };
     const out = try run(
         arena_state.allocator(),
-        &.{ "-S", "\\\\.\\pipe\\ghostty-tmux-42-00ff", "list-panes" },
-        testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" }),
+        &.{ "-S", "\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff", "list-panes" },
+        testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" }),
         "C:\\",
         &tr,
         NoStdin{},
     );
     try std.testing.expectEqual(@as(u8, 0), out.code);
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-42-00ff", tr.pipe);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff", tr.pipe);
     try std.testing.expectEqual(@as(?u32, 42), tr.expected_pid);
 }
 
@@ -248,8 +251,8 @@ test "tmux shim run: TMUX first field and expected pid from pipe name" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var tr: FakeTransport = .{ .reply = ok_reply };
-    _ = try run(arena_state.allocator(), &.{"list-panes"}, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" }), "C:\\", &tr, NoStdin{});
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-7-aa", tr.pipe);
+    _ = try run(arena_state.allocator(), &.{"list-panes"}, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" }), "C:\\", &tr, NoStdin{});
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa", tr.pipe);
     try std.testing.expectEqual(@as(?u32, 7), tr.expected_pid);
     try std.testing.expectEqual(@as(?u32, 42), protocol.pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-42-00ff00ff00ff00ff"));
     try std.testing.expectEqual(@as(?u32, null), protocol.pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-x"));
@@ -265,7 +268,7 @@ test "tmux shim run: request fields" {
 
     var tr: FakeTransport = .{ .now = 5000, .reply = ok_reply };
     const argv = [_][]const u8{ "split-window", "-h", "-P", "-F", "#{pane_id}" };
-    const out = try run(a, &argv, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0", .pane = "%3", .block = block }), "C:\\work", &tr, NoStdin{});
+    const out = try run(a, &argv, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0", .pane = "%3", .block = block }), "C:\\work", &tr, NoStdin{});
     try std.testing.expectEqual(@as(u8, 0), out.code);
 
     const req = try protocol.parseRequest(a, tr.payload);
@@ -289,7 +292,7 @@ test "tmux shim run: response mapping" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" });
+    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" });
 
     var ok: FakeTransport = .{ .reply = ok_reply };
     const o1 = try run(a, &.{"list-panes"}, env, "C:\\", &ok, NoStdin{});
@@ -307,15 +310,15 @@ test "tmux shim run: response mapping" {
     var garbage: FakeTransport = .{ .reply = "not json" };
     const o3 = try run(a, &.{"list-panes"}, env, "C:\\", &garbage, NoStdin{});
     try std.testing.expectEqual(@as(u8, 1), o3.code);
-    try std.testing.expectEqualStrings("ghostty: lost connection to \\\\.\\pipe\\ghostty-tmux-7-aa\n", o3.stderr);
+    try std.testing.expectEqualStrings("ghostty: lost connection to \\\\.\\pipe\\ghostty-tmux-7-00000000000000aa\n", o3.stderr);
 }
 
 test "tmux shim run: transport errors" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" });
-    const pipe = "\\\\.\\pipe\\ghostty-tmux-7-aa";
+    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" });
+    const pipe = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa";
 
     inline for (.{
         .{ error.NoServer, "no server running on " ++ pipe ++ "\n" },
@@ -335,7 +338,7 @@ test "tmux shim run: load-buffer reads stdin only when asked" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" });
+    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" });
 
     var tr: FakeTransport = .{ .reply = ok_reply };
     const o1 = try run(a, &.{ "display-message", "-p", "x" }, env, "C:\\", &tr, NoStdin{});
@@ -355,7 +358,7 @@ test "tmux shim run: load-buffer caps and UTF-8" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" });
+    const env = testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" });
     var tr: FakeTransport = .{ .reply = ok_reply };
 
     const big = try a.alloc(u8, protocol.max_stdin_tmux + 1);
@@ -379,8 +382,37 @@ test "tmux shim run: usage errors do not reach the server" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var tr: FakeTransport = .{};
-    const out = try run(arena_state.allocator(), &.{ "-Q", "list-panes" }, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-aa,7,0" }), "C:\\", &tr, NoStdin{});
+    const out = try run(arena_state.allocator(), &.{ "-Q", "list-panes" }, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" }), "C:\\", &tr, NoStdin{});
     try std.testing.expectEqual(@as(u8, 1), out.code);
     try std.testing.expectEqualStrings("unknown option -Q\n", out.stderr);
     try std.testing.expectEqual(@as(usize, 0), tr.calls);
+}
+
+test "tmux shim run: only Ghostty tmux pipes are opened" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const zeros: [400]u8 = @splat('0');
+    const long = try std.fmt.allocPrint(a, "\\\\.\\pipe\\ghostty-tmux-1-{s}", .{&zeros});
+    const bad = [_][]const u8{
+        "C:\\x\\file.txt",
+        "\\\\host\\pipe\\ghostty-tmux-1-00000000000000ab",
+        "\\\\.\\pipe\\other",
+        "\\\\.\\pipe\\ghostty-tmux-1-ab",
+        "\\\\.\\pipe\\ghostty-tmux-x-00000000000000ab",
+        long,
+    };
+    for (bad) |name| {
+        var tr: FakeTransport = .{ .reply = ok_reply };
+        const out = try run(a, &.{ "-S", name, "list-panes" }, testEnv(.{}), "C:\\", &tr, NoStdin{});
+        try std.testing.expectEqual(@as(u8, 1), out.code);
+        try std.testing.expectEqualStrings("not a Ghostty tmux socket\n", out.stderr);
+        try std.testing.expectEqual(@as(usize, 0), tr.calls);
+
+        var tr2: FakeTransport = .{ .reply = ok_reply };
+        const env_tmux = try std.fmt.allocPrint(a, "{s},1,0", .{name});
+        const out2 = try run(a, &.{"list-panes"}, testEnv(.{ .tmux = env_tmux }), "C:\\", &tr2, NoStdin{});
+        try std.testing.expectEqual(@as(u8, 1), out2.code);
+        try std.testing.expectEqual(@as(usize, 0), tr2.calls);
+    }
 }

@@ -20,6 +20,13 @@ fn nextBackoff(ms: u32) u32 {
     return @min(ms * 2, 1000);
 }
 
+/// UTF-8 to UTF-16 in `out`; null when the name does not fit or is invalid.
+fn toUtf16(out: *[max_name_u16:0]u16, name: []const u8) ?usize {
+    const len = std.unicode.calcUtf16LeLen(name) catch return null;
+    if (len > max_name_u16) return null;
+    return std.unicode.utf8ToUtf16Le(out, name) catch null;
+}
+
 /// `deadline_ms` is an absolute `GetTickCount64` value; it bounds the whole
 /// exchange. `expected_pid` (from `protocol.pidFromTmuxPipe`) must equal the
 /// pipe server's pid when given. Caller owns the returned response payload.
@@ -30,13 +37,19 @@ pub fn request(
     payload: []const u8,
     deadline_ms: u64,
 ) TransportError![]u8 {
+    if (payload.len > protocol.max_frame) return error.ProtocolError;
+
     var name_w: [max_name_u16:0]u16 = undefined;
-    const n = std.unicode.utf8ToUtf16Le(&name_w, name) catch return error.NoServer;
+    const n = toUtf16(&name_w, name) orelse return error.NoServer;
     name_w[n] = 0;
     const name_z: [*:0]const u16 = @ptrCast(&name_w);
 
     const pipe = try open(name_z, deadline_ms);
     defer _ = win.CloseHandle(pipe);
+
+    // Never write the request into a file or a device that happens to have
+    // this name.
+    if (win.GetFileType(pipe) != win.FILE_TYPE_PIPE) return error.NotOurServer;
 
     if (expected_pid) |want| {
         var pid: u32 = 0;
@@ -47,7 +60,6 @@ pub fn request(
     defer _ = win.CloseHandle(event);
     const io: Io = .{ .pipe = pipe, .event = event, .deadline = deadline_ms };
 
-    if (payload.len > protocol.max_frame) return error.ProtocolError;
     const wire = try alloc.alloc(u8, 4 + payload.len);
     defer alloc.free(wire);
     std.mem.writeInt(u32, wire[0..4], @intCast(payload.len), .little);
@@ -118,12 +130,10 @@ const Io = struct {
     fn readSome(self: Io, buf: []u8) TransportError!usize {
         _ = win.ResetEvent(self.event);
         var ov: win.OVERLAPPED = .{ .hEvent = self.event };
-        var n: u32 = 0;
         const len: u32 = @intCast(@min(buf.len, std.math.maxInt(u32)));
-        if (win.ReadFile(self.pipe, buf.ptr, len, &n, &ov) == 0) {
-            if (win.GetLastError() != win.ERROR_IO_PENDING) return error.BrokenPipe;
-            n = try self.finish(&ov);
-        }
+        if (win.ReadFile(self.pipe, buf.ptr, len, null, &ov) == 0 and
+            win.GetLastError() != win.ERROR_IO_PENDING) return error.BrokenPipe;
+        const n = try self.finish(&ov);
         if (n == 0) return error.BrokenPipe;
         return n;
     }
@@ -138,13 +148,11 @@ const Io = struct {
         while (sent < data.len) {
             _ = win.ResetEvent(self.event);
             var ov: win.OVERLAPPED = .{ .hEvent = self.event };
-            var n: u32 = 0;
             const rest = data[sent..];
             const len: u32 = @intCast(@min(rest.len, std.math.maxInt(u32)));
-            if (win.WriteFile(self.pipe, rest.ptr, len, &n, &ov) == 0) {
-                if (win.GetLastError() != win.ERROR_IO_PENDING) return error.BrokenPipe;
-                n = try self.finish(&ov);
-            }
+            if (win.WriteFile(self.pipe, rest.ptr, len, null, &ov) == 0 and
+                win.GetLastError() != win.ERROR_IO_PENDING) return error.BrokenPipe;
+            const n = try self.finish(&ov);
             if (n == 0) return error.BrokenPipe;
             sent += n;
         }
@@ -166,7 +174,7 @@ const TestServer = struct {
     thread: ?std.Thread = null,
 
     fn start(self: *TestServer, name: []const u8) !void {
-        const n = try std.unicode.utf8ToUtf16Le(&self.name_w, name);
+        const n = toUtf16(&self.name_w, name) orelse return error.NameTooLong;
         self.name_w[n] = 0;
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         while (!self.ready.load(.acquire)) win.Sleep(1);
@@ -248,6 +256,49 @@ test "tmux shim pipe: no server" {
         request(std.testing.allocator, name, null, "{}", t0 + 2000),
     );
     try std.testing.expect(win.GetTickCount64() - t0 < 200);
+}
+
+test "tmux shim pipe: a name that does not fit is NoServer" {
+    const zeros: [400]u8 = @splat('0');
+    const long = "\\\\.\\pipe\\ghostty-tmux-1-" ++ zeros;
+    try std.testing.expectError(
+        error.NoServer,
+        request(std.testing.allocator, long, null, "{}", win.GetTickCount64() + 1000),
+    );
+    // Invalid UTF-8 as well.
+    try std.testing.expectError(
+        error.NoServer,
+        request(std.testing.allocator, "\xff\xfe", null, "{}", win.GetTickCount64() + 1000),
+    );
+}
+
+test "tmux shim pipe: a regular file is NotOurServer and stays untouched" {
+    var tmp: [260:0]u16 = undefined;
+    const tn = win.GetTempPathW(tmp.len, &tmp);
+    try std.testing.expect(tn > 0 and tn < 200);
+    const leaf = std.unicode.utf8ToUtf16LeStringLiteral("ghostty-tmux-shim-test-file.txt");
+    @memcpy(tmp[tn..][0..leaf.len], leaf);
+    tmp[tn + leaf.len] = 0;
+    const path_w: [*:0]const u16 = @ptrCast(&tmp);
+    const h = win.CreateFileW(path_w, win.GENERIC_READ | win.GENERIC_WRITE, 0, null, win.CREATE_ALWAYS, win.FILE_ATTRIBUTE_NORMAL, null);
+    try std.testing.expect(h != win.INVALID_HANDLE_VALUE);
+    _ = win.CloseHandle(h);
+    defer _ = win.DeleteFileW(path_w);
+
+    var path8: [600]u8 = undefined;
+    const n8 = try std.unicode.utf16LeToUtf8(&path8, tmp[0 .. tn + leaf.len]);
+    try std.testing.expectError(
+        error.NotOurServer,
+        request(std.testing.allocator, path8[0..n8], null, "SECRET", win.GetTickCount64() + 1000),
+    );
+
+    const h2 = win.CreateFileW(path_w, win.GENERIC_READ, win.FILE_SHARE_READ, null, win.OPEN_EXISTING, win.FILE_ATTRIBUTE_NORMAL, null);
+    try std.testing.expect(h2 != win.INVALID_HANDLE_VALUE);
+    defer _ = win.CloseHandle(h2);
+    var buf: [16]u8 = undefined;
+    var got: u32 = 0;
+    _ = win.ReadFile(h2, &buf, buf.len, &got, null);
+    try std.testing.expectEqual(@as(u32, 0), got);
 }
 
 test "tmux shim pipe: roundtrip with matching pid" {

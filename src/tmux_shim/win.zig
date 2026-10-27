@@ -25,7 +25,8 @@ pub const OPEN_EXISTING: DWORD = 3;
 pub const OPEN_ALWAYS: DWORD = 4;
 pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x80;
 pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
-pub const FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x00080000;
+pub const CREATE_ALWAYS: DWORD = 2;
+pub const FILE_TYPE_PIPE: DWORD = 3;
 pub const SECURITY_SQOS_PRESENT: DWORD = 0x00100000;
 pub const SECURITY_IDENTIFICATION: DWORD = 0x00010000;
 
@@ -37,9 +38,8 @@ pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 8;
 
 pub const ERROR_FILE_NOT_FOUND: DWORD = 2;
 pub const ERROR_PIPE_BUSY: DWORD = 231;
-pub const ERROR_SEM_TIMEOUT: DWORD = 121;
+pub const ERROR_BROKEN_PIPE: DWORD = 109;
 pub const ERROR_IO_PENDING: DWORD = 997;
-pub const ERROR_PIPE_CONNECTED: DWORD = 535;
 
 pub const WAIT_OBJECT_0: DWORD = 0;
 pub const INFINITE: DWORD = 0xFFFFFFFF;
@@ -89,3 +89,6 @@ pub extern "kernel32" fn ConnectNamedPipe(pipe: HANDLE, ov: ?*OVERLAPPED) callco
 pub extern "kernel32" fn DisconnectNamedPipe(pipe: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
 pub extern "kernel32" fn GetSystemTimeAsFileTime(ft: *u64) callconv(.winapi) void;
+pub extern "kernel32" fn GetFileType(h: HANDLE) callconv(.winapi) DWORD;
+pub extern "kernel32" fn GetTempPathW(len: DWORD, buf: [*]u16) callconv(.winapi) DWORD;
+pub extern "kernel32" fn DeleteFileW(name: [*:0]const u16) callconv(.winapi) BOOL;

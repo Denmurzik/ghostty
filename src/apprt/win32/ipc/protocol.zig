@@ -78,14 +78,34 @@ pub fn tmuxEnvValue(buf: []u8, pipe: []const u8, pid: u32) ![]const u8 {
 
 /// The server pid inside a tmux pipe name: the digits between
 /// `ghostty-tmux-` and the next `-`.
+/// The marker must start the name, optionally behind `\\.\pipe\`.
 pub fn pidFromTmuxPipe(name: []const u8) ?u32 {
     const marker = "ghostty-tmux-";
-    const at = std.mem.indexOf(u8, name, marker) orelse return null;
-    const rest = name[at + marker.len ..];
+    const local = "\\\\.\\pipe\\";
+    var s = name;
+    if (s.len >= local.len and std.ascii.eqlIgnoreCase(s[0..local.len], local)) s = s[local.len..];
+    if (!std.mem.startsWith(u8, s, marker)) return null;
+    const rest = s[marker.len..];
     const end = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
     if (end == 0) return null;
     for (rest[0..end]) |c| if (!std.ascii.isDigit(c)) return null;
     return std.fmt.parseInt(u32, rest[0..end], 10) catch null;
+}
+
+/// The pid of a name that is exactly `\\.\pipe\ghostty-tmux-<pid>-<16 hex>`
+/// (prefix compared ASCII case-insensitively), else null. This is the only
+/// shape `tmux.exe` connects to.
+pub fn tmuxPipePid(name: []const u8) ?u32 {
+    if (name.len < tmux_pipe_prefix.len or
+        !std.ascii.eqlIgnoreCase(name[0..tmux_pipe_prefix.len], tmux_pipe_prefix)) return null;
+    const rest = name[tmux_pipe_prefix.len..];
+    const dash = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
+    const nonce = rest[dash + 1 ..];
+    if (nonce.len != 16) return null;
+    for (nonce) |c| if (!std.ascii.isHex(c)) return null;
+    if (dash == 0) return null;
+    for (rest[0..dash]) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u32, rest[0..dash], 10) catch null;
 }
 
 pub fn expired(req: Request, now_ms: u64) bool {
@@ -325,6 +345,21 @@ test "win32 ipc protocol: tmux pipe name, env value and pid" {
     try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-7"));
     try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux--ab"));
     try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("garbage"));
+    // Anchored: a marker in the middle (a UNC share, a file path) is no pid.
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\host\\pipe\\ghostty-tmux-1-ab"));
+    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("C:\\x\\ghostty-tmux-1-ab"));
+
+    // The strict form the client connects to.
+    try t.expectEqual(@as(?u32, 42), tmuxPipePid(name));
+    try t.expectEqual(@as(?u32, 42), tmuxPipePid("\\\\.\\PIPE\\Ghostty-Tmux-42-00000000000000FF"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("ghostty-tmux-42-00000000000000ff"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-42-ff"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-42-00000000000000fg"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff0"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\ghostty-tmux--00000000000000ff"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\host\\pipe\\ghostty-tmux-42-00000000000000ff"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("C:\\x\\victim.txt"));
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\other"));
     try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-99999999999-ab"));
 }
 
