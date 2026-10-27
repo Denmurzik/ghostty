@@ -1506,3 +1506,50 @@ test "d3d11 device: images re-uploaded after recovery" {
     try testing.expect(state.upload(alloc, &api));
     try testing.expectEqual(api.device, state.images.get(.{ .kitty = 1 }).?.image.ready.device);
 }
+
+test "d3d11 device: background image re-uploaded after recovery" {
+    const D3D11 = @import("D3D11.zig");
+    if (comptime GraphicsAPI != D3D11) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    D3D11.Device.preferWarp();
+    defer D3D11.Device.resetPreferWarp();
+    defer D3D11.Device.shutdown();
+    var api: D3D11 = .{
+        .alloc = alloc,
+        .blending = .native,
+        .device = try D3D11.Device.acquire(alloc),
+    };
+    defer D3D11.Device.release(api.device);
+
+    // What `prepBackgroundImage` makes from the file: owned RGBA pixels.
+    const makeBg = struct {
+        fn make(a: Allocator) !Image {
+            const data = try a.dupe(u8, &.{ 16, 32, 48, 255 });
+            return .{ .pending = .{
+                .width = 1,
+                .height = 1,
+                .pixel_format = .rgba,
+                .data = data.ptr,
+            } };
+        }
+    }.make;
+
+    var bg: Image = try makeBg(alloc);
+    defer bg.deinit(alloc);
+    try bg.upload(alloc, &api);
+    try testing.expectEqual(api.device, bg.ready.device);
+
+    // The recovery drops the texture and reads the file again.
+    D3D11.Device.markLost(api.device, @import("win32").foundation.DXGI_ERROR_DEVICE_REMOVED);
+    api.displayRealized();
+    bg.deinit(alloc);
+    bg = try makeBg(alloc);
+    try testing.expect(api.recoverDevice());
+    try testing.expect(bg.isPending());
+
+    try bg.upload(alloc, &api);
+    try testing.expectEqual(api.device, bg.ready.device);
+    try testing.expect(!api.device.isLost());
+}

@@ -310,3 +310,5 @@ powershell -NoProfile -File test/windows/vt-smoke/selftest.ps1      # Compare-Im
 the shell's config) and `-Splits N` (type into the focused one of N panes),
 or `GHOSTTY_LAT_EXTRA_CONFIG` / `GHOSTTY_LAT_SPLITS` under the runner. Name such
 runs with `GHOSTTY_LAT_BUILD_VARIANT` so they never read as baseline rows.
+
+`GHOSTTY_E2E_VARIANT=opacity` selects the `opacity` variant of `device-recover.ps1` (scenarios take no parameters).

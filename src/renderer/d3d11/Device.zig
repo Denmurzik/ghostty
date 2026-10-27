@@ -186,7 +186,14 @@ var prefer_warp: std.atomic.Value(bool) = .init(false);
 /// rasterizer. Process-global: the recovery turns to it after the hardware
 /// adapter kept failing.
 pub fn preferWarp() void {
-    if (!prefer_warp.swap(true, .acq_rel)) log.warn("d3d11 devices now use WARP", .{});
+    if (prefer_warp.swap(true, .acq_rel)) return;
+    log.warn("d3d11 devices now use WARP", .{});
+
+    // A healthy hardware device that a new window made meanwhile is not
+    // handed out any more; its holders keep it until they release it.
+    registry_mutex.lockUncancelable(global.io());
+    defer registry_mutex.unlock(global.io());
+    if (current) |d| if (d.options.driver != .warp) dropRegistryRef(d);
 }
 
 /// Test hook: tests that call `preferWarp` undo it with this.
@@ -742,16 +749,10 @@ test "d3d11 device: preferWarp switches the adapter" {
     defer resetPreferWarp();
     const alloc = std.testing.allocator;
 
-    const before = try Device.init(alloc, .{ .driver = .hardware });
-    defer before.deinit(alloc);
-    // GHOSTTY_D3D11_DRIVER may force an adapter; only the switch is checked.
-    const was_warp = before.options.driver == .warp;
-
     preferWarp();
     const after = try Device.init(alloc, .{ .driver = .hardware });
     defer after.deinit(alloc);
     try std.testing.expectEqual(Driver.warp, after.options.driver);
-    _ = was_warp;
 }
 
 test "d3d11 device: custom shaders stay disabled once a loss disabled them" {

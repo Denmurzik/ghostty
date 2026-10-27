@@ -45,6 +45,32 @@ Invoke-E2eScenario 'device-recover' {
     [void](Invoke-GhosttyAction -Class $g.Class -Action "text:cat '$kittyBash'\r")
     Start-Sleep -Milliseconds 800
 
+    # The first pixel near $Rgb in the top-left corner of a dump, or $null.
+    function Find-Color($D, [int[]]$Rgb) {
+        for ($y = 0; $y -lt [Math]::Min($D.Height, 160); $y += 2) {
+            for ($x = 0; $x -lt [Math]::Min($D.Width, 320); $x += 2) {
+                if (Test-PixelNear (Get-DumpPixel $D $x $y) $Rgb 12) { return "$x,$y" }
+            }
+        }
+        $null
+    }
+    function Get-VisibleIds {
+        @((Get-GhosttyState -Class $g.Class).windows | ForEach-Object { $_.tabs } | ForEach-Object { $_.surfaces } |
+            Where-Object { $_.visible } | ForEach-Object { [int]$_.id })
+    }
+
+    # Before the loss: the visible surfaces show the inverted background image and the
+    # inverted (cyan) Kitty image in one of them.
+    $pre = @{}
+    $kittyBefore = $false
+    foreach ($id in (Get-VisibleIds)) {
+        $d = Read-Dump (Get-DumpPath $g $id)
+        if (-not $d) { throw "no dump of surface $id before the loss" }
+        $pre[$id] = Get-DumpPixel $d ($d.Width - 6) ($d.Height - 6)
+        if (Find-Color $d @(0, 255, 255)) { $kittyBefore = $true }
+    }
+    if ($pre.Count -eq 0) { throw 'no visible surface before the loss' }
+    if (-not $kittyBefore) { throw 'the Kitty image (inverted red) is not on screen before the loss' }
     # The loss is noticed by the next frame: keep the terminal drawing.
     $lostAt = Get-Date
     $lost = Wait-Until -TimeoutSec 40 -PollMs 250 -Condition {
@@ -56,7 +82,7 @@ Invoke-E2eScenario 'device-recover' {
     # The health bar shows (or recovery already ran) within 1 s.
     $bar = Wait-Until -TimeoutSec 1 -PollMs 50 -Condition {
         $s = Get-GhosttyState -Class $g.Class
-        if ([int]$s.m3.health.bars -gt 0 -or [int]$s.m3.health.recovered -gt 0) { $s }
+        if ([int]$s.m3.health.bars -gt 0) { $s }
     }
     if (-not $bar) { throw 'no health bar within 1 s of the device loss' }
 
@@ -68,18 +94,23 @@ Invoke-E2eScenario 'device-recover' {
     }
     if (-not $done) { throw ('not recovered within 3 s: ' + ((Get-GhosttyState -Class $g.Class).m3.health | ConvertTo-Json -Compress)) }
 
-    # Every surface draws again (fresh dump after the loss).
-    $ids = @((Get-GhosttyState -Class $g.Class).windows | ForEach-Object { $_.tabs } | ForEach-Object { $_.surfaces } | ForEach-Object { [int]$_.id })
-    if ($ids.Count -ne 4) { throw "expected 4 surfaces, found $($ids.Count)" }
-    foreach ($id in $ids) {
+    # Every visible surface draws again: a fresh dump with the background image (the
+    # custom shader is off now, so the inverse of the earlier pixel) and the red Kitty image.
+    $kittyAfter = $false
+    foreach ($id in $pre.Keys) {
         $path = Get-DumpPath $g $id
         $fresh = Wait-Until -TimeoutSec 3 -PollMs 100 -Condition {
             [void](Invoke-GhosttyAction -Class $g.Class -Action 'text:\r')
             (Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path).LastWriteTime -gt $lostAt)
         }
-        if (-not $fresh) { Write-E2eInfo "surface $id (hidden tab?) has no dump after the loss" }
+        if (-not $fresh) { throw "visible surface $id has no fresh dump after the loss" }
+        $d = Read-Dump $path
+        $want = @((255 - $pre[$id].R), (255 - $pre[$id].G), (255 - $pre[$id].B))
+        $px = Get-DumpPixel $d ($d.Width - 6) ($d.Height - 6)
+        if (-not (Test-PixelNear $px $want 8)) { throw ("surface {0}: background {1}, expected near #{2:x2}{3:x2}{4:x2}" -f $id, (Format-Pixel $px), $want[0], $want[1], $want[2]) }
+        if (Find-Color $d @(255, 0, 0)) { $kittyAfter = $true }
     }
-
+    if (-not $kittyAfter) { throw 'the Kitty image (red) is not on screen after the recovery' }
     $log = Get-Content -LiteralPath $g.Log -Raw
     $nLost = ([regex]::Matches($log, 'd3d11 device lost')).Count
     $nShader = ([regex]::Matches($log, 'custom shaders disabled after device loss')).Count
@@ -88,3 +119,4 @@ Invoke-E2eScenario 'device-recover' {
     if ($nShader -ne 1) { throw "expected one 'custom shaders disabled after device loss', found $nShader" }
     if ($nRecovered -ne 4) { throw "expected four 'renderer recovered', found $nRecovered" }
 }
+

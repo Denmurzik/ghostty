@@ -184,6 +184,10 @@ reacquire_pending: std.atomic.Value(bool) = .init(false),
 /// also the only thread that swaps it.
 device_mutex: std.Io.Mutex = .init,
 
+/// Set while the last attempt to get a new device failed (no GPU, no WARP);
+/// the recovery then backs off instead of counting a repeated loss.
+recover_failed: std.atomic.Value(bool) = .init(false),
+
 /// Per-process counter handing out `dump` file indices.
 var next_renderer_index: std.atomic.Value(usize) = .init(0);
 
@@ -448,6 +452,11 @@ pub fn displayRealized(self: *D3D11) void {
     self.reacquire_pending.store(true, .release);
 }
 
+/// Whether the last attempt to get a new device failed. Any thread.
+pub fn deviceRecoverFailed(self: *const D3D11) bool {
+    return self.recover_failed.load(.acquire);
+}
+
 /// Whether `displayRealized` asked for a replacement device. Cheap, any thread.
 pub fn deviceChangePending(self: *const D3D11) bool {
     return self.reacquire_pending.load(.acquire);
@@ -475,6 +484,7 @@ pub fn recoverDevice(self: *D3D11) bool {
 
     const fresh = Device.acquire(self.alloc) catch |err| {
         log.err("d3d11 could not create a new device err={}", .{err});
+        self.recover_failed.store(true, .release);
         return false;
     };
     {
@@ -484,6 +494,7 @@ pub fn recoverDevice(self: *D3D11) bool {
     }
     Device.release(old);
     self.swap_chain_failure_logged = false;
+    self.recover_failed.store(false, .release);
     log.info("d3d11 renderer recovered generation={d}", .{fresh.generation});
     return true;
 }

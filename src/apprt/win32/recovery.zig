@@ -36,6 +36,12 @@ const repeat_window_ms: u64 = 5_000;
 const failures_for_warp = 3;
 const warp_window_ms: u64 = 60_000;
 
+/// The longest wait between two sweeps while a surface cannot be recovered.
+const backoff_cap_ms: u32 = 30_000;
+
+const no_device_text = "Rendering paused: no GPU device could be created. Retrying\u{2026}";
+/// Stays on every surface after the switch to WARP, until it is closed.
+const warp_final_text = "Software rendering: the GPU kept resetting. Restart Ghostty to use the GPU again.";
 const custom_shaders_text = "Rendering paused: the GPU was reset. Custom shaders are turned off. Recovering\u{2026}";
 const warp_text = "Rendering paused: the GPU keeps resetting. Switching to software rendering\u{2026}";
 
@@ -55,6 +61,9 @@ pub const State = struct {
 
     /// Custom shaders were turned off after a loss.
     shaders_disabled: bool = false,
+
+    /// Delay of the next sweep while recoveries keep failing.
+    backoff_ms: u32 = verify_ms,
 
     /// Renderers moved to a new device so far (IPC test state).
     recovered: u32 = 0,
@@ -137,7 +146,11 @@ pub fn timer(app: *App, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESU
 /// The renderer of `surface` reported its health. Bad health arms the
 /// recovery timer once; good health needs nothing (the badge hides itself).
 pub fn rendererHealth(surface: *Surface, health: apprt.Action.Value(.renderer_health)) void {
-    if (health != .unhealthy) return;
+    if (health == .healthy) {
+        // The bar of the switch to WARP is not cleared by a healthy frame.
+        if (surface.app.recovery.warp) badges.setHealthText(surface, warp_final_text);
+        return;
+    }
     arm(surface.app, debounce_ms);
 }
 
@@ -164,6 +177,7 @@ fn sweep(app: *App, now_ms: u64) void {
 
     var lost: usize = 0;
     var repeated = false;
+    var failed_acquire = false;
     var shader_active = false;
     for (app.windows.items) |window| {
         for (window.tabs.items) |tab| {
@@ -172,19 +186,26 @@ fn sweep(app: *App, now_ms: u64) void {
                 const s = entry.view;
                 if (!isLost(s)) continue;
                 lost += 1;
-                if (state.recoveredRecently(s.id, now_ms)) repeated = true;
-                if (s.core_surface.renderer.has_custom_shaders) shader_active = true;
+                // A failed attempt to get a device is not the GPU failing again.
+                if (s.core_surface.renderer.api.deviceRecoverFailed()) {
+                    failed_acquire = true;
+                } else if (state.recoveredRecently(s.id, now_ms)) {
+                    repeated = true;
+                }
+                if (customShadersConfigured(s)) shader_active = true;
             }
         }
     }
 
     if (lost == 0) {
         // A recovered surface may still fail on its first frames.
+        state.backoff_ms = verify_ms;
         if (state.anyRecentRecovery(now_ms)) arm(app, verify_ms);
         return;
     }
 
     var text: ?[]const u8 = null;
+    if (failed_acquire) text = no_device_text;
     switch (decideShader(shader_active, renderer.Device.customShadersDisabled())) {
         .disable_shaders => {
             renderer.Device.disableCustomShaders();
@@ -216,7 +237,25 @@ fn sweep(app: *App, now_ms: u64) void {
     }
 
     Inspector.deviceChanged(app);
-    arm(app, verify_ms);
+
+    // Surfaces that fail again or cannot get a device are retried less and
+    // less often (no unrealize/realize and log line every 500 ms).
+    if (repeated or failed_acquire) {
+        arm(app, state.backoff_ms);
+        state.backoff_ms = @min(state.backoff_ms *| 2, backoff_cap_ms);
+    } else {
+        state.backoff_ms = verify_ms;
+        arm(app, verify_ms);
+    }
+}
+
+/// Whether the config of the surface names custom shaders. Read under the
+/// draw mutex, the render thread writes the renderer state.
+fn customShadersConfigured(s: *Surface) bool {
+    const r = &s.core_surface.renderer;
+    r.draw_mutex.lockUncancelable(global.io());
+    defer r.draw_mutex.unlock(global.io());
+    return r.has_custom_shaders;
 }
 
 fn isLost(s: *Surface) bool {

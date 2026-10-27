@@ -1052,6 +1052,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.recoverDeviceLocked();
         }
 
+        /// Reports `unhealthy` to the apprt unless it was already. Caller holds
+        /// `draw_mutex`.
+        fn markUnhealthy(self: *Self) void {
+            if (self.health.load(.seq_cst) == .unhealthy) return;
+            self.health.store(.unhealthy, .seq_cst);
+            _ = self.surface_mailbox.push(.{ .renderer_health = .unhealthy }, .{ .forever = {} });
+        }
+
         /// The body of `recoverDevice`. Caller holds `draw_mutex`.
         fn recoverDeviceLocked(self: *Self) void {
             // Everything created from the old device goes first: the swap
@@ -1067,6 +1075,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             _ = self.api.recoverDevice();
+
+            // The first good frame on the new device then reports `healthy`,
+            // which hides the health bar of surfaces that never drew unhealthy.
+            self.markUnhealthy();
 
             self.reinitialize_shaders = true;
             self.target_config_modified +%= 1;
@@ -1852,6 +1864,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 defer self.draw_mutex.unlock(global.io());
                 break :locked self.drawFrameLocked(sync) catch |err| {
                     if (comptime @hasDecl(GraphicsAPI, "frameFailed")) self.api.frameFailed(err);
+                    // A loss seen before the frame completed still has to reach the
+                    // apprt: it arms the recovery.
+                    if (comptime @hasDecl(GraphicsAPI, "isLost")) {
+                        if (self.api.isLost()) self.markUnhealthy();
+                    }
                     return err;
                 };
             };
