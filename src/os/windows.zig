@@ -206,6 +206,12 @@ pub const exp = struct {
             lpBuffer: LPSTR,
             nSize: *DWORD,
         ) callconv(.winapi) BOOL;
+        /// https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getcomputernameexa
+        pub extern "kernel32" fn GetComputerNameExA(
+            NameType: c_int,
+            lpBuffer: ?LPSTR,
+            nSize: *DWORD,
+        ) callconv(.winapi) BOOL;
         /// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppathw
         pub extern "kernel32" fn GetTempPathW(
             nBufferLength: DWORD,

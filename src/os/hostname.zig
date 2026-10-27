@@ -17,13 +17,19 @@ pub fn isLocal(hostname: []const u8) LocalHostnameValidationError!bool {
     // If hostname is not "localhost" it must match our hostname.
     switch (builtin.target.os.tag) {
         .windows => {
+            // MSYS and Cygwin report the DNS host name (`gethostname`), cmd
+            // and pwsh the NetBIOS name, which stops at 15 characters.
+            // Computer names are case-insensitive.
             const windows = @import("windows.zig");
-            var buf: [256:0]u8 = undefined;
-            var nSize: windows.DWORD = buf.len;
-            if (windows.exp.kernel32.GetComputerNameA(&buf, &nSize) == windows.FALSE) return false;
-            const ourHostname = buf[0..nSize];
-            // Windows computer names are case-insensitive.
-            return std.ascii.eqlIgnoreCase(hostname, ourHostname);
+            const computer_name_netbios = 0;
+            const computer_name_dns_hostname = 1;
+            inline for (.{ computer_name_netbios, computer_name_dns_hostname }) |kind| {
+                var buf: [256:0]u8 = undefined;
+                var nSize: windows.DWORD = buf.len;
+                if (windows.exp.kernel32.GetComputerNameExA(kind, &buf, &nSize) != windows.FALSE and
+                    std.ascii.eqlIgnoreCase(hostname, buf[0..nSize])) return true;
+            }
+            return false;
         },
         else => {
             var buf: [posix.HOST_NAME_MAX]u8 = undefined;

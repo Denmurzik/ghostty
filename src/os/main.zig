@@ -21,6 +21,7 @@ const kernel_info = @import("kernel_info.zig");
 pub const cgroup = @import("cgroup.zig");
 pub const edit = @import("edit.zig");
 pub const hostname = @import("hostname.zig");
+pub const pwd_path = @import("pwd_path.zig");
 pub const i18n = @import("i18n.zig");
 pub const mach = @import("mach.zig");
 pub const path = @import("path.zig");
@@ -69,6 +70,7 @@ test {
     _ = i18n;
     _ = path;
     _ = uri;
+    _ = pwd_path;
     _ = shell;
     _ = windows_shell;
     _ = windows_latency;

@@ -6,7 +6,6 @@ const App = @import("../App.zig");
 const Window = @import("../Window.zig");
 const clipboard = @import("../clipboard.zig");
 const messages = @import("../messages.zig");
-const pwd_path = @import("../pwd_path.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -127,15 +126,8 @@ pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bo
         .surface => |s| s,
     };
     const surface = app.surfaceFor(core) orelse return false;
-    // Core hands over the path of the OSC 7 URL as the shell wrote it
-    // (`/c/Users/x`); an empty or untranslatable one forgets the directory.
-    const translated = try pwd_path.translate(app.core_app.alloc, value.pwd);
-    defer if (translated) |t| app.core_app.alloc.free(t);
-    if (translated) |t| {
-        try surface.setPwd(t);
-    } else {
-        surface.clearPwd();
-    }
+    // Core hands over the Windows path (an empty one when the shell has none).
+    try surface.setPwd(value.pwd);
     // The proxy icon of the title row follows the directory.
     surface.window.surfaceTitleChanged(surface);
     return true;

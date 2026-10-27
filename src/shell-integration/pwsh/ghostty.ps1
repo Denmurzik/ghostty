@@ -15,7 +15,7 @@ function global:__ghostty_title([string]$text) {
     [Console]::Out.Write("$([char]27)]2;$text$([char]7)")
 }
 
-# The working directory as OSC 7, `file://HOST/C:/Users/x` with every
+# The working directory as OSC 7, `file:///C:/Users/x` with every
 # segment percent-encoded. Anything but a drive path (UNC, other providers)
 # reports no directory, which clears the previous one.
 function global:__ghostty_pwd([string]$path) {
@@ -23,7 +23,7 @@ function global:__ghostty_pwd([string]$path) {
     if ($path -match '^[A-Za-z]:([\\/]|$)') {
         $segments = $path.Replace('\', '/').Split('/') | ForEach-Object { [Uri]::EscapeDataString($_) }
         $segments[0] = $path.Substring(0, 2)
-        $url = "file://$($env:COMPUTERNAME)/" + ($segments -join '/')
+        $url = 'file:///' + ($segments -join '/')
     }
     [Console]::Out.Write("$([char]27)]7;$url$([char]7)")
 }

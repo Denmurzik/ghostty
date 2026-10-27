@@ -1523,6 +1523,22 @@ pub const StreamHandler = struct {
         try self.terminal.semanticPrompt(cmd);
     }
 
+    /// Forget the pwd, as if we never saw one.
+    fn resetPwd(self: *StreamHandler) !void {
+        // Blank value can never fail because no allocs happen.
+        self.terminal.setPwd("") catch unreachable;
+
+        // If we haven't seen a title, we're using the pwd as our title.
+        // Set it to blank which will reset our title behavior.
+        if (!self.seen_title) {
+            try self.windowTitle("");
+            assert(!self.seen_title);
+        }
+
+        // Report the change.
+        self.surfaceMessageWriter(.{ .pwd_change = .{ .stable = "" } });
+    }
+
     fn reportPwd(self: *StreamHandler, url: []const u8) !void {
         // Special handling for the empty URL. We treat the empty URL
         // as resetting the pwd as if we never saw a pwd. I can't find any
@@ -1530,21 +1546,7 @@ pub const StreamHandler = struct {
         // behavior that enables some useful features. For example, the macOS
         // proxy icon can be hidden when a program reports it doesn't know
         // the pwd rather than showing a stale pwd.
-        if (url.len == 0) {
-            // Blank value can never fail because no allocs happen.
-            self.terminal.setPwd("") catch unreachable;
-
-            // If we haven't seen a title, we're using the pwd as our title.
-            // Set it to blank which will reset our title behavior.
-            if (!self.seen_title) {
-                try self.windowTitle("");
-                assert(!self.seen_title);
-            }
-
-            // Report the change.
-            self.surfaceMessageWriter(.{ .pwd_change = .{ .stable = "" } });
-            return;
-        }
+        if (url.len == 0) return self.resetPwd();
 
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
@@ -1602,7 +1604,24 @@ pub const StreamHandler = struct {
         var stack_alloc_buf: [1024]u8 = undefined;
         var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
         defer arena_alloc.deinit();
-        const path = try uri.path.toRawMaybeAlloc(stack_alloc.allocator());
+        const raw_path = try uri.path.toRawMaybeAlloc(stack_alloc.allocator());
+
+        // On Windows the shells write `/c/Users/x` (MSYS) or `C:` forms:
+        // everything downstream (new tabs, links, the title) wants the
+        // drive-letter path. A path that is none (UNC and WebDAV included:
+        // a working directory there leaks credentials) is no pwd at all.
+        const win_path: ?[]u8 = if (comptime builtin.target.os.tag == .windows)
+            try internal_os.pwd_path.translate(self.alloc, raw_path)
+        else
+            null;
+        defer if (win_path) |p| self.alloc.free(p);
+        if (comptime builtin.target.os.tag == .windows) {
+            if (win_path == null) {
+                log.warn("OSC 7 path is not a local drive path, ignored", .{});
+                return self.resetPwd();
+            }
+        }
+        const path = win_path orelse raw_path;
 
         log.debug("terminal pwd: {s}", .{path});
         try self.terminal.setPwd(path);

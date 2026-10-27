@@ -451,18 +451,10 @@ fn pwshRunsCode(arg: []const u8) bool {
     return false;
 }
 
-/// Whether `name` (a computer name) can sit in a PROMPT as is.
-fn promptSafe(name: []const u8) bool {
-    if (name.len == 0 or name.len > 63) return false;
-    for (name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
-    }
-    return true;
-}
-
 /// Setup the cmd.exe integration (Windows): the PROMPT gets a leading OSC 2
-/// with the current directory (`$P`) and an OSC 7 with it. cmd cannot tell us which command is
-/// running; conhost's own "<cmd.exe> - <command>" title covers that.
+/// with the current directory (`$P`) and an OSC 7 with it. cmd cannot tell
+/// us which command is running; conhost's own "<cmd.exe> - <command>" title
+/// covers that.
 fn setupCmd(
     alloc: Allocator,
     command: config.Command,
@@ -478,17 +470,10 @@ fn setupCmd(
         // /c and /r run one command and exit.
         if (arg.len >= 2 and arg[0] == '/' and (arg[1] == 'c' or arg[1] == 'C' or arg[1] == 'r' or arg[1] == 'R')) return null;
     }
-    // OSC 7 follows the title, as `kitty-shell-cwd://` (core keeps that path
-    // raw, so a name with spaces or a # needs no encoding). The host is this
-    // machine's name, which PROMPT cannot expand itself (no %VAR%), so it is
-    // written out here; a name PROMPT would misread gets no OSC 7.
-    const title = "$e]2;$P$e\\";
-    const host = env.get("COMPUTERNAME") orelse "";
-    const osc7 = if (promptSafe(host))
-        try std.mem.concat(alloc, u8, &.{ "$e]7;kitty-shell-cwd://", host, "/$P$e\\" })
-    else
-        "";
-    const prefix = try std.mem.concat(alloc, u8, &.{ title, osc7 });
+    // OSC 7 follows the title, as `kitty-shell-cwd://` with no host (this
+    // machine): core keeps that path raw, so a name with spaces or a # needs
+    // no encoding.
+    const prefix = "$e]2;$P$e\\$e]7;kitty-shell-cwd:///$P$e\\";
     const current = env.get("PROMPT") orelse "$P$G";
     if (std.mem.startsWith(u8, current, prefix)) return try command.clone(alloc);
     try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current }));
@@ -1353,14 +1338,16 @@ test "windows: cmd prompt" {
     try testing.expect(env.get("PROMPT") == null);
     try env.put("GHOSTTY_SHELL_FEATURES", "cursor:blink,title");
     try testing.expect(try setupCmd(alloc, cmd, &env) != null);
-    try testing.expectEqualStrings("$e]2;$P$e\\$P$G", env.get("PROMPT").?);
+    // The title, then OSC 7 with no host (raw `kitty-shell-cwd` path).
+    const prefix = "$e]2;$P$e\\$e]7;kitty-shell-cwd:///$P$e\\";
+    try testing.expectEqualStrings(prefix ++ "$P$G", env.get("PROMPT").?);
 
     // Set up again, or with a prompt of the user's: prefixed once.
     try testing.expect(try setupCmd(alloc, cmd, &env) != null);
-    try testing.expectEqualStrings("$e]2;$P$e\\$P$G", env.get("PROMPT").?);
+    try testing.expectEqualStrings(prefix ++ "$P$G", env.get("PROMPT").?);
     try env.put("PROMPT", "$T $P$G");
     try testing.expect(try setupCmd(alloc, cmd, &env) != null);
-    try testing.expectEqualStrings("$e]2;$P$e\\$T $P$G", env.get("PROMPT").?);
+    try testing.expectEqualStrings(prefix ++ "$T $P$G", env.get("PROMPT").?);
 
     // /c runs one command: no prompt shows.
     var other = EnvMap.init(alloc);
