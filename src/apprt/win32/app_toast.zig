@@ -13,6 +13,8 @@ const log = std.log.scoped(.win32_app_toast);
 const duration_ms = 2000;
 /// Gap to the window edge, as the 8 pt padding of the macOS overlays.
 const margin_px = 8;
+/// Room for the key state indicator below (its height and gap), logical px.
+const stack_px = 40;
 
 const Kind = enum { copied, cleared, reloaded };
 
@@ -57,6 +59,9 @@ fn show(surface: *Surface, kind: Kind) void {
         state.toast = l;
         break :blk l;
     };
+    // Above the key state indicator when that is shown.
+    const indicator_shown = if (surface.key_state.label) |l| l.popup.visible else false;
+    label.popup.margin = if (indicator_shown) margin_px + stack_px else margin_px;
     label.set(textFor(kind));
     label.show();
     label.popup.hideAfter(duration_ms);

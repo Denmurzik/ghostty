@@ -154,7 +154,7 @@ fn paint(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     const surface: *Surface = @ptrCast(@alignCast(p.ctx orelse return));
     var scene: Scene = .{};
     scene.build(&surface.key_state, ctx.dpi, ctx.palette.dark);
-    Chrome.paintItems(ctx.hdc, ctx.rect, scene.items[0..scene.n], ctx.palette, ctx.dpi) catch |err| {
+    Chrome.paintItems(ctx.hdc, ctx.rect, scene.items[0..scene.n], ctx.palette, ctx.dpi, null) catch |err| {
         log.warn("unable to paint the key state err={}", .{err});
     };
 }
@@ -218,7 +218,8 @@ const Scene = struct {
         const h = px(height_pt, dpi);
 
         // The capsule goes first; its width is known at the end.
-        self.push(.{ .box = .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = h }, .radius = 0, .fill = fill } });
+        self.push(undefined);
+        self.push(undefined);
         var x = px(pad_x, dpi);
 
         if (state.tables.items.len > 0) {
@@ -254,7 +255,9 @@ const Scene = struct {
                 writeTrigger(&w, trigger) catch {};
                 const text = self.wide(w.buffered());
                 const cw = textWidth(text, keycap_font, dpi) + 2 * px(keycap_pad_x, dpi);
-                self.push(.{ .box = .{ .rect = .{ .x = x, .y = @divTrunc(h - ch, 2), .w = cw, .h = ch }, .radius = px(keycap_radius, dpi), .fill = cap_fill, .stroke = cap_border } });
+                const cap: geom.Rect = .{ .x = x, .y = @divTrunc(h - ch, 2), .w = cw, .h = ch };
+                self.push(.{ .box = .{ .rect = cap, .radius = px(keycap_radius, dpi), .fill = cap_fill } });
+                self.push(.{ .stroke = .{ .rect = cap, .radius = px(keycap_radius, dpi), .width = 1, .color = cap_border } });
                 self.push(.{ .text = .{ .rect = .{ .x = x, .y = 0, .w = cw, .h = h }, .text = text, .font = keycap_font, .color = primary } });
                 x += cw + px(keycap_gap, dpi);
             }
@@ -271,7 +274,9 @@ const Scene = struct {
 
         x += px(pad_x, dpi);
         self.width = x;
-        self.items[0] = .{ .box = .{ .rect = .{ .x = 0, .y = 0, .w = x, .h = h }, .radius = @divTrunc(h, 2), .fill = fill, .stroke = border } };
+        const body: geom.Rect = .{ .x = 0, .y = 0, .w = x, .h = h };
+        self.items[0] = .{ .box = .{ .rect = body, .radius = @divTrunc(h, 2), .fill = fill } };
+        self.items[1] = .{ .stroke = .{ .rect = body, .radius = @divTrunc(h, 2), .width = 1, .color = border } };
     }
 };
 

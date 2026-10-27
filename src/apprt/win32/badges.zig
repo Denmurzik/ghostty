@@ -183,22 +183,22 @@ fn paintReadonly(label: *const TextLabel, ctx: overlay.PaintContext) void {
     const dpi = ctx.dpi;
     const fill = materialFill(ctx.palette.dark);
     const r = ctx.rect;
-    const stroke_w = @max(1, @divTrunc(geom.scale(3, dpi) + 1, 2));
     const x0 = geom.scale(badge_pad_x, dpi);
     const icon_w = geom.scale(badge_icon_w, dpi);
     const text_x = x0 + icon_w + geom.scale(badge_gap, dpi);
     const items = [_]Chrome.Item{
-        .{ .box = .{
+        .{ .box = .{ .rect = r, .radius = geom.scale(badge_radius, dpi), .fill = fill } },
+        // 1.5 pt, orange at 0.6.
+        .{ .stroke = .{
             .rect = r,
             .radius = geom.scale(badge_radius, dpi),
-            .fill = fill,
-            .stroke = Chrome.blend(withAlpha(orange, 153), fill),
-            .stroke_w = stroke_w,
+            .width = 1.5 * @as(f32, @floatFromInt(dpi)) / 96.0,
+            .color = withAlpha(orange, 153),
         } },
         .{ .text = .{ .rect = .{ .x = x0, .y = 0, .w = icon_w, .h = r.h }, .text = glyph_lock, .font = badge_icon_font, .color = badge_ink } },
         .{ .text = .{ .rect = .{ .x = text_x, .y = 0, .w = r.w - text_x, .h = r.h }, .text = label.text16(), .font = badge_font, .color = badge_ink, .halign = .leading } },
     };
-    Chrome.paintItems(ctx.hdc, r, &items, ctx.palette, dpi) catch |err| {
+    Chrome.paintItems(ctx.hdc, r, &items, ctx.palette, dpi, null) catch |err| {
         log.warn("unable to paint the read-only badge err={}", .{err});
     };
 }
@@ -208,9 +208,9 @@ fn paintBar(label: *const TextLabel, ctx: overlay.PaintContext) void {
     const base = materialFill(ctx.palette.dark);
     const items = [_]Chrome.Item{
         .{ .box = .{ .rect = ctx.rect, .radius = 0, .fill = Chrome.blend(withAlpha(orange, 128), base) } },
-        .{ .text = .{ .rect = ctx.rect, .text = label.text16(), .font = bar_font, .color = primaryInk(ctx.palette.dark) } },
+        .{ .text = .{ .rect = ctx.rect, .text = label.text16(), .font = bar_font, .color = primaryInk(ctx.palette.dark), .trim = true } },
     };
-    Chrome.paintItems(ctx.hdc, ctx.rect, &items, ctx.palette, ctx.dpi) catch |err| {
+    Chrome.paintItems(ctx.hdc, ctx.rect, &items, ctx.palette, ctx.dpi, null) catch |err| {
         log.warn("unable to paint the health bar err={}", .{err});
     };
 }

@@ -678,23 +678,20 @@ pub const HAlign = enum { leading, center };
 
 /// One thing to draw, in px with the origin at the top-left of the popup.
 pub const Item = union(enum) {
-    /// An antialiased rounded rectangle. With `stroke` the border is a
-    /// ring of `stroke_w` px inside `rect` in that colour; `fill` must be
-    /// opaque then (blend translucent colours with `blend` first).
-    box: struct {
-        rect: geom.Rect,
-        radius: i32,
-        fill: theme.Color,
-        stroke: ?theme.Color = null,
-        stroke_w: i32 = 1,
-    },
-    /// Text vertically centred in `rect`, clipped to it.
+    /// An antialiased filled rounded rectangle (radius 0: a rectangle).
+    box: struct { rect: geom.Rect, radius: i32, fill: theme.Color },
+    /// The outline of a rounded rectangle, `width` px wide, drawn inside
+    /// `rect`; the colour may be translucent.
+    stroke: struct { rect: geom.Rect, radius: i32, width: f32, color: theme.Color },
+    /// Text vertically centred in `rect`, clipped to it; with `trim` the
+    /// text that does not fit ends in an ellipsis.
     text: struct {
         rect: geom.Rect,
         text: []const u16,
         font: Font = .{},
         color: theme.Color,
         halign: HAlign = .center,
+        trim: bool = false,
     },
 };
 
@@ -709,7 +706,7 @@ pub fn blend(top: theme.Color, bottom: theme.Color) theme.Color {
     };
 }
 
-fn makeFormat(sh: *Shared, font: Font, halign: HAlign, dpi: u32) !*dwrite.IDWriteTextFormat {
+fn makeFormat(sh: *Shared, font: Font, halign: HAlign, trim: bool, dpi: u32) !*dwrite.IDWriteTextFormat {
     const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
     const family = if (font.icons) sh.icon_family else sh.title_family;
     const format = try sh.dwrite.createTextFormat(family, font.weight, .NORMAL, .NORMAL, font.size_pt * scale, L("en-us"));
@@ -717,47 +714,88 @@ fn makeFormat(sh: *Shared, font: Font, halign: HAlign, dpi: u32) !*dwrite.IDWrit
     try format.setWordWrapping(.NO_WRAP);
     try format.setTextAlignment(if (halign == .center) .CENTER else .LEADING);
     try format.setParagraphAlignment(.CENTER);
+    if (trim) {
+        // The format keeps its own reference to the sign.
+        const sign = try sh.dwrite.createEllipsisTrimmingSign(format);
+        defer com.release(sign);
+        try format.setTrimming(.{ .granularity = .CHARACTER }, sign);
+    }
     return format;
 }
 
-/// Width in px of `text` in `font` at `dpi`.
+const measure_slots = 32;
+const measure_chars = 48;
+const Measured = struct {
+    dpi: u32 = 0,
+    font: Font = .{},
+    len: usize = 0,
+    text: [measure_chars]u16 = undefined,
+    width: i32 = 0,
+};
+var measured: [measure_slots]Measured = @splat(.{});
+var measured_next: usize = 0;
+
+/// Width in px of `text` in `font` at `dpi`. Short texts are remembered, so
+/// a label that is painted again and again measures once.
 pub fn measureText(text: []const u16, font: Font, dpi: u32) !i32 {
+    const cacheable = text.len > 0 and text.len <= measure_chars;
+    if (cacheable) for (&measured) |*m| {
+        if (m.dpi == dpi and m.len == text.len and std.meta.eql(m.font, font) and
+            std.mem.eql(u16, m.text[0..m.len], text)) return m.width;
+    };
+
     const sh = try shared();
-    const format = try makeFormat(sh, font, .leading, dpi);
+    const format = try makeFormat(sh, font, .leading, false, dpi);
     defer com.release(format);
     const layout = try sh.dwrite.createTextLayout(text, format, 4096, 256);
     defer com.release(layout);
     const metrics = try layout.getMetrics();
-    return @intFromFloat(@ceil(metrics.widthIncludingTrailingWhitespace));
+    const width: i32 = @intFromFloat(@ceil(metrics.widthIncludingTrailingWhitespace));
+
+    if (cacheable) {
+        const slot = &measured[measured_next];
+        measured_next = (measured_next + 1) % measure_slots;
+        slot.* = .{ .dpi = dpi, .font = font, .len = text.len, .width = width };
+        @memcpy(slot.text[0..text.len], text);
+    }
+    return width;
 }
 
 fn drawItemsBody(items: []const Item, p: *Painter) void {
-    const sh = shared() catch return;
+    const sh = shared() catch |err| {
+        logOnce(err);
+        return;
+    };
     for (items) |item| switch (item) {
-        .box => |b| {
-            if (b.stroke) |s| {
-                p.fillRound(b.rect, b.radius, s);
-                const w = b.stroke_w;
-                const inner: geom.Rect = .{ .x = b.rect.x + w, .y = b.rect.y + w, .w = b.rect.w - 2 * w, .h = b.rect.h - 2 * w };
-                if (inner.w > 0 and inner.h > 0) p.fillRound(inner, @max(b.radius - w, 0), b.fill);
-            } else {
-                p.fillRound(b.rect, b.radius, b.fill);
-            }
+        .box => |b| p.fillRound(b.rect, b.radius, b.fill),
+        .stroke => |s| {
+            const half = s.width / 2;
+            p.brush.setColor(colorF(s.color));
+            p.rt.drawRoundedRectangle(.{
+                .rect = .{
+                    .left = @as(f32, @floatFromInt(s.rect.x)) + half,
+                    .top = @as(f32, @floatFromInt(s.rect.y)) + half,
+                    .right = @as(f32, @floatFromInt(s.rect.right())) - half,
+                    .bottom = @as(f32, @floatFromInt(s.rect.bottom())) - half,
+                },
+                .radiusX = @max(@as(f32, @floatFromInt(s.radius)) - half, 0),
+                .radiusY = @max(@as(f32, @floatFromInt(s.radius)) - half, 0),
+            }, p.brush.asBrush(), s.width);
         },
         .text => |t| {
-            const format = makeFormat(sh, t.font, t.halign, p.dpi) catch continue;
+            const format = makeFormat(sh, t.font, t.halign, t.trim, p.dpi) catch continue;
             defer com.release(format);
             p.drawText(t.rect, t.text, format, t.color);
         },
     };
 }
 
-/// Paints `items` over a transparent background into `hdc` (a label's
-/// premultiplied DIB, origin at the popup's). A lost device is retried
-/// once, a failure is logged once.
-pub fn paintItems(hdc: HDC, size: geom.Rect, items: []const Item, palette: theme.Palette, dpi: u32) !void {
+/// Paints `items` into `hdc` (origin at the popup's) over `background`;
+/// null clears to transparent, for a label's premultiplied DIB. A lost
+/// device is retried once, a failure is logged once.
+pub fn paintItems(hdc: HDC, size: geom.Rect, items: []const Item, palette: theme.Palette, dpi: u32, background: ?theme.Color) !void {
     var pal = palette;
-    pal.strip_bg.a = 0;
+    pal.strip_bg = if (background) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = 255 } else .{ .r = 0, .g = 0, .b = 0, .a = 0 };
     withPainter(hdc, size.w, size.h, pal, dpi, items, drawItemsBody) catch |err| {
         if (err != error.DeviceLost) {
             logOnce(err);

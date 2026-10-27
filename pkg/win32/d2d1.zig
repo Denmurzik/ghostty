@@ -222,7 +222,7 @@ pub const ID2D1RenderTarget = extern struct {
         DrawLine: *const fn (*ID2D1RenderTarget, D2D1_POINT_2F, D2D1_POINT_2F, *ID2D1Brush, f32, ?*anyopaque) callconv(.winapi) void,
         DrawRectangle: *const anyopaque,
         FillRectangle: *const fn (*ID2D1RenderTarget, *const D2D1_RECT_F, *ID2D1Brush) callconv(.winapi) void,
-        DrawRoundedRectangle: *const anyopaque,
+        DrawRoundedRectangle: *const fn (*ID2D1RenderTarget, *const D2D1_ROUNDED_RECT, *ID2D1Brush, f32, ?*anyopaque) callconv(.winapi) void,
         FillRoundedRectangle: *const fn (*ID2D1RenderTarget, *const D2D1_ROUNDED_RECT, *ID2D1Brush) callconv(.winapi) void,
         DrawEllipse: *const anyopaque,
         FillEllipse: *const anyopaque,
@@ -280,6 +280,11 @@ pub const ID2D1RenderTarget = extern struct {
 
     pub inline fn fillRoundedRectangle(self: *ID2D1RenderTarget, rect: D2D1_ROUNDED_RECT, brush: *ID2D1Brush) void {
         self.vtable.FillRoundedRectangle(self, &rect, brush);
+    }
+
+    /// The outline is centred on the edge of `rect`.
+    pub inline fn drawRoundedRectangle(self: *ID2D1RenderTarget, rect: D2D1_ROUNDED_RECT, brush: *ID2D1Brush, stroke_width: f32) void {
+        self.vtable.DrawRoundedRectangle(self, &rect, brush, stroke_width, null);
     }
 
     pub inline fn drawLine(
