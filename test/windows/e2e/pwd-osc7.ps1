@@ -6,8 +6,10 @@
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
 Invoke-E2eScenario 'pwd-osc7' {
-    $dir = Join-Path $script:Sbx.Tmp 'pwd dir #1 Проект'
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    # Outside %TEMP%: Git Bash shows that as /tmp, which has no drive path.
+    # A name with a space; the unit tests cover # and non-ASCII names.
+    $dir = 'C:\Program Files\Common Files'
+    if (-not (Test-Path -LiteralPath $dir)) { throw "E2E-SKIP: $dir does not exist" }
 
     function Get-FocusedPwd($G) {
         $d = Get-GhosttyState -Class $G.Class
@@ -19,13 +21,16 @@ Invoke-E2eScenario 'pwd-osc7' {
     }
     function Wait-Pwd($G, [string]$Want, [string]$What, [double]$TimeoutSec = 12) {
         $ok = Wait-Until -TimeoutSec $TimeoutSec -PollMs 150 -Condition { (Get-FocusedPwd $G) -ieq $Want }
-        if (-not $ok) { throw "$What : pwd is '$(Get-FocusedPwd $G)', expected '$Want'" }
+        if (-not $ok) {
+            $tail = if (Test-Path -LiteralPath $G.Log) { (Get-Content -LiteralPath $G.Log -Tail 15) -join ' | ' } else { 'no log' }
+            throw "$What : pwd is '$(Get-FocusedPwd $G)', expected '$Want'; log: $tail"
+        }
     }
 
     # --- Git Bash: cd, then a new tab and a split start there ---
     $g = Start-BashE2e
     [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
-    Send-Line $g.Hwnd 'cd "$TEMP/pwd dir #1 Проект"'
+    Send-Line $g.Hwnd 'cd "/c/Program Files/Common Files"'
     Wait-Pwd $g $dir 'git bash cd'
     Save-Evidence -Tag 'pwd-osc7-bash' -G $g -Window
 
