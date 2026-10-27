@@ -20,11 +20,6 @@ const log = std.log.scoped(.directwrite);
 
 const Font = dwrite.IDWriteFont;
 
-extern "kernel32" fn GetUserDefaultLocaleName(
-    name: [*]u16,
-    len: i32,
-) callconv(.winapi) i32;
-
 /// LOCALE_NAME_MAX_LENGTH, including the terminator.
 const locale_name_max = 85;
 
@@ -58,7 +53,7 @@ pub const DirectWrite = struct {
         } else |_| {}
 
         var locale: [locale_name_max + 1:0]u16 = @splat(0);
-        const n = GetUserDefaultLocaleName(&locale, locale_name_max);
+        const n = win32.kernel32.GetUserDefaultLocaleName(&locale, locale_name_max);
         if (n <= 0) {
             for ("en-us", 0..) |c, i| locale[i] = c;
             locale[5] = 0;

@@ -197,3 +197,5 @@ pub extern "kernel32" fn GetLocalTime(*SYSTEMTIME) callconv(.winapi) void;
 pub const MOVEFILE_REPLACE_EXISTING = 0x1;
 pub const MOVEFILE_WRITE_THROUGH = 0x8;
 pub extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: ?[*:0]const u16, flags: u32) callconv(.winapi) BOOL;
+/// Writes the name (with NUL) into `buf`; returns its length with the NUL, 0 on failure.
+pub extern "kernel32" fn GetUserDefaultLocaleName(buf: [*]u16, len: i32) callconv(.winapi) i32;
