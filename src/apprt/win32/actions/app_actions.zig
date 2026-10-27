@@ -8,6 +8,7 @@ const Chrome = @import("../Chrome.zig");
 const QuickTerminal = @import("../QuickTerminal.zig");
 const Window = @import("../Window.zig");
 const hooks = @import("../hooks.zig");
+const shell_open = @import("../shell_open.zig");
 const messages = @import("../messages.zig");
 const theme = @import("../theme.zig");
 const tray = @import("../tray.zig");
@@ -166,7 +167,7 @@ pub fn config_change(app: *App, target: apprt.Target, value: apprt.Action.Value(
 
 /// The config file is opened by the shell's "open" verb; without an
 /// association it goes to Notepad. Both open a window, so this is never
-/// called from tests.
+/// called from tests (which record it instead).
 pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_config)) !bool {
     _ = target;
     // `new_window` runs `$EDITOR` in a terminal on GTK; here both ask the shell.
@@ -179,42 +180,7 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
     };
     defer alloc.free(path);
 
-    return shellOpen(alloc, path);
-}
-
-/// Opens a file Ghostty wrote with the shell's "open" verb; without an
-/// association it goes to Notepad.
-pub fn shellOpen(alloc: std.mem.Allocator, path: []const u8) bool {
-    const wide = util.utf16z(alloc, path) catch |err| {
-        log.warn("unable to convert path err={}", .{err});
-        return false;
-    };
-    defer alloc.free(wide);
-
-    const open = std.unicode.utf8ToUtf16LeStringLiteral("open");
-    const rc = win32.shell32.ShellExecuteW(null, open, wide.ptr, null, null, win32.user32.SW_SHOWNORMAL);
-    if (rc > 32) return true;
-    if (rc != win32.shell32.SE_ERR_NOASSOC) {
-        log.warn("unable to open the file rc={}", .{rc});
-        return false;
-    }
-
-    const quoted = std.fmt.allocPrint(alloc, "\"{s}\"", .{path}) catch |err| {
-        log.warn("unable to build notepad arguments err={}", .{err});
-        return false;
-    };
-    defer alloc.free(quoted);
-    const params = util.utf16z(alloc, quoted) catch |err| {
-        log.warn("unable to convert notepad arguments err={}", .{err});
-        return false;
-    };
-    defer alloc.free(params);
-    const notepad = std.unicode.utf8ToUtf16LeStringLiteral("notepad.exe");
-    const rc2 = win32.shell32.ShellExecuteW(null, open, notepad, params.ptr, null, win32.user32.SW_SHOWNORMAL);
-    if (rc2 <= 32) {
-        log.warn("unable to open the file in notepad rc={}", .{rc2});
-        return false;
-    }
+    shell_open.openPath(app, path);
     return true;
 }
 

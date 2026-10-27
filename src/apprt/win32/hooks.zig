@@ -240,6 +240,7 @@ test "win32 hooks: testState writes an m3 object" {
     var app: App = undefined;
     app.windows = .empty;
     app.quick = .{};
+    app.shell_open = .{};
     try testState(&app, &jw);
     try jw.endObject();
 
