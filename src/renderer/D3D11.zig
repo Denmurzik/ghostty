@@ -368,7 +368,11 @@ pub fn drawFrameEnd(self: *D3D11) void {
 pub fn drawDecor(self: *D3D11, target: *const Target) void {
     const word_ptr = (self.present_target orelse return).decor orelse return;
     const word: Decor.Word = @bitCast(word_ptr.load(.monotonic));
-    if (word.isZero()) return;
+    if (word.isZero()) {
+        // Nothing is drawn: do not keep textures alive through cached views.
+        if (self.decor_pass) |*pass| pass.releaseViews();
+        return;
+    }
 
     if (self.decor_pass == null) {
         if (self.decor_failed) return;

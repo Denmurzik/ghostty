@@ -88,12 +88,25 @@ pub fn deinit(self: *Self) void {
     self.pipeline.deinit();
 }
 
+/// Drops the cached views, and with them the references to their textures.
+pub fn releaseViews(self: *Self) void {
+    for (&self.views) |*v| {
+        com.release(v.rtv);
+        v.* = .{ .resource = null, .rtv = null };
+    }
+    self.next_view = 0;
+}
+
 /// The cached gamma-space view of `target`'s texture, created on first use.
 fn unormView(self: *Self, target: *const Target) ?*d3d11.ID3D11RenderTargetView {
     const key: *anyopaque = target.texture.texture;
     for (self.views) |v| {
         if (v.resource == key) return v.rtv;
     }
+
+    // A pass serves the one live target of its surface: views of earlier
+    // ones (before a resize) would keep their textures alive.
+    self.releaseViews();
 
     const rtv = target.device.device.createRenderTargetView(target.texture.texture.asResource(), &.{
         .Format = .B8G8R8A8_UNORM,

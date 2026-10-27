@@ -356,15 +356,19 @@ pub fn lastNormalWindow(self: *App) ?*Window {
 /// the closing settles (closing a tab of 16 panes ends 16 surfaces in a row,
 /// each call restarts the delay).
 pub fn scheduleMemoryRelease(self: *App) void {
-    _ = win32.user32.SetTimer(self.msg_hwnd, release_memory_timer_id, release_memory_delay_ms, null);
+    if (win32.user32.SetTimer(self.msg_hwnd, release_memory_timer_id, release_memory_delay_ms, null) == 0) {
+        log.warn("SetTimer failed err={}", .{win32.kernel32.GetLastError()});
+    }
 }
 
 fn releaseMemory(self: *App) void {
     _ = win32.user32.KillTimer(self.msg_hwnd, release_memory_timer_id);
-    const device = self.core_app.device orelse return;
-    device.lockContext();
-    defer device.unlockContext();
-    device.trim();
+    if (self.core_app.device) |device| {
+        device.lockContext();
+        defer device.unlockContext();
+        device.trimDriver();
+    }
+    renderer.Device.compactHeap();
 }
 
 /// Drop a window from the app's list; false if it was not listed.

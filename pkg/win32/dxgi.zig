@@ -296,6 +296,43 @@ pub const IDXGIDevice = extern struct {
     };
 };
 
+pub const IDXGIDevice1 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("77db970f-6276-48ba-ba28-070143b4392c");
+
+    pub const VTable = extern struct {
+        base: IDXGIDevice.VTable,
+        SetMaximumFrameLatency: *const anyopaque,
+        GetMaximumFrameLatency: *const anyopaque,
+    };
+};
+
+pub const IDXGIDevice2 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("05008617-fbfd-4051-a790-144884b4f6a9");
+
+    pub const VTable = extern struct {
+        base: IDXGIDevice1.VTable,
+        OfferResources: *const anyopaque,
+        ReclaimResources: *const anyopaque,
+        EnqueueSetEvent: *const anyopaque,
+    };
+};
+
+pub const IDXGIDevice3 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("6007896c-3244-4afd-bf18-a6d3beda5023");
+
+    pub const VTable = extern struct {
+        base: IDXGIDevice2.VTable,
+        /// Discards the driver's cached memory for released resources.
+        Trim: *const fn (*IDXGIDevice3) callconv(.winapi) void,
+    };
+};
+
 pub const IDXGIDeviceSubObject = extern struct {
     vtable: *const VTable,
 

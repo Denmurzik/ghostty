@@ -178,3 +178,6 @@ pub extern "kernel32" fn GetFullPathNameW(name: [*:0]const u16, len: u32, buf: ?
 pub extern "kernel32" fn GetLongPathNameW(short: [*:0]const u16, buf: ?[*]u16, len: u32) callconv(.winapi) u32;
 /// Same length convention; 0 on failure.
 pub extern "kernel32" fn GetFinalPathNameByHandleW(file: HANDLE, buf: ?[*]u16, len: u32, flags: u32) callconv(.winapi) u32;
+
+pub extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn HeapCompact(heap: HANDLE, flags: u32) callconv(.winapi) usize;

@@ -380,48 +380,28 @@ pub fn logFirstFramePrivateUsage() void {
 }
 
 pub fn deinit(self: *Device, alloc: Allocator) void {
+    // Every target hands its texture back before the device goes.
+    std.debug.assert(self.target_pool.live() == 0);
     com.release(self.context);
     com.release(self.device);
     com.release(self.factory);
     alloc.destroy(self);
 }
 
-extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?win32.foundation.HANDLE;
-extern "kernel32" fn HeapCompact(heap: win32.foundation.HANDLE, flags: u32) callconv(.winapi) usize;
-
-/// `IDXGIDevice3`, which `pkg/win32` does not bind: only `Trim` is called.
-const IDXGIDevice3 = extern struct {
-    vtable: *const VTable,
-
-    pub const iid = win32.foundation.GUID.parse("6007896c-3244-4afd-bf18-a6d3beda5023");
-
-    const VTable = extern struct {
-        base: dxgi.IDXGIDevice.VTable,
-        SetMaximumFrameLatency: *const anyopaque,
-        GetMaximumFrameLatency: *const anyopaque,
-        OfferResources: *const anyopaque,
-        ReclaimResources: *const anyopaque,
-        EnqueueSetEvent: *const anyopaque,
-        Trim: *const fn (*IDXGIDevice3) callconv(.winapi) void,
-    };
-};
-
 /// Asks the driver to give back the memory it caches for released
-/// resources (swap chain buffers, targets). Call with the context lock held
-/// after surfaces went away; the sooner the more it frees. Failures are not
-/// worth reporting.
+/// resources (swap chain buffers, targets). The caller holds the context
+/// lock. Failures are not worth reporting.
 pub fn trimDriver(self: *Device) void {
     self.assertContextLocked();
-    const dxgi_device = com.queryInterface(self.device, IDXGIDevice3) catch return;
+    const dxgi_device = com.queryInterface(self.device, dxgi.IDXGIDevice3) catch return;
     defer com.release(dxgi_device);
     dxgi_device.vtable.Trim(dxgi_device);
 }
 
-/// `trimDriver` and a compaction of the process heap, which keeps the
-/// high-water mark of the closed surfaces' allocations.
-pub fn trim(self: *Device) void {
-    self.trimDriver();
-    if (GetProcessHeap()) |h| _ = HeapCompact(h, 0);
+/// Compacts the process heap, which keeps the high-water mark of closed
+/// surfaces' allocations. Needs no device lock; call it unlocked.
+pub fn compactHeap() void {
+    if (win32.kernel32.GetProcessHeap()) |h| _ = win32.kernel32.HeapCompact(h, 0);
 }
 
 /// Compiles the builtin shaders ahead of the first frame. Static: the app

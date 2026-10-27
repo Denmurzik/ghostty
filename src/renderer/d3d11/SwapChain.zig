@@ -682,3 +682,35 @@ test "d3d11 frame slot: a second wait after a consumed slot does not block" {
     try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
     try testing.expectEqual(@as(usize, 1), w.calls);
 }
+
+test "d3d11 swapchain: surfaces sharing a target each present their own pixels" {
+    const device = try Device.init(testing.allocator, .{ .driver = .warp });
+    defer device.deinit(testing.allocator);
+    var window_a: TestWindow = try .init();
+    defer window_a.deinit();
+    var window_b: TestWindow = try .init();
+    defer window_b.deinit();
+
+    var target_a = try Target.initShared(.{ .device = device, .width = 16, .height = 8, .srgb = false });
+    defer target_a.deinit();
+    var target_b = try Target.initShared(.{ .device = device, .width = 16, .height = 8, .srgb = false });
+    defer target_b.deinit();
+    try testing.expect(target_a.texture.texture == target_b.texture.texture);
+
+    var chain_a = try init(device, window_a.hwnd, 16, 8, .hwnd);
+    var chain_b = try init(device, window_b.hwnd, 16, 8, .hwnd);
+
+    device.lockContext();
+    defer device.unlockContext();
+    defer chain_a.deinit();
+    defer chain_b.deinit();
+
+    // Frames alternate on the one texture; each clears first, as a frame does.
+    clearTarget(device, &target_a, .{ 1, 0, 0, 1 });
+    try chain_a.copyToBackbuffer(device.context, &target_a);
+    clearTarget(device, &target_b, .{ 0, 0, 1, 1 });
+    try chain_b.copyToBackbuffer(device.context, &target_b);
+
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, &(try readBackbuffer(&chain_a)));
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, &(try readBackbuffer(&chain_b)));
+}

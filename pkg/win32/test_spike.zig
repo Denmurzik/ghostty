@@ -18,6 +18,13 @@ test "win32 com: vtable slot counts" {
     // 10.0.26100 headers (um/d3d11.h, shared/dxgi.h, dxgi1_2.h, dxgi1_3.h).
     try std.testing.expectEqual(3, slots(com.IUnknown));
 
+    // dxgi.h, dxgi1_2.h, dxgi1_3.h: IDXGIDevice 12, +SetMaximumFrameLatency/Get (14), +Offer/Reclaim/Enqueue (17), +Trim (18).
+    try std.testing.expectEqual(12, slots(dxgi.IDXGIDevice));
+    try std.testing.expectEqual(14, slots(dxgi.IDXGIDevice1));
+    try std.testing.expectEqual(17, slots(dxgi.IDXGIDevice2));
+    try std.testing.expectEqual(18, slots(dxgi.IDXGIDevice3));
+    try std.testing.expectEqual(17 * @sizeOf(usize), @offsetOf(dxgi.IDXGIDevice3.VTable, "Trim"));
+
     try std.testing.expectEqual(43, slots(d3d11.ID3D11Device));
     try std.testing.expectEqual(7, slots(d3d11.ID3D11DeviceChild));
     try std.testing.expectEqual(115, slots(d3d11.ID3D11DeviceContext));
