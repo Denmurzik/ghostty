@@ -200,7 +200,7 @@ pub fn api() ?*const Api {
     const names = .{ "RoGetActivationFactory", "RoActivateInstance", "WindowsCreateString", "WindowsDeleteString", "WindowsGetStringRawBuffer" };
     inline for (names) |name| {
         const proc = kernel32.GetProcAddress(module, name) orelse return null;
-        @field(api_value, name) = @ptrCast(proc);
+        @field(api_value, name) = @ptrCast(@alignCast(proc));
     }
     api_state = 1;
     return &api_value;
