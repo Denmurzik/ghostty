@@ -15,9 +15,8 @@ Invoke-E2eScenario 'resize' {
         Start-Sleep -Milliseconds 400
         $ss = Get-SplitState $g
         $sb = (Get-SurfaceBoxes $ss)[0]
-        # The native scrollbar (SM_CXVSCROLL = 17 DIP) is carved out of the surface rect and not part of the dump.
-        $sbw = [int][Math]::Round(17 * [double]@($ss.Surfaces)[0].scale)
-        $client = [pscustomobject]@{ Width = $sb.W - $sbw; Height = $sb.H }
+        # The overlay scroller (60cef1642) takes no width: the dump is the whole surface rect.
+        $client = [pscustomobject]@{ Width = $sb.W; Height = $sb.H }
         $d = Wait-Dump $g { param($d) $d.Width -eq $client.Width -and $d.Height -eq $client.Height } 10
         if (-not $d) {
             $last = Read-Dump $g.Dump
