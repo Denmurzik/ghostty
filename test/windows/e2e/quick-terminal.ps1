@@ -31,12 +31,7 @@ function Get-Quick($G) { (Get-GhosttyState -Class $G.Class).m3.quick }
 function Invoke-QuickToggle($G) {
     $p = Start-Launch $G.Class @('+toggle-quick-terminal')
     if (-not $p.WaitForExit(5000)) { throw 'the +toggle-quick-terminal launch did not finish in 5 s' }
-    if ($p.ExitCode -ne 0) {
-        # src/cli/toggle_quick_terminal.zig ignores --class (default instance only): product gap, the
-        # toggle goes through the test IPC action instead so the rest of the scenario still runs.
-        if (-not $script:CliWarned) { Write-E2eInfo "WARN +toggle-quick-terminal --class exited $($p.ExitCode); using the IPC action"; $script:CliWarned = $true }
-        [void](Invoke-GhosttyAction -Class $G.Class -Action 'toggle_quick_terminal')
-    }
+    if ($p.ExitCode -ne 0) { throw "+toggle-quick-terminal --class=$($G.Class) exited $($p.ExitCode)" }
 }
 
 function Wait-Quick($G, [string]$What, [scriptblock]$Predicate, [double]$TimeoutSec = 4) {

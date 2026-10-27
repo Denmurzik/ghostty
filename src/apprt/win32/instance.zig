@@ -314,3 +314,16 @@ test "win32 instance: peerMatches own pid" {
     try std.testing.expect(peerMatches(kernel32.GetCurrentProcessId()));
     try std.testing.expect(!peerMatches(4));
 }
+
+test "win32 instance: the pipe name carries the --class" {
+    const alloc = std.testing.allocator;
+    const custom = try pipeNameFor(alloc, "ghostty-e2e-1");
+    defer alloc.free(custom);
+    const default = try pipeNameFor(alloc, null);
+    defer alloc.free(default);
+    const utf8 = try util.utf8(alloc, custom);
+    defer alloc.free(utf8);
+
+    try std.testing.expect(std.mem.endsWith(u8, utf8, "-ghostty-e2e-1"));
+    try std.testing.expect(!std.mem.eql(u16, custom, default));
+}
