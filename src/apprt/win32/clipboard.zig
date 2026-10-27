@@ -232,7 +232,10 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
         },
 
         .paste, .osc_52_read => {
-            const maybe_text = read(alloc, surface.hwnd) catch |err| blk: {
+            // Text handed to `pasteText` travels with the entry; anything
+            // else is read from the clipboard now.
+            const given = p.text;
+            const maybe_text: ?[:0]u8 = given orelse read(alloc, surface.hwnd) catch |err| blk: {
                 log.warn("clipboard read failed err={}", .{err});
                 break :blk null;
             };
@@ -242,40 +245,92 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
                 surface.core_surface.denyClipboardRequest(p.req);
                 return true;
             };
-            defer alloc.free(text);
 
-            surface.core_surface.completeClipboardRequest(p.req, .{
-                .contents = &.{.{ .mime = "text/plain", .data = text }},
-            }) catch |err| switch (err) {
-                error.UnsafePaste, error.UnauthorizedPaste => {
-                    const unsafe = p.req == .paste;
-                    switch (confirmWith(
-                        surface,
-                        alloc,
-                        p,
-                        if (unsafe) "Confirm Paste" else "Clipboard Read",
-                        if (unsafe)
-                            "This text may be unsafe to paste: it contains line breaks or control characters. Paste it anyway?"
-                        else
-                            "An application in this terminal wants to read your clipboard. Allow it?",
-                        text,
-                    )) {
-                        .gone => return false,
-                        .yes => surface.core_surface.completeClipboardRequest(p.req, .{
-                            .contents = &.{.{ .mime = "text/plain", .data = text }},
-                            .confirmed = true,
-                        }) catch |e| log.warn("clipboard request failed err={}", .{e}),
-                        .no => surface.core_surface.denyClipboardRequest(p.req),
-                    }
-                },
-                else => log.warn("clipboard request failed err={}", .{err}),
-            };
-            return true;
+            var flow: RequestFlow = .{ .surface = surface, .alloc = alloc, .p = p };
+            const alive = runRequest(&flow, text);
+            // Gone: `cancelAll` already freed what the entry owned.
+            if (alive or given == null) alloc.free(text);
+            return alive;
         },
 
         // `request` never queues these.
         .kitty_read, .kitty_write, .list => unreachable,
     }
+}
+
+/// The core and dialog side of a paste or OSC 52 read, so that
+/// `runRequest` can be driven by a fake in tests.
+const RequestFlow = struct {
+    surface: *Surface,
+    alloc: Allocator,
+    p: Pending,
+
+    fn complete(self: *RequestFlow, text: []const u8, confirmed: bool) !void {
+        try self.surface.core_surface.completeClipboardRequest(self.p.req, .{
+            .contents = &.{.{ .mime = "text/plain", .data = text }},
+            .confirmed = confirmed,
+        });
+    }
+
+    fn confirm(self: *RequestFlow, text: []const u8) Answer {
+        const unsafe = self.p.req == .paste;
+        return confirmWith(
+            self.surface,
+            self.alloc,
+            self.p,
+            if (unsafe) "Confirm Paste" else "Clipboard Read",
+            if (unsafe)
+                "This text may be unsafe to paste: it contains line breaks or control characters. Paste it anyway?"
+            else
+                "An application in this terminal wants to read your clipboard. Allow it?",
+            text,
+        );
+    }
+
+    fn deny(self: *RequestFlow) void {
+        self.surface.core_surface.denyClipboardRequest(self.p.req);
+    }
+};
+
+/// Complete a paste or OSC 52 read with `text`: straight away when core
+/// accepts it, behind a confirmation when core calls it unsafe or
+/// unauthorized. Nothing reaches the pty before the answer. A request that
+/// cannot be completed is denied, which answers an OSC 52 read with empty
+/// contents. False means the surface was destroyed behind the dialog.
+fn runRequest(flow: anytype, text: []const u8) bool {
+    flow.complete(text, false) catch |err| switch (err) {
+        error.UnsafePaste, error.UnauthorizedPaste => {
+            switch (flow.confirm(text)) {
+                .gone => return false,
+                .yes => flow.complete(text, true) catch |e| {
+                    log.warn("clipboard request failed err={}", .{e});
+                    flow.deny();
+                },
+                .no => flow.deny(),
+            }
+        },
+        else => {
+            log.warn("clipboard request failed err={}", .{err});
+            flow.deny();
+        },
+    };
+    return true;
+}
+
+/// Paste `text` that did not come from the clipboard (a file drop, say)
+/// the way Ctrl+V pastes: through the same confirmation when it is unsafe.
+/// Queued, never run inline, for the reason in the file header. A failure
+/// is logged and the text dropped.
+pub fn pasteText(surface: *Surface, text: [:0]const u8) void {
+    const alloc = surface.app.core_app.alloc;
+    const copy = alloc.dupeSentinel(u8, text, 0) catch |err| {
+        log.warn("paste text copy failed err={}", .{err});
+        return;
+    };
+    enqueue(surface, .{ .req = .{ .paste = .standard }, .text = copy }) catch |err| {
+        log.warn("paste text queue failed err={}", .{err});
+        alloc.free(copy);
+    };
 }
 
 /// Ask the user about `p`, showing `text` in the prompt. While the dialog
@@ -294,9 +349,9 @@ fn confirmWith(
     const owner = surface.window.hwnd;
     const state = &surface.clipboard_state;
 
-    const preview = dialogs.previewText(alloc, text, preview_chars) catch return .no;
-    defer alloc.free(preview);
-    const body = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ question, preview }) catch return .no;
+    const shown = previewOf(alloc, text, preview_chars) catch return .no;
+    defer alloc.free(shown);
+    const body = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ question, shown }) catch return .no;
     defer alloc.free(body);
 
     var abandoned = false;
@@ -319,7 +374,9 @@ fn confirmWith(
 /// opened without one cannot be given data.
 pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8) !void {
     const alloc = global.alloc();
-    const wide = try util.utf16z(alloc, text_utf8);
+    const clean = try sanitize(alloc, text_utf8);
+    defer alloc.free(clean);
+    const wide = try util.utf16z(alloc, clean);
     defer alloc.free(wide);
 
     var lone_lf: usize = 0;
@@ -359,6 +416,77 @@ pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8) !void {
     if (win32.user32.SetClipboardData(win32.user32.CF_UNICODETEXT, mem) == null)
         return error.SetClipboardFailed;
     owned = true;
+}
+
+/// What an OSC 52 payload may carry that the clipboard cannot: invalid
+/// UTF-8 becomes U+FFFD, and an embedded NUL ends the text (a Windows
+/// clipboard string is NUL terminated). Caller owns the result.
+fn sanitize(alloc: Allocator, text: []const u8) ![]u8 {
+    var end = text.len;
+    if (std.mem.indexOfScalar(u8, text, 0)) |nul| {
+        log.warn("clipboard text has an embedded NUL, truncated at byte {}", .{nul});
+        end = nul;
+    }
+    const src = text[0..end];
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, src.len);
+
+    var i: usize = 0;
+    while (i < src.len) {
+        const len = std.unicode.utf8ByteSequenceLength(src[i]) catch 0;
+        if (len != 0 and i + len <= src.len and std.unicode.utf8ValidateSlice(src[i..][0..len])) {
+            try out.appendSlice(alloc, src[i..][0..len]);
+            i += len;
+        } else {
+            try out.appendSlice(alloc, "\u{FFFD}");
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// The text of a confirmation prompt's preview: `dialogs.previewText`
+/// plus an escape for what it leaves alone and that can mislead a reader,
+/// C1 controls and bidi overrides/isolates/marks, shown as `<U+XXXX>`.
+fn previewOf(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(alloc);
+
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (count == max_chars) {
+            try escaped.appendSlice(alloc, "\u{2026}");
+            break;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const cp: ?u21 = if (i + len <= text.len)
+            std.unicode.utf8Decode(text[i..][0..len]) catch null
+        else
+            null;
+        if (cp) |c| {
+            if (isDeceptive(c)) {
+                var tmp: [12]u8 = undefined;
+                try escaped.appendSlice(alloc, std.fmt.bufPrint(&tmp, "<U+{X:0>4}>", .{c}) catch unreachable);
+            } else try escaped.appendSlice(alloc, text[i..][0..len]);
+            i += len;
+        } else {
+            try escaped.append(alloc, text[i]);
+            i += 1;
+        }
+        count += 1;
+    }
+
+    return dialogs.previewText(alloc, escaped.items, std.math.maxInt(usize));
+}
+
+fn isDeceptive(c: u21) bool {
+    return (c >= 0x80 and c <= 0x9F) or
+        c == 0x061C or c == 0x200E or c == 0x200F or
+        (c >= 0x202A and c <= 0x202E) or
+        (c >= 0x2066 and c <= 0x2069);
 }
 
 /// The clipboard's text as UTF-8 with CRLF turned into LF, or null when
@@ -622,4 +750,89 @@ test "win32 clipboard: pending request is denied when the surface closes" {
     // A second cancel (nothing left) is a no-op.
     state.cancelAll(alloc, &rec, Recorder.deny);
     try std.testing.expectEqual(@as(usize, 4), rec.denied.items.len);
+}
+
+test "win32 clipboard: osc52 invalid utf8 replaced" {
+    const alloc = std.testing.allocator;
+
+    const a = try sanitize(alloc, "a\xffb\xe2\x82");
+    defer alloc.free(a);
+    try std.testing.expectEqualStrings("a\u{FFFD}b\u{FFFD}\u{FFFD}", a);
+
+    // Valid text is untouched, an embedded NUL ends it.
+    const b = try sanitize(alloc, "Ж😀\x00tail");
+    defer alloc.free(b);
+    try std.testing.expectEqualStrings("Ж😀", b);
+}
+
+test "win32 clipboard: preview escapes bidi overrides" {
+    const alloc = std.testing.allocator;
+
+    const a = try previewOf(alloc, "rm\u{202E}fdp\u{85}\u{2066}x\n", 512);
+    defer alloc.free(a);
+    try std.testing.expectEqualStrings("rm<U+202E>fdp<U+0085><U+2066>x\u{240A}", a);
+
+    // The limit counts source codepoints.
+    const b = try previewOf(alloc, "abcdef", 3);
+    defer alloc.free(b);
+    try std.testing.expectEqualStrings("abc\u{2026}", b);
+}
+
+const FakeFlow = struct {
+    /// What core says to an unconfirmed completion.
+    unsafe: bool,
+    answer: Answer,
+    fail_confirmed: bool = false,
+
+    written: usize = 0,
+    asked: usize = 0,
+    denied: usize = 0,
+
+    fn complete(self: *FakeFlow, text: []const u8, confirmed: bool) error{ UnsafePaste, UnauthorizedPaste, OutOfMemory }!void {
+        _ = text;
+        if (!confirmed and self.unsafe) return error.UnsafePaste;
+        if (confirmed and self.fail_confirmed) return error.OutOfMemory;
+        self.written += 1;
+    }
+
+    fn confirm(self: *FakeFlow, text: []const u8) Answer {
+        _ = text;
+        self.asked += 1;
+        // Nothing may have been written before the answer.
+        std.debug.assert(self.written == 0);
+        return self.answer;
+    }
+
+    fn deny(self: *FakeFlow) void {
+        self.denied += 1;
+    }
+};
+
+test "win32 clipboard: pasteText asks for unsafe text" {
+    // Multi-line text: asked first, written only after yes.
+    var multi: FakeFlow = .{ .unsafe = true, .answer = .yes };
+    try std.testing.expect(runRequest(&multi, "a\nb"));
+    try std.testing.expectEqual(@as(usize, 1), multi.asked);
+    try std.testing.expectEqual(@as(usize, 1), multi.written);
+
+    // Declined: nothing written, the request is denied.
+    var no: FakeFlow = .{ .unsafe = true, .answer = .no };
+    try std.testing.expect(runRequest(&no, "a\nb"));
+    try std.testing.expectEqual(@as(usize, 0), no.written);
+    try std.testing.expectEqual(@as(usize, 1), no.denied);
+
+    // Safe text: written at once, no question.
+    var single: FakeFlow = .{ .unsafe = false, .answer = .no };
+    try std.testing.expect(runRequest(&single, "one line"));
+    try std.testing.expectEqual(@as(usize, 0), single.asked);
+    try std.testing.expectEqual(@as(usize, 1), single.written);
+
+    // Surface destroyed behind the dialog.
+    var gone: FakeFlow = .{ .unsafe = true, .answer = .gone };
+    try std.testing.expect(!runRequest(&gone, "a\nb"));
+
+    // A confirmed completion that fails still answers the request.
+    var failing: FakeFlow = .{ .unsafe = true, .answer = .yes, .fail_confirmed = true };
+    try std.testing.expect(runRequest(&failing, "a\nb"));
+    try std.testing.expectEqual(@as(usize, 1), failing.denied);
 }
