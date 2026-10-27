@@ -354,7 +354,7 @@ fn storePwd(alloc: Allocator, slot: *?[:0]u8, pwd: []const u8) Allocator.Error!v
 /// console's image path is no title). The caption is set separately.
 pub fn setTitle(self: *Surface, title: []const u8) Allocator.Error!void {
     const alloc = self.app.core_app.alloc;
-    const copy: ?[:0]u8 = if (title_rules.programTitle(title)) |t| try alloc.dupeSentinel(u8, t, 0) else null;
+    const copy: ?[:0]u8 = if (title_rules.programTitleAfter(self.title, title)) |t| try alloc.dupeSentinel(u8, t, 0) else null;
     if (self.title) |old| alloc.free(old);
     self.title = copy;
 }

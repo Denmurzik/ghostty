@@ -110,3 +110,27 @@ test "win32 title rules: real titles pass through" {
     };
     for (keep) |raw| try std.testing.expectEqualStrings(raw, programTitle(raw).?);
 }
+
+/// Like `programTitle`, for a surface whose title was `previous`: cmd builds
+/// its running title from the console title, "<previous> - <command>", so
+/// that prefix is dropped.
+pub fn programTitleAfter(previous: ?[]const u8, raw: []const u8) ?[]const u8 {
+    const title = programTitle(raw) orelse return null;
+    const prev = previous orelse return title;
+    if (prev.len == 0 or !std.mem.startsWith(u8, title, prev)) return title;
+    const rest = title[prev.len..];
+    if (!std.mem.startsWith(u8, rest, " - ")) return title;
+    const command = std.mem.trim(u8, rest[3..], " \t");
+    return if (command.len == 0) title else command;
+}
+
+test "win32 title rules: cmd running title drops the working directory" {
+    const cwd = "C:\\Users\\me\\proj";
+    try std.testing.expectEqualStrings(
+        "ping  -n 6 127.0.0.1",
+        programTitleAfter(cwd, "C:\\Users\\me\\proj - ping  -n 6 127.0.0.1").?,
+    );
+    try std.testing.expectEqualStrings(cwd, programTitleAfter(null, cwd).?);
+    try std.testing.expectEqualStrings("C:\\other - x", programTitleAfter(cwd, "C:\\other - x").?);
+    try std.testing.expectEqualStrings(cwd, programTitleAfter(cwd, cwd).?);
+}

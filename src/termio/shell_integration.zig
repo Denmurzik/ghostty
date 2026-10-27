@@ -157,6 +157,24 @@ fn exeName(arg0: []const u8) []const u8 {
     return base;
 }
 
+/// A drive path or UNC path, with either separator.
+fn isWindowsAbsolute(path: []const u8) bool {
+    if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
+        (path[2] == '\\' or path[2] == '/')) return true;
+    return std.mem.startsWith(u8, path, "\\\\") or std.mem.startsWith(u8, path, "//");
+}
+
+/// Whether `path` lies in the Windows system directories (either separator).
+fn isWindowsSystemDir(path: []const u8) bool {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (path.len > buf.len) return false;
+    for (path, 0..) |c, i| buf[i] = if (c == '/') '\\' else c;
+    const p = buf[0..path.len];
+    return std.ascii.findIgnoreCase(p, "\\windows\\system32\\") != null or
+        std.ascii.findIgnoreCase(p, "\\windows\\sysnative\\") != null or
+        std.ascii.findIgnoreCase(p, "\\windows\\syswow64\\") != null;
+}
+
 fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     var arg_iter = try command.argIterator(alloc);
     defer arg_iter.deinit();
@@ -165,10 +183,11 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     const exe = exeName(arg0);
 
     if (std.mem.eql(u8, "bash", exe)) {
-        // The bash.exe in System32 is the WSL launcher, not a bash we can inject into.
+        // A bare "bash" resolves through PATH, where System32 (the WSL
+        // launcher, not a bash we can inject into) comes before Git: inject
+        // only into an absolute path outside System32.
         if (comptime builtin.target.os.tag == .windows) {
-            if (std.ascii.findIgnoreCase(arg0, "\\windows\\system32\\") != null or
-                std.ascii.findIgnoreCase(arg0, "\\windows\\sysnative\\") != null) return null;
+            if (!isWindowsAbsolute(arg0) or isWindowsSystemDir(arg0)) return null;
         }
         // Apple distributes their own patched version of Bash 3.2
         // on macOS that disables the ENV-based POSIX startup path.
@@ -358,9 +377,18 @@ fn setupPwsh(
     var iter = try command.argIterator(alloc);
     defer iter.deinit();
     if (iter.next()) |exe| try args.appendArg(exe) else return null;
+    var skip_value = false;
     while (iter.next()) |arg| {
         // A command, script or stdin script is not an interactive session.
         if (pwshRunsCode(arg)) return null;
+        if (skip_value) {
+            skip_value = false;
+        } else if (arg.len > 0 and arg[0] != '-' and arg[0] != '/') {
+            // The first bare argument is a script file.
+            return null;
+        } else {
+            skip_value = pwshTakesValue(arg);
+        }
         try args.appendArg(arg);
     }
 
@@ -379,17 +407,35 @@ fn setupPwsh(
 
     // Single quotes inside the path double, as PowerShell requires.
     var quoted: std.Io.Writer.Allocating = .init(alloc);
-    try quoted.writer.writeAll(". '");
+    // The text is read and compiled, not dot-sourced as a file, so the
+    // execution policy (Restricted, AllSigned, Mark-of-the-Web) does not apply.
+    try quoted.writer.writeAll(". ([scriptblock]::Create([IO.File]::ReadAllText('");
     for (script_path) |c| {
         if (c == '\'') try quoted.writer.writeByte('\'');
         try quoted.writer.writeByte(c);
     }
-    try quoted.writer.writeByte('\'');
+    try quoted.writer.writeAll("')))");
 
     try args.appendArg("-NoExit");
     try args.appendArg("-Command");
     try args.appendArg(quoted.written());
     return try args.finish();
+}
+
+/// Whether a PowerShell parameter takes the next argument as its value.
+fn pwshTakesValue(arg: []const u8) bool {
+    if (arg.len < 2 or (arg[0] != '-' and arg[0] != '/')) return false;
+    const name = arg[1..];
+    const takes = [_][]const u8{
+        "workingdirectory", "executionpolicy",   "configurationname", "custompipename",
+        "inputformat",      "outputformat",      "settingsfile",      "windowstyle",
+        "psconsolefile",    "configurationfile",
+    };
+    for (takes) |t| {
+        if (std.mem.indexOfScalar(u8, name, ':') == null and
+            name.len <= t.len and std.ascii.eqlIgnoreCase(name, t[0..name.len])) return true;
+    }
+    return false;
 }
 
 /// Whether a PowerShell argument asks to run code instead of a session.
@@ -413,6 +459,9 @@ fn setupCmd(
     command: config.Command,
     env: *EnvMap,
 ) !?config.Command {
+    const features = env.get("GHOSTTY_SHELL_FEATURES") orelse return null;
+    if (std.mem.indexOf(u8, features, "title") == null) return null;
+
     var iter = try command.argIterator(alloc);
     defer iter.deinit();
     _ = iter.next() orelse return null;
@@ -447,7 +496,7 @@ fn setupBash(
     // the path of bash.exe at a space (it lives under "Program Files").
     var args: ArgList = .{
         .alloc = alloc,
-        .direct = builtin.target.os.tag == .windows and command == .direct,
+        .direct = builtin.target.os.tag == .windows,
     };
 
     // Iterator that yields each argument in the original command line.
@@ -567,7 +616,7 @@ test "bash" {
     defer env.deinit();
 
     const command = try setupBash(alloc, .{ .shell = "bash" }, res.path, &env);
-    try testing.expectEqualStrings("bash --posix", command.?.shell);
+    try testing.expectEqualStrings("bash --posix", try flat(alloc, command.?));
     try testing.expectEqualStrings("1", env.get("GHOSTTY_BASH_INJECT").?);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -618,7 +667,7 @@ test "bash: inject flags" {
         defer env.deinit();
 
         const command = try setupBash(alloc, .{ .shell = "bash --norc" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try testing.expectEqualStrings("bash --posix", try flat(alloc, command.?));
         try testing.expectEqualStrings("1 --norc", env.get("GHOSTTY_BASH_INJECT").?);
     }
 
@@ -628,7 +677,7 @@ test "bash: inject flags" {
         defer env.deinit();
 
         const command = try setupBash(alloc, .{ .shell = "bash --noprofile" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try testing.expectEqualStrings("bash --posix", try flat(alloc, command.?));
         try testing.expectEqualStrings("1 --noprofile", env.get("GHOSTTY_BASH_INJECT").?);
     }
 }
@@ -648,14 +697,14 @@ test "bash: rcfile" {
     // bash --rcfile
     {
         const command = try setupBash(alloc, .{ .shell = "bash --rcfile profile.sh" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try testing.expectEqualStrings("bash --posix", try flat(alloc, command.?));
         try testing.expectEqualStrings("profile.sh", env.get("GHOSTTY_BASH_RCFILE").?);
     }
 
     // bash --init-file
     {
         const command = try setupBash(alloc, .{ .shell = "bash --init-file profile.sh" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try testing.expectEqualStrings("bash --posix", try flat(alloc, command.?));
         try testing.expectEqualStrings("profile.sh", env.get("GHOSTTY_BASH_RCFILE").?);
     }
 }
@@ -731,13 +780,13 @@ test "bash: additional arguments" {
     // "-" argument separator
     {
         const command = try setupBash(alloc, .{ .shell = "bash - --arg file1 file2" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix - --arg file1 file2", command.?.shell);
+        try testing.expectEqualStrings("bash --posix - --arg file1 file2", try flat(alloc, command.?));
     }
 
     // "--" argument separator
     {
         const command = try setupBash(alloc, .{ .shell = "bash -- --arg file1 file2" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix -- --arg file1 file2", command.?.shell);
+        try testing.expectEqualStrings("bash --posix -- --arg file1 file2", try flat(alloc, command.?));
     }
 }
 
@@ -1164,10 +1213,42 @@ test "windows: shells are detected by image name" {
     const cmd: config.Command = .{ .direct = &.{"C:\\WINDOWS\\system32\\CMD.EXE"} };
     const wsl: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\bash.exe"} };
     try testing.expectEqual(.bash, try detectShell(alloc, git));
+    try testing.expect(try detectShell(alloc, .{ .shell = "bash" }) == null);
+    try testing.expect(try detectShell(alloc, .{ .shell = "C:/Windows/System32/bash.exe" }) == null);
+    try testing.expect(try detectShell(alloc, .{ .shell = "c:\\windows\\SysNative\\bash.exe" }) == null);
+    try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "\"C:/Program Files/Git/bin/bash.exe\" --login" }));
     try testing.expectEqual(.pwsh, try detectShell(alloc, pwsh));
     try testing.expectEqual(.pwsh, try detectShell(alloc, ps5));
     try testing.expectEqual(.cmd, try detectShell(alloc, cmd));
     try testing.expect(try detectShell(alloc, wsl) == null);
+}
+
+/// Test helper: the arguments of `command` joined by spaces.
+fn flat(alloc: Allocator, command: config.Command) ![]const u8 {
+    switch (command) {
+        .shell => |s| return s,
+        .direct => |args| return try std.mem.join(alloc, " ", args),
+    }
+}
+
+test "windows: bash from a quoted shell string stays direct" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    const quoted: config.Command = .{ .shell = "\"C:/Program Files/Git/bin/bash.exe\" --login" };
+    const command = (try setupBash(alloc, quoted, res.path, &env)).?;
+    try testing.expectEqual(@as(usize, 3), command.direct.len);
+    try testing.expectEqualStrings("C:/Program Files/Git/bin/bash.exe", command.direct[0]);
+    try testing.expectEqualStrings("--posix", command.direct[1]);
+    try testing.expectEqualStrings("--login", command.direct[2]);
 }
 
 test "windows: bash keeps a direct argv" {
@@ -1207,8 +1288,14 @@ test "windows: pwsh" {
     try testing.expectEqualStrings("-NoLogo", command.direct[1]);
     try testing.expectEqualStrings("-NoExit", command.direct[2]);
     try testing.expectEqualStrings("-Command", command.direct[3]);
-    try testing.expect(std.mem.startsWith(u8, command.direct[4], ". '"));
-    try testing.expect(std.mem.endsWith(u8, command.direct[4], "\\shell-integration\\pwsh\\ghostty.ps1'"));
+    try testing.expect(std.mem.startsWith(u8, command.direct[4], ". ([scriptblock]::Create([IO.File]::ReadAllText('"));
+    try testing.expect(std.mem.endsWith(u8, command.direct[4], "\\shell-integration\\pwsh\\ghostty.ps1')))"));
+
+    // A positional script (and the value of a parameter before it) is code to run.
+    const script: config.Command = .{ .direct = &.{ "pwsh.exe", "-NoLogo", "-WorkingDirectory", "C:\\x", "run.ps1" } };
+    try testing.expect(try setupPwsh(alloc, script, res.path) == null);
+    const with_value: config.Command = .{ .direct = &.{ "pwsh.exe", "-WorkingDirectory", "C:\\x" } };
+    try testing.expect(try setupPwsh(alloc, with_value, res.path) != null);
 
     // Code to run is not a session.
     inline for (.{ "-Command", "-c", "-File", "-f", "-EncodedCommand", "-", "-Version" }) |arg| {
@@ -1240,6 +1327,13 @@ test "windows: cmd prompt" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
     const cmd: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} };
+
+    // The title feature is off (the variable is absent or lacks it): untouched.
+    try testing.expect(try setupCmd(alloc, cmd, &env) == null);
+    try env.put("GHOSTTY_SHELL_FEATURES", "cursor:blink");
+    try testing.expect(try setupCmd(alloc, cmd, &env) == null);
+    try testing.expect(env.get("PROMPT") == null);
+    try env.put("GHOSTTY_SHELL_FEATURES", "cursor:blink,title");
     try testing.expect(try setupCmd(alloc, cmd, &env) != null);
     try testing.expectEqualStrings("$e]2;$P$e\\$P$G", env.get("PROMPT").?);
 
@@ -1253,6 +1347,7 @@ test "windows: cmd prompt" {
     // /c runs one command: no prompt shows.
     var other = EnvMap.init(alloc);
     defer other.deinit();
+    try other.put("GHOSTTY_SHELL_FEATURES", "title");
     const run: config.Command = .{ .direct = &.{ "cmd.exe", "/c", "dir" } };
     try testing.expect(try setupCmd(alloc, run, &other) == null);
     try testing.expect(other.get("PROMPT") == null);

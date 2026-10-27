@@ -69,6 +69,19 @@ Invoke-E2eScenario 'titles' {
     $g = Start-E2eGhostty -ConfigText "command = direct:cmd.exe`nconfirm-close-surface = false`n"
     $t = Wait-TabTitle $g 0 { param($t) $t -like '*\*' -or $t -like '?:*' } 'cmd shows its working directory'
     if ($t -match '(?i)cmd\.exe') { throw "cmd title is the image path: '$t'" }
+    # cmd's running-command title: its own "<image> - <command>" title must
+    # arrive as the bare command, never "<cwd> - <command>" or the image path.
+    Send-Line $g.Hwnd 'ping -n 6 127.0.0.1 > nul'
+    $seen = New-Object System.Collections.Generic.List[string]
+    $running = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {
+        $w = Get-TitleWin $g
+        $title = [string]@($w.tabs)[0].title
+        if ($seen.Count -eq 0 -or $seen[$seen.Count - 1] -ne $title) { $seen.Add($title) }
+        if ($title -match 'ping') { $title }
+    }
+    Write-E2eInfo "cmd titles seen: $($seen -join ' | ')"
+    if (-not $running) { throw "cmd never showed the running command; titles: $($seen -join ' | ')" }
+    if ($running -match '(?i)cmd\.exe| - ') { throw "cmd running title is not the bare command: '$running'" }
     Save-Evidence -Tag 'titles-cmd' -G $g -Window
     Close-Window $g
     [void](Wait-ProcessExit $g 8)

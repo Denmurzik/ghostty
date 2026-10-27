@@ -918,6 +918,9 @@ const Subprocess = struct {
         // converting it, so its prompt and titles show "C:/..." instead of "~".
         if (comptime builtin.target.os.tag != .windows) {
             if (cwd) |pwd| try env.put("PWD", pwd);
+        } else {
+            // Ghostty's own PWD (started from Git Bash) must not reach the child either.
+            _ = env.swapRemove("PWD");
         }
 
         return .{
