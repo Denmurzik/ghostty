@@ -53,3 +53,14 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 
 ## Owner decision (2026-10-27): visual style follows Ghostty for macOS
 - For every visual element (split dividers, tab strip and tabs, titlebar, overlays such as resize/search/command palette, quick terminal, scrollbar, inspector, dialogs) the reference is how Ghostty does it on macOS (`macos/Sources/…`): sizes in points → DIPs, colours derived the same way from the terminal palette/config, animations and spacing. Deviate only where Windows conventions require it (caption buttons, snap layouts, Mica), and say so in the task report.
+
+## 2026-10-27 — Window chrome redesign after Ghostty for macOS (owner, grill session)
+Reference: the owner's screenshot of Ghostty for macOS (Tahoe titlebar tabs) + `macos/Sources/Features/Terminal/**`. No "liquid glass" effect.
+- Two rows: a title row, and a tab row below it. The title row and the terminal share one background (terminal background colour, no seam); later one `background-opacity` for the whole window (title + tabs + terminal).
+- Window buttons (minimise / maximise / close) stay on the right, Windows style, thin, drawn in the terminal colours; Snap Layouts keep working.
+- Title row: proxy folder icon + window title, CENTERED. Window title = focused surface title like macOS (`BaseTerminalController.computeTitle`: title override, bell marker when `bell-features` has `title`, ghost fallback). Icon = Windows shell folder icon of the focused surface's pwd, shown only when the pwd is known (`macos-titlebar-proxy-icon` honoured). Icon actions: click opens the folder in Explorer; right-click shows a path menu (parent folders → open in Explorer, "Copy path"); drag the icon out as a folder (OLE drag source).
+- Tab row: shown only with ≥ 2 tabs (`window-show-tab-bar` auto/always/never like macOS). Equal-width tabs filling the row, title centered, the selected tab a lighter rounded pill, thin separators between others, macOS shapes/sizes; the real keybinding of `goto_tab:N` from the config at the right of each tab (nothing if unbound); `×` appears on hover at the RIGHT (replacing the shortcut label); middle click closes; "+" always at the far right as a round button.
+- Animations like macOS (~0.2 s): a new tab pushes the others and grows, a closed tab shrinks, drag-reorder slides neighbours, the tab row slides in when the second tab appears — the terminal grid resizes ONCE (no animated pty resizes).
+- Inactive windows dim title text like macOS.
+- Transparency/blur (with M3 Tasks 14/15): blur must stay on when the window is inactive (not only while focused) — the system Acrylic/Mica backdrops go solid on deactivation, so use a backdrop that persists.
+- Order: first the look with opaque background (supersedes M3 Task 29's scope), then unified transparency with Tasks 14/15.
