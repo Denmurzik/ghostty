@@ -451,8 +451,17 @@ fn pwshRunsCode(arg: []const u8) bool {
     return false;
 }
 
+/// Whether `name` (a computer name) can sit in a PROMPT as is.
+fn promptSafe(name: []const u8) bool {
+    if (name.len == 0 or name.len > 63) return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
+    }
+    return true;
+}
+
 /// Setup the cmd.exe integration (Windows): the PROMPT gets a leading OSC 2
-/// with the current directory (`$P`). cmd cannot tell us which command is
+/// with the current directory (`$P`) and an OSC 7 with it. cmd cannot tell us which command is
 /// running; conhost's own "<cmd.exe> - <command>" title covers that.
 fn setupCmd(
     alloc: Allocator,
@@ -469,11 +478,20 @@ fn setupCmd(
         // /c and /r run one command and exit.
         if (arg.len >= 2 and arg[0] == '/' and (arg[1] == 'c' or arg[1] == 'C' or arg[1] == 'r' or arg[1] == 'R')) return null;
     }
-
+    // OSC 7 follows the title, as `kitty-shell-cwd://` (core keeps that path
+    // raw, so a name with spaces or a # needs no encoding). The host is this
+    // machine's name, which PROMPT cannot expand itself (no %VAR%), so it is
+    // written out here; a name PROMPT would misread gets no OSC 7.
     const title = "$e]2;$P$e\\";
+    const host = env.get("COMPUTERNAME") orelse "";
+    const osc7 = if (promptSafe(host))
+        try std.mem.concat(alloc, u8, &.{ "$e]7;kitty-shell-cwd://", host, "/$P$e\\" })
+    else
+        "";
+    const prefix = try std.mem.concat(alloc, u8, &.{ title, osc7 });
     const current = env.get("PROMPT") orelse "$P$G";
-    if (std.mem.startsWith(u8, current, title)) return try command.clone(alloc);
-    try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ title, current }));
+    if (std.mem.startsWith(u8, current, prefix)) return try command.clone(alloc);
+    try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current }));
     return try command.clone(alloc);
 }
 

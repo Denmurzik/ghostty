@@ -508,6 +508,8 @@ fn writeSurface(jw: *std.json.Stringify, window: *Window, s: *Surface, focused: 
     try jw.write(focused);
     try jw.objectField("title");
     try jw.write(s.getTitle() orelse "");
+    try jw.objectField("pwd");
+    try jw.write(s.getPwd() orelse "");
     try jw.objectField("scale");
     try jw.write(s.content_scale.x);
     try jw.objectField("scrollbar");

@@ -202,3 +202,14 @@ test isValidMacAddress {
     try testing.expect(!isValidMacAddress("01-23-45-67-89-Aa"));
     try testing.expect(!isValidMacAddress("01:23:45:67:89:Aa:Bb"));
 }
+
+test "parse: raw_path keeps a cmd prompt path" {
+    const testing = @import("std").testing;
+
+    // cmd writes `$P` unencoded: spaces, backslashes, `#`.
+    const text = "kitty-shell-cwd://MY-PC/C:\\Users\\a b#c %41\\";
+    var buf: [256]u8 = undefined;
+    const uri = try parse(text, .{ .raw_path = true });
+    try testing.expectEqualStrings("MY-PC", uri.host.?.percent_encoded);
+    try testing.expectEqualStrings("/C:\\Users\\a b#c %41\\", try uri.path.toRaw(&buf));
+}

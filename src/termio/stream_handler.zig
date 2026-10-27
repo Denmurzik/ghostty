@@ -1546,11 +1546,6 @@ pub const StreamHandler = struct {
             return;
         }
 
-        if (builtin.target.os.tag == .windows) {
-            log.warn("reportPwd unimplemented on windows", .{});
-            return;
-        }
-
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
@@ -1570,7 +1565,11 @@ pub const StreamHandler = struct {
         }
 
         var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-        const host = std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
+        // Windows paths come as `file:///C:/x`: no host means this machine.
+        const is_windows = comptime builtin.target.os.tag == .windows;
+        const host = if (is_windows and (uri.host == null or uri.host.?.isEmpty()))
+            std.Io.net.HostName{ .bytes = "localhost" }
+        else std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
             error.UriMissingHost => {
                 log.warn("OSC 7 uri must contain a hostname: {}", .{err});
                 return;

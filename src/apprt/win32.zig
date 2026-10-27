@@ -9,6 +9,7 @@ test {
     _ = Surface;
     _ = @import("win32/geom.zig");
     _ = @import("win32/link_policy.zig");
+    _ = @import("win32/pwd_path.zig");
     _ = @import("win32/messages.zig");
     _ = @import("win32/Overrides.zig");
     _ = @import("win32/instance.zig");

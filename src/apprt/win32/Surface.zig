@@ -14,6 +14,7 @@ const apprt = @import("../../apprt.zig");
 const global = @import("../../global.zig");
 const renderer = @import("../../renderer.zig");
 const CoreSurface = @import("../../Surface.zig");
+const configpkg = @import("../../config.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
@@ -164,6 +165,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     // command-line overrides of its window.
     var config = try apprt.surface.newConfig(app.core_app, &app.config, opts.context);
     defer config.deinit();
+    try inheritPwd(app, &config, opts.context);
     try opts.overrides.apply(&config);
     if (opts.parent) |parent| {
         if (app.config.@"window-inherit-font-size") {
@@ -338,6 +340,26 @@ pub fn getPwd(self: *const Surface) ?[:0]const u8 {
 /// Remember the working directory the shell reported.
 pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
     try storePwd(self.app.core_app.alloc, &self.pwd, pwd);
+}
+
+/// `newConfig` inherits the directory the terminal stored, which is the
+/// path as the shell wrote it (`/c/Users/x`): start in the translated one
+/// of the focused surface instead, or in the configured one when it has none.
+fn inheritPwd(app: *App, config: *configpkg.Config, context: apprt.surface.NewSurfaceContext) !void {
+    if (!apprt.surface.shouldInheritWorkingDirectory(context, &app.config)) return;
+    const prev = app.core_app.focusedSurface() orelse return;
+    const pwd = (app.surfaceFor(prev) orelse return).getPwd();
+    config.@"working-directory" = if (pwd) |p| wd: {
+        var value: configpkg.WorkingDirectory = .{ .path = try config._arena.?.allocator().dupe(u8, p) };
+        try value.finalize(config._arena.?.allocator());
+        break :wd value;
+    } else app.config.@"working-directory";
+}
+
+/// Forget the working directory (the shell reported none we can use).
+pub fn clearPwd(self: *Surface) void {
+    if (self.pwd) |old| self.app.core_app.alloc.free(old);
+    self.pwd = null;
 }
 
 /// Replace the copy in `slot` with one of `pwd`.
