@@ -80,7 +80,7 @@ fn hasAttachment(buf: []u8, rest: []const u8) bool {
     var it = std.mem.splitScalar(u8, rest[q + 1 ..], '&');
     while (it.next()) |field| {
         const key = field[0 .. std.mem.indexOfScalar(u8, field, '=') orelse field.len];
-        const name = percentDecode(buf, key);
+        const name = std.mem.trim(u8, percentDecode(buf, key), &std.ascii.whitespace);
         if (std.ascii.eqlIgnoreCase(name, "attach") or std.ascii.eqlIgnoreCase(name, "attachment")) return true;
     }
     return false;
@@ -300,6 +300,8 @@ test "win32 link policy: URL bytes and mail attachments" {
     try expectRefuse("mailto:a@b.c?attach=C:\\x");
     try expectRefuse("mailto:a@b.c?subject=x&Attachment=y");
     try expectRefuse("mailto:a@b.c?%61ttach=y");
+    try expectRefuse("mailto:a@b.c?%20attach=y");
+    try expectRefuse("mailto:a@b.c?subject=x&attachment%09=y");
     try expectOpen("mailto:a@b.c?subject=hi");
     try expectOpen("mailto:a@b.c?subject=attach%20me&body=attachment");
     try expectRefuse("mailto:a@b.c?subject=x&ATTACH=y");
