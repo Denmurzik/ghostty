@@ -1,6 +1,6 @@
 # e2e: milestone=M3 timeout=90 order=620
 # config-errors: a config with an unknown key opens the "Configuration
-# errors" task dialog (#32770 of the pid) that lists the line; "Ignore"
+# errors" task dialog (GhosttyDialog of the pid) that lists the line; "Ignore"
 # closes it; after the file is fixed, "Reload configuration" shows no dialog.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
@@ -16,13 +16,13 @@ Invoke-E2eScenario 'config-errors' {
         $d = Get-GhosttyState -Class $g.Class
         $d.m3.config_errors
     }
-    function Get-Dialogs { @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32770')) }
+    function Get-Dialogs { @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog')) }
     function Send-DialogButton($Dlg, [int]$Id) {
         [void][GhosttyE2e.Win]::PostMessageW($Dlg, $script:TDM_CLICK_BUTTON, [IntPtr]$Id, [IntPtr]::Zero)
     }
 
     $dlg = Wait-Until -TimeoutSec 10 -PollMs 100 -Condition { Get-Dialogs | Select-Object -First 1 }
-    if (-not $dlg) { throw 'no config errors dialog (#32770) within 10 s' }
+    if (-not $dlg) { throw 'no config errors dialog (GhosttyDialog) within 10 s' }
     $title = [GhosttyE2e.Win]::TextOf($dlg)
     if ($title -ne 'Configuration errors') { throw "dialog title is '$title'" }
     $e = Get-Errors

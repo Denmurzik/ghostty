@@ -1,7 +1,7 @@
 # e2e: milestone=M3 timeout=180 order=650
 # drop-text: text dragged from an OLE source is pasted like Ctrl+V. One line
 # lands at the prompt without running; two lines raise the paste-confirm task
-# dialog (#32770), and Cancel types nothing. Interactive desktop only.
+# dialog (GhosttyDialog), and Cancel types nothing. Interactive desktop only.
 # Keep this file ASCII only (Windows PowerShell 5.1 reads a BOM-less script as ANSI).
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_splits.ps1')
@@ -35,7 +35,7 @@ Invoke-E2eScenario 'drop-text' {
     # 2. Two lines: the confirm dialog; Cancel types nothing.
     Invoke-TextDrop $g "echo one > `"`$TEMP/gt-droptext.txt`"`necho two > `"`$TEMP/gt-droptext.txt`"`n"
     $dlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {
-        [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32770') | Select-Object -First 1
+        [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog') | Select-Object -First 1
     }
     if (-not $dlg) { throw 'no paste-confirm dialog for a two-line drop' }
     Save-Evidence 'dialog' $g -Window -Hwnd $dlg

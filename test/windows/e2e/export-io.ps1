@@ -19,7 +19,7 @@ Invoke-E2eScenario 'export-io' {
     }
     $x = (Get-GhosttyState -Class $g.Class).m3.export_io
     if ($x.bytes -ne 12 -or $x.path -ne $out -or $x.count -ne 1) { throw "state.m3.export_io is $($x | ConvertTo-Json -Compress)" }
-    if (@([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32770')).Count -ne 0) { throw 'a dialog appeared in test mode' }
+    if (@([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog')).Count -ne 0) { throw 'a dialog appeared in test mode' }
 
     foreach ($bad in "$($g.Sandbox.Tmp)\..\escape.txt", "$out`:stream") {
         $r = Invoke-GhosttyIpc -Class $g.Class -Request @{ op = 'export-io'; surface = 0; text = 'x'; path = $bad }

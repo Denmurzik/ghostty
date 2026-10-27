@@ -77,7 +77,7 @@ Invoke-E2eScenario 'link-hover-open' {
         Start-Sleep -Milliseconds 150
         [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
         try { Send-MouseClick -Hwnd $surface -X 30 -Y ($row + $dy + 10) } finally { [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero) }
-        $dlg = Wait-Until -TimeoutSec 2 -PollMs 100 -Condition { [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32770') | Select-Object -First 1 }
+        $dlg = Wait-Until -TimeoutSec 2 -PollMs 100 -Condition { [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog') | Select-Object -First 1 }
         if ($dlg) { break }
     }
     if (-not $dlg) { throw 'no confirmation dialog for the ms-settings: link' }

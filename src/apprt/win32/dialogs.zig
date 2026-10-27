@@ -1,4 +1,6 @@
-//! Modal confirmation dialogs (TaskDialog; MessageBoxW when it is unavailable).
+//! Modal confirmation dialogs in the Windows 11 style (a WinUI
+//! `ContentDialog`, see `dialog/Dialog.zig`); a plain message box when the
+//! dialog cannot be built.
 //!
 //! A dialog runs its own message loop, so anything that shows one can see
 //! its window, and the surface behind it, destroyed before the call
@@ -7,10 +9,15 @@
 //! from `performAction`, core callbacks or IPC op handlers, and every call
 //! site checks that its window survived. See `clipboard.zig` for how that
 //! is handled for clipboard prompts.
+//!
+//! Everything shown is made safe first (`dialog/text.zig`): control and
+//! bidi characters are written out, never drawn or obeyed, and a body too
+//! tall for the screen scrolls instead of being cut.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
-const comctl32 = win32.comctl32;
+const Dialog = @import("dialog/Dialog.zig");
+const dtext = @import("dialog/text.zig");
 
 const IDYES = 6;
 const MB_DEFBUTTON2 = 0x00000100;
@@ -18,12 +25,8 @@ const MB_DEFBUTTON2 = 0x00000100;
 /// Id of the affirmative custom button ("&Close", "&Allow").
 const button_accept = 100;
 
-/// The codepoint that stands in for bytes that are not valid UTF-8.
-const replacement: u21 = 0xFFFD;
-
-/// First codepoint of the Unicode "Control Pictures" block: U+2400 + c is
-/// the visible symbol for the control character c.
-const control_pictures: u21 = 0x2400;
+/// Id of the cancelling button, and the answer of Esc and the close button.
+const button_cancel = Dialog.cancel_id;
 
 const log = std.log.scoped(.win32_dialogs);
 
@@ -34,67 +37,29 @@ pub const CloseKind = enum { surface, tab, window, all_windows, app };
 
 /// Ask whether `kind` may be closed while a process is still running in it.
 pub fn confirmCloseKind(owner: win32.foundation.HWND, kind: CloseKind) bool {
-    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
-        .{ .nButtonID = button_accept, .pszButtonText = w16("&Close") },
-        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
+    const buttons = [_]ListButton{
+        .{ .id = button_accept, .text = "&Close" },
+        .{ .id = button_cancel, .text = "Cancel" },
     };
-    const config = buildConfig(owner, kind, &buttons);
-    return switch (comctl32.taskDialogShow(&config)) {
-        .pressed => |id| id == button_accept,
-        .failed => |hr| refused(hr),
-        .unavailable => fallbackBox(owner, closeTitle(kind), closeBody(kind)),
-    };
-}
-
-/// The task dialog failed, maybe after it had been on screen: asking again
-/// would prompt twice, so the answer is the default button (Cancel), and the
-/// failure is logged.
-fn refused(hr: i32) bool {
-    log.warn("task dialog failed, taking the default button hr=0x{x}", .{@as(u32, @bitCast(hr))});
-    return false;
-}
-
-/// The task dialog of a close confirmation. Pure: nothing is shown.
-fn buildConfig(
-    owner: win32.foundation.HWND,
-    kind: CloseKind,
-    buttons: []const comctl32.TASKDIALOG_BUTTON,
-) comctl32.TASKDIALOGCONFIG {
-    return buildConfigText(
+    const answer = show(
         owner,
-        w16("Ghostty"),
+        "Ghostty",
         closeInstruction(kind),
-        w16("A process is still running. Closing will end it."),
-        buttons,
-    );
+        "A process is still running. Closing will end it.",
+        "",
+        &buttons,
+        button_cancel,
+    ) orelse return fallbackBox(owner, closeTitle(kind), closeBody(kind));
+    return answer == button_accept;
 }
 
-fn buildConfigText(
-    owner: ?win32.foundation.HWND,
-    title: [*:0]const u16,
-    instruction: ?[*:0]const u16,
-    content: [*:0]const u16,
-    buttons: []const comctl32.TASKDIALOG_BUTTON,
-) comctl32.TASKDIALOGCONFIG {
-    return .{
-        .hwndParent = owner,
-        .dwFlags = comctl32.TDF_POSITION_RELATIVE_TO_WINDOW | comctl32.TDF_ALLOW_DIALOG_CANCELLATION,
-        .pszWindowTitle = title,
-        .pszMainInstruction = instruction,
-        .pszContent = content,
-        .cButtons = @intCast(buttons.len),
-        .pButtons = buttons.ptr,
-        .nDefaultButton = comctl32.IDCANCEL,
-    };
-}
-
-fn closeInstruction(kind: CloseKind) [*:0]const u16 {
+fn closeInstruction(kind: CloseKind) []const u8 {
     return switch (kind) {
-        .surface => w16("Close this terminal?"),
-        .tab => w16("Close this tab?"),
-        .window => w16("Close this window?"),
-        .all_windows => w16("Close all windows?"),
-        .app => w16("Quit Ghostty?"),
+        .surface => "Close this terminal?",
+        .tab => "Close this tab?",
+        .window => "Close this window?",
+        .all_windows => "Close all windows?",
+        .app => "Quit Ghostty?",
     };
 }
 
@@ -120,28 +85,21 @@ fn closeBody(kind: CloseKind) []const u8 {
 
 /// Show a question on top of `owner`. True for "Allow". "Cancel" is the
 /// default button: every question asked here is about something that is
-/// hard to undo. Text that does not fit the (generous) fixed buffers is
-/// cut, and invalid UTF-8 shows as U+FFFD.
+/// hard to undo. The text is shown in full (it scrolls when it is long);
+/// control and bidi characters in it are written out, and invalid UTF-8
+/// shows as U+FFFD.
 pub fn confirm(
     owner: win32.foundation.HWND,
     title: []const u8,
     body: []const u8,
 ) bool {
-    var title_buf: [128]u16 = undefined;
-    var body_buf: [2048]u16 = undefined;
-    const wide_title = toWide(&title_buf, title);
-    const wide_body = toWide(&body_buf, body);
-
-    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
-        .{ .nButtonID = button_accept, .pszButtonText = w16("&Allow") },
-        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
+    const buttons = [_]ListButton{
+        .{ .id = button_accept, .text = "&Allow" },
+        .{ .id = button_cancel, .text = "Cancel" },
     };
-    const config = buildConfigText(owner, wide_title, null, wide_body, &buttons);
-    return switch (comctl32.taskDialogShow(&config)) {
-        .pressed => |id| id == button_accept,
-        .failed => |hr| refused(hr),
-        .unavailable => fallbackBox(owner, title, body),
-    };
+    const answer = show(owner, title, title, body, "", &buttons, button_cancel) orelse
+        return fallbackBox(owner, title, body);
+    return answer == button_accept;
 }
 
 /// One button of `taskDialogList`.
@@ -152,11 +110,13 @@ pub const ListButton = struct {
 
 const list_buttons_max = 4;
 
-/// A task dialog with a warning icon, a main instruction, a body (a list
-/// of lines, say) and custom buttons. The id of the pressed button; null
-/// when the dialog failed (nothing is asked a second time). Without
-/// `TaskDialogIndirect` the body is shown in a plain message box and the
-/// result is null as well. Text that does not fit the fixed buffers is cut.
+/// A dialog with a headline (`instruction`), a paragraph and a scrollable
+/// list of lines in a code font (`body`: everything up to the first blank
+/// line is the paragraph, the rest is the list; with no blank line it is
+/// all list) and custom buttons. The id of the pressed button; `2` when it
+/// was dismissed; null when the dialog could not be shown (the body is
+/// then shown in a plain message box). Text that does not fit the fixed
+/// buffers is cut.
 pub fn taskDialogList(
     owner: ?win32.foundation.HWND,
     title: []const u8,
@@ -165,54 +125,67 @@ pub fn taskDialogList(
     buttons: []const ListButton,
     default_id: i32,
 ) ?i32 {
-    var title_buf: [128]u16 = undefined;
-    var instruction_buf: [256]u16 = undefined;
-    var body_buf: [16384]u16 = undefined;
-    var text_bufs: [list_buttons_max][64]u16 = undefined;
-    var raw: [list_buttons_max]comctl32.TASKDIALOG_BUTTON = undefined;
-    const count = @min(buttons.len, list_buttons_max);
-    for (buttons[0..count], 0..) |b, i| raw[i] = .{
-        .nButtonID = b.id,
-        .pszButtonText = toWide(&text_bufs[i], b.text).ptr,
-    };
+    const split = std.mem.indexOf(u8, body, "\n\n");
+    const intro = if (split) |at| body[0..at] else "";
+    const lines = if (split) |at| body[at + 2 ..] else body;
+    if (show(owner, title, instruction, intro, lines, buttons, default_id)) |id| return id;
 
-    var config = buildConfigText(
+    var box_title: [128]u16 = undefined;
+    var box_body: [16384]u16 = undefined;
+    _ = win32.user32.MessageBoxW(
         owner,
-        toWide(&title_buf, title),
-        toWide(&instruction_buf, instruction),
-        toWide(&body_buf, body),
-        raw[0..count],
+        dtext.toWide(&box_body, body, .paragraphs),
+        dtext.toWide(&box_title, title, .single_line),
+        win32.user32.MB_OK | win32.user32.MB_ICONWARNING,
     );
-    config.pszMainIcon = @ptrFromInt(comctl32.TD_WARNING_ICON);
-    config.nDefaultButton = default_id;
-    switch (comctl32.taskDialogShow(&config)) {
-        .pressed => |id| return id,
-        .failed => |hr| {
-            log.warn("task dialog failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
-            return null;
-        },
-        .unavailable => {
-            var box_title: [128]u16 = undefined;
-            var box_body: [16384]u16 = undefined;
-            _ = win32.user32.MessageBoxW(
-                owner,
-                toWide(&box_body, body),
-                toWide(&box_title, title),
-                win32.user32.MB_OK | win32.user32.MB_ICONWARNING,
-            );
-            return null;
-        },
-    }
+    return null;
 }
 
-/// The M1 message box, for when `TaskDialogIndirect` cannot be used.
+/// Builds the wide text and runs the dialog. Null when it could not be
+/// shown.
+fn show(
+    owner: ?win32.foundation.HWND,
+    window_title: []const u8,
+    title: []const u8,
+    body: []const u8,
+    list: []const u8,
+    buttons: []const ListButton,
+    default_id: i32,
+) ?i32 {
+    var window_buf: [128]u16 = undefined;
+    var title_buf: [256]u16 = undefined;
+    var body_buf: [8192]u16 = undefined;
+    var list_buf: [16384]u16 = undefined;
+    var label_bufs: [list_buttons_max][64]u16 = undefined;
+    var wide_buttons: [list_buttons_max]Dialog.Button = undefined;
+
+    const count = @min(buttons.len, list_buttons_max);
+    var default_index: usize = 0;
+    for (buttons[0..count], 0..) |b, i| {
+        wide_buttons[i] = .{ .id = b.id, .text = dtext.toWide(&label_bufs[i], b.text, .single_line) };
+        if (b.id == default_id) default_index = i;
+    }
+
+    return Dialog.run(.{
+        .owner = owner,
+        .window_title = dtext.toWide(&window_buf, window_title, .single_line),
+        .title = dtext.toWide(&title_buf, title, .single_line),
+        .body = dtext.toWide(&body_buf, body, .paragraphs),
+        .list = dtext.toWide(&list_buf, list, .paragraphs),
+        .buttons = wide_buttons[0..count],
+        .default_index = default_index,
+    });
+}
+
+/// The M1 message box, for when the dialog cannot be built.
 fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8) bool {
+    log.warn("the dialog could not be built, using a message box", .{});
     var title_buf: [128]u16 = undefined;
     var body_buf: [2048]u16 = undefined;
     const result = win32.user32.MessageBoxW(
         owner,
-        toWide(&body_buf, body),
-        toWide(&title_buf, title),
+        dtext.toWide(&body_buf, body, .paragraphs),
+        dtext.toWide(&title_buf, title, .single_line),
         win32.user32.MB_YESNO | win32.user32.MB_ICONQUESTION | MB_DEFBUTTON2,
     );
     return result == IDYES;
@@ -234,11 +207,11 @@ pub fn previewText(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
             break;
         }
 
-        var cp = nextCodepoint(text, &i);
+        var cp = dtext.nextCodepoint(text, &i);
         if (cp < 0x20) {
-            cp += control_pictures;
+            cp += dtext.control_pictures;
         } else if (cp == 0x7F) {
-            cp = control_pictures + 0x21;
+            cp = dtext.control_pictures + 0x21;
         }
         try appendCodepoint(alloc, &out, cp);
         count += 1;
@@ -253,49 +226,7 @@ fn appendCodepoint(alloc: Allocator, out: *std.ArrayList(u8), cp: u21) !void {
     try out.appendSlice(alloc, buf[0..n]);
 }
 
-/// Decode the codepoint at `text[i.*]` and advance `i`. A byte that does
-/// not start a valid sequence yields U+FFFD and advances by one.
-fn nextCodepoint(text: []const u8, i: *usize) u21 {
-    const start = i.*;
-    const len = std.unicode.utf8ByteSequenceLength(text[start]) catch {
-        i.* += 1;
-        return replacement;
-    };
-    if (start + len > text.len) {
-        i.* += 1;
-        return replacement;
-    }
-    const cp = std.unicode.utf8Decode(text[start..][0..len]) catch {
-        i.* += 1;
-        return replacement;
-    };
-    i.* += len;
-    return cp;
-}
-
-/// UTF-8 to a null-terminated UTF-16 string in `buf`, cut at the buffer's
-/// end (never in the middle of a surrogate pair).
-fn toWide(buf: []u16, text: []const u8) [:0]u16 {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const cp = nextCodepoint(text, &i);
-        const units: usize = if (cp >= 0x10000) 2 else 1;
-        if (n + units + 1 > buf.len) break;
-
-        if (units == 2) {
-            const c = cp - 0x10000;
-            buf[n] = 0xD800 + @as(u16, @intCast(c >> 10));
-            buf[n + 1] = 0xDC00 + @as(u16, @intCast(c & 0x3FF));
-        } else {
-            buf[n] = @intCast(cp);
-        }
-        n += units;
-    }
-
-    buf[n] = 0;
-    return buf[0..n :0];
-}
+const comctl32 = win32.comctl32;
 
 test "win32 dialogs: preview escapes control characters and truncates" {
     const alloc = std.testing.allocator;
@@ -344,24 +275,6 @@ test "win32 dialogs: preview escapes control characters and truncates" {
     }
 }
 
-test "win32 dialogs: wide conversion handles non-BMP, invalid bytes and truncation" {
-    var buf: [8]u16 = undefined;
-
-    const wide = toWide(&buf, "aЖ😀\xff");
-    try std.testing.expectEqualSlices(
-        u16,
-        &.{ 'a', 0x0416, 0xD83D, 0xDE00, 0xFFFD },
-        wide,
-    );
-    try std.testing.expectEqual(@as(u16, 0), buf[wide.len]);
-
-    // Room for 3 units plus the terminator: the surrogate pair does not fit
-    // after "ab" so it is dropped whole.
-    var small: [4]u16 = undefined;
-    const cut = toWide(&small, "ab😀c");
-    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b' }, cut);
-}
-
 test "win32 dialogs: every close kind has its own sentence" {
     const kinds = std.enums.values(CloseKind);
     for (kinds, 0..) |a, i| {
@@ -374,22 +287,23 @@ test "win32 dialogs: every close kind has its own sentence" {
     try std.testing.expectEqualStrings("Close Terminal", closeTitle(.surface));
 }
 
-test "win32 dialogs: task dialog config is valid" {
-    const owner: win32.foundation.HWND = @ptrFromInt(0x1000);
-    const buttons = [_]comctl32.TASKDIALOG_BUTTON{
-        .{ .nButtonID = button_accept, .pszButtonText = w16("&Close") },
-        .{ .nButtonID = comctl32.IDCANCEL, .pszButtonText = w16("Cancel") },
-    };
-    for (std.enums.values(CloseKind)) |kind| {
-        const config = buildConfig(owner, kind, &buttons);
-        try std.testing.expectEqual(@sizeOf(comctl32.TASKDIALOGCONFIG), config.cbSize);
-        try std.testing.expectEqual(comctl32.IDCANCEL, config.nDefaultButton);
-        try std.testing.expectEqual(2, config.cButtons);
-        try std.testing.expect(config.dwFlags & comctl32.TDF_POSITION_RELATIVE_TO_WINDOW != 0);
-        try std.testing.expectEqual(owner, config.hwndParent.?);
-        try std.testing.expect(config.pszMainInstruction != null);
+test "win32 dialogs: every close kind asks its own question" {
+    const kinds = std.enums.values(CloseKind);
+    for (kinds, 0..) |a, i| {
+        try std.testing.expect(closeInstruction(a).len > 0);
+        for (kinds[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(u8, closeInstruction(a), closeInstruction(b)));
+        }
     }
-    try std.testing.expectEqualSlices(u16, w16("Quit Ghostty?"), std.mem.span(closeInstruction(.app)));
+    try std.testing.expectEqualStrings("Quit Ghostty?", closeInstruction(.app));
+}
+
+test {
+    _ = @import("dialog/colors.zig");
+    _ = @import("dialog/keys.zig");
+    _ = @import("dialog/layout.zig");
+    _ = @import("dialog/text.zig");
+    _ = Dialog;
 }
 
 // Sizes from a throwaway `zig cc -target x86_64-windows-msvc` program against

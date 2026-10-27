@@ -1,6 +1,6 @@
 # e2e: milestone=M1 timeout=180 order=110
 # paste-confirm: pasting a multi-line clipboard asks for confirmation (a
-# #32770 task dialog). The default button is Cancel: Enter cancels and nothing
+# GhosttyDialog task dialog). The default button is Cancel: Enter cancels and nothing
 # runs; answering Allow (custom button id 100) pastes both lines and (after Enter, as Git Bash holds a
 # bracketed paste in its line buffer) the shell runs them. The dialog is
 # answered with window messages, not key presses: the harness takes the
@@ -20,14 +20,14 @@ Invoke-E2eScenario 'paste-confirm' {
 
         function Get-PasteDialog {
             Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {
-                [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32770') | Select-Object -First 1
+                [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog') | Select-Object -First 1
             }
         }
 
         # 1. Enter takes the default button (No): the paste is dropped.
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+v'
         $dlg = Get-PasteDialog
-        if (-not $dlg) { throw 'no confirmation dialog (#32770) within 8 s of Ctrl+Shift+V' }
+        if (-not $dlg) { throw 'no confirmation dialog (GhosttyDialog) within 8 s of Ctrl+Shift+V' }
         $title = [GhosttyE2e.Win]::TextOf($dlg)
         Write-E2eInfo "dialog '$title'"
         Save-Evidence 'dialog' $g -Window -Hwnd $dlg

@@ -1,6 +1,6 @@
 # e2e: milestone=M2 timeout=240 order=420
 # close-confirm: closing something that still runs a process asks first, with
-# a task dialog (class #32770, owned by the Ghostty pid). Cancel (the default)
+# a task dialog (class GhosttyDialog, owned by the Ghostty pid). Cancel (the default)
 # keeps everything; "Close" (id 100) closes and kills the process tree. Also
 # covered: a shell that exits behind an open dialog, an IPC new-tab that runs
 # inside the dialog's message loop, close_tab with two tabs and quit with
@@ -14,11 +14,11 @@ $script:TDM_CLICK_BUTTON = 0x466   # WM_USER + 102
 $script:IdClose = 100
 $script:IdCancel = 2
 
-function Get-ConfirmDialogs($G) { @([GhosttyE2e.Win]::TopLevel([uint32]$G.Pid, '#32770')) }
+function Get-ConfirmDialogs($G) { @([GhosttyE2e.Win]::TopLevel([uint32]$G.Pid, 'GhosttyDialog')) }
 
 function Wait-ConfirmDialog($G, [string]$What) {
     $dlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { Get-ConfirmDialogs $G | Select-Object -First 1 }
-    if (-not $dlg) { throw "no confirmation dialog (#32770) within 8 s: $What" }
+    if (-not $dlg) { throw "no confirmation dialog (GhosttyDialog) within 8 s: $What" }
     $dlg
 }
 
