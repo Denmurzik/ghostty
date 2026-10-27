@@ -23,18 +23,6 @@ pub const Timestamp = struct {
     second: u8,
 };
 
-const SYSTEMTIME = extern struct {
-    wYear: u16,
-    wMonth: u16,
-    wDayOfWeek: u16,
-    wDay: u16,
-    wHour: u16,
-    wMinute: u16,
-    wSecond: u16,
-    wMilliseconds: u16,
-};
-extern "kernel32" fn GetLocalTime(*SYSTEMTIME) callconv(.winapi) void;
-
 /// What the save dialog is about; the handler of `WM_GHOSTTY_POSTED_DIALOG`
 /// (kind `export_io`) owns and frees it.
 const Payload = struct {
@@ -86,10 +74,9 @@ pub fn save(app: *App, target: apprt.Target, value: apprt.Action.Value(.export_t
 
 /// The test-mode entry (IPC op `export-io`): no dialog, the bytes go to `path`.
 pub fn saveTest(app: *App, target: apprt.Target, value: apprt.Action.Value(.export_terminal_io), path: []const u8) bool {
-    _ = app;
     _ = target;
     if (!pathSafe(path)) return false;
-    writeBytes(path, value.contents) catch |err| {
+    writeBytes(app.core_app.alloc, path, value.contents) catch |err| {
         log.warn("unable to write the export err={}", .{err});
         return false;
     };
@@ -115,8 +102,8 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
     saving = true;
     defer saving = false;
 
-    var local: SYSTEMTIME = undefined;
-    GetLocalTime(&local);
+    var local: win32.kernel32.SYSTEMTIME = undefined;
+    win32.kernel32.GetLocalTime(&local);
     var name_buf: [64]u8 = undefined;
     const name = defaultName(&name_buf, .{
         .year = local.wYear,
@@ -160,16 +147,31 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
         log.warn("refusing to write the export to an unsafe path", .{});
         return;
     }
-    writeBytes(path, payload.bytes) catch |err| {
+    writeBytes(alloc, path, payload.bytes) catch |err| {
         log.warn("unable to write the export err={}", .{err});
         return;
     };
     record(path, payload.bytes.len);
 }
 
-/// The bytes exactly as given: no BOM, no line-ending conversion.
-fn writeBytes(path: []const u8, data: []const u8) !void {
-    try std.Io.Dir.cwd().writeFile(global.io(), .{ .sub_path = path, .data = data });
+/// The bytes exactly as given: no BOM, no line-ending conversion. Written to
+/// a temp file next to path and moved over it, so a failed write never
+/// leaves a truncated file (macOS writes atomically too).
+fn writeBytes(alloc: Allocator, path: []const u8, data: []const u8) !void {
+    const io = global.io();
+    var rnd: [4]u8 = undefined;
+    io.random(&rnd);
+    const temp = try std.fmt.allocPrint(alloc, "{s}.{x}.tmp", .{ path, rnd });
+    defer alloc.free(temp);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = temp, .data = data });
+    errdefer cwd.deleteFile(io, temp) catch {};
+
+    const wide_temp = try util.utf16z(alloc, temp);
+    defer alloc.free(wide_temp);
+    const wide_path = try util.utf16z(alloc, path);
+    defer alloc.free(wide_path);
+    if (win32.kernel32.MoveFileExW(wide_temp, wide_path, win32.kernel32.MOVEFILE_REPLACE_EXISTING | win32.kernel32.MOVEFILE_WRITE_THROUGH) == 0) return error.MoveFailed;
 }
 
 fn record(path: []const u8, bytes: usize) void {
@@ -193,6 +195,7 @@ pub fn defaultName(buf: []u8, now: Timestamp) []const u8 {
 pub fn pathSafe(path: []const u8) bool {
     if (path.len == 0) return false;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    if (std.mem.startsWith(u8, path, "\\??\\")) return false;
     if (path.len >= 4 and (path[0] == '\\' or path[0] == '/') and (path[1] == '\\' or path[1] == '/') and
         (path[2] == '?' or path[2] == '.') and (path[3] == '\\' or path[3] == '/')) return false;
     for (path, 0..) |c, i| {
@@ -240,5 +243,6 @@ test "win32 export: path safety refuses dot-dot, streams and device paths" {
     try t.expect(!pathSafe("C:\\tmp\\out.txt::$DATA"));
     try t.expect(!pathSafe("\\\\?\\C:\\x"));
     try t.expect(!pathSafe("\\\\.\\C:\\x"));
+    try t.expect(!pathSafe("\\??\\UNC\\s\\x"));
     try t.expect(!pathSafe("C:\\x\x00y"));
 }

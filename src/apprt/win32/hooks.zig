@@ -54,6 +54,16 @@ pub fn appStopping(app: *App) void {
     shell_open.appStopping(app);
     Inspector.appStopping(app);
     notify.deinit(app);
+    drainDialogs(app.msg_hwnd);
+}
+
+/// Dialogs posted to the message window that nobody will pump any more.
+fn drainDialogs(hwnd: win32.foundation.HWND) void {
+    var msg: win32.user32.MSG = undefined;
+    const m = messages.WM_GHOSTTY_POSTED_DIALOG;
+    while (win32.user32.PeekMessageW(&msg, hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
+        discardDialog(msg.wParam, msg.lParam);
+    }
 }
 
 /// The app-level config changed; `reloaded` when the files were read again.

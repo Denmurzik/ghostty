@@ -76,8 +76,12 @@ fn post(app: *App, config: *const configpkg.Config) void {
     if (showing or pending) return;
 
     const alloc = app.core_app.alloc;
-    const text = formatDiagnostics(alloc, diags, max_listed) catch return;
-    const payload = alloc.create(Payload) catch {
+    const text = formatDiagnostics(alloc, diags, max_listed) catch |err| {
+        log.warn("unable to format the config errors err={}", .{err});
+        return;
+    };
+    const payload = alloc.create(Payload) catch |err| {
+        log.warn("unable to allocate the config errors dialog err={}", .{err});
         alloc.free(text);
         return;
     };
@@ -110,7 +114,7 @@ pub fn postedApp(app: *App, lparam: win32.foundation.LPARAM) void {
     show(app, owner, lparam);
 }
 
-/// The window the message was posted to is gone: free the payload.
+/// Frees the payload of a message that will never be delivered.
 pub fn discard(lparam: win32.foundation.LPARAM) void {
     pending = false;
     payloadOf(lparam).destroy();
@@ -131,6 +135,8 @@ fn show(app: *App, owner: ?win32.foundation.HWND, lparam: win32.foundation.LPARA
     shown_total += 1;
     last_count = payload.count;
     last_text_len = @min(payload.text.len, last_text.len);
+    // Never end in the middle of a UTF-8 sequence.
+    while (last_text_len > 0 and last_text_len < payload.text.len and (payload.text[last_text_len] & 0xC0) == 0x80) last_text_len -= 1;
     @memcpy(last_text[0..last_text_len], payload.text[0..last_text_len]);
     last_choice = "";
 
@@ -139,13 +145,19 @@ fn show(app: *App, owner: ?win32.foundation.HWND, lparam: win32.foundation.LPARA
         alloc,
         "{d} {s} found while loading the configuration.",
         .{ payload.count, if (payload.count == 1) "error was" else "errors were" },
-    ) catch return;
+    ) catch |err| {
+        log.warn("unable to build the config errors dialog err={}", .{err});
+        return;
+    };
     defer alloc.free(instruction);
     const body = std.fmt.allocPrint(
         alloc,
         "Please review the errors below and reload your configuration or ignore the erroneous lines.\n\n{s}",
         .{payload.text},
-    ) catch return;
+    ) catch |err| {
+        log.warn("unable to build the config errors dialog err={}", .{err});
+        return;
+    };
     defer alloc.free(body);
 
     const buttons = [_]dialogs.ListButton{
@@ -154,8 +166,10 @@ fn show(app: *App, owner: ?win32.foundation.HWND, lparam: win32.foundation.LPARA
         .{ .id = button_ignore, .text = "Ignore" },
     };
     const chosen = dialogs.taskDialogList(owner, "Configuration errors", instruction, body, &buttons, button_reload);
+    // The dialog is gone: a reload that still finds errors (it runs
+    // synchronously) posts and shows a new one.
+    showing = false;
     switch (chosen orelse button_ignore) {
-        // The dialog is gone; a reload that still finds errors posts a new one.
         button_reload => {
             last_choice = "reload";
             _ = app_actions.reload_config(app, .app, .{ .soft = false }) catch |err| {

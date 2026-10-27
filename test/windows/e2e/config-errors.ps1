@@ -46,6 +46,12 @@ Invoke-E2eScenario 'config-errors' {
     $dlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { Get-Dialogs | Select-Object -First 1 }
     if (-not $dlg) { throw 'reload_config with the error still in the file showed no dialog' }
 
+    # "Reload configuration" with the error still there shows a new dialog.
+    Send-DialogButton $dlg $script:IdReload
+    if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { -not [GhosttyE2e.Win]::IsWindow($dlg) })) { throw 'Reload did not close the dialog' }
+    $dlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { Get-Dialogs | Select-Object -First 1 }
+    if (-not $dlg) { throw 'Reload with the error still in the file showed no new dialog' }
+
     # ... and fixing the file, then pressing "Reload configuration" leaves none.
     [IO.File]::WriteAllText($path, $bad, (New-Object Text.UTF8Encoding $false))
     Send-DialogButton $dlg $script:IdReload

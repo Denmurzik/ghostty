@@ -181,3 +181,19 @@ pub extern "kernel32" fn GetFinalPathNameByHandleW(file: HANDLE, buf: ?[*]u16, l
 
 pub extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?HANDLE;
 pub extern "kernel32" fn HeapCompact(heap: HANDLE, flags: u32) callconv(.winapi) usize;
+
+pub const SYSTEMTIME = extern struct {
+    wYear: u16,
+    wMonth: u16,
+    wDayOfWeek: u16,
+    wDay: u16,
+    wHour: u16,
+    wMinute: u16,
+    wSecond: u16,
+    wMilliseconds: u16,
+};
+pub extern "kernel32" fn GetLocalTime(*SYSTEMTIME) callconv(.winapi) void;
+
+pub const MOVEFILE_REPLACE_EXISTING = 0x1;
+pub const MOVEFILE_WRITE_THROUGH = 0x8;
+pub extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: ?[*:0]const u16, flags: u32) callconv(.winapi) BOOL;
