@@ -1,4 +1,4 @@
-# e2e: milestone=M2 timeout=360 order=470
+# e2e: milestone=M2 timeout=120 order=470
 # drop-files: files and folders dragged from an OLE source onto a surface are
 # pasted as shell-quoted, space-separated paths: msys paths in Git Bash, the
 # Windows paths in pwsh and cmd. There is no highlight (as on macOS);
@@ -79,7 +79,7 @@ function Invoke-DropCase($G, [string]$Name, [string]$Prefix, [string]$Suffix, [s
     Invoke-SendInput -Hwnd $G.Hwnd -Keys 'enter'
     if (-not (Wait-File $oracle 20)) { Save-Evidence "$Name-fail" $G -Window; throw "$Name : the oracle file was not written" }
     Start-Sleep -Milliseconds 500
-    $lines = Read-OracleLines $oracle
+    $lines = @(Read-OracleLines $oracle)
     if ($lines.Count -ne $Expected.Count) {
         throw "$Name : expected $($Expected.Count) lines, got $($lines.Count): $($lines -join ' | ')"
     }
@@ -139,13 +139,14 @@ Invoke-E2eScenario 'drop-files' {
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter'
         if (-not (Wait-File $oracle 20)) { throw 'split: the oracle file was not written by the split that got the drop' }
         Start-Sleep -Milliseconds 500
-        $lines = Read-OracleLines $oracle
+        $lines = @(Read-OracleLines $oracle)
         if ($lines.Count -ne $files.Count) { throw "split: expected $($files.Count) lines, got $($lines.Count)" }
 
         # The tab strip refuses: nothing is typed (an empty printf line is written).
         $top = ($boxes | Measure-Object -Property T -Minimum).Minimum
         if ($top -ge 8) {
             Remove-Item -LiteralPath $oracle -Force -ErrorAction SilentlyContinue
+            Send-Typed $g.Hwnd "printf '%s\n' "
             $drag = Start-OleFileDrag -Files $files -ToHwnd $g.Hwnd -X ([int]($boxes[0].R)) -Y ([int]($top / 2))
             try {
                 Start-Sleep -Milliseconds 300
@@ -155,7 +156,7 @@ Invoke-E2eScenario 'drop-files' {
             Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter'
             if (-not (Wait-File $oracle 20)) { throw 'strip: the oracle file was not written' }
             Start-Sleep -Milliseconds 500
-            $lines = Read-OracleLines $oracle
+            $lines = @(Read-OracleLines $oracle)
             if ($lines.Count -ne 0) { throw "strip: the refused drop typed text: $($lines -join ' | ')" }
         } else {
             Write-E2eInfo 'no tab strip above the surfaces; strip refusal not checked'

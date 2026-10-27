@@ -75,7 +75,7 @@ function Start-OleFileDrag {
 
     # Wait for the form, then press inside it and nudge past the drag threshold.
     $src = Wait-Until -TimeoutSec 10 -PollMs 100 -Condition {
-        $h = [GhosttyE2e.DropNative]::FindWindowW($null, 'gt-drop-source')
+        $h = [GhosttyE2e.DropNative]::FindWindowW([NullString]::Value, 'gt-drop-source')
         $owner = [uint32]0
         if ($h -ne [IntPtr]::Zero) { [void][GhosttyE2e.DropNative]::GetWindowThreadProcessId($h, [ref]$owner) }
         if ($h -ne [IntPtr]::Zero -and $owner -eq [uint32]$PID) { $h }
