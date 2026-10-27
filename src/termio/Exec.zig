@@ -1958,7 +1958,7 @@ pub fn readLoopWindows(
         }
 
         var n: windows.DWORD = 0;
-        if (windows.exp.kernel32.ReadFile(handle, &buf, buf.len, &n, &overlapped) == windows.FALSE) {
+        if (windows.exp.kernel32.ReadFile(handle, &buf, buf.len, null, &overlapped) == windows.FALSE) {
             switch (windows.GetLastError()) {
                 .IO_PENDING => {},
                 .BROKEN_PIPE => return .eof,
@@ -2002,10 +2002,25 @@ pub fn readLoopWindows(
                     },
                 }
             }
+        } else {
+            // The read completed at once. With an OVERLAPPED the count
+            // `ReadFile` reports is not defined; ask for it.
+            n = syncReadCount(handle, &overlapped) orelse return .err;
         }
 
         if (n > 0) onData(ctx, buf[0..n]);
     }
+}
+
+/// The byte count of an overlapped read that `ReadFile` completed
+/// synchronously. Null if the system does not know it.
+fn syncReadCount(handle: windows.HANDLE, overlapped: *windows.OVERLAPPED) ?windows.DWORD {
+    var n: windows.DWORD = 0;
+    if (windows.exp.kernel32.GetOverlappedResult(handle, overlapped, &n, windows.FALSE) == windows.FALSE) {
+        log.err("io reader result error err={}", .{windows.GetLastError()});
+        return null;
+    }
+    return n;
 }
 
 /// The events used to coordinate the Windows read thread with the rest
@@ -2714,6 +2729,29 @@ const TestReadLoop = struct {
 
 fn testElapsedMs(start: std.Io.Timestamp) i64 {
     return start.untilNow(global.io(), .awake).toMilliseconds();
+}
+
+test "windows exec: sync-completed read uses GetOverlappedResult" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const pipe = try Pty.createOutPipe();
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.read);
+    defer _ = windows.exp.kernel32.CloseHandle(pipe.write);
+
+    const event = windows.exp.kernel32.CreateEventW(null, windows.TRUE, windows.FALSE, null).?;
+    defer _ = windows.exp.kernel32.CloseHandle(event);
+    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    overlapped.hEvent = event;
+
+    // Data is waiting, so the read completes before `ReadFile` returns. The
+    // count pointer is null: the byte count may only come from the result.
+    var written: windows.DWORD = 0;
+    try testing.expect(windows.exp.kernel32.WriteFile(pipe.write, "ghostty", 7, &written, null) != windows.FALSE);
+    var buf: [64]u8 = undefined;
+    try testing.expect(windows.exp.kernel32.ReadFile(pipe.read, &buf, buf.len, null, &overlapped) != windows.FALSE);
+    try testing.expectEqual(@as(?windows.DWORD, 7), syncReadCount(pipe.read, &overlapped));
+    try testing.expectEqualStrings("ghostty", buf[0..7]);
 }
 
 test "windows exec: read loop returns promptly when quit is signalled while blocked" {
