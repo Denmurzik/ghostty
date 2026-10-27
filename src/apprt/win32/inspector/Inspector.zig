@@ -535,6 +535,7 @@ const Fixture = struct {
         errdefer alloc.destroy(surface);
         surface.inspector = null;
         surface.title = null;
+        surface.title_user = null;
 
         const hinstance = win32.kernel32.GetModuleHandleW(null) orelse return error.SkipZigTest;
         const insp = try Inspector.create(.{
