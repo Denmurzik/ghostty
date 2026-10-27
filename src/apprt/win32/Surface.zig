@@ -52,7 +52,7 @@ const WM_DPICHANGED_AFTERPARENT = 0x02E3;
 
 /// Timer that applies a coalesced size to core (SPEC §6.4). The system
 /// timer cannot tick faster than its ~15.6 ms resolution anyway.
-const resize_timer_id: usize = 1;
+const resize_timer_id: usize = messages.timers.surface.resize;
 const resize_interval_ms: u32 = 16;
 
 /// Source of `id`, for log correlation only.

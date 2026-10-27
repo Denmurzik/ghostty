@@ -21,9 +21,8 @@ const Report = terminal.osc.Command.ProgressReport;
 /// A report that is not refreshed for this long is dropped, like GTK does,
 /// so a program that died mid-progress does not leave the bar up.
 const stale_timeout_ms: u32 = 15_000;
-/// `WM_TIMER` id of the stale timer on a top-level window; the shared
-/// table in `messages.zig` has no entry for it.
-const stale_timer_id: usize = 0x2600;
+/// `WM_TIMER` id of the stale timer on a top-level window.
+const stale_timer_id: usize = messages.timers.window.taskbar_stale;
 
 pub const State = struct {
     progress: ?Report = null,
@@ -44,12 +43,8 @@ pub fn tbpfFor(state: Report.State) u32 {
     };
 }
 
-/// Show `report` on the taskbar button of `window`.
-pub fn setProgress(window: *Window, report: Report) bool {
-    return setProgressFrom(window, 0, report);
-}
-
-/// Like `setProgress`, remembering that surface `reporter` made the report.
+/// Show `report` on the taskbar button of `window`, remembering that surface
+/// `reporter` made the report.
 pub fn setProgressFrom(window: *Window, reporter: u32, report: Report) bool {
     const st = &window.taskbar;
     _ = win32.user32.KillTimer(window.hwnd, stale_timer_id);

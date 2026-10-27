@@ -48,9 +48,15 @@ pub const timers = struct {
         /// Hides the overlay after its duration.
         pub const hide: usize = 1;
     };
+    pub const surface = struct {
+        /// Applies the coalesced size of a live resize to core.
+        pub const resize: usize = 1;
+    };
     pub const window = struct {
         /// Reserved: strip auto-scroll while a tab is dragged.
         pub const strip_autoscroll: usize = 1;
+        /// Drops a stale taskbar progress report (`taskbar.zig`).
+        pub const taskbar_stale: usize = 0x2600;
     };
 };
 
@@ -81,9 +87,19 @@ test "win32 skeleton: private message ids are unique and keep M1's values" {
 }
 
 test "win32 skeleton: timer ids are unique per window class" {
-    // Each class owns exactly one timer today; a second one must differ.
     try std.testing.expectEqual(@as(usize, 1), timers.msg_window.quit);
     try std.testing.expectEqual(@as(usize, 1), timers.tab.divider_drag);
     try std.testing.expectEqual(@as(usize, 1), timers.resize_overlay.hide);
-    try std.testing.expectEqual(@as(usize, 1), timers.window.strip_autoscroll);
+    try std.testing.expectEqual(@as(usize, 1), timers.surface.resize);
+    try std.testing.expectEqual(@as(usize, 0x2600), timers.window.taskbar_stale);
+
+    // A timer id is only meaningful to the window that owns it, so ids
+    // must differ within one class; the top-level window has several.
+    const window_ids = [_]usize{
+        timers.window.strip_autoscroll,
+        timers.window.taskbar_stale,
+    };
+    for (window_ids, 0..) |id, i| {
+        for (window_ids[i + 1 ..]) |other| try std.testing.expect(id != other);
+    }
 }

@@ -20,13 +20,14 @@ const CoreSurface = @import("../../Surface.zig");
 const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
 const dialogs = @import("dialogs.zig");
+const messages = @import("messages.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_clipboard);
 
 /// Posted to a surface window when `State` has queued work. No payload; a
 /// destroyed window simply drops it.
-pub const WM_GHOSTTY_CLIPBOARD_READ = win32.user32.WM_APP + 2;
+pub const WM_GHOSTTY_CLIPBOARD_READ = messages.WM_GHOSTTY_CLIPBOARD_READ;
 
 /// How often a busy clipboard (another process has it open) is retried
 /// after the first attempt, and how long to wait between attempts.
