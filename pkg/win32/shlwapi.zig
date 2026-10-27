@@ -10,6 +10,7 @@ const BOOL = foundation.BOOL;
 
 const AssocIsDangerousFn = *const fn ([*:0]const u16) callconv(.winapi) BOOL;
 
+/// The cached entry point is unsynchronized: call from the UI thread only.
 fn assocIsDangerousProc() ?AssocIsDangerousFn {
     const S = struct {
         var proc: ?AssocIsDangerousFn = null;

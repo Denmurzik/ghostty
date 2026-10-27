@@ -13,6 +13,8 @@ pub const IDOK = 1;
 pub const IDCANCEL = 2;
 
 pub const ICC_STANDARD_CLASSES = 0x00004000;
+/// Includes the tooltip class (`TOOLTIPS_CLASSW`).
+pub const ICC_WIN95_CLASSES = 0x000000FF;
 
 pub const INITCOMMONCONTROLSEX = extern struct {
     dwSize: u32,

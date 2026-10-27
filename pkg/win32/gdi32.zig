@@ -83,5 +83,5 @@ pub extern "gdi32" fn CreateFontW(
     face: [*:0]const u16,
 ) callconv(.winapi) ?HFONT;
 
-pub const HRGN = *opaque {};
+pub const HRGN = user32.HRGN;
 pub extern "gdi32" fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) callconv(.winapi) ?HRGN;

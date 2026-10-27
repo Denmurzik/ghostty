@@ -310,3 +310,8 @@ test "win32 shlwapi: AssocIsDangerous flags .exe and not .txt" {
     try std.testing.expectEqual(true, win32.shlwapi.assocIsDangerous(exe) orelse return error.SkipZigTest);
     try std.testing.expectEqual(false, win32.shlwapi.assocIsDangerous(txt).?);
 }
+
+test "win32 gdi32: CreateRectRgn roundtrip" {
+    const rgn = gdi32.CreateRectRgn(0, 0, 10, 10) orelse return error.CreateRgnFailed;
+    try std.testing.expect(gdi32.DeleteObject(@ptrCast(rgn)) != 0);
+}
