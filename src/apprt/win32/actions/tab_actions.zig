@@ -68,7 +68,7 @@ pub fn close_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.clo
     return win32.user32.PostMessageW(
         surface.window.hwnd,
         messages.WM_GHOSTTY_CLOSE_TAB,
-        @intFromEnum(mode),
+        @backingInt(mode),
         @as(isize, surface.tab.id),
     ) != 0;
 }
