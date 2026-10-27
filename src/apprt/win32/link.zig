@@ -9,6 +9,8 @@ const Chrome = @import("Chrome.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const dialogs = @import("dialogs.zig");
+const hooks = @import("hooks.zig");
+const messages = @import("messages.zig");
 const link_policy = @import("link_policy.zig");
 const overlay = @import("overlay.zig");
 const shell_open = @import("shell_open.zig");
@@ -20,8 +22,8 @@ const log = std.log.scoped(.win32_link);
 const label_chars = 80;
 
 /// Sizes at 96 DPI, from macOS `URLHoverBanner`: 5 pt padding all round;
-/// the line is 26 px high like the resize overlay's, and a character is
-/// given 8 px.
+/// the line is 26 px high like the resize overlay's. `char_w` is only the
+/// guess when the text cannot be measured.
 const pad_x = 5;
 const char_w = 8;
 const height_px = 26;
@@ -47,6 +49,18 @@ pub fn surfaceDestroying(surface: *Surface) void {
     surface.app.core_app.alloc.destroy(label);
 }
 
+/// Confirmations posted to a window that is going away are never delivered:
+/// take them out of its queue and free them.
+pub fn windowDestroying(window: *Window) void {
+    var msg: win32.user32.MSG = undefined;
+    const m = messages.WM_GHOSTTY_POSTED_DIALOG;
+    while (win32.user32.PeekMessageW(&msg, window.hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
+        if (msg.wParam != @backingInt(hooks.DialogKind.url_confirm)) continue;
+        const payload: *shell_open.ConfirmPayload = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+        payload.destroy();
+    }
+}
+
 /// `WM_GHOSTTY_POSTED_DIALOG` of kind `url_confirm`: the worker met a link
 /// that needs the user's consent.
 pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
@@ -64,10 +78,13 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
     const alloc = app.core_app.alloc;
     const shown = dialogs.previewText(alloc, payload.url, 200) catch return;
     defer alloc.free(shown);
+    const scheme = if (link_policy.schemeEnd(payload.url)) |end| payload.url[0..end] else "unknown";
+    const shown_scheme = dialogs.previewText(alloc, scheme, 40) catch return;
+    defer alloc.free(shown_scheme);
     const body = std.fmt.allocPrint(
         alloc,
-        "A program in this terminal wants to open:\n\n{s}\n\nOnly continue if you trust it.",
-        .{shown},
+        "A program in this terminal wants to open a \"{s}\" link. That hands control to another program on this computer.\n\n{s}\n\nOnly continue if you trust it.",
+        .{ shown_scheme, shown },
     ) catch return;
     defer alloc.free(body);
 
@@ -104,9 +121,19 @@ pub fn hover(app: *App, target: apprt.Target, value: apprt.Action.Value(.mouse_o
     const n = std.unicode.utf8ToUtf16Le(&label.text, safe) catch 0;
     label.text_len = n;
     label.popup.surface = surface;
-    label.popup.size = .{ .w = 2 * pad_x + char_w * @as(i32, @intCast(n)), .h = height_px };
+    label.popup.size = .{ .w = labelWidth(label.text[0..n], surface.window.dpi), .h = height_px };
     try label.popup.show();
     return true;
+}
+
+/// Logical width of a label with `text`: the measured text and the padding.
+fn labelWidth(text: []const u16, dpi: u32) i32 {
+    const px = Chrome.measureLabel(text, dpi) catch |err| blk: {
+        log.warn("unable to measure the link label err={}", .{err});
+        break :blk @divTrunc(@as(i32, @intCast(text.len)) * char_w * @as(i32, @intCast(dpi)), 96);
+    };
+    // Back to 96 dpi; one more pixel absorbs the rounding.
+    return @divTrunc(px * 96 + @as(i32, @intCast(dpi)) - 1, @as(i32, @intCast(dpi))) + 2 * pad_x + 1;
 }
 
 fn ensureLabel(alloc: Allocator, surface: *Surface) !*Label {
@@ -177,7 +204,7 @@ pub fn open(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url
         log.warn("refusing to open a link of {d} bytes", .{url.len});
         return true;
     }
-    if (hasControl(url)) {
+    if (shell_open.hasForbidden(url)) {
         log.warn("refusing to open a link with control characters", .{});
         return true;
     }
@@ -188,18 +215,6 @@ pub fn open(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url
     };
     shell_open.submit(app, id, value.kind, url);
     return true;
-}
-
-/// C0, DEL and C1 (U+0080..U+009F) characters.
-fn hasControl(url: []const u8) bool {
-    for (url) |c| {
-        if (c < 0x20 or c == 0x7f) return true;
-    }
-    var i: usize = 0;
-    while (i + 1 < url.len) : (i += 1) {
-        if (url[i] == 0xC2 and url[i + 1] >= 0x80 and url[i + 1] <= 0x9F) return true;
-    }
-    return false;
 }
 
 test "win32 link: label text ellipsis" {

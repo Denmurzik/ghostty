@@ -155,3 +155,26 @@ pub const WAIT_OBJECT_0 = 0;
 pub const WAIT_TIMEOUT = 258;
 pub const INFINITE = 0xFFFFFFFF;
 pub const DUPLICATE_SAME_ACCESS = 2;
+
+// Paths and drives (fileapi.h)
+
+pub const INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
+pub const FILE_SHARE_READ = 0x1;
+pub const FILE_SHARE_WRITE = 0x2;
+pub const FILE_SHARE_DELETE = 0x4;
+/// Lets `CreateFileW` open a directory.
+pub const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+/// `GetFinalPathNameByHandleW` flags: the DOS path (`\?\C:\...`), normalized.
+pub const VOLUME_NAME_DOS = 0x0;
+pub const FILE_NAME_NORMALIZED = 0x0;
+
+/// `INVALID_FILE_ATTRIBUTES` when the path does not exist.
+pub extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(.winapi) u32;
+/// `DRIVE_*` of the root (`C:\`).
+pub extern "kernel32" fn GetDriveTypeW(root: [*:0]const u16) callconv(.winapi) u32;
+/// Returns the length without the NUL; with a too small buffer the length needed, with the NUL.
+pub extern "kernel32" fn GetFullPathNameW(name: [*:0]const u16, len: u32, buf: ?[*]u16, file_part: ?*?[*]u16) callconv(.winapi) u32;
+/// Expands 8.3 short names. Same length convention; 0 when the file does not exist.
+pub extern "kernel32" fn GetLongPathNameW(short: [*:0]const u16, buf: ?[*]u16, len: u32) callconv(.winapi) u32;
+/// Same length convention; 0 on failure.
+pub extern "kernel32" fn GetFinalPathNameByHandleW(file: HANDLE, buf: ?[*]u16, len: u32, flags: u32) callconv(.winapi) u32;

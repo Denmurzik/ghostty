@@ -31,19 +31,8 @@ const max_record_url = 256;
 const drive_removable = 2;
 const drive_fixed = 3;
 
-const INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
-
 /// `GetLastError` after `ShellExecuteExW` found no program for the file.
 const error_no_association = 1155;
-
-extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(.winapi) u32;
-extern "kernel32" fn GetDriveTypeW(root: [*:0]const u16) callconv(.winapi) u32;
-extern "kernel32" fn GetFullPathNameW(
-    name: [*:0]const u16,
-    len: u32,
-    buf: ?[*]u16,
-    file_part: ?*?[*]u16,
-) callconv(.winapi) u32;
 
 pub const Verdict = union(enum) {
     /// Hand this URL or local path to the shell's "open" verb.
@@ -77,25 +66,36 @@ pub const Env = struct {
     full_path: *const fn (Allocator, []const u16) anyerror![]u16,
     /// Given an extension with its dot; `AssocIsDangerous`.
     is_dangerous: *const fn ([]const u16) bool,
+    /// `GetLongPathNameW`: expands 8.3 names; fails for a file that is not there.
+    long_path: *const fn (Allocator, []const u16) anyerror![]u16,
+    /// The final path of an existing file after links, junctions and
+    /// subst drives (`GetFinalPathNameByHandleW`); fails when it cannot say.
+    final_path: *const fn (Allocator, []const u16) anyerror![]u16,
 };
 
 /// Extensions that run code, or are handled by something that does, when
 /// the shell opens them. Compared case-insensitively. `Env.is_dangerous`
 /// covers what Windows adds to its own list.
 const dangerous_extensions = [_][]const u8{
-    ".exe",         ".com",                ".scr",               ".pif",        ".bat",        ".cmd",
-    ".ps1",         ".psm1",               ".psd1",              ".ps1xml",     ".vbs",        ".vbe",
-    ".js",          ".jse",                ".wsf",               ".wsh",        ".wsc",        ".hta",
-    ".msi",         ".msp",                ".mst",               ".dll",        ".sys",        ".cpl",
-    ".reg",         ".lnk",                ".url",               ".jar",        ".msc",        ".gadget",
-    ".application", ".appx",               ".msix",              ".appxbundle", ".msixbundle", ".cab",
-    ".chm",         ".inf",                ".scf",               ".sct",        ".xll",        ".docm",
-    ".dotm",        ".xlsm",               ".xltm",              ".pptm",       ".potm",       ".ppam",
-    ".library-ms",  ".searchconnector-ms", ".settingcontent-ms", ".diagcab",    ".appref-ms",  ".website",
-    ".theme",       ".themepack",          ".iso",               ".img",        ".vhd",        ".vhdx",
+    ".exe",             ".com",                ".scr",               ".pif",        ".bat",        ".cmd",
+    ".ps1",             ".psm1",               ".psd1",              ".ps1xml",     ".vbs",        ".vbe",
+    ".js",              ".jse",                ".wsf",               ".wsh",        ".wsc",        ".hta",
+    ".msi",             ".msp",                ".mst",               ".dll",        ".sys",        ".cpl",
+    ".reg",             ".lnk",                ".url",               ".jar",        ".msc",        ".gadget",
+    ".application",     ".appx",               ".msix",              ".appxbundle", ".msixbundle", ".cab",
+    ".chm",             ".inf",                ".scf",               ".sct",        ".xll",        ".docm",
+    ".dotm",            ".xlsm",               ".xltm",              ".pptm",       ".potm",       ".ppam",
+    ".library-ms",      ".searchconnector-ms", ".settingcontent-ms", ".diagcab",    ".appref-ms",  ".website",
+    ".theme",           ".themepack",          ".iso",               ".img",        ".vhd",        ".vhdx",
+    ".py",              ".pyw",                ".pyz",               ".pyzw",       ".sh",         ".bash",
+    ".rb",              ".pl",                 ".jnlp",              ".rdp",        ".wsb",        ".appinstaller",
+    ".ms-appinstaller", ".mht",                ".mhtml",             ".vb",         ".ws",         ".shb",
+    ".shs",             ".hlp",                ".cer",               ".crt",        ".ppkg",
 };
 
 pub fn isDangerousExtension(ext: []const u8) bool {
+    // Monad shell scripts: .msh, .msh1, .msh2, .mshxml, ...
+    if (ext.len >= 4 and std.ascii.eqlIgnoreCase(ext[0..4], ".msh")) return true;
     for (dangerous_extensions) |d| {
         if (std.ascii.eqlIgnoreCase(ext, d)) return true;
     }
@@ -121,7 +121,8 @@ pub fn validate(alloc: Allocator, kind: apprt.action.OpenUrl.Kind, url: []const 
 
     if (link_policy.isDriveAbsolute(url)) return pathVerdict(alloc, url, env);
 
-    if (link_policy.schemeEnd(url)) |colon| {
+    // `main.zig:12` is a path with a position, not a scheme.
+    if (link_policy.schemeEnd(url)) |colon| if (std.mem.indexOfScalar(u8, url[0..colon], '.') == null) {
         const scheme = url[0..colon];
         const rest = url[colon + 1 ..];
 
@@ -140,14 +141,18 @@ pub fn validate(alloc: Allocator, kind: apprt.action.OpenUrl.Kind, url: []const 
             return .{ .open = try alloc.dupe(u8, url) };
         }
         if (std.ascii.eqlIgnoreCase(scheme, "file")) return fileVerdict(alloc, rest, env);
+        // Known exploit vectors: no question is worth asking.
+        if (std.ascii.eqlIgnoreCase(scheme, "ms-msdt") or std.ascii.eqlIgnoreCase(scheme, "search-ms")) {
+            return .{ .refuse = "scheme is an exploit vector" };
+        }
         return .{ .confirm = try alloc.dupe(u8, url) };
-    }
+    };
 
     return pathVerdict(alloc, url, env);
 }
 
 /// Control characters (C0, DEL and C1), quotes and bidi controls.
-fn hasForbidden(s: []const u8) bool {
+pub fn hasForbidden(s: []const u8) bool {
     for (s) |c| {
         if (c < 0x20 or c == 0x7f or c == '"') return true;
     }
@@ -225,9 +230,23 @@ fn toWide(alloc: Allocator, s: []const u8) ?[]u16 {
     return std.unicode.utf8ToUtf16LeAlloc(alloc, s) catch null;
 }
 
+/// `path:12` and `path:12:5` (compiler and grep output) are the file at a
+/// position; the position is dropped.
+fn stripPosition(raw: []const u8) []const u8 {
+    var p = raw;
+    for (0..2) |_| {
+        const colon = std.mem.lastIndexOfScalar(u8, p, ':') orelse return p;
+        if (colon < 2 or colon + 1 == p.len) return p;
+        for (p[colon + 1 ..]) |c| if (!std.ascii.isDigit(c)) return p;
+        p = p[0..colon];
+    }
+    return p;
+}
+
 /// The path rules of the policy: no network, devices or streams, only
 /// local drives, and programs are revealed, never run.
-fn pathVerdict(alloc: Allocator, raw: []const u8, env: Env) !Verdict {
+fn pathVerdict(alloc: Allocator, raw_with_position: []const u8, env: Env) !Verdict {
+    const raw = stripPosition(raw_with_position);
     if (raw.len >= 2 and link_policy.isSlash(raw[0]) and link_policy.isSlash(raw[1])) {
         return .{ .refuse = "UNC or device path" };
     }
@@ -236,7 +255,7 @@ fn pathVerdict(alloc: Allocator, raw: []const u8, env: Env) !Verdict {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var path = switch (try absolute(a, raw, env)) {
+    const path = switch (try absolute(a, raw, env)) {
         .path => |p| p,
         .refuse => |why| return .{ .refuse = why },
     };
@@ -245,25 +264,50 @@ fn pathVerdict(alloc: Allocator, raw: []const u8, env: Env) !Verdict {
     }
     if (unsafeChars(path)) return .{ .refuse = "unsafe character in path" };
 
-    // Windows resolves `.` and `..` and may shorten names; judge the result.
+    // Windows resolves `.` and `..`; judge the result.
     const wide_in = toWide(a, path) orelse return .{ .refuse = "path is not valid text" };
     const wide_full = env.full_path(a, wide_in) catch return .{ .refuse = "path cannot be resolved" };
-    path = std.unicode.utf16LeToUtf8Alloc(a, wide_full) catch return .{ .refuse = "path is not valid text" };
+    const full = std.unicode.utf16LeToUtf8Alloc(a, wide_full) catch return .{ .refuse = "path is not valid text" };
+    return judge(alloc, a, full, env, true);
+}
 
+/// A name with `~` and a digit may be an 8.3 short name, which the shell
+/// judges by the long name behind it.
+fn hasShortName(part: []const u8) bool {
+    for (part, 0..) |c, i| {
+        if (c == '~' and i + 1 < part.len and std.ascii.isDigit(part[i + 1])) return true;
+    }
+    return false;
+}
+
+/// Checks a resolved absolute path. With `resolve` links are followed once
+/// and their target judged instead.
+fn judge(alloc: Allocator, a: Allocator, path_in: []const u8, env: Env, resolve: bool) !Verdict {
+    var path = path_in;
     if (!link_policy.isDriveAbsolute(path)) return .{ .refuse = "UNC or device path" };
-    if (unsafeChars(path)) return .{ .refuse = "unsafe character in path" };
-    if (hasForbidden(path)) return .{ .refuse = "control, quote or bidi character" };
+    if (unsafeChars(path) or hasForbidden(path)) return .{ .refuse = "unsafe character in path" };
 
     // Trailing dots and spaces are dropped by Windows when it opens the
     // name; look at what it will see.
-    var end = path.len;
-    while (end > 3 and (path[end - 1] == '\\' or path[end - 1] == '.' or path[end - 1] == ' ')) end -= 1;
-    path = path[0..end];
+    path = trimName(path);
 
+    // Windows judges a short name by the long one: expand it first.
+    var long_failed = false;
+    const wide_short = toWide(a, path) orelse return .{ .refuse = "path is not valid text" };
+    if (env.long_path(a, wide_short)) |wide_long| {
+        const long = std.unicode.utf16LeToUtf8Alloc(a, wide_long) catch return .{ .refuse = "path is not valid text" };
+        if (!link_policy.isDriveAbsolute(long) or unsafeChars(long) or hasForbidden(long)) {
+            return .{ .refuse = "unsafe character in path" };
+        }
+        path = trimName(long);
+    } else |_| long_failed = true;
+
+    var short_name = false;
     var parts = std.mem.splitScalar(u8, path[3..], '\\');
     var last: []const u8 = "";
     while (parts.next()) |part| {
         if (link_policy.isDeviceName(part)) return .{ .refuse = "reserved device name" };
+        if (hasShortName(part)) short_name = true;
         last = part;
     }
 
@@ -272,7 +316,10 @@ fn pathVerdict(alloc: Allocator, raw: []const u8, env: Env) !Verdict {
     if (drive != drive_fixed and drive != drive_removable) return .{ .refuse = "drive is not local" };
 
     const ext = if (std.mem.lastIndexOfScalar(u8, last, '.')) |dot| last[dot..] else "";
-    var dangerous = isDangerousExtension(ext);
+    // `name.{CLSID}` is a shell namespace folder, not a directory.
+    if (ext.len > 1 and ext[1] == '{') return .{ .refuse = "shell namespace folder" };
+
+    var dangerous = short_name or isDangerousExtension(ext);
     if (!dangerous and ext.len > 0) {
         const wide_ext = toWide(a, ext) orelse return .{ .refuse = "path is not valid text" };
         dangerous = env.is_dangerous(wide_ext);
@@ -281,7 +328,22 @@ fn pathVerdict(alloc: Allocator, raw: []const u8, env: Env) !Verdict {
 
     const wide_path = toWide(a, path) orelse return .{ .refuse = "path is not valid text" };
     if (!env.exists(wide_path)) return .{ .refuse = "path does not exist" };
+    // The file is there but its long name is not known: do not guess.
+    if (long_failed) return .{ .reveal = try alloc.dupe(u8, path) };
+
+    if (resolve) {
+        if (env.final_path(a, wide_path)) |wide_final| {
+            const final = std.unicode.utf16LeToUtf8Alloc(a, wide_final) catch return .{ .refuse = "path is not valid text" };
+            if (!std.ascii.eqlIgnoreCase(final, path)) return judge(alloc, a, final, env, false);
+        } else |_| {}
+    }
     return .{ .open = try alloc.dupe(u8, path) };
+}
+
+fn trimName(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 3 and (path[end - 1] == '\\' or path[end - 1] == '.' or path[end - 1] == ' ')) end -= 1;
+    return path[0..end];
 }
 
 /// A colon past the drive (alternate stream, device syntax) or a wildcard.
@@ -308,26 +370,70 @@ fn toZ(buf: *[2100:0]u16, s: []const u16) ?[*:0]const u16 {
 fn realExists(path: []const u16) bool {
     var buf: [2100:0]u16 = undefined;
     const z = toZ(&buf, path) orelse return false;
-    return GetFileAttributesW(z) != INVALID_FILE_ATTRIBUTES;
+    return win32.kernel32.GetFileAttributesW(z) != win32.kernel32.INVALID_FILE_ATTRIBUTES;
 }
 
 fn realDriveType(root: []const u16) u32 {
     var buf: [2100:0]u16 = undefined;
     const z = toZ(&buf, root) orelse return 0;
-    return GetDriveTypeW(z);
+    return win32.kernel32.GetDriveTypeW(z);
 }
 
 fn realFullPath(alloc: Allocator, path: []const u16) anyerror![]u16 {
     const z = try alloc.allocSentinel(u16, path.len, 0);
     @memcpy(z, path);
     defer alloc.free(z);
-    const need = GetFullPathNameW(z.ptr, 0, null, null);
+    const need = win32.kernel32.GetFullPathNameW(z.ptr, 0, null, null);
     if (need == 0) return error.FullPathFailed;
     const buf = try alloc.alloc(u16, need);
     defer alloc.free(buf);
-    const got = GetFullPathNameW(z.ptr, need, buf.ptr, null);
+    const got = win32.kernel32.GetFullPathNameW(z.ptr, need, buf.ptr, null);
     if (got == 0 or got >= need) return error.FullPathFailed;
     return try alloc.dupe(u16, buf[0..got]);
+}
+
+fn realLongPath(alloc: Allocator, path: []const u16) anyerror![]u16 {
+    const z = try alloc.allocSentinel(u16, path.len, 0);
+    @memcpy(z, path);
+    defer alloc.free(z);
+    const need = win32.kernel32.GetLongPathNameW(z.ptr, null, 0);
+    if (need == 0) return error.LongPathFailed;
+    const buf = try alloc.alloc(u16, need);
+    defer alloc.free(buf);
+    const got = win32.kernel32.GetLongPathNameW(z.ptr, buf.ptr, need);
+    if (got == 0 or got >= need) return error.LongPathFailed;
+    return try alloc.dupe(u16, buf[0..got]);
+}
+
+/// Opens the file without touching its contents and asks where it really is.
+fn realFinalPath(alloc: Allocator, path: []const u16) anyerror![]u16 {
+    var zbuf: [2100:0]u16 = undefined;
+    const z = toZ(&zbuf, path) orelse return error.TooLong;
+    const k = win32.kernel32;
+    const file = k.CreateFileW(
+        z,
+        0,
+        k.FILE_SHARE_READ | k.FILE_SHARE_WRITE | k.FILE_SHARE_DELETE,
+        null,
+        k.OPEN_EXISTING,
+        k.FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (file == k.INVALID_HANDLE_VALUE) return error.OpenFailed;
+    defer _ = k.CloseHandle(file);
+
+    const flags = k.VOLUME_NAME_DOS | k.FILE_NAME_NORMALIZED;
+    const need = k.GetFinalPathNameByHandleW(file, null, 0, flags);
+    if (need == 0) return error.FinalPathFailed;
+    const buf = try alloc.alloc(u16, need);
+    defer alloc.free(buf);
+    const got = k.GetFinalPathNameByHandleW(file, buf.ptr, need, flags);
+    if (got == 0 or got >= need) return error.FinalPathFailed;
+    // `\\?\C:\x` becomes `C:\x`; `\\?\UNC\...` stays and is refused.
+    var out = buf[0..got];
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    if (out.len >= 6 and std.mem.eql(u16, out[0..4], prefix) and out[5] == ':') out = out[4..];
+    return try alloc.dupe(u16, out);
 }
 
 fn realIsDangerous(ext: []const u16) bool {
@@ -345,6 +451,8 @@ fn realEnv(pwd: ?[]const u8, userprofile: []const u8) Env {
         .drive_type = realDriveType,
         .full_path = realFullPath,
         .is_dangerous = realIsDangerous,
+        .long_path = realLongPath,
+        .final_path = realFinalPath,
     };
 }
 
@@ -735,6 +843,31 @@ const fake = struct {
         return std.ascii.eqlIgnoreCase(buf[0..n], dangerous_ext);
     }
 
+    fn contains(path: []const u16, needle: []const u8) bool {
+        var buf: [256]u8 = undefined;
+        const n = std.unicode.utf16LeToUtf8(&buf, path) catch return false;
+        return std.mem.indexOf(u8, buf[0..n], needle) != null;
+    }
+
+    fn wide(alloc: Allocator, s: []const u8) ![]u16 {
+        return std.unicode.utf8ToUtf16LeAlloc(alloc, s);
+    }
+
+    /// Knows the long name of one short name; fails for names with "nolong".
+    fn longPath(alloc: Allocator, path: []const u16) anyerror![]u16 {
+        if (contains(path, "nolong")) return error.NoLongName;
+        if (contains(path, "REPORT~1.DOC")) return wide(alloc, "C:\\x\\report.docm");
+        if (contains(path, "PICT~1.TXT")) return wide(alloc, "C:\\x\\picture.txt");
+        return alloc.dupe(u16, path);
+    }
+
+    /// Two links: one to a share, one to a program.
+    fn finalPath(alloc: Allocator, path: []const u16) anyerror![]u16 {
+        if (contains(path, "remote-link")) return wide(alloc, "\\\\?\\UNC\\srv\\s\\a.txt");
+        if (contains(path, "exe-link")) return wide(alloc, "C:\\x\\evil.exe");
+        return error.NotALink;
+    }
+
     fn env(pwd: ?[]const u8) Env {
         return .{
             .pwd = pwd,
@@ -743,6 +876,8 @@ const fake = struct {
             .drive_type = driveType,
             .full_path = fullPath,
             .is_dangerous = isDangerous,
+            .long_path = longPath,
+            .final_path = finalPath,
         };
     }
 };
@@ -764,8 +899,11 @@ test "win32 shell_open: web, mail and other schemes" {
     try check(.osc8, "HtTpS://a.b/c", .open, null);
     try check(.unknown, "mailto:a@b.c?subject=x", .open, null);
     try check(.osc8, "javascript:alert(1)", .confirm, "javascript:alert(1)");
-    try check(.osc8, "ms-msdt:/id x", .confirm, null);
-    try check(.osc8, "search-ms:query=x", .confirm, null);
+    try check(.osc8, "ms-msdt:/id x", .refuse, null);
+    try check(.osc8, "MS-MSDT:/id x", .refuse, null);
+    try check(.osc8, "search-ms:query=x", .refuse, null);
+    try check(.osc8, "localhost:3000", .confirm, null);
+    try check(.osc8, "ftp://host/a.exe", .confirm, null);
     try check(.osc8, "ms-settings:", .confirm, null);
     try check(.osc8, "https:///x", .refuse, null);
     try check(.osc8, "mailto:a@b.c?attach=C:\\x", .refuse, null);
@@ -838,6 +976,85 @@ test "win32 shell_open: dangerous extensions are revealed" {
         defer std.testing.allocator.free(path);
         try check(.osc8, path, .reveal, path);
     }
+}
+
+test "win32 shell_open: short names are judged by the long name" {
+    fake.exists_result = true;
+    // report.docm behind REPORT~1.DOC.
+    try check(.osc8, "C:\\x\\REPORT~1.DOC", .reveal, "C:\\x\\report.docm");
+    try check(.osc8, "file:///C:/x/REPORT~1.DOC", .reveal, null);
+    // A harmless long name that still looks short is not trusted.
+    try check(.osc8, "C:\\x\\PICT~1.TXT", .open, "C:\\x\\picture.txt");
+    try check(.osc8, "C:\\x\\OTHER~1.TXT", .reveal, null);
+    try check(.osc8, "C:\\PROGRA~1\\x\\a.txt", .reveal, null);
+    // The long name cannot be had: an existing file is revealed, a missing one is not there.
+    try check(.osc8, "C:\\x\\nolong.txt", .reveal, null);
+    fake.exists_result = false;
+    try check(.osc8, "C:\\x\\nolong.txt", .refuse, null);
+    fake.exists_result = true;
+}
+
+test "win32 shell_open: code-running extensions are revealed" {
+    fake.exists_result = true;
+    const exts = [_][]const u8{
+        ".pyw",             ".py",  ".pyz", ".pyzw", ".sh",  ".bash", ".rb",  ".pl",  ".jnlp", ".rdp",  ".wsb", ".appinstaller",
+        ".ms-appinstaller", ".mht", ".vb",  ".ws",   ".shb", ".shs",  ".hlp", ".cer", ".crt",  ".ppkg", ".msh", ".msh2",
+        ".mshxml",
+    };
+    for (exts) |ext| {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "C:\\x\\a{s}", .{ext});
+        defer std.testing.allocator.free(path);
+        try check(.osc8, path, .reveal, path);
+    }
+    try check(.unknown, "~/x.sh", .reveal, null);
+}
+
+test "win32 shell_open: positions, shell folders and links" {
+    fake.exists_result = true;
+    try check(.unknown, "src/main.zig:12", .open, "C:\\repo\\src\\main.zig");
+    try check(.unknown, "src/main.zig:12:5", .open, "C:\\repo\\src\\main.zig");
+    try check(.unknown, "main.zig:12", .open, "C:\\repo\\main.zig");
+    try check(.unknown, "C:\\x\\a.txt:3", .open, "C:\\x\\a.txt");
+    try check(.unknown, "C:\\x\\a.txt:evil", .refuse, null);
+    try check(.unknown, "C:\\x\\a.txt:1:2:3", .refuse, null);
+
+    try check(.osc8, "C:\\x\\folder.{20D04FE0-3AEA-1069-A2D8-08002B30309D}", .refuse, null);
+
+    // A link is judged by its target.
+    try check(.osc8, "C:\\x\\remote-link.txt", .refuse, null);
+    try check(.osc8, "C:\\x\\exe-link.txt", .reveal, "C:\\x\\evil.exe");
+}
+
+test "win32 shell_open: policy rows of the first link hotfix" {
+    fake.exists_result = true;
+    const refused = [_][]const u8{
+        "\\\\host\\s\\a.exe",      "//host/s/a.exe",            "\\\\?\\C:\\a",                           "\\\\.\\C:\\a",
+        "file://host/share/a.exe", "file:////host/share/a.exe", "file:///%5C%5Chost%5Cshare%5Ca.exe",     "file:///C:/a%00b",
+        "file:///C:/a%22b",        "file:///C:/a%2",            "file:///C:/a%zz",                        "file:///etc/passwd",
+        "file:relative",           "C:\\x\\y.txt:stream",       "C:\\x\\*.exe",                           "C:foo.exe",
+        "javascript:alert(1)x\n",  "http:",                     "https:///x",                             "mailto:",
+        "https://a/\x00",          "https://a/\"b",             "https://a b",                            "mailto:a@b c",
+        "https://a/\xe2\x80\xae",  "https://a/caf\xc3\xa9",     "https://a/<b>",                          "https://a/{b}",
+        "https://a/b\\c",          "https://a/b^c",             "mailto:a@b.c?attach=C:\\x",              "mailto:a@b.c?subject=x&Attachment=y",
+        "mailto:a@b.c?%61ttach=y", "mailto:a@b.c?%20attach=y",  "mailto:a@b.c?subject=x&attachment%09=y", "mailto:a@b.c?subject=x&ATTACH=y",
+        "C:\\a\xe2\x80\xaeb.exe",  "C:\\a\xe2\x81\xa6b",        "C:\\a\xe2\x80\xa8b",                     "C:\\x\\CON",
+        "C:\\x\\nul.txt",          "C:\\x\\com1.tar.gz",        "C:\\lpt9\\a",                            "C:\\a\xe2\x80\x8eb",
+        "C:\\a\xe2\x80\x8fb",      "C:\\a\xd8\x9cb",            "C:\\a\xc2\x85b",                         "C:\\x\\CONIN$",
+        "C:\\x\\conout$.txt",      "C:\\x\\CLOCK$",
+    };
+    for (refused) |url| try check(.osc8, url, .refuse, null);
+    // These were refused as odd schemes before; now they ask or are paths.
+    try check(.osc8, "ms-settings:", .confirm, null);
+    try check(.osc8, "https://example.com/%2e%2e/%41", .open, null);
+    try check(.osc8, "https://a/caf%C3%A9", .open, null);
+    try check(.osc8, "mailto:a@b.c?subject=attach%20me&body=attachment", .open, null);
+    try check(.osc8, "FILE:///c:/My%20Dir/a.txt", .open, "c:\\My Dir\\a.txt");
+    try check(.osc8, "file://localhost/C:/x/y.exe", .reveal, "C:\\x\\y.exe");
+    try check(.osc8, "D:/x/y.lnk", .reveal, "D:\\x\\y.lnk");
+    try check(.osc8, "C:\\x\\y\\", .open, "C:\\x\\y");
+    try check(.osc8, "C:\\", .open, "C:\\");
+    try check(.osc8, "C:\\x\\com10", .open, null);
+    try check(.osc8, "C:\\a\xc3\xa9\\b", .open, "C:\\a\xc3\xa9\\b");
 }
 
 test "win32 shell_open: paths are resolved against the surface" {

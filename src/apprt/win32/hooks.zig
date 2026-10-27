@@ -126,6 +126,7 @@ pub const WindowChange = enum { moved, sized, dpi, minimized, restored, activate
 
 pub fn windowChanged(window: *Window, change: WindowChange) void {
     overlay.windowChanged(window, change);
+    if (change == .destroying) link.windowDestroying(window);
     QuickTerminal.windowChanged(window, change);
 }
 

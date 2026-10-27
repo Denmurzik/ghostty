@@ -517,6 +517,16 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
     p.drawText(r, args.text, p.fm.label, p.pal.text);
 }
 
+/// Width in px of `text` set in the label font at `dpi`.
+pub fn measureLabel(text: []const u16, dpi: u32) !i32 {
+    const sh = try shared();
+    const formats = try sh.formatsFor(dpi);
+    const layout = try sh.dwrite.createTextLayout(text, formats.label, 4096, 256);
+    defer com.release(layout);
+    const metrics = try layout.getMetrics();
+    return @intFromFloat(@ceil(metrics.widthIncludingTrailingWhitespace));
+}
+
 /// A centred text label on an opaque rounded fill (the resize overlay). As
 /// on macOS (`RoundedRectangle(cornerRadius: 4)`) the fill is the system
 /// window background (`.background`), not the terminal's; high contrast
