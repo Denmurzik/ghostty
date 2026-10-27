@@ -203,7 +203,9 @@ pub const Face = struct {
                 const string = entry.string[0..entry.string_len];
                 // There are other encodings that are something other than UTF-8
                 // but this is one we've seen "in the wild" so far.
-                if (entry.platform_id == freetype.c.TT_PLATFORM_MICROSOFT and entry.encoding_id == freetype.c.TT_MS_ID_UNICODE_CS) skip: {
+                // Both the Microsoft Unicode and the Unicode platform store UTF-16BE.
+                if ((entry.platform_id == freetype.c.TT_PLATFORM_MICROSOFT and entry.encoding_id == freetype.c.TT_MS_ID_UNICODE_CS) or
+                    entry.platform_id == freetype.c.TT_PLATFORM_APPLE_UNICODE) skip: {
                     if (string.len % 2 != 0) break :skip;
                     if (string.len > 1024) break :skip;
                     var tmp: [512]u16 = undefined;

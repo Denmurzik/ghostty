@@ -74,10 +74,6 @@ pub const Descriptor = struct {
     /// will be preferred, but not guaranteed.
     variations: []const Variation = &.{},
 
-    /// The presentation the caller needs. Only the Windows backend reads
-    /// this: emoji presentation skips the DirectWrite text fallback.
-    presentation: ?Presentation = null,
-
     /// Hash the descriptor with the given hasher.
     pub fn hash(self: Descriptor, hasher: anytype) void {
         const autoHash = std.hash.autoHash;
@@ -89,7 +85,6 @@ pub const Descriptor = struct {
         autoHash(hasher, self.bold);
         autoHash(hasher, self.italic);
         autoHash(hasher, self.monospace);
-        autoHash(hasher, self.presentation);
         autoHash(hasher, self.variations.len);
         for (self.variations) |variation| {
             autoHash(hasher, variation.id);
@@ -1004,8 +999,7 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         if (self.dw) |dw| return .{ .dw = .{
-            .first = try dw.discover(alloc, self.lib, desc),
-            .second = null,
+            .stages = .{ try dw.discover(alloc, self.lib, desc), null, null },
         } };
 
         const index = try Index.get(self.lib);
@@ -1021,14 +1015,20 @@ pub const Windows = struct {
         collection: *Collection,
         desc: Descriptor,
     ) !DiscoverIterator {
-        _ = collection;
         if (self.dw) |dw| {
             if (desc.family != null) return self.discover(alloc, desc);
 
-            var first = try dw.fallback(alloc, self.lib, null, desc);
+            // The system's choice, then the well-known families, then any
+            // installed face that covers the codepoint (user fonts).
+            var buf: [256]u8 = undefined;
+            var first = try dw.fallback(alloc, self.lib, primaryFamily(collection, &buf), desc);
             errdefer first.deinit();
-            const second = try dw.discoverFamilies(alloc, self.lib, &fallback_families, desc);
-            return .{ .dw = .{ .first = first, .second = second } };
+            var second = try dw.discoverFamilies(alloc, self.lib, &fallback_families, desc);
+            errdefer second.deinit();
+            var walk_desc = desc;
+            walk_desc.monospace = false;
+            const third = try dw.walk(alloc, self.lib, walk_desc);
+            return .{ .dw = .{ .stages = .{ first, second, third } } };
         }
 
         const index = try Index.get(self.lib);
@@ -1039,6 +1039,16 @@ pub const Windows = struct {
             desc,
             desc.family == null,
         ) };
+    }
+
+    /// Family name of the primary regular face, a hint for the system
+    /// fallback. Null for an empty collection.
+    fn primaryFamily(collection: *Collection, buf: []u8) ?[]const u8 {
+        const entry = collection.getEntry(.{}) catch return null;
+        return switch (entry.face) {
+            .deferred => |d| d.familyName(buf),
+            .loaded => |*face| face.name(buf),
+        } catch null;
     }
 
     /// One face of one font file.
@@ -1273,20 +1283,21 @@ pub const Windows = struct {
         }
     };
 
-    /// Two DirectWrite result lists read one after the other.
+    /// DirectWrite result lists read one after the other.
     const DirectWriteIterator = struct {
-        first: DirectWrite.Iterator,
-        second: ?DirectWrite.Iterator,
+        stages: [3]?DirectWrite.Iterator,
+        pos: usize = 0,
 
         fn deinit(self: *DirectWriteIterator) void {
-            self.first.deinit();
-            if (self.second) |*s| s.deinit();
+            for (&self.stages) |*s| if (s.*) |*it| it.deinit();
         }
 
         fn next(self: *DirectWriteIterator) !?DeferredFace {
-            if (try self.first.next()) |face| return face;
-            const second = if (self.second) |*s| s else return null;
-            return try second.next();
+            while (self.pos < self.stages.len) : (self.pos += 1) {
+                const it = if (self.stages[self.pos]) |*it| it else continue;
+                if (try it.next()) |face| return face;
+            }
+            return null;
         }
     };
 
@@ -1549,7 +1560,7 @@ test "windows font: emoji fallback prefers Segoe UI Emoji" {
     defer lib.deinit();
     var disco: Windows = .init(lib);
     defer disco.deinit();
-    var collection: Collection = undefined;
+    var collection: Collection = .init();
     var iter = try disco.discoverFallback(std.testing.allocator, &collection, .{
         .codepoint = 0x1F600,
     });

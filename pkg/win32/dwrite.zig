@@ -561,7 +561,7 @@ pub const IDWriteFont = extern struct {
         IsSymbolFont: *const anyopaque,
         GetFaceNames: *const fn (*IDWriteFont, *?*IDWriteLocalizedStrings) callconv(.winapi) HRESULT,
         GetInformationalStrings: *const fn (*IDWriteFont, InformationalStringId, *?*IDWriteLocalizedStrings, *foundation.BOOL) callconv(.winapi) HRESULT,
-        GetSimulations: *const anyopaque,
+        GetSimulations: *const fn (*IDWriteFont) callconv(.winapi) u32,
         GetMetrics: *const anyopaque,
         HasCharacter: *const fn (*IDWriteFont, u32, *foundation.BOOL) callconv(.winapi) HRESULT,
         CreateFontFace: *const fn (*IDWriteFont, *?*IDWriteFontFace) callconv(.winapi) HRESULT,
@@ -569,6 +569,11 @@ pub const IDWriteFont = extern struct {
 
     pub inline fn getWeight(self: *IDWriteFont) u32 {
         return self.vtable.GetWeight(self);
+    }
+
+    /// DWRITE_FONT_SIMULATIONS; 0 for a real face, bold (1) and oblique (2) bits when synthesized.
+    pub inline fn getSimulations(self: *IDWriteFont) u32 {
+        return self.vtable.GetSimulations(self);
     }
 
     pub inline fn getStretch(self: *IDWriteFont) u32 {

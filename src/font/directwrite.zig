@@ -95,9 +95,7 @@ pub const DirectWrite = struct {
         return Iterator.initList(alloc, lib, desc, try fonts.toOwnedSlice(alloc));
     }
 
-    /// The font the system picks for `desc.codepoint`, unless the request
-    /// is for emoji presentation (which is resolved from the emoji
-    /// families, not the text fallback).
+    /// The font the system picks for `desc.codepoint`, if any.
     pub fn fallback(
         self: *const DirectWrite,
         alloc: Allocator,
@@ -108,8 +106,19 @@ pub const DirectWrite = struct {
         var fonts: std.ArrayList(*Font) = .empty;
         errdefer releaseAll(alloc, &fonts);
 
-        if (desc.presentation != .emoji) try self.mapCharacter(alloc, &fonts, base_family, desc);
+        try self.mapCharacter(alloc, &fonts, base_family, desc);
         return Iterator.initList(alloc, lib, desc, try fonts.toOwnedSlice(alloc));
+    }
+
+    /// Every installed face that covers `desc.codepoint`, in collection
+    /// order; the last resort for scripts the system fallback does not know.
+    pub fn walk(
+        self: *const DirectWrite,
+        alloc: Allocator,
+        lib: Library,
+        desc: Descriptor,
+    ) !Iterator {
+        return Iterator.initWalk(self.collection, alloc, lib, desc);
     }
 
     /// The best face of each of `families` that exists, in list order.
@@ -129,11 +138,20 @@ pub const DirectWrite = struct {
             const idx = (self.collection.findFamilyName(name_w) catch null) orelse continue;
             const fam = self.collection.getFontFamily(idx) catch continue;
             defer com.release(fam);
-            const f = fam.getFirstMatchingFont(
+            var f = fam.getFirstMatchingFont(
                 if (desc.bold) .BOLD else .NORMAL,
                 .NORMAL,
                 if (desc.italic) .ITALIC else .NORMAL,
             ) catch continue;
+            if (f.getSimulations() != 0) {
+                // No real face for the style: use the regular one.
+                com.release(f);
+                f = fam.getFirstMatchingFont(.NORMAL, .NORMAL, .NORMAL) catch continue;
+                if (f.getSimulations() != 0) {
+                    com.release(f);
+                    continue;
+                }
+            }
             fonts.append(alloc, f) catch |err| {
                 com.release(f);
                 return err;
@@ -169,6 +187,12 @@ pub const DirectWrite = struct {
 
         for (0..fam.getFontCount()) |i| {
             const f = fam.getFont(@intCast(i)) catch continue;
+            // A simulated bold or oblique is the regular file; leave the
+            // synthesis to the collection.
+            if (f.getSimulations() != 0) {
+                com.release(f);
+                continue;
+            }
             ranked.append(alloc, .{ .font = f, .key = rankKey(f, desc) }) catch |err| {
                 com.release(f);
                 return err;
@@ -217,12 +241,7 @@ pub const DirectWrite = struct {
             defer com.release(fam);
             for (0..fam.getFontCount()) |i| {
                 const f = fam.getFont(@intCast(i)) catch continue;
-                const names = (f.getInformationalStrings(.FULL_NAME) catch null) orelse {
-                    com.release(f);
-                    continue;
-                };
-                defer com.release(names);
-                if (!anyStringEquals(names, name)) {
+                if (f.getSimulations() != 0 or !fullNameMatches(f, name)) {
                     com.release(f);
                     continue;
                 }
@@ -380,7 +399,9 @@ pub const DirectWrite = struct {
             if (self.monospace_only and !isMonospace(f)) return null;
 
             const location = try fileLocation(self.alloc, f) orelse return null;
-            errdefer self.alloc.free(location.path);
+            // Owned by the returned face; freed here on every other exit.
+            var keep_path = false;
+            defer if (!keep_path) self.alloc.free(location.path);
 
             const file = WindowsFontFile.open(location.path) catch return null;
             var face = Face.initMapped(
@@ -393,9 +414,10 @@ pub const DirectWrite = struct {
 
             if (self.codepoint != 0 and face.glyphIndex(self.codepoint) == null) {
                 face.deinit();
-                self.alloc.free(location.path);
                 return null;
             }
+
+            keep_path = true;
 
             return .{ .win = .{
                 .path = location.path,
@@ -442,9 +464,11 @@ fn fileLocation(alloc: Allocator, f: *Font) !?Location {
     defer alloc.free(wide);
     local.getFilePathFromKey(key.key, key.size, wide) catch return null;
 
+    const face_index = std.math.cast(i32, face.getIndex()) orelse return null;
+    const path = try std.unicode.wtf16LeToWtf8AllocZ(alloc, wide[0..len]);
     return .{
-        .path = try std.unicode.wtf16LeToWtf8AllocZ(alloc, wide[0..len]),
-        .face_index = std.math.cast(i32, face.getIndex()) orelse return null,
+        .path = path,
+        .face_index = face_index,
     };
 }
 
@@ -467,6 +491,17 @@ fn isMonospace(f: *Font) bool {
     const f1 = com.queryInterface(f, dwrite.IDWriteFont1) catch return false;
     defer com.release(f1);
     return f1.isMonospacedFont();
+}
+
+/// Whether `name` is the full name ("Consolas Bold") or the typographic
+/// family ("Segoe UI Variable") of `f`.
+fn fullNameMatches(f: *Font, name: []const u8) bool {
+    for ([_]dwrite.InformationalStringId{ .FULL_NAME, .TYPOGRAPHIC_FAMILY_NAMES }) |id| {
+        const names = (f.getInformationalStrings(id) catch null) orelse continue;
+        defer com.release(names);
+        if (anyStringEquals(names, name)) return true;
+    }
+    return false;
 }
 
 /// Whether any locale of `strings` equals `needle`, ASCII case-insensitive.
@@ -686,19 +721,6 @@ test "windows directwrite: CJK fallback picks a Japanese face" {
     return error.TestUnexpectedResult;
 }
 
-test "windows directwrite: emoji presentation is not routed" {
-    var lib: Library = try .init(std.testing.allocator);
-    defer lib.deinit();
-    var dw = DirectWrite.init() orelse return error.SkipZigTest;
-    defer dw.deinit();
-    var iter = try dw.fallback(std.testing.allocator, lib, null, .{
-        .codepoint = 0x1F600,
-        .presentation = .emoji,
-    });
-    defer iter.deinit();
-    try std.testing.expect((try iter.next()) == null);
-}
-
 const test_codepoints = [_]u32{ 0x3042, 0x6F22, 0xAC00, 0x2603, 0x2211, 0x2318, 0x1F600, 0x0416 };
 
 fn testFallbackWorker(
@@ -708,7 +730,10 @@ fn testFallbackWorker(
 ) void {
     for (0..200) |i| {
         const cp = test_codepoints[i % test_codepoints.len];
-        var iter = dw.fallback(std.heap.page_allocator, lib, null, .{ .codepoint = cp }) catch return;
+        var iter = dw.fallback(std.heap.page_allocator, lib, null, .{ .codepoint = cp }) catch {
+            results[i % test_codepoints.len] = std.math.maxInt(u64);
+            return;
+        };
         defer iter.deinit();
         var h: u64 = 0;
         for (iter.fonts) |f| {
@@ -728,8 +753,8 @@ test "windows directwrite: fallback from two threads" {
     var dw = DirectWrite.init() orelse return error.SkipZigTest;
     defer dw.deinit();
 
-    var a: [test_codepoints.len]u64 = undefined;
-    var b: [test_codepoints.len]u64 = undefined;
+    var a: [test_codepoints.len]u64 = @splat(0);
+    var b: [test_codepoints.len]u64 = @splat(0);
     var t1 = try std.Thread.spawn(.{}, testFallbackWorker, .{ &dw, lib, &a });
     var t2 = try std.Thread.spawn(.{}, testFallbackWorker, .{ &dw, lib, &b });
     t1.join();
@@ -790,4 +815,29 @@ test "windows directwrite: timings" {
         std.debug.print("directwrite: first discover {d:.1} ms, fallback {d:.2} ms per codepoint\n", .{ first_ms, per_cp_ms });
     } else |_| {}
     try std.testing.expect(first_ms < 1000);
+}
+
+test "windows directwrite: walk finds installed faces covering a codepoint" {
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var dw = DirectWrite.init() orelse return error.SkipZigTest;
+    defer dw.deinit();
+    var iter = try dw.walk(std.testing.allocator, lib, .{ .codepoint = 0x3042 });
+    defer iter.deinit();
+    var face = (try iter.next()) orelse return error.TestUnexpectedResult;
+    defer face.deinit();
+    try std.testing.expect(face.hasCodepoint(0x3042, null));
+}
+
+test "windows directwrite: face names are UTF-8" {
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var dw = DirectWrite.init() orelse return error.SkipZigTest;
+    defer dw.deinit();
+    var iter = try dw.discover(std.testing.allocator, lib, .{ .family = "Consolas" });
+    defer iter.deinit();
+    var face = (try iter.next()) orelse return error.TestUnexpectedResult;
+    defer face.deinit();
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Consolas", try face.name(&buf));
 }
