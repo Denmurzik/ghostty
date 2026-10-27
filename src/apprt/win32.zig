@@ -52,4 +52,17 @@ test {
     _ = @import("win32/tab_menu.zig");
     _ = @import("win32/recovery.zig");
     _ = @import("win32/inspector/Inspector.zig");
+    _ = @import("../tmux_shim/cli.zig");
+    _ = @import("../tmux_shim/format.zig");
+    _ = @import("../tmux_shim/sh_command.zig");
+    _ = @import("win32/tmux/commands.zig");
+    _ = @import("win32/tmux/FakeHost.zig");
+    _ = @import("win32/tmux/layout.zig");
+    _ = @import("win32/tmux/Server.zig");
+    _ = @import("win32/tmux/env.zig");
+    _ = @import("win32/tmux/spawn.zig");
+    _ = @import("win32/tmux/keys.zig");
+    _ = @import("win32/tmux/Registry.zig");
+    _ = @import("win32/tmux/pane_io.zig");
+    _ = @import("win32/tmux/labels.zig");
 }
