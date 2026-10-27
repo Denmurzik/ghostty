@@ -65,4 +65,24 @@ test {
     _ = @import("win32/tmux/Registry.zig");
     _ = @import("win32/tmux/pane_io.zig");
     _ = @import("win32/tmux/labels.zig");
+
+    // Force analysis of the stub signatures (function bodies are lazy).
+    {
+        const R = @import("win32/tmux/Registry.zig");
+        _ = &R.run;
+        _ = &R.surfaceDestroying;
+        _ = &R.childExited;
+        _ = &R.appStopping;
+        const P = @import("win32/tmux/pane_io.zig");
+        _ = &P.layoutChanged;
+        _ = &P.onTimer;
+        _ = &P.surfaceDestroying;
+        const L = @import("win32/tmux/labels.zig");
+        _ = &L.optionsChanged;
+        _ = &L.tabLayoutChanged;
+        _ = &L.tabShown;
+        _ = &L.tabReparented;
+        _ = &L.windowChanged;
+        _ = &L.surfaceDestroying;
+    }
 }

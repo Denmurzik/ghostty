@@ -44,7 +44,11 @@ pub fn parseGlobal(argv: []const []const u8, diag: *Diag) error{Usage}!Global {
                     diag.print("-{c} is not supported by Ghostty", .{c});
                     return error.Usage;
                 },
-                '2', 'd', 'h', 'l', 'N', 'q', 'u', 'U', 'v' => {},
+                'h' => {
+                    diag.print("usage: tmux [-V] [-S socket-path] command [flags]", .{});
+                    return error.Usage;
+                },
+                '2', 'd', 'l', 'N', 'q', 'u', 'U', 'v' => {},
                 'V' => g.version = true,
                 'f', 'L', 'S' => {
                     var val: []const u8 = undefined;
@@ -122,12 +126,12 @@ fn template(id: CommandId) []const u8 {
         .select_pane => "DdegLlMmP:RT:t:UZ",
         .set_option => "aFgopqst:uUw",
         .display_message => "aCc:d:lINpt:F:v",
-        .list_panes => "aF:f:O:rst:",
-        .list_windows => "aF:f:O:rt:",
+        .list_panes => "asF:f:t:",
+        .list_windows => "F:f:at:",
         .show_environment => "hgst:",
         .load_buffer => "b:t:w",
         .send_keys => "c:FHKlMN:Rt:X",
-        .capture_pane => "ab:CeE:JNpPqS:Tt:",
+        .capture_pane => "ab:CeE:JMNpPqS:Tt:",
     };
 }
 
@@ -273,7 +277,11 @@ fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
         diag.print("ambiguous command: {s}, could be: {s}", .{ name, list[0..n] });
         return error.Usage;
     }
-    if (found) |e| if (e.id) |id| return id;
+    if (found) |e| {
+        if (e.id) |id| return id;
+        diag.print("{s}: unsupported by Ghostty", .{e.name});
+        return error.Usage;
+    }
     diag.print("unknown command: {s}", .{name});
     return error.Usage;
 }
@@ -451,9 +459,9 @@ test "tmux shim cli: aliases and prefixes" {
     try std.testing.expectEqual(CommandId.split_window, (try parseCommands(a, &.{"split-w"}, &d))[0].id);
     try std.testing.expectEqual(CommandId.list_panes, (try parseCommands(a, &.{"lsp"}, &d))[0].id);
     try expectUsage(&.{"kill"}, "ambiguous command: kill, could be: kill-pane, kill-server, kill-session, kill-window");
-    try expectUsage(&.{"new-session"}, "unknown command: new-session");
-    // "show" is tmux's exact alias of show-options (not one of the 14).
-    try expectUsage(&.{"show"}, "unknown command: show");
+    try expectUsage(&.{"new-session"}, "new-session: unsupported by Ghostty");
+    // "show" is tmux's exact alias of show-options: a real, unsupported command.
+    try expectUsage(&.{"show"}, "show-options: unsupported by Ghostty");
     try expectUsage(&.{"sho"}, "ambiguous command: sho, could be: show-buffer, show-environment, show-hooks, show-messages, show-options, show-prompt-history, show-window-options");
 }
 
@@ -512,4 +520,19 @@ test "tmux shim cli: targets and sizes" {
     try std.testing.expect(parseSize("0%") == null);
     try std.testing.expect(parseSize("101%") == null);
     try std.testing.expect(parseSize("x") == null);
+}
+
+test "tmux shim cli: unsupported real commands, -h and templates" {
+    try expectUsage(&.{"has-session"}, "has-session: unsupported by Ghostty");
+    try expectUsage(&.{"frobnicate"}, "unknown command: frobnicate");
+    var d: Diag = .{};
+    try std.testing.expectError(error.Usage, parseGlobal(&.{"-h"}, &d));
+    try std.testing.expect(std.mem.startsWith(u8, d.message(), "usage:"));
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expect((try parseCommands(a, &.{ "list-panes", "-s", "-a" }, &d))[0].has('s'));
+    try std.testing.expect((try parseCommands(a, &.{ "capture-pane", "-M" }, &d))[0].has('M'));
+    try expectUsage(&.{ "list-windows", "-r" }, "command list-windows: unknown flag -r");
+    try expectUsage(&.{ "list-panes", "-O", "x" }, "command list-panes: unknown flag -O");
 }
