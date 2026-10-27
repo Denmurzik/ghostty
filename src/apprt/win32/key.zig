@@ -255,10 +255,15 @@ pub fn isAltNumpadDigit(vk: u16, alt_down: bool) bool {
 }
 
 /// Whether Shift stays a modifier of a key that produced `text`. Shift
-/// that picked the character (a letter, a symbol) is consumed by it; the
-/// space bar is unchanged by Shift, so `shift+space` stays a binding.
-pub fn shiftConsumed(shift: bool, text: []const u8) bool {
-    return shift and text.len > 0 and !std.mem.eql(u8, text, " ");
+/// that picked the character (a letter, a symbol) is consumed by it; a key
+/// whose text is its unshifted character (the space bar) is unchanged by
+/// Shift, so `shift+space` stays a binding.
+pub fn shiftConsumed(shift: bool, text: []const u8, unshifted: u21) bool {
+    if (!shift or text.len == 0) return false;
+    const len = std.unicode.utf8ByteSequenceLength(text[0]) catch return true;
+    if (len != text.len) return true;
+    const cp = std.unicode.utf8Decode(text) catch return true;
+    return cp != unshifted;
 }
 
 /// The fake Shift Windows injects around some extended keys (Insert, Home,
@@ -508,11 +513,16 @@ test "win32 key: alt+numpad sequence yields one text event" {
 }
 
 test "win32 key: shift+space keeps shift" {
-    try testing.expect(!shiftConsumed(true, " "));
-    try testing.expect(shiftConsumed(true, "A"));
-    try testing.expect(shiftConsumed(true, "Ж"));
-    try testing.expect(!shiftConsumed(false, "a"));
-    try testing.expect(!shiftConsumed(true, ""));
+    try testing.expect(!shiftConsumed(true, " ", ' '));
+    try testing.expect(shiftConsumed(true, "A", 'a'));
+    try testing.expect(shiftConsumed(true, "Ж", 'ж'));
+    try testing.expect(shiftConsumed(true, "!", '1'));
+    // Unknown unshifted character: the text came from the shift.
+    try testing.expect(shiftConsumed(true, "x", 0));
+    try testing.expect(!shiftConsumed(false, "a", 'a'));
+    try testing.expect(!shiftConsumed(true, "", ' '));
+    // A key unchanged by Shift on this layout keeps it.
+    try testing.expect(!shiftConsumed(true, "ж", 'ж'));
 }
 
 test "win32 key: utf8 buffer never splits a code point" {
@@ -526,6 +536,16 @@ test "win32 key: utf8 buffer never splits a code point" {
     try testing.expect(!appendWhole(&dest, "ab€"));
     try testing.expect(appendWhole(&dest, "€"));
     try testing.expectEqualStrings("€", &dest);
+
+    // A piece that does not fit leaves the buffer alone, and the drain
+    // stops there: a later, smaller piece must not overtake it.
+    var small: [3]u8 = undefined;
+    var len: usize = 0;
+    const pieces = [_][]const u8{ "a", "€", "b" };
+    for (pieces) |p| {
+        if (appendWhole(small[len..], p)) len += p.len else break;
+    }
+    try testing.expectEqualStrings("a", small[0..len]);
 }
 
 test "win32 key: fake shifts are recognized" {

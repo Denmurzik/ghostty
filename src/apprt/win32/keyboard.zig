@@ -143,7 +143,7 @@ fn handleKey(
         state.dead_pending = false;
 
         event.utf8 = key.stripControl(text, &stripped_buf);
-        event.consumed_mods.shift = key.shiftConsumed(event.mods.shift, event.utf8);
+        event.consumed_mods.shift = key.shiftConsumed(event.mods.shift, event.utf8, event.unshifted_codepoint);
 
         const has_altgr = hasAltGr(state, hkl);
         const altgr = key.applyAltGr(
@@ -261,7 +261,9 @@ fn drainChars(surface: *Surface, sys: bool, buf: []u8) Drained {
         else
             surface.keyboard_state.joiner.feed(unit, &out) orelse continue;
 
-        if (key.appendWhole(buf[len..], utf8)) len += utf8.len;
+        // A unit that does not fit ends the drain: a later one must not
+        // overtake it.
+        if (key.appendWhole(buf[len..], utf8)) len += utf8.len else break;
         if (is_dead) {
             dead = true;
             break;

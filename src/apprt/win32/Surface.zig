@@ -731,11 +731,11 @@ test "win32 surface: WM_SIZE decoding" {
     try std.testing.expect(maximized.visible);
 }
 
-test "win32 tab: new tab inherits the focused surface pwd" {
+test "win32 surface: pwd is stored per surface" {
     const alloc = std.testing.allocator;
 
-    // Two panes of one tab report different directories; each keeps its own,
-    // so whichever one is focused is the one a new tab starts from.
+    // Two panes report different directories; each keeps its own, so the
+    // focused one is the source for the subtitle.
     var first: Surface = undefined;
     var second: Surface = undefined;
     first.pwd = null;
