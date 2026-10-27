@@ -66,6 +66,23 @@ pub fn windowStyle(decorations: Decorations) u32 {
     };
 }
 
+/// The style of a top-level window of `kind`. The quick terminal is a bare
+/// popup: no frame, no caption.
+pub fn styleFor(kind: Window.Kind, setting: configpkg.Config.WindowDecoration) u32 {
+    return switch (kind) {
+        .normal => windowStyle(decorationsFor(setting)),
+        .quick => user32.WS_POPUP | user32.WS_CLIPCHILDREN,
+    };
+}
+
+/// The extended style: the quick terminal has no taskbar button.
+pub fn exStyleFor(kind: Window.Kind) u32 {
+    return switch (kind) {
+        .normal => 0,
+        .quick => user32.WS_EX_TOOLWINDOW,
+    };
+}
+
 /// The `WM_NCHITTEST` result of a strip part. `x` is the client x of the
 /// point, `width` the client width; the top corners are `3 * resize_band`.
 pub fn ncHitCode(part: TabStrip.Part, x: i32, width: i32, resize_band: i32) u32 {
@@ -347,7 +364,7 @@ fn buildMenu() ?user32.HMENU {
 /// Bring the window's frame in line with the config: decorations, system
 /// menu style, Mica and the extended frame.
 pub fn apply(window: *Window) void {
-    applyDecorations(window, decorationsFor(window.app.config.@"window-decoration"));
+    applyDecorations(window, if (window.kind == .quick) .none else decorationsFor(window.app.config.@"window-decoration"));
 }
 
 /// `apply` with explicit decorations: the `toggle_window_decorations`
@@ -358,7 +375,7 @@ pub fn applyDecorations(window: *Window, decorations: Decorations) void {
     const style: usize = @bitCast(user32.GetWindowLongPtrW(window.hwnd, user32.GWL_STYLE));
     const sysmenu: usize = user32.WS_SYSMENU;
     const want = (style & ~sysmenu) | (windowStyle(decorations) & sysmenu);
-    if (want != style) _ = user32.SetWindowLongPtrW(window.hwnd, user32.GWL_STYLE, @bitCast(want));
+    if (want != style and window.kind == .normal) _ = user32.SetWindowLongPtrW(window.hwnd, user32.GWL_STYLE, @bitCast(want));
 
     const mica = theme.palette(window).mica;
     const m = TabStrip.Metrics.forDpi(window.dpi);
@@ -394,6 +411,7 @@ pub fn applyDecorations(window: *Window, decorations: Decorations) void {
 }
 
 pub fn stripMode(window: *const Window) TabStrip.Mode {
+    if (window.kind == .quick) return if (window.tabs.items.len > 1) .tabs_only else .hidden;
     if (window.placement.fullscreen) return .hidden;
     return switch (window.frame.decorations) {
         .client => .titlebar,
@@ -478,4 +496,14 @@ test "win32 frame: insets restored vs maximized at 96 and 144 dpi" {
         try std.testing.expectEqual(@as(i32, 0), none.top + none.left + none.right + none.bottom);
     }
     try std.testing.expect(frameInsets(144, false, .client).left > frameInsets(96, false, .client).left);
+}
+
+test "win32 frame: the quick terminal is a bare popup without a taskbar button" {
+    const quick = styleFor(.quick, .auto);
+    try std.testing.expect(quick & user32.WS_POPUP != 0);
+    try std.testing.expect(quick & user32.WS_CAPTION == 0);
+    try std.testing.expect(quick & user32.WS_THICKFRAME == 0);
+    try std.testing.expect(exStyleFor(.quick) & user32.WS_EX_TOOLWINDOW != 0);
+    try std.testing.expectEqual(windowStyle(.client), styleFor(.normal, .client));
+    try std.testing.expectEqual(@as(u32, 0), exStyleFor(.normal));
 }

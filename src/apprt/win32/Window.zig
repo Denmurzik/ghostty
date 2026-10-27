@@ -78,6 +78,7 @@ pub const CreateOptions = struct {
     parent: ?*CoreSurface = null,
     overrides: Overrides = .none,
     first_tab: bool = true,
+    kind: Kind = .normal,
 };
 
 hwnd: win32.foundation.HWND,
@@ -149,6 +150,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
         .hwnd = undefined,
         .app = app,
         .id = next_id.fetchAdd(1, .monotonic),
+        .kind = opts.kind,
     };
 
     if (opts.overrides.title) |t| self.title_override = alloc.dupeSentinel(u8, t, 0) catch |err| {
@@ -167,10 +169,10 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
     // The window procedure sees WM_NCCREATE before this returns and stores
     // `self` as the window's user data.
     const hwnd = win32.user32.CreateWindowExW(
-        0,
+        frame_mod.exStyleFor(opts.kind),
         class_name,
         std.unicode.utf8ToUtf16LeStringLiteral(default_title),
-        frame_mod.windowStyle(frame_mod.decorationsFor(app.config.@"window-decoration")),
+        frame_mod.styleFor(opts.kind, app.config.@"window-decoration"),
         win32.user32.CW_USEDEFAULT,
         win32.user32.CW_USEDEFAULT,
         win32.user32.CW_USEDEFAULT,
@@ -210,8 +212,9 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
             self.destroy();
             return err;
         };
-        // Core's `initial_size` has set the size by now.
-        self.placeInitial(parent_window);
+        // Core's `initial_size` has set the size by now. The quick terminal
+        // is placed by its own module when it is shown.
+        if (opts.kind == .normal) self.placeInitial(parent_window);
     }
 
     return self;
@@ -353,6 +356,8 @@ pub fn tabIndex(self: *const Window, tab: *const Tab) ?usize {
 
 /// Whether the tab strip lists tabs (rather than only the new-tab button).
 pub fn showTabs(self: *const Window) bool {
+    // The quick terminal lists tabs once it has more than one.
+    if (self.kind == .quick) return self.tabs.items.len > 1;
     return showTabsFor(self.app.config.@"window-show-tab-bar", self.tabs.items.len);
 }
 
@@ -838,6 +843,8 @@ fn runHooks(
 /// Resize the window so that its content area is `width` x `height`
 /// physical pixels.
 pub fn setInitialSize(self: *Window, width: u32, height: u32) void {
+    // The quick terminal's size comes from `quick-terminal-size`.
+    if (self.kind == .quick) return;
     self.placement.initial_size = .{ .width = width, .height = height };
     const size = windowSizeFor(
         .{ .w = clampPixels(width), .h = clampPixels(height) },
@@ -932,7 +939,8 @@ pub fn applyDpi(self: *Window, new_dpi: u32, suggested: ?win32.foundation.RECT) 
         placement_mod.coverMonitor(self);
     } else if (zoomed) {
         self.refitMaximized();
-    } else if (!iconic) {
+    } else if (!iconic and self.kind == .normal) {
+        // The quick terminal is placed by its module on every show.
         if (suggested) |r| {
             self.setOuterRect(geom.Rect.fromRECT(r));
         } else if (old_dpi != self.dpi) {
@@ -1171,7 +1179,7 @@ fn wndProc(
 
         win32.user32.WM_ACTIVATE => {
             const active = (wparam & 0xFFFF) != win32.user32.WA_INACTIVE;
-            if (active) self.app.last_active = self;
+            if (active and self.kind == .normal) self.app.last_active = self;
             hooks_mod.windowChanged(self, if (active) .activated else .deactivated);
         },
 

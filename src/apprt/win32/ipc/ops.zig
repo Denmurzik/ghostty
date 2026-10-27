@@ -262,7 +262,7 @@ fn colorScheme(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
 
 fn toggleQuickTerminal(app: *App, alloc: Allocator) []u8 {
     if (!QuickTerminal.ipcToggle(app)) {
-        return reply(alloc, .failed, "", "quick terminal is not available yet", null);
+        return reply(alloc, .failed, "", "quick terminal could not be toggled", null);
     }
     return reply(alloc, .ok, "", "", null);
 }
@@ -528,7 +528,6 @@ test "win32 ipc ops: unknown and test ops are refused without the env flag" {
         .{ .json = "{\"v\":1,\"op\":\"new-window\",\"deadline_ms\":1}", .code = .failed },
         .{ .json = "{\"v\":1,\"op\":\"new-window\",\"args\":[\"-e\",\"x\"]}", .code = .failed },
         .{ .json = "{\"v\":1,\"op\":\"new-tab\",\"args\":[\"--command=x\"]}", .code = .failed },
-        .{ .json = "{\"v\":1,\"op\":\"toggle-quick-terminal\"}", .code = .failed },
     };
     for (cases) |c| {
         const out = handle(app, testing.allocator, c.json);

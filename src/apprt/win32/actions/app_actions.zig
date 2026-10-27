@@ -70,9 +70,16 @@ pub fn goto_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.g
     const index = for (windows, 0..) |w, i| {
         if (w == from) break i;
     } else return false;
-    const to = gotoWindowIndex(value, index, windows.len) orelse return false;
-    windows[to].activate();
-    return true;
+    // The quick terminal is not part of the cycle.
+    var to = index;
+    for (windows) |_| {
+        to = gotoWindowIndex(value, to, windows.len) orelse return false;
+        if (windows[to].kind == .normal and windows[to] != from) {
+            windows[to].activate();
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The window `goto_window` lands on; null when there is no other one.

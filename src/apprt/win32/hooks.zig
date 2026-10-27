@@ -234,6 +234,7 @@ test "win32 hooks: testState writes an m3 object" {
     // Only the windows are looked at.
     var app: App = undefined;
     app.windows = .empty;
+    app.quick = .{};
     try testState(&app, &jw);
     try jw.endObject();
 

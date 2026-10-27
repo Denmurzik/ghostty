@@ -6,6 +6,7 @@ const std = @import("std");
 const win32 = @import("win32");
 const Chrome = @import("Chrome.zig");
 const TabStrip = @import("TabStrip.zig");
+const QuickTerminal = @import("QuickTerminal.zig");
 const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
@@ -252,6 +253,7 @@ pub fn hitAt(app: *App, pt: tab_drag.Point) tab_drag.Hit {
     const root = user32.GetAncestor(under, user32.GA_ROOT) orelse return .none;
     for (app.windows.items) |w| {
         if (w.hwnd != root or w.tearing_down) continue;
+        if (!QuickTerminal.acceptsTabDrop(w.kind)) return .none;
         var c: win32.foundation.POINT = .{ .x = pt.x, .y = pt.y };
         _ = user32.ScreenToClient(w.hwnd, &c);
         if (!w.strip.show_tabs or !w.strip.bounds.contains(c.x, c.y)) return .none;

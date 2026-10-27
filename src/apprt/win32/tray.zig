@@ -6,6 +6,7 @@
 const std = @import("std");
 const win32 = @import("win32");
 const App = @import("App.zig");
+const QuickTerminal = @import("QuickTerminal.zig");
 const Window = @import("Window.zig");
 const dpi_mod = @import("dpi.zig");
 const messages = @import("messages.zig");
@@ -239,14 +240,22 @@ fn wndProc(
 }
 
 fn click(app: *App) void {
-    switch (clickAction(app.windows.items.len)) {
+    switch (clickAction(QuickTerminal.countNormal(app.windows.items))) {
         .new_window => newWindow(app),
         .present_last => {
-            const window = app.last_active orelse
-                app.windows.items[app.windows.items.len - 1];
+            const window = app.last_active orelse lastNormal(app) orelse return;
             window.activate();
         },
     }
+}
+
+fn lastNormal(app: *App) ?*Window {
+    var i = app.windows.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (app.windows.items[i].kind == .normal) return app.windows.items[i];
+    }
+    return null;
 }
 
 fn newWindow(app: *App) void {
