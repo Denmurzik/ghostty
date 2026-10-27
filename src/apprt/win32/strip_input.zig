@@ -112,7 +112,10 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             trackLeave(window);
             const x = user32.getXLparam(lparam);
             setHover(window, hoverOf(hitTest(window, x, user32.getYLparam(lparam))));
-            if (window.strip_input.proxy_press) |press| proxyMove(window, press, x, user32.getYLparam(lparam), wparam);
+            // The drag of the folder ran its own loop: the window may be gone.
+            if (window.strip_input.proxy_press) |press| {
+                if (proxyMove(window, press, x, user32.getYLparam(lparam), wparam)) return 0;
+            }
             if (window.strip_input.session != null) {
                 hideTooltip(window);
                 if (wparam & MK_LBUTTON == 0) {
@@ -215,18 +218,19 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
 }
 
 /// The pointer moved with the proxy icon pressed: past the drag threshold the
-/// folder is dragged out.
-fn proxyMove(window: *Window, press: geom.Point, x: i32, y: i32, wparam: WPARAM) void {
+/// folder is dragged out (true: the drag ran, `window` must not be touched).
+fn proxyMove(window: *Window, press: geom.Point, x: i32, y: i32, wparam: WPARAM) bool {
     if (wparam & MK_LBUTTON == 0) {
         window.strip_input.proxy_press = null;
         _ = user32.ReleaseCapture();
-        return;
+        return false;
     }
     const m = TabStrip.Metrics.forDpi(window.dpi);
-    if (@abs(x - press.x) < m.drag_threshold and @abs(y - press.y) < m.drag_threshold) return;
+    if (@abs(x - press.x) < m.drag_threshold and @abs(y - press.y) < m.drag_threshold) return false;
     window.strip_input.proxy_press = null;
     _ = user32.ReleaseCapture();
     proxy_icon.startDrag(window);
+    return true;
 }
 
 /// The button went up with the proxy icon pressed: a click when it is still over it.

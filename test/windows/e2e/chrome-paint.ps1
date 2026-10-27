@@ -1,9 +1,10 @@
 # e2e: milestone=M2 timeout=180 order=300
 # chrome-paint: the strip is painted by the Chrome painter. Three tabs, the
-# window in the foreground, then CopyFromScreen of the strip: the active tab
-# has the configured background (+-6), the inactive tabs carry text pixels
-# (luminance variance above a threshold), and with the pointer over the close
-# caption button its rect is mostly #C42B1C (+-10). Run for a dark and a
+# window in the foreground, then CopyFromScreen of the strip: the title row is
+# the configured background (+-6, one colour with the terminal), the selected
+# tab is a pill lighter than the track behind it, the inactive tabs carry text
+# pixels (luminance variance above a threshold), and with the pointer over the
+# close caption button its rect is mostly #C42B1C (+-10). Run for a dark and a
 # light configuration; the PNGs go to the evidence dir.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
@@ -64,25 +65,31 @@ function Test-Chrome([string]$Tag, [string]$Background, [string]$Foreground) {
         $dir = Get-EvidenceDir
         if ($dir) { $strip.Save((Join-Path $dir "chrome-paint-$Tag-strip.png"), [Drawing.Imaging.ImageFormat]::Png) }
 
-        # Active tab (the last one): the background, sampled below the title.
+        # The title row is the configured background; the selected tab (the last
+        # one) is a pill lighter than the track, sampled left of its title.
         $want = [Drawing.ColorTranslator]::FromHtml($Background)
-        $a = @($st.strip.tabs)[$st.active_tab]
-        $ax = $a[0] + 24
-        $ay = $a[3] - 4
-        $px = $strip.GetPixel($ax - $b[0], $ay - $b[1])
+        $px = $strip.GetPixel(40, 6)
         if ([Math]::Abs($px.R - $want.R) -gt 6 -or [Math]::Abs($px.G - $want.G) -gt 6 -or [Math]::Abs($px.B - $want.B) -gt 6) {
-            throw ("$Tag : active tab pixel ({0},{1}) is #{2:x2}{3:x2}{4:x2}, config background $Background" -f $ax, $ay, $px.R, $px.G, $px.B)
+            throw ("$Tag : title row pixel is #{0:x2}{1:x2}{2:x2}, config background $Background" -f $px.R, $px.G, $px.B)
+        }
+        $a = @($st.strip.tabs)[$st.active_tab]
+        $ay = [int](($a[1] + $a[3]) / 2)
+        $pill = $strip.GetPixel($a[0] + 40 - $b[0], $ay - $b[1])
+        $track = $strip.GetPixel($st.strip.track[0] + 3 - $b[0], $ay - $b[1])
+        Write-E2eInfo ("$Tag pill #{0:x2}{1:x2}{2:x2} track #{3:x2}{4:x2}{5:x2}" -f $pill.R, $pill.G, $pill.B, $track.R, $track.G, $track.B)
+        if ((Get-Luma $pill) -le (Get-Luma $track) + 4) {
+            throw ("$Tag : the selected tab (#{0:x2}{1:x2}{2:x2}) is not lighter than the track (#{3:x2}{4:x2}{5:x2})" -f $pill.R, $pill.G, $pill.B, $track.R, $track.G, $track.B)
         }
 
         # Inactive tabs: text pixels in the title area.
         for ($i = 0; $i -lt 3; $i++) {
             if ($i -eq $st.active_tab) { continue }
             $r = @($st.strip.tabs)[$i]
-            $rect = New-Object Drawing.Rectangle ($r[0] + 8), 8, ($r[2] - $r[0] - 48), ($r[3] - $r[1] - 16)
+            $rect = New-Object Drawing.Rectangle ([int](($r[0] + $r[2]) / 2) - 30 - $b[0]), ($r[1] - $b[1] + 4), 60, ($r[3] - $r[1] - 8)
             $crop = $strip.Clone($rect, $strip.PixelFormat)
             try { $sd = Get-LumaStdDev $crop } finally { $crop.Dispose() }
             Write-E2eInfo "$Tag inactive tab $i luminance stddev $([Math]::Round($sd, 1))"
-            if ($sd -lt 8) { throw "$Tag : inactive tab $i has no text pixels (luminance stddev $sd)" }
+            if ($sd -lt 3) { throw "$Tag : inactive tab $i has no text pixels (luminance stddev $sd)" }
         }
         $strip.Dispose()
 

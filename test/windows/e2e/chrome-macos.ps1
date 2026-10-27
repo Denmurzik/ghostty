@@ -1,4 +1,4 @@
-# e2e: milestone=M3 timeout=240 order=395
+# e2e: milestone=M3 timeout=420 order=395
 # chrome-macos: the window chrome after Ghostty for macOS (DECISIONS 2026-10-27).
 # One tab: only the title row (30 px), no tab row, no "+", the title centred on
 # the window, the title row and the terminal one colour. Three tabs: the tab
@@ -184,7 +184,82 @@ function Test-Look([string]$Tag, [string]$Background, [string]$Foreground) {
     }
 }
 
+
+# Pixels of two shots that differ (luminance), counted over the whole strip.
+function Get-ShotDiff([Drawing.Bitmap]$A, [Drawing.Bitmap]$B) {
+    $n = 0
+    $h = [Math]::Min($A.Height, $B.Height)
+    for ($y = 0; $y -lt $h; $y += 2) {
+        for ($x = 0; $x -lt $A.Width; $x += 2) {
+            if ([Math]::Abs((Get-Luma $A.GetPixel($x, $y)) - (Get-Luma $B.GetPixel($x, $y))) -gt 6) { $n++ }
+        }
+    }
+    $n
+}
+
+# The animations: a second tab slides the tab row in, a closed tab slides it
+# out, and the terminal's grid resizes once each time (not per frame). Frames
+# of the strip are taken while it moves; at least one of them differs from the
+# resting end state, and the surface's rect takes at most two values.
+function Test-Animation([string]$Background, [string]$Foreground) {
+    $g = Start-E2eGhostty -ConfigText "background = $Background`nforeground = $Foreground`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = auto`n"
+    try {
+        if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "anim : no frame dump" }
+        [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+        Start-Sleep -Milliseconds 800
+        function Get-Win { @((Get-GhosttyState -Class $g.Class).windows)[0] }
+        function Get-SurfaceRect { $w = Get-Win; (@($w.tabs)[$w.active_tab].surfaces[0].rect) -join ',' }
+        $o = New-Object GhosttyE2e.Mouse+POINT
+        [void][GhosttyE2e.Mouse]::ClientToScreen($g.Hwnd, [ref]$o)
+        $width = (Get-Win).strip.bounds[2]
+        Send-MouseMove -Hwnd $g.Hwnd -X 300 -Y 300
+
+        function Watch-Strip([string]$Action, [int]$Frames) {
+            $shots = @()
+            $rects = @((Get-SurfaceRect))
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            [void](Invoke-GhosttyAction -Class $g.Class -Action $Action)
+            for ($i = 0; $i -lt $Frames; $i++) {
+                $shots += , (Get-ScreenShot $o.X $o.Y $width 66)
+                $rects += (Get-SurfaceRect)
+            }
+            Start-Sleep -Milliseconds 500
+            $final = Get-ScreenShot $o.X $o.Y $width 66
+            $rects += (Get-SurfaceRect)
+            $diffs = @($shots | ForEach-Object { Get-ShotDiff $_ $final })
+            foreach ($s in $shots) { $s.Dispose() }
+            $final.Dispose()
+            Write-E2eInfo "anim $Action : $Frames frames in $($sw.ElapsedMilliseconds) ms, diffs to the end state $($diffs -join ',')"
+            Write-E2eInfo "anim $Action : surface rects $((@($rects | Select-Object -Unique)) -join ' | ')"
+            [pscustomobject]@{ Diffs = $diffs; Rects = @($rects | Select-Object -Unique) }
+        }
+
+        # The second tab: the row slides in.
+        $r = Watch-Strip 'new_tab' 8
+        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the new tab differs from its end state ($($r.Diffs -join ','))" }
+        if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid in: $($r.Rects -join ' | ')" }
+        # A third tab slides in too (tabs animate, the terminal does not resize).
+        $r = Watch-Strip 'new_tab' 8
+        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the third tab differs from its end state ($($r.Diffs -join ','))" }
+        if ($r.Rects.Count -gt 1) { throw "anim: the terminal resized with a third tab: $($r.Rects -join ' | ')" }
+        # Closing back to one tab: the row slides out, the terminal grows once, at the end.
+        [void](Invoke-GhosttyAction -Class $g.Class -Action 'close_tab')
+        Start-Sleep -Milliseconds 600
+        $r = Watch-Strip 'close_tab' 8
+        if (@($r.Diffs | Where-Object { $_ -gt 150 }).Count -lt 1) { throw "anim: no frame of the closing tab differs from its end state ($($r.Diffs -join ','))" }
+        if ($r.Rects.Count -gt 2) { throw "anim: the terminal resized $($r.Rects.Count - 1) times while the row slid out: $($r.Rects -join ' | ')" }
+        $w = Get-Win
+        if (@($w.tabs).Count -ne 1 -or $w.strip.bounds[3] -ne 30) { throw "anim: the end state is not one tab with the title row only: strip $($w.strip.bounds -join ',')" }
+    } finally {
+        if (-not $g.Process.HasExited) {
+            $g.Process.Kill()
+            [void]$g.Process.WaitForExit(5000)
+        }
+    }
+}
+
 Invoke-E2eScenario 'chrome-macos' {
     Test-Look 'dark' '#1b1c26' '#e0e0e0'
     Test-Look 'light' '#f4f4f4' '#101010'
+    Test-Animation '#1b1c26' '#e0e0e0'
 }

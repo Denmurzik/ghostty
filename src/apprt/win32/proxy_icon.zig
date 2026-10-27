@@ -220,17 +220,19 @@ pub fn showMenu(window: *Window, screen_x: i32, screen_y: i32) void {
     _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
     _ = user32.AppendMenuW(menu, user32.MF_STRING, copy_command, std.unicode.utf8ToUtf16LeStringLiteral("Copy path"));
 
-    _ = user32.SetForegroundWindow(window.hwnd);
+    const hwnd = window.hwnd;
+    _ = user32.SetForegroundWindow(hwnd);
     const cmd = user32.TrackPopupMenuEx(
         menu,
         user32.TPM_RETURNCMD | user32.TPM_RIGHTBUTTON,
         screen_x,
         screen_y,
-        window.hwnd,
+        hwnd,
         null,
     );
-    _ = user32.PostMessageW(window.hwnd, user32.WM_NULL, 0, 0);
-    if (cmd <= 0) return;
+    _ = user32.PostMessageW(hwnd, user32.WM_NULL, 0, 0);
+    // The menu ran a loop of its own: the window may be gone.
+    if (cmd <= 0 or util.fromUserData(Window, hwnd) != window) return;
     const chosen: usize = @intCast(cmd);
     if (chosen == copy_command) {
         clipboard.write(window.hwnd, path) catch |err| {
