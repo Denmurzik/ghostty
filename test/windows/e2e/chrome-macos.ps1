@@ -10,13 +10,6 @@
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
-function Get-ScreenShot([int]$X, [int]$Y, [int]$W, [int]$H) {
-    $bmp = New-Object Drawing.Bitmap $W, $H
-    $gfx = [Drawing.Graphics]::FromImage($bmp)
-    try { $gfx.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H)) } finally { $gfx.Dispose() }
-    $bmp
-}
-
 function Get-Luma([Drawing.Color]$C) { 0.2126 * $C.R + 0.7152 * $C.G + 0.0722 * $C.B }
 
 # Standard deviation of the luminance over the bitmap.

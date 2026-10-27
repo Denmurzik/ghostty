@@ -758,6 +758,86 @@ test "d3d11 frame: composition premultiplies in sRGB space, linear blending does
     }
 }
 
+test "d3d11 frame: composition leaves translucent text unchanged" {
+    // Faint text (fg alpha 128) over an opaque bg: only the background
+    // layers change with `composition`, so the pixels must be equal.
+    var results: [2][4]u8 = undefined;
+    for ([_]bool{ false, true }, 0..) |composition, n| {
+        var fx: Fixture = try .init(.linear, 16, 16);
+        defer fx.deinit();
+
+        var uniforms = try bufferpkg.Buffer(shaderspkg.Uniforms).init(fx.api.uniformBufferOptions(), 1);
+        defer uniforms.deinit();
+        var bg_cells = try bufferpkg.Buffer(shaderspkg.CellBg).initFill(
+            fx.api.bgBufferOptions(),
+            &.{.{ 0, 0, 0, 0 }},
+        );
+        defer bg_cells.deinit();
+        var cells = try bufferpkg.Buffer(shaderspkg.CellText).initFill(
+            fx.api.fgBufferOptions(),
+            &.{.{
+                .glyph_pos = .{ 2, 2 },
+                .glyph_size = .{ 4, 4 },
+                .bearings = .{ 2, 12 },
+                .grid_pos = .{ 0, 0 },
+                .color = .{ 224, 224, 224, 128 },
+                .atlas = .grayscale,
+            }},
+        );
+        defer cells.deinit();
+
+        var gray: font.Atlas = try .init(testing.allocator, 8, .grayscale);
+        defer gray.deinit(testing.allocator);
+        for (2..6) |y| @memset(gray.data[y * 8 + 2 ..][0..4], 255);
+        var color: font.Atlas = try .init(testing.allocator, 8, .bgra);
+        defer color.deinit(testing.allocator);
+
+        fx.api.drawFrameStart();
+        defer fx.api.drawFrameEnd();
+
+        const gray_tex = try fx.api.initAtlasTexture(&gray);
+        defer gray_tex.deinit();
+        try gray_tex.replaceRegion(0, 0, 8, 8, gray.data);
+        const color_tex = try fx.api.initAtlasTexture(&color);
+        defer color_tex.deinit();
+        try color_tex.replaceRegion(0, 0, 8, 8, color.data);
+
+        var u = fx.uniforms(8, 16, 1, 1);
+        u.bg_color = .{ 16, 32, 48, 255 };
+        u.bools.composition = composition;
+        try uniforms.sync(&.{u});
+
+        var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+        {
+            var pass = frame.renderPass(&.{.{
+                .target = .{ .target = fx.target },
+                .clear_color = .{ 0, 0, 0, 0 },
+            }});
+            defer pass.complete();
+            pass.step(.{
+                .pipeline = fx.shaders.pipelines.bg_color,
+                .uniforms = uniforms.buffer,
+                .draw = .{ .type = .triangle, .vertex_count = 3 },
+            });
+            pass.step(.{
+                .pipeline = fx.shaders.pipelines.cell_text,
+                .uniforms = uniforms.buffer,
+                .buffers = &.{ cells.buffer, bg_cells.buffer },
+                .textures = &.{ gray_tex, color_tex },
+                .draw = .{ .type = .triangle_strip, .vertex_count = 4, .instance_count = 1 },
+            });
+        }
+        frame.complete(false);
+
+        const pixels = try fx.pixels();
+        defer testing.allocator.free(pixels);
+        results[n] = pixelAt(pixels, 16, 3, 5);
+    }
+    try expectPixel(results[0], results[1], 0);
+    // And it is a blend, not the bare bg or the bare text.
+    try testing.expect(results[0][0] != 48 and results[0][0] < 224);
+}
+
 test "d3d11 frame: dump hook writes a BMP" {
     var fx: Fixture = try .init(.native, 5, 3);
     defer fx.deinit();

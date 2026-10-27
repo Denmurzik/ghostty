@@ -1,6 +1,6 @@
 # e2e: milestone=M3 timeout=240 order=396
-# chrome-proxy-icon: the proxy icon of the title row. Without a known working
-# directory there is no icon; once the focused surface reports one (test IPC
+# chrome-proxy-icon: the proxy icon of the title row. Shell integration is on,
+# so the icon shows for the start folder; once the focused surface reports another (test IPC
 # op `pwd`) the shell's folder icon appears left of the title, the pair centred
 # on the window, and the pixels of the icon rect are coloured. A click records
 # the folder as `open` in `m3.opened` (test mode launches nothing), dragging
@@ -10,13 +10,6 @@
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
-
-function Get-ScreenShot([int]$X, [int]$Y, [int]$W, [int]$H) {
-    $bmp = New-Object Drawing.Bitmap $W, $H
-    $gfx = [Drawing.Graphics]::FromImage($bmp)
-    try { $gfx.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H)) } finally { $gfx.Dispose() }
-    $bmp
-}
 
 function Get-Win($G) { @((Get-GhosttyState -Class $G.Class).windows)[0] }
 
@@ -31,7 +24,6 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
     try {
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
         $w = Get-Win $g
-        if ($null -ne $w.strip.proxy_icon) { throw "an icon is shown before any directory is known: $($w.strip.proxy_icon -join ',')" }
 
         Set-Pwd $g $folder
         $w = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {

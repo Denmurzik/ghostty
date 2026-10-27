@@ -189,15 +189,6 @@ float4 load_color(
   // 0 .. 255 -> 0.0 .. 1.0
   float4 color = float4(in_color) / 255.0f;
 
-  // A composition chain is blended by DWM on the stored sRGB bytes, which
-  // must hold the premultiplied sRGB colour: premultiply the encoded colour,
-  // then linearize it so that the hardware's encode on write gives it back.
-  if (is_linear && uniform_composition()) {
-    color.rgb *= color.a;
-    color.rgb = linearize(float4(color.rgb, 1.0)).rgb;
-    return color;
-  }
-
   // Linearize if necessary.
   if (is_linear) {
     color = linearize(color);
@@ -207,6 +198,27 @@ float4 load_color(
   color.rgb *= color.a;
 
   return color;
+}
+
+// Like `load_color`, for the layers whose alpha reaches DWM: the background
+// colour and the cell backgrounds. A composition chain is blended by DWM on
+// the stored sRGB bytes, which must hold the premultiplied sRGB colour:
+// premultiply the encoded colour, then linearize the product so that the
+// hardware's encode on write gives it back. Everything else (text, cursor,
+// faint text, images, colour glyphs, `background-image` opacity, custom shader
+// post passes) keeps `load_color`'s linear premultiply.
+float4 load_bg_color(
+  uint4 in_color,
+  bool display_p3,
+  bool is_linear
+) {
+  if (is_linear && uniform_composition()) {
+    float4 color = float4(in_color) / 255.0f;
+    color.rgb *= color.a;
+    color.rgb = linearize(float4(color.rgb, 1.0)).rgb;
+    return color;
+  }
+  return load_color(in_color, display_p3, is_linear);
 }
 
 //-------------------------------------------------------------------

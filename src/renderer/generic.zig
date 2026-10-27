@@ -2041,9 +2041,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try self.updateCustomShaderUniformsForFrame();
 
             // Setup our frame data
-            var frame_uniforms = self.uniforms;
-            if (comptime @hasDecl(GraphicsAPI, "adjustUniforms")) self.api.adjustUniforms(&frame_uniforms);
-            try frame.uniforms.sync(&.{frame_uniforms});
+            if (comptime @hasDecl(GraphicsAPI, "adjustUniforms")) {
+                var frame_uniforms = self.uniforms;
+                self.api.adjustUniforms(&frame_uniforms);
+                try frame.uniforms.sync(&.{frame_uniforms});
+            } else try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
 

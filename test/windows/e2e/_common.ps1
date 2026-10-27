@@ -969,3 +969,81 @@ function Start-Launch([string]$Class, [string[]]$LaunchArgs) {
     Register-OwnGhostty -ProcessId $proc.Id
     $proc
 }
+
+# --- screen captures ----------------------------------------------------------------
+#
+# A capture must never contain a window that is not ours (the owner works on
+# this desktop): before every capture a grid of WindowFromPoint samples over
+# the rect has to hit only this process (the backdrop/distractor forms) or a
+# Ghostty started by this run (class ghostty-*). Otherwise it is retried
+# three times and then the scenario is SKIPped ("desktop busy"), saving
+# nothing. Saved images are crops of the Ghostty window (Save-WindowShot).
+
+if (-not ('GhosttyE2e.Capture' -as [type])) {
+    Add-Type -Namespace GhosttyE2e -Name Capture -MemberDefinition @"
+[StructLayout(LayoutKind.Sequential)] public struct PT { public int X, Y; }
+[StructLayout(LayoutKind.Sequential)] public struct RC { public int Left, Top, Right, Bottom; }
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(PT p);
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RC r);
+"@
+}
+
+$script:CaptureOwnerCache = @{}
+
+function Test-OwnCaptureProcess([uint32]$ProcessId) {
+    if ($ProcessId -eq $PID) { return $true }
+    if ($script:CaptureOwnerCache.ContainsKey($ProcessId)) { return $script:CaptureOwnerCache[$ProcessId] }
+    $ok = $false
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if ($p -and $p.Name -like 'ghostty*' -and [string]$p.CommandLine -like '*--class=ghostty-*') { $ok = $true }
+    $script:CaptureOwnerCache[$ProcessId] = $ok
+    $ok
+}
+
+# True when every sampled point of the rect belongs to one of our windows.
+function Test-CaptureRectClear([int]$X, [int]$Y, [int]$W, [int]$H) {
+    $cols = 14
+    $rows = 9
+    for ($i = 0; $i -lt $cols; $i++) {
+        for ($j = 0; $j -lt $rows; $j++) {
+            $pt = New-Object GhosttyE2e.Capture+PT
+            $pt.X = $X + [int](($W - 1) * $i / ($cols - 1))
+            $pt.Y = $Y + [int](($H - 1) * $j / ($rows - 1))
+            $hit = [GhosttyE2e.Capture]::WindowFromPoint($pt)
+            if ($hit -eq [IntPtr]::Zero) { continue }
+            $root = [GhosttyE2e.Capture]::GetAncestor($hit, 2)
+            if ($root -eq [IntPtr]::Zero) { $root = $hit }
+            $owner = [uint32]0
+            [void][GhosttyE2e.Capture]::GetWindowThreadProcessId($root, [ref]$owner)
+            if (-not (Test-OwnCaptureProcess $owner)) { $script:CaptureForeign = "pid $owner at $($pt.X),$($pt.Y) in rect $X,$Y,${W}x$H"; return $false }
+        }
+    }
+    $true
+}
+
+function Assert-CaptureRectClear([int]$X, [int]$Y, [int]$W, [int]$H) {
+    for ($try = 0; $try -lt 3; $try++) {
+        if (Test-CaptureRectClear $X $Y $W $H) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "E2E-SKIP: desktop busy (a window that is not ours is in the capture area: $($script:CaptureForeign))"
+}
+
+# Pixels of a screen rect, after the foreign-window guard.
+function Get-ScreenShot([int]$X, [int]$Y, [int]$W, [int]$H) {
+    Assert-CaptureRectClear $X $Y $W $H
+    $bmp = New-Object Drawing.Bitmap $W, $H
+    $gfx = [Drawing.Graphics]::FromImage($bmp)
+    try { $gfx.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H)) } finally { $gfx.Dispose() }
+    $bmp
+}
+
+# Saves the window rect of `$Hwnd` plus a small margin (the backdrop around it).
+function Save-WindowShot([IntPtr]$Hwnd, [string]$Path, [int]$Margin = 40) {
+    $r = New-Object GhosttyE2e.Capture+RC
+    [void][GhosttyE2e.Capture]::GetWindowRect($Hwnd, [ref]$r)
+    $bmp = Get-ScreenShot ($r.Left - $Margin) ($r.Top - $Margin) ($r.Right - $r.Left + 2 * $Margin) ($r.Bottom - $r.Top + 2 * $Margin)
+    try { $bmp.Save($Path, [Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+}

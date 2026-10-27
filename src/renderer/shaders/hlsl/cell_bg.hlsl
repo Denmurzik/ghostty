@@ -50,7 +50,7 @@ float4 cell_bg_ps(float4 position : SV_Position) : SV_Target0 {
   //       a bunch of work converting the cell color in every
   //       fragment of each cell. It's not the most epxensive
   //       operation, but it is still wasted work.
-  return load_color(
+  return load_bg_color(
     cell_color,
     uniform_use_display_p3(),
     uniform_use_linear_blending()

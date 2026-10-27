@@ -49,7 +49,7 @@ Invoke-E2eScenario 'opacity-blur' {
                 $spread = Get-LumaSpread $bmp
                 $c = $bmp.GetPixel(100, 60)
             } finally { $bmp.Dispose() }
-            if ($dir) { (Get-ScreenBitmap 60 60 1500 1000).Save((Join-Path $dir "opacity-blur-$Tag-screen.png"), [Drawing.Imaging.ImageFormat]::Png) }
+            if ($dir) { Save-WindowShot $g.Hwnd (Join-Path $dir "opacity-blur-$Tag-screen.png") }
             Write-E2eInfo "$Tag : stripe spread $([Math]::Round($spread, 1)), centre $(Format-Color $c)"
             [pscustomobject]@{ Spread = $spread; Color = $c }
         }

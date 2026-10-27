@@ -299,7 +299,9 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
 /// space (`shaders/hlsl/common.hlsli` `load_color`), the way DWM blends it.
 pub fn adjustUniforms(self: *const D3D11, uniforms: *shaders.Uniforms) void {
     const target = self.present_target orelse return;
-    uniforms.bools.composition = self.blending.isLinear() and currentMode(target) == .composition;
+    // The chain this frame is drawn into, else the one it will get.
+    const mode = if (self.swap_chain) |*sc| sc.mode else currentMode(target);
+    uniforms.bools.composition = self.blending.isLinear() and mode == .composition;
 }
 
 /// The mode to create a chain in: composition only when the apprt asked

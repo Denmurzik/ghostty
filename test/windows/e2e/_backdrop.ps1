@@ -66,12 +66,7 @@ function Invoke-Pump([int]$Ms) {
     }
 }
 
-function Get-ScreenBitmap([int]$X, [int]$Y, [int]$W, [int]$H) {
-    $bmp = New-Object Drawing.Bitmap $W, $H
-    $gfx = [Drawing.Graphics]::FromImage($bmp)
-    try { $gfx.CopyFromScreen($X, $Y, 0, 0, (New-Object Drawing.Size $W, $H)) } finally { $gfx.Dispose() }
-    $bmp
-}
+function Get-ScreenBitmap([int]$X, [int]$Y, [int]$W, [int]$H) { Get-ScreenShot $X $Y $W $H }
 
 function Get-ScreenPixel([int]$X, [int]$Y) {
     $b = Get-ScreenBitmap $X $Y 1 1

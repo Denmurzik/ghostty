@@ -248,8 +248,9 @@ pub const Uniforms = extern struct {
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool = false,
 
-        /// The frame goes to a composition swap chain: premultiply in
-        /// sRGB space (DWM blends the stored bytes), see `load_color`.
+        /// The frame goes to a composition swap chain: the background layers
+        /// premultiply in sRGB space (DWM blends the stored bytes), see
+        /// `load_bg_color`; text and everything else is unchanged.
         composition: bool = false,
 
         _padding: u27 = 0,
