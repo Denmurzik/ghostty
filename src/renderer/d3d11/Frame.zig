@@ -8,6 +8,7 @@
 const Self = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const global = @import("../../global.zig");
@@ -190,10 +191,12 @@ pub const Dump = struct {
     pending: ?Pending = null,
 
     /// Test hook: runs in `flush` right before the file is written.
-    before_write: ?struct {
+    before_write: if (builtin.is_test) ?WriteHook else void = if (builtin.is_test) null else {},
+
+    const WriteHook = struct {
         ctx: *anyopaque,
         run: *const fn (*anyopaque) void,
-    } = null,
+    };
 
     const Pending = struct {
         /// Tightly packed BGRA, owned by the dump.
@@ -279,7 +282,9 @@ pub const Dump = struct {
         self.pending = null;
         defer alloc.free(p.pixels);
 
-        if (self.before_write) |hook| hook.run(hook.ctx);
+        if (comptime builtin.is_test) {
+            if (self.before_write) |hook| hook.run(hook.ctx);
+        }
         self.write(p) catch |err| self.logFailure(err);
     }
 
