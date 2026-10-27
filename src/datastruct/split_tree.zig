@@ -580,6 +580,35 @@ pub fn SplitTree(comptime V: type) type {
             };
         }
 
+        /// Replace the view of the leaf at the given node, returning a new
+        /// tree with the same shape, ratios and zoom state.
+        ///
+        /// The allocator will be used for the newly created tree.
+        /// The previous tree will not be freed, but reference counts
+        /// for the views will be increased accordingly for the new tree.
+        pub fn replace(
+            self: *const Self,
+            gpa: Allocator,
+            at: Node.Handle,
+            view: *View,
+        ) Allocator.Error!Self {
+            assert(self.nodes[at.idx()] == .leaf);
+
+            var arena = ArenaAllocator.init(gpa);
+            errdefer arena.deinit();
+            const alloc = arena.allocator();
+
+            const nodes = try alloc.dupe(Node, self.nodes);
+            nodes[at.idx()] = .{ .leaf = view };
+            try refNodes(gpa, nodes);
+
+            return .{
+                .arena = arena,
+                .nodes = nodes,
+                .zoomed = self.zoomed,
+            };
+        }
+
         /// Remove a node from the tree.
         pub fn remove(
             self: *Self,
@@ -2526,4 +2555,69 @@ test "SplitTree: remove and zoom" {
             \\
         );
     }
+}
+
+test "SplitTree: replace keeps shape, ratios and zoom" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var va: TestTree.View = .{ .label = "A" };
+    var vb: TestTree.View = .{ .label = "B" };
+    var vc: TestTree.View = .{ .label = "C" };
+    var vd: TestTree.View = .{ .label = "D" };
+
+    var ta: TestTree = try .init(alloc, &va);
+    defer ta.deinit();
+    var tb: TestTree = try .init(alloc, &vb);
+    defer tb.deinit();
+    var tc: TestTree = try .init(alloc, &vc);
+    defer tc.deinit();
+
+    // A | (B / C)
+    var bc = try tb.split(alloc, .root, .down, 0.25, &tc);
+    defer bc.deinit();
+    var t = try ta.split(alloc, .root, .right, 0.4, &bc);
+    defer t.deinit();
+
+    var at: TestTree.Node.Handle = undefined;
+    var it = t.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.view.label, "B")) at = entry.handle;
+    }
+    t.zoom(at);
+
+    var r = try t.replace(alloc, at, &vd);
+    defer r.deinit();
+
+    try testing.expectEqual(t.nodes.len, r.nodes.len);
+    try testing.expectEqual(at, r.zoomed.?);
+    for (t.nodes, r.nodes, 0..) |old, new, i| switch (old) {
+        .split => |s| {
+            try testing.expectEqual(s.layout, new.split.layout);
+            try testing.expectEqual(s.ratio, new.split.ratio);
+            try testing.expectEqual(s.left, new.split.left);
+            try testing.expectEqual(s.right, new.split.right);
+        },
+        .leaf => if (i == at.idx()) {
+            try testing.expectEqualStrings("D", new.leaf.label);
+        } else {
+            try testing.expectEqualStrings(old.leaf.label, new.leaf.label);
+        },
+    };
+}
+
+test "SplitTree: replace root leaf" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var va: TestTree.View = .{ .label = "A" };
+    var vb: TestTree.View = .{ .label = "B" };
+    var t: TestTree = try .init(alloc, &va);
+    defer t.deinit();
+
+    var r = try t.replace(alloc, .root, &vb);
+    defer r.deinit();
+    try testing.expectEqual(@as(usize, 1), r.nodes.len);
+    try testing.expectEqualStrings("B", r.nodes[0].leaf.label);
+    try testing.expect(r.zoomed == null);
 }
