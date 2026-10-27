@@ -572,6 +572,10 @@ fn renderCallback(
     // Kitty graphics animations pause with us and resume on visibility.
     if (!t.flags.visible) return .disarm;
 
+    // A renderer paced by the display waits for its slot first, so the
+    // snapshot below is what the frame shows (see `waitFrameSlot`).
+    t.renderer.waitFrameSlot();
+
     // Update our frame data
     t.renderer.updateFrame(
         t.state,

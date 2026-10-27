@@ -1725,6 +1725,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.syncDisplayLink(null, null);
         }
 
+        /// Lets a graphics API that paces the render thread on the display
+        /// wait for its frame slot. The render thread calls this before
+        /// `updateFrame`, so the frame snapshots the terminal after the wait
+        /// and not before it: input that arrives while waiting is shown by
+        /// this frame and not by the one after. `drawFrame` waits again, which
+        /// finds the slot free.
+        pub fn waitFrameSlot(self: *Self) void {
+            if (comptime @hasDecl(GraphicsAPI, "waitFrameSlot")) self.api.waitFrameSlot();
+        }
+
         /// Draw the frame to the screen.
         ///
         /// If `sync` is true, this will synchronously block until
