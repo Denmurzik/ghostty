@@ -64,10 +64,27 @@ Where the row goes. Default: docs\windows\ram-baseline.csv.
 .PARAMETER IdleSeconds
 Idle time before sampling (default 10).
 
-.PARAMETER ConfigExtra
+.PARAMETER ExtraConfig
 Extra config lines appended to the test config (for example
-`font-family = Consolas`). Rows measured with it are not baseline rows: pass
--Csv elsewhere.
+`font-family = Consolas`; alias ConfigExtra). Rows measured with it are not
+baseline rows: pass -Csv elsewhere.
+
+.PARAMETER Actions
+Comma separated `op:arg` actions (`new_split:right,toggle_readonly`) run in
+order through the test IPC after the scenario's own setup, before the idle
+time and the sample. Implies GHOSTTY_WIN32_TEST_IPC=1. An action the app does
+not perform is reported (INFO) and the run goes on.
+
+.PARAMETER Tag
+Written to the CSV `scenario` column instead of the scenario name (rows with
+-Sample: `<tag>:<label>`). Use it to keep config/feature rows apart from the
+baseline rows.
+
+.PARAMETER Sample
+Multi-point sampling: `label@op,label@op`. `op` is an action or
+`wait:<seconds>`; after each op one row is sampled with the scenario
+`<tag>:<label>` (the tag defaults to the scenario name). Replaces the single
+idle-then-sample row. Implies GHOSTTY_WIN32_TEST_IPC=1.
 
 .PARAMETER LogCopy
 Copy the run's ghostty.log here before the sandbox is deleted. A Debug build
@@ -84,7 +101,10 @@ param(
     [string]$Exe,
     [string]$Csv,
     [int]$IdleSeconds = 10,
-    [string]$ConfigExtra,
+    [Alias('ConfigExtra')][string]$ExtraConfig,
+    [string[]]$Actions,
+    [string]$Tag,
+    [string[]]$Sample,
     [string]$LogCopy
 )
 
@@ -93,6 +113,16 @@ Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'lib\Harness.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib\GhosttyIpc.psm1') -Force
+
+# `powershell -File` hands over `a,b` as one string.
+$Actions = @($Actions | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$Sample = @($Sample | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$samplePoints = @(foreach ($s in $Sample) {
+    $at = $s.IndexOf('@')
+    if ($at -lt 1 -or $at -eq $s.Length - 1) { throw "-Sample entry '$s' is not label@op" }
+    [pscustomobject]@{ Label = $s.Substring(0, $at); Op = $s.Substring($at + 1) }
+})
+$rowName = if ($Tag) { $Tag } else { $Scenario }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Exe) {
@@ -120,7 +150,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $configHome 'ghostty') | Ou
 $quitLine = if ($Scenario -eq 'zero-windows') { '' } else { "quit-after-last-window-closed = true`n" }
 $ramClass = 'ghostty-ram-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 [IO.File]::WriteAllText((Join-Path $configHome 'ghostty\config.ghostty'),
-    (New-GhosttyConfigText -Class $ramClass -Extra "command = direct:cmd.exe /k`nconfirm-close-surface = false`n$quitLine$ConfigExtra"),
+    (New-GhosttyConfigText -Class $ramClass -Extra "command = direct:cmd.exe /k`nconfirm-close-surface = false`n$quitLine$ExtraConfig"),
     (New-Object Text.UTF8Encoding $false))
 
 $vars = [ordered]@{
@@ -133,7 +163,7 @@ $vars = [ordered]@{
     XDG_CONFIG_HOME      = $configHome
     GHOSTTY_D3D11_DRIVER = $(if ($Driver -eq 'warp') { 'warp' } else { $null })
     GHOSTTY_D3D11_DUMP   = $null
-    GHOSTTY_WIN32_TEST_IPC = $(if ($Scenario -in 'tabs', 'splits', 'windows', 'close-10', 'zero-windows') { '1' } else { $null })
+    GHOSTTY_WIN32_TEST_IPC = $(if ($Scenario -in 'tabs', 'splits', 'windows', 'close-10', 'zero-windows' -or $Actions.Count -or $samplePoints.Count) { '1' } else { $null })
 }
 
 $lock = Enter-GuiLock -Owner 'measure-ram.ps1' -TimeoutMinutes 30
@@ -237,9 +267,36 @@ try {
         }
     }
 
+    # -Actions / -Sample ops: an action the app does not perform is reported, not fatal.
+    function Invoke-RamOp([string]$Op) {
+        if ($Op -match '^wait:(\d+(\.\d+)?)$') {
+            Start-Sleep -Milliseconds ([int]([double]$Matches[1] * 1000))
+            return
+        }
+        if (-not (Invoke-GhosttyAction -Class $ramClass -Action $Op)) { Write-Host "INFO action '$Op' was not performed" }
+        Start-Sleep -Milliseconds 700
+    }
+    $pointRows = @()
+    if (-not $notApplicable) {
+        foreach ($a in $Actions) { Invoke-RamOp $a }
+        foreach ($pt in $samplePoints) {
+            Invoke-RamOp $pt.Op
+            $proc.Refresh()
+            if ($proc.HasExited) { throw "ghostty exited before sample '$($pt.Label)'" }
+            $pointRows += [pscustomobject]@{
+                Name    = "${rowName}:$($pt.Label)"
+                Private = [math]::Round($proc.PrivateMemorySize64 / 1MB, 1)
+                Ws      = [math]::Round($proc.WorkingSet64 / 1MB, 1)
+            }
+        }
+    }
+
     if ($notApplicable) {
         $privateMb = 'n/a'
         $wsMb = 'n/a'
+    } elseif ($samplePoints.Count) {
+        $privateMb = $null
+        $wsMb = $null
     } else {
     Start-Sleep -Seconds $IdleSeconds
     $proc.Refresh()
@@ -273,10 +330,21 @@ if (-not (Test-Path -LiteralPath $Csv)) {
     [IO.File]::WriteAllText($Csv, "date,commit,optimize,adapter,scenario,private_mb,ws_mb`n", (New-Object Text.UTF8Encoding $false))
 }
 # Adapter names have no commas in practice; keep the file parseable anyway.
-$row = '{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
-    ($adapter -replace ',', ' '), $Scenario,
-    ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $privateMb)),
-    ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $wsMb))
+function Format-CsvRow([string]$Name, $Private, $Ws) {
+    '{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
+        ($adapter -replace ',', ' '), ($Name -replace ',', ' '),
+        ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $Private)),
+        ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $Ws))
+}
+if ($pointRows.Count) {
+    foreach ($p in $pointRows) {
+        $r = Format-CsvRow $p.Name $p.Private $p.Ws
+        [IO.File]::AppendAllText($Csv, $r + "`n", (New-Object Text.UTF8Encoding $false))
+        Write-Output $r
+    }
+    return
+}
+$row = Format-CsvRow $rowName $privateMb $wsMb
 if ($null -ne $beforeMb) {
     $before = '{0},{1},{2},{3},close-10-before,{4},{5}' -f (Get-Date -Format 'yyyy-MM-dd'), $commit, $Optimize,
         ($adapter -replace ',', ' '),

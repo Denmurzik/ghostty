@@ -9,10 +9,13 @@ start with `_` carries a header in its leading comment block,
 
     # e2e: milestone=M1 timeout=150 order=30 [surfaces=N]
 
-and runs in `order` (ascending). `surfaces` > 4 makes the runner require
-2.5 GB of free RAM (SKIP otherwise) and, for a Debug exe, run the scenario
-under the shared test-lock (GHOSTTY_TEST_LOCK, default the team lock script);
-the lock's wait is added to the timeout.
+and runs in `order` (ascending). The whole run holds the desktop lock
+%TEMP%\gui-e2e.lock (test/windows/README.md): a desktop that stays busy for
+30 minutes SKIPs every scenario (exit 2; the SKIP lines are also written to
+results.txt). `surfaces` > 4 makes the runner require 2.5 GB of free RAM (SKIP
+otherwise) and, for a Debug exe, run that scenario under the team's test-lock,
+the separate build/RAM lock (GHOSTTY_TEST_LOCK, default the team lock script);
+the test-lock's wait is added to the timeout.
 
 Each scenario is a script of its own, started in its own powershell process
 (STA, for the clipboard) and prints PASS, FAIL or SKIP with its name. The
@@ -32,7 +35,7 @@ The scenarios send real keyboard input to the Ghostty window they started:
 do not type while the run is in progress.
 
 .PARAMETER Milestone
-M1, M2 or all (default): which scenarios the headers select.
+M1, M2, M3 or all (default): which scenarios the headers select.
 
 .PARAMETER Only
 Run just these scenarios (names without .ps1).
@@ -47,7 +50,7 @@ powershell -NoProfile -File test/windows/e2e.ps1 -Milestone M1
 powershell -NoProfile -File test/windows/e2e.ps1 -Only startup,render -EvidenceDir C:\tmp\evidence
 #>
 param(
-    [ValidateSet('M1', 'M2', 'all')][string]$Milestone = 'all',
+    [ValidateSet('M1', 'M2', 'M3', 'all')][string]$Milestone = 'all',
     [string[]]$Only,
     [string]$EvidenceDir
 )
@@ -177,7 +180,9 @@ try {
     $lockToken = Enter-GuiLock -Owner 'e2e.ps1' -TimeoutMinutes 30
 } catch {
     if ($_.Exception.Message -notlike 'GUI lock * still held*') { throw }
-    foreach ($s in $all) { Write-Output "SKIP $($s.Name): $($_.Exception.Message)" }
+    $busy = @(foreach ($s in $all) { "SKIP $($s.Name): $($_.Exception.Message)" })
+    $busy | ForEach-Object { Write-Output $_ }
+    [IO.File]::WriteAllLines($results, [string[]]$busy, (New-Object Text.UTF8Encoding $false))
     Write-Output "e2e: PASS 0, FAIL 0, SKIP $($all.Count) (desktop lock busy)"
     exit 2
 }

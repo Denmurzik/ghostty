@@ -4,11 +4,22 @@
 # when measured with cmd.exe (GHOSTTY_LAT_SHELL=cmd). With Git Bash the whole
 # path is the bash stage plus the Ghostty stages and is recorded, not gated.
 # e2e: milestone=M2 timeout=300 order=150
+# Options (standalone: powershell -File input-latency.ps1 -ExtraConfig "font-size = 14" -Splits 2; under the
+# runner: GHOSTTY_LAT_EXTRA_CONFIG / GHOSTTY_LAT_SPLITS): -ExtraConfig appends config lines (`;` separates
+# lines), -Splits N types into the focused one of N panes. Rows measured with either are feature rows, not
+# the baseline: name them with GHOSTTY_LAT_BUILD_VARIANT.
+param(
+    [string]$ExtraConfig = $env:GHOSTTY_LAT_EXTRA_CONFIG,
+    [int]$Splits = $(if ($env:GHOSTTY_LAT_SPLITS) { [int]$env:GHOSTTY_LAT_SPLITS } else { 1 })
+)
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_latency.ps1')
 
+$global:LatExtra = (@($ExtraConfig -split ';' | Where-Object { $_ }) -join "`n")
+$global:LatSplits = $Splits
+
 Invoke-E2eScenario 'input-latency' {
-    $g = Start-LatencyGhostty 'input-latency'
+    $g = Start-LatencyGhostty 'input-latency' -ExtraConfig $global:LatExtra -Splits $global:LatSplits
     $cursor = Enter-LatencyInput $g
     try {
         # Letters only: every key echoes one character.

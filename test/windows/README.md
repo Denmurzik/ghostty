@@ -263,6 +263,7 @@ the latency scenarios `input-latency`, `tui-latency`, `output-latency`.
 ```
 zig build -j2 -Doptimize=ReleaseFast --prefix zig-out-rf
 powershell -NoProfile -File test/windows/measure-ram.ps1 [-Driver hardware|warp] [-Scenario one-surface|scrollback|tabs|splits|windows|close-10|zero-windows] [-Optimize ReleaseFast|Debug]
+    [-ExtraConfig <text>] [-Actions <op:arg,...>] [-Tag <name>] [-Sample <label@op,...>]
 ```
 
 Starts `ghostty.exe` (`zig-out-rf\bin\ghostty.exe` for ReleaseFast, `zig-out\bin\ghostty.exe` for
@@ -280,3 +281,32 @@ The run holds the desktop lock. Only
 `-Optimize ReleaseFast` rows are gated (M1: one surface <= 110 MB); a Debug
 build also logs `private usage after Device.init / first surface / first
 frame` (`-LogCopy <file>` keeps the log), and logs `d3d11 adapter=` at info.
+
+Feature rows (M3): `-ExtraConfig "background-image = ..."` appends config
+lines (alias `-ConfigExtra`), `-Actions new_split:right,toggle_readonly` runs
+actions through the test IPC after the scenario's setup (implies
+`GHOSTTY_WIN32_TEST_IPC=1`), `-Tag <name>` replaces the `scenario` column, and
+`-Sample a@wait:5,b@toggle_readonly` samples several points in one run: after
+each op (an action or `wait:<seconds>`) one row `<tag>:<label>` is written
+instead of the single idle-then-sample row. Write feature rows to a CSV of
+their own (`-Csv`) or tag them; they are not baseline rows.
+
+## vt-smoke (M3)
+
+Screenshot checks of the VT emulation, see `vt-smoke/README.md`:
+
+```
+powershell -NoProfile -File test/windows/vt-smoke.ps1 [-Only a,b] [-Update] [-Driver warp|hardware] [-EvidenceDir d]
+powershell -NoProfile -File test/windows/vt-smoke/selftest.ps1      # Compare-Image self-test, no GUI
+```
+
+`e2e/vt-smoke.ps1` runs it inside the e2e runner (`-Milestone M3`, order 700).
+`lib/ImageCompare.psm1` (`Compare-Image -Actual -Reference [-Tolerance 24]
+[-MinMatch 0.995]`) is the per-channel image comparison.
+
+## Latency probes: options
+
+`input-latency.ps1` takes `-ExtraConfig "k = v;k = v"` (config lines appended to
+the shell's config) and `-Splits N` (type into the focused one of N panes),
+or `GHOSTTY_LAT_EXTRA_CONFIG` / `GHOSTTY_LAT_SPLITS` under the runner. Name such
+runs with `GHOSTTY_LAT_BUILD_VARIANT` so they never read as baseline rows.

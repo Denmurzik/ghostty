@@ -331,12 +331,33 @@ function Stop-OwnGhostty {
     $script:OwnPids.Clear()
 }
 
+if (-not ('GhosttyHarness.Mem' -as [type])) {
+    Add-Type -Namespace GhosttyHarness -Name Mem -MemberDefinition @"
+[StructLayout(LayoutKind.Sequential)] public struct MEMORYSTATUSEX {
+    public uint dwLength; public uint dwMemoryLoad;
+    public ulong ullTotalPhys; public ulong ullAvailPhys;
+    public ulong ullTotalPageFile; public ulong ullAvailPageFile;
+    public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual;
+}
+[DllImport("kernel32.dll", SetLastError = true)] static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX s);
+public static ulong AvailPhysBytes() {
+    MEMORYSTATUSEX s = new MEMORYSTATUSEX();
+    s.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+    if (!GlobalMemoryStatusEx(ref s)) throw new System.ComponentModel.Win32Exception();
+    return s.ullAvailPhys;
+}
+"@
+}
+
 <#
-Free physical memory in GB (GlobalMemoryStatusEx's ullAvailPhys, through
-Win32_OperatingSystem.FreePhysicalMemory, which is in KB).
+Available physical memory in GB: GlobalMemoryStatusEx's ullAvailPhys, which
+counts the standby list (cached pages the system gives back on demand) as
+available, like Task Manager's "Available". Win32_OperatingSystem's
+FreePhysicalMemory leaves the standby list out and under-reports on a machine
+that has been up for a while.
 #>
 function Get-FreeRamGb {
-    [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+    [math]::Round([GhosttyHarness.Mem]::AvailPhysBytes() / 1GB, 2)
 }
 
 <#

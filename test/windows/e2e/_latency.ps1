@@ -23,6 +23,8 @@
 
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot '_splits.ps1')
+
 # Numbers in the CSV and in the messages use a decimal point.
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 
@@ -139,8 +141,10 @@ function Get-LatencyVariant {
 }
 
 # Git Bash by default, cmd.exe with GHOSTTY_LAT_SHELL=cmd; the tracer needs
-# a build that has it.
-function Start-LatencyGhostty([string]$Scenario) {
+# a build that has it. ExtraConfig: config lines appended to the shell's
+# config; Splits: panes in the tab (new_split right/down alternating, the
+# last one focused and its shell ready; the probes type into the focused pane).
+function Start-LatencyGhostty([string]$Scenario, [string]$ExtraConfig = '', [int]$Splits = 1) {
     $csv = Join-Path $script:Sbx.Root 'latency.csv'
     $script:LatCsv = $csv
     $script:LatVariant = Get-LatencyVariant
@@ -150,18 +154,21 @@ function Start-LatencyGhostty([string]$Scenario) {
         if ($env:GHOSTTY_LAT_SHELL -eq 'cmd') {
             # cmd.exe edits its line inside conhost: the ConPTY stage without
             # a shell process of our own. input-latency and output-latency use it.
-            $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath 'cmd') -NoDump
+            $cmdText = Get-Content -LiteralPath (Get-ConfigPath 'cmd') -Raw -Encoding UTF8
+            if ($ExtraConfig) { $cmdText = $cmdText.TrimEnd() + "`n" + $ExtraConfig + "`n" }
+            $g = Start-E2eGhostty -ConfigText $cmdText -NoDump
             Set-WindowLayout $g.Hwnd '00000409'
             Start-Sleep -Seconds 3
             $script:LatVariant += '-cmd'
         } else {
-            $g = Start-BashE2e -NoDump
+            $g = Start-BashE2e -NoDump -ExtraConfig $ExtraConfig
         }
     } finally {
         Remove-Item Env:\GHOSTTY_LATENCY_TRACE -ErrorAction SilentlyContinue
         Remove-Item Env:\GHOSTTY_LATENCY_TAG -ErrorAction SilentlyContinue
     }
     if (-not (Test-Path -LiteralPath $csv)) { throw "no latency trace at ${csv}: this build has no tracer" }
+    if ($Splits -gt 1) { Add-LatencySplits $g ($Splits - 1) }
     # What the ConPTY overrides did (a rejected flag value falls back to 0).
     if (Test-Path -LiteralPath $g.Log) {
         foreach ($l in @(Select-String -LiteralPath $g.Log -Pattern 'conpty|CreatePseudoConsole' | ForEach-Object { $_.Line })) {
@@ -169,6 +176,30 @@ function Start-LatencyGhostty([string]$Scenario) {
         }
     }
     $g
+}
+
+# Opens $Count more panes (right, down, right ...) in the tab. The new pane
+# takes the focus; its shell is ready when a typed line has run.
+function Add-LatencySplits($G, [int]$Count) {
+    if (-not (Set-ForegroundSafe -Hwnd $G.Hwnd)) { throw 'E2E-SKIP: could not take the foreground' }
+    Wait-SurfaceCount $G 1 | Out-Null
+    for ($i = 0; $i -lt $Count; $i++) {
+        Invoke-SplitAction $G $(if ($i % 2 -eq 0) { 'new_split:right' } else { 'new_split:down' })
+        Wait-SurfaceCount $G ($i + 2) | Out-Null
+        if ($env:GHOSTTY_LAT_SHELL -eq 'cmd') {
+            Start-Sleep -Seconds 3
+        } else {
+            $marker = Join-Path $G.Sandbox.Tmp "gt-ready-split$i.txt"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $ready = $false
+            while (-not $ready -and $sw.Elapsed.TotalSeconds -lt 40) {
+                Send-Line $G.Hwnd "echo ready > `"`$TEMP/gt-ready-split$i.txt`""
+                $ready = Wait-File $marker 6
+            }
+            if (-not $ready) { throw "the shell of split $($i + 2) did not run a typed line within 40 s" }
+        }
+    }
+    Write-E2eInfo "$($Count + 1) panes, the last one focused"
 }
 
 # Foreground, cursor over the surface (wheel messages go to the window under

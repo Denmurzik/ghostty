@@ -367,7 +367,7 @@ Leaves GHOSTTY_WIN32_TEST_IPC unset (it is `1` otherwise).
 .PARAMETER Env
 Extra environment variables for the child process (name -> value).
 
-Every start gets a class of its own (`ghostty-e2e-<8 hex>`, in $G.Class), so
+Every start gets a class of its own (`<ClassPrefix>-<8 hex>`, default prefix `ghostty-e2e`, in $G.Class), so
 no scenario can reach another instance, nor an instance of the owner.
 #>
 function Start-E2eGhostty {
@@ -380,6 +380,7 @@ function Start-E2eGhostty {
         [switch]$KeepDefaultQuit,
         [switch]$NoTestIpc,
         [string[]]$ExtraArgs,
+        [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$ClassPrefix = 'ghostty-e2e',
         [hashtable]$Env,
         [double]$WindowTimeoutSec = 15
     )
@@ -387,7 +388,7 @@ function Start-E2eGhostty {
     $sbx = $script:Sbx
     if ($ConfigFile) { $ConfigText = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 }
 
-    $class = 'ghostty-e2e-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $class = "$ClassPrefix-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
     $configHome = Join-Path $sbx.Home '.config'
     if (-not $NoConfig) {
         $extra = if ($KeepDefaultQuit) { $ConfigText } else { "quit-after-last-window-closed = true`n$ConfigText" }
@@ -839,8 +840,10 @@ function Assert-ShellText([string]$Path, [string]$Expected, [string]$What) {
 
 # Starts Git Bash with the UTF-8 config and returns after the shell runs our
 # lines, with the window on the US layout.
-function Start-BashE2e([string]$ConfigName = 'gitbash-de', [switch]$NoDump) {
-    $g = Start-E2eGhostty -ConfigFile (Get-ConfigPath $ConfigName) -NoDump:$NoDump
+function Start-BashE2e([string]$ConfigName = 'gitbash-de', [switch]$NoDump, [string]$ExtraConfig) {
+    $text = Get-Content -LiteralPath (Get-ConfigPath $ConfigName) -Raw -Encoding UTF8
+    if ($ExtraConfig) { $text = $text.TrimEnd() + "`n" + $ExtraConfig + "`n" }
+    $g = Start-E2eGhostty -ConfigText $text -NoDump:$NoDump
     Wait-BashReady $g
     $g
 }
