@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const windows = std.os.windows;
 
 // NOTE: The Windows part of the Zig stdlib is currently in the process of
@@ -237,6 +238,8 @@ pub const exp = struct {
         pub extern "kernel32" fn CloseHandle(
             hObject: HANDLE,
         ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn FreeLibrary(hLibModule: HANDLE) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
         pub extern "kernel32" fn VirtualAlloc(
             lpAddress: ?LPVOID,
             dwSize: SIZE_T,
@@ -571,12 +574,109 @@ pub fn peSubsystem(image: []const u8) ?u16 {
     return std.mem.readInt(u16, image[pe + 4 + 20 + 68 ..][0..2], .little);
 }
 
+// --- elevation and diagnostic environment (final review B-I1)
+
+const TOKEN_QUERY: DWORD = 0x0008;
+const TokenElevation: DWORD = 20;
+const TOKEN_ELEVATION = extern struct { TokenIsElevated: DWORD };
+extern "advapi32" fn OpenProcessToken(process: HANDLE, access: DWORD, token: *HANDLE) callconv(.winapi) BOOL;
+extern "advapi32" fn GetTokenInformation(
+    token: HANDLE,
+    class: DWORD,
+    info: ?*anyopaque,
+    length: DWORD,
+    return_length: *DWORD,
+) callconv(.winapi) BOOL;
+
+var elevated_cache: std.atomic.Value(u8) = .init(0); // 0 unknown, 1 no, 2 yes
+
+/// Whether the current process runs elevated (TokenElevation), cached.
+/// An unreadable token counts as elevated: the stricter answer is the safe
+/// side for every caller (IPC pipe names, diagnostic variables).
+pub fn isElevated() bool {
+    switch (elevated_cache.load(.acquire)) {
+        1 => return false,
+        2 => return true,
+        else => {},
+    }
+    const result = blk: {
+        var token: HANDLE = undefined;
+        if (OpenProcessToken(exp.kernel32.GetCurrentProcess(), TOKEN_QUERY, &token) == FALSE) break :blk true;
+        defer _ = exp.kernel32.CloseHandle(token);
+        var elev: TOKEN_ELEVATION = .{ .TokenIsElevated = 0 };
+        var len: DWORD = 0;
+        if (GetTokenInformation(token, TokenElevation, &elev, @sizeOf(TOKEN_ELEVATION), &len) == FALSE) break :blk true;
+        break :blk elev.TokenIsElevated != 0;
+    };
+    elevated_cache.store(if (result) 2 else 1, .release);
+    return result;
+}
+
+/// The value of a diagnostic environment variable (`GHOSTTY_WIN32_CONPTY_*`,
+/// `GHOSTTY_LATENCY_*`, `GHOSTTY_D3D11_*`), or null when unset or when the
+/// process is elevated. The user profile's environment is writable at medium
+/// integrity and UAC copies it into the elevated process, so an elevated
+/// Ghostty must not let it name files to create or DLLs to load. Caller owns
+/// the result.
+pub fn diagnosticEnv(alloc: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return diagnosticEnvFor(isElevated(), alloc, name);
+}
+
+fn diagnosticEnvFor(elevated: bool, alloc: std.mem.Allocator, name: []const u8) ?[]u8 {
+    if (elevated) return null;
+    return @import("../global.zig").environ().getAlloc(alloc, name) catch null;
+}
+
+const diagnostic_prefixes = [_][]const u8{ "GHOSTTY_LATENCY_", "GHOSTTY_WIN32_CONPTY_", "GHOSTTY_D3D11_" };
+
+/// Removes every diagnostic variable (see `diagnosticEnv`) from the
+/// environment a child shell gets, so they do not leak into programs, or
+/// into a Ghostty started from inside the terminal.
+pub fn scrubDiagnosticEnv(env: *std.process.Environ.Map) void {
+    var i: usize = 0;
+    while (i < env.count()) {
+        const key = env.keys()[i];
+        const diagnostic = for (diagnostic_prefixes) |prefix| {
+            if (std.ascii.startsWithIgnoreCase(key, prefix)) break true;
+        } else false;
+        if (diagnostic) _ = env.swapRemove(key) else i += 1;
+    }
+}
+
+test "scrubDiagnosticEnv removes only the diagnostic variables" {
+    const testing = std.testing;
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("GHOSTTY_D3D11_DUMP", "x");
+    try env.put("GHOSTTY_D3D11_SIMULATE_DEVICE_LOST", "1");
+    try env.put("GHOSTTY_LATENCY_TRACE", "x");
+    try env.put("GHOSTTY_LATENCY_TAG", "x");
+    try env.put("GHOSTTY_WIN32_CONPTY_DLL", "x");
+    try env.put("ghostty_d3d11_debug", "1");
+    try env.put("GHOSTTY_RESOURCES_DIR", "r");
+    try env.put("PATH", "p");
+    scrubDiagnosticEnv(&env);
+    try testing.expectEqual(@as(usize, 2), env.count());
+    try testing.expect(env.get("GHOSTTY_RESOURCES_DIR") != null);
+    try testing.expect(env.get("PATH") != null);
+}
+
+test "diagnosticEnv ignores the environment when elevated" {
+    const testing = std.testing;
+    // Any variable that is always set on Windows.
+    const value = diagnosticEnvFor(false, testing.allocator, "SystemRoot") orelse
+        return error.SkipZigTest;
+    testing.allocator.free(value);
+    try testing.expect(diagnosticEnvFor(true, testing.allocator, "SystemRoot") == null);
+    try testing.expect(diagnosticEnvFor(false, testing.allocator, "GHOSTTY_NO_SUCH_VARIABLE_FOR_TEST") == null);
+}
+
 /// The ConPTY entry points the pty uses, plus the flags `CreatePseudoConsole`
 /// gets. Diagnostic overrides (latency measurements, not configuration):
 /// `GHOSTTY_WIN32_CONPTY_FLAGS=<u32>` replaces the flags (0 otherwise) and
-/// `GHOSTTY_WIN32_CONPTY_DLL=<path to conpty.dll>` loads the three functions
-/// from that DLL (next to its `OpenConsole.exe`) instead of kernel32. Any
-/// failure falls back to kernel32.
+/// `GHOSTTY_WIN32_CONPTY_DLL=<path to conpty.dll>` (Debug builds only) loads the
+/// three functions from that DLL (next to its `OpenConsole.exe`) instead of
+/// kernel32. Any failure falls back to kernel32. Elevated processes ignore both.
 pub const ConPty = struct {
     pub const CreateFn = *const fn (COORD, HANDLE, HANDLE, DWORD, *HPCON) callconv(.winapi) HRESULT;
     pub const ResizeFn = *const fn (HPCON, COORD) callconv(.winapi) HRESULT;
@@ -615,18 +715,22 @@ pub fn conpty() *const ConPty {
         .flags = 0,
     };
 
-    if (global.environ().getAlloc(alloc, "GHOSTTY_WIN32_CONPTY_FLAGS")) |text| {
+    if (diagnosticEnv(alloc, "GHOSTTY_WIN32_CONPTY_FLAGS")) |text| {
         defer alloc.free(text);
         if (std.fmt.parseInt(DWORD, text, 0)) |flags| {
             api.flags = flags;
             log.info("conpty flags override flags={d}", .{flags});
         } else |_| log.warn("ignoring GHOSTTY_WIN32_CONPTY_FLAGS={s}", .{text});
-    } else |_| {}
+    }
 
-    if (global.environ().getAlloc(alloc, "GHOSTTY_WIN32_CONPTY_DLL")) |path| {
-        defer alloc.free(path);
-        loadDll(path, &api) catch |err| log.warn("conpty dll {s} not used err={}, using kernel32", .{ path, err });
-    } else |_| {}
+    // Debug builds only: a release build never loads a DLL named by the
+    // environment (the elevated check in `diagnosticEnv` is the second lock).
+    if (builtin.mode == .debug) {
+        if (diagnosticEnv(alloc, "GHOSTTY_WIN32_CONPTY_DLL")) |path| {
+            defer alloc.free(path);
+            loadDll(path, &api) catch |err| log.warn("conpty dll {s} not used err={}, using kernel32", .{ path, err });
+        }
+    }
 
     conpty_state = api;
     conpty_ready.store(true, .release);
@@ -649,6 +753,8 @@ fn loadDll(path: []const u8, api: *ConPty) !void {
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
     ) orelse return unexpectedError(GetLastError());
 
+    // A DLL that lacks an export is not kept loaded.
+    errdefer _ = exp.kernel32.FreeLibrary(module);
     const create = exp.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse return error.MissingExport;
     const resize = exp.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse return error.MissingExport;
     const close = exp.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse return error.MissingExport;

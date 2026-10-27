@@ -16,6 +16,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const global = @import("../global.zig");
+const windows = @import("windows.zig");
 
 const log = std.log.scoped(.windows_latency);
 
@@ -285,15 +286,15 @@ fn init() bool {
     if (state.load(.monotonic) != .unknown) return state.load(.monotonic) == .on;
 
     const on = open: {
-        const path = global.environ().getAlloc(global.alloc(), "GHOSTTY_LATENCY_TRACE") catch break :open false;
+        const path = windows.diagnosticEnv(global.alloc(), "GHOSTTY_LATENCY_TRACE") orelse break :open false;
         defer global.alloc().free(path);
         if (path.len == 0 or path.len > path_buf.len) break :open false;
 
-        if (global.environ().getAlloc(global.alloc(), "GHOSTTY_LATENCY_TAG")) |tag| {
+        if (windows.diagnosticEnv(global.alloc(), "GHOSTTY_LATENCY_TAG")) |tag| {
             defer global.alloc().free(tag);
             tag_len = @min(tag.len, tag_buf.len);
             @memcpy(tag_buf[0..tag_len], tag[0..tag_len]);
-        } else |_| {}
+        }
 
         const f = std.Io.Dir.createFileAbsolute(io, path, .{}) catch |err| {
             log.warn("cannot open latency trace path={s} err={}", .{ path, err });

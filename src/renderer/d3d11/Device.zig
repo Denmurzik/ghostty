@@ -20,6 +20,7 @@ const com = win32.com;
 const d3d11 = win32.d3d11;
 const dxgi = win32.dxgi;
 const global = @import("../../global.zig");
+const windows_os = @import("../../os/main.zig").windows;
 const hlsl = @import("hlsl.zig");
 
 const log = std.log.scoped(.d3d11);
@@ -289,7 +290,7 @@ fn nowNs() u64 {
 /// The loss time of `GHOSTTY_D3D11_SIMULATE_DEVICE_LOST`, Debug builds only.
 fn simulateFromEnv(alloc: Allocator) u64 {
     if (builtin.mode != .debug) return 0;
-    const v = global.environ().getAlloc(alloc, "GHOSTTY_D3D11_SIMULATE_DEVICE_LOST") catch return 0;
+    const v = windows_os.diagnosticEnv(alloc, "GHOSTTY_D3D11_SIMULATE_DEVICE_LOST") orelse return 0;
     defer alloc.free(v);
     const ms = std.fmt.parseInt(u32, v, 10) catch return 0;
     if (ms == 0) return 0;
@@ -423,7 +424,7 @@ fn queryTearingSupport(factory: *dxgi.IDXGIFactory2) bool {
 fn applyEnv(alloc: Allocator, options: Options) Options {
     var opts = options;
 
-    if (global.environ().getAlloc(alloc, "GHOSTTY_D3D11_DRIVER")) |v| {
+    if (windows_os.diagnosticEnv(alloc, "GHOSTTY_D3D11_DRIVER")) |v| {
         defer alloc.free(v);
         if (std.ascii.eqlIgnoreCase(v, "warp")) {
             opts.driver = .warp;
@@ -432,12 +433,12 @@ fn applyEnv(alloc: Allocator, options: Options) Options {
         } else {
             log.warn("ignoring unknown GHOSTTY_D3D11_DRIVER value={s}", .{v});
         }
-    } else |_| {}
+    }
 
-    if (global.environ().getAlloc(alloc, "GHOSTTY_D3D11_DEBUG")) |v| {
+    if (windows_os.diagnosticEnv(alloc, "GHOSTTY_D3D11_DEBUG")) |v| {
         defer alloc.free(v);
         opts.debug_layer = std.mem.eql(u8, v, "1");
-    } else |_| {}
+    }
 
     return opts;
 }

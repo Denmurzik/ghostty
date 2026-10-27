@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const win32 = @import("win32");
 const configpkg = @import("../../config.zig");
+const internal_os = @import("../../os/main.zig");
 const client = @import("ipc/client.zig");
 const protocol = @import("ipc/protocol.zig");
 const Overrides = @import("Overrides.zig");
@@ -90,25 +91,9 @@ pub fn currentUserSid(alloc: Allocator) ![]u8 {
     return util.utf8(alloc, std.mem.span(wide.?));
 }
 
-var elevated_cache: std.atomic.Value(u8) = .init(0); // 0 unknown, 1 no, 2 yes
-
-/// Whether the current process runs elevated (TokenElevation), cached.
-/// An unreadable token counts as elevated: the stricter pipe name and
-/// security descriptor are the safe side.
-pub fn isElevated() bool {
-    switch (elevated_cache.load(.acquire)) {
-        1 => return false,
-        2 => return true,
-        else => {},
-    }
-    const result = blk: {
-        const token = openToken(kernel32.GetCurrentProcess()) orelse break :blk true;
-        defer _ = kernel32.CloseHandle(token);
-        break :blk queryElevated(token) orelse true;
-    };
-    elevated_cache.store(if (result) 2 else 1, .release);
-    return result;
-}
+/// Whether the current process runs elevated (TokenElevation), cached; see
+/// `os.windows.isElevated`.
+pub const isElevated = internal_os.windows.isElevated;
 
 /// `\\.\pipe\ghostty-<sid>-<session>-<u|a>-<class>` as a null-terminated
 /// UTF-16 string for the Win32 pipe APIs. Caller owns the result.

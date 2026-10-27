@@ -14,6 +14,7 @@ const font = @import("../font/main.zig");
 const configpkg = @import("../config.zig");
 const global = @import("../global.zig");
 const latency = @import("../os/main.zig").windows_latency;
+const windows_os = @import("../os/main.zig").windows;
 const rendererpkg = @import("../renderer.zig");
 const Renderer = rendererpkg.GenericRenderer(D3D11);
 pub const Device = @import("d3d11/Device.zig");
@@ -152,7 +153,7 @@ pub fn init(
 }
 
 fn pacingLogFromEnv(alloc: Allocator) bool {
-    const v = global.environ().getAlloc(alloc, "GHOSTTY_D3D11_PACING_LOG") catch return false;
+    const v = windows_os.diagnosticEnv(alloc, "GHOSTTY_D3D11_PACING_LOG") orelse return false;
     defer alloc.free(v);
     return std.mem.eql(u8, v, "1");
 }

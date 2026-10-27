@@ -41,10 +41,10 @@ var test_ops_cache: std.atomic.Value(u8) = .init(0);
 /// environment, so that shells and nested launches never inherit test ops.
 /// Called at startup, before any child process exists.
 pub fn cacheTestOps(alloc: Allocator) void {
-    const on = if (global.environ().getAlloc(alloc, test_ops_var)) |value| blk: {
+    const on = if (@import("../../../os/main.zig").windows.diagnosticEnv(alloc, test_ops_var)) |value| blk: {
         defer alloc.free(value);
         break :blk std.mem.eql(u8, value, "1");
-    } else |_| false;
+    } else false;
     test_ops_cache.store(if (on) 2 else 1, .release);
     _ = kernel32.SetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral(test_ops_var), null);
 }

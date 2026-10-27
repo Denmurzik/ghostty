@@ -543,10 +543,10 @@ fn ipcError(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn exitImmediately(self: *const App) bool {
-    const value = global.environ().getAlloc(
+    const value = @import("../../os/main.zig").windows.diagnosticEnv(
         self.core_app.alloc,
         "GHOSTTY_WIN32_EXIT_IMMEDIATELY",
-    ) catch return false;
+    ) orelse return false;
     defer self.core_app.alloc.free(value);
     return std.mem.eql(u8, value, "1");
 }

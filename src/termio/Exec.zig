@@ -676,9 +676,7 @@ const Subprocess = struct {
 
         // Diagnostic variables of the Windows port stay with Ghostty.
         if (comptime is_windows) {
-            inline for (.{ "GHOSTTY_LATENCY_TRACE", "GHOSTTY_LATENCY_TAG", "GHOSTTY_WIN32_CONPTY_FLAGS", "GHOSTTY_WIN32_CONPTY_DLL" }) |name| {
-                _ = env.swapRemove(name);
-            }
+            internal_os.windows.scrubDiagnosticEnv(&env);
         }
 
         // If we have a resources dir then set our env var

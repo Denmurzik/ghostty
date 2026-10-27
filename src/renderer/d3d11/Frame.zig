@@ -11,6 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const global = @import("../../global.zig");
+const windows_os = @import("../../os/main.zig").windows;
 const Health = @import("../../renderer.zig").Health;
 const Renderer = @import("../generic.zig").Renderer(D3D11);
 const D3D11 = @import("../D3D11.zig");
@@ -204,7 +205,7 @@ pub const Dump = struct {
 
     /// Null unless `GHOSTTY_D3D11_DUMP` is set to a non-empty value.
     pub fn initFromEnv(alloc: Allocator, index: usize) ?Dump {
-        const dir = global.environ().getAlloc(alloc, "GHOSTTY_D3D11_DUMP") catch return null;
+        const dir = windows_os.diagnosticEnv(alloc, "GHOSTTY_D3D11_DUMP") orelse return null;
         if (dir.len == 0) {
             alloc.free(dir);
             return null;
