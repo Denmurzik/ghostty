@@ -83,6 +83,14 @@ pub fn create(alloc: Allocator, opts: Options) !*Window {
     };
     self.hwnd = hwnd;
 
+    // CW_USEDEFAULT may have put the window on another monitor than the
+    // surface's, which gives no WM_DPICHANGED at creation.
+    const actual = user32.GetDpiForWindow(hwnd);
+    if (actual != 0 and actual != opts.dpi) {
+        self.dpi = actual;
+        _ = user32.SetWindowPos(hwnd, null, 0, 0, geom.scale(default_width, actual), geom.scale(default_height, actual), user32.SWP_NOMOVE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+    }
+
     const dark: win32.foundation.BOOL = 1;
     _ = win32.dwmapi.DwmSetWindowAttribute(
         hwnd,

@@ -28,6 +28,8 @@ const Window = @import("Window.zig");
 
 const com = win32.com;
 const d3d11 = win32.d3d11;
+const dxgi = win32.dxgi;
+const kernel32 = win32.kernel32;
 const user32 = win32.user32;
 
 const log = std.log.scoped(.win32_inspector);
@@ -91,6 +93,9 @@ pub const Inspector = struct {
     /// Frames built by the tick.
     frames: u64 = 0,
 
+    /// Hash of the surface title the window caption shows.
+    title_hash: u64 = 0,
+
     pub fn create(opts: Options) !*Inspector {
         const alloc = opts.alloc;
         const self = try alloc.create(Inspector);
@@ -121,6 +126,10 @@ pub const Inspector = struct {
         try open_list.append(alloc, self);
         errdefer _ = open_list.pop();
 
+        // A failure leaves no blank window behind.
+        if (opts.core) |core| try core.activateInspector();
+        errdefer if (opts.core) |core| core.deactivateInspector();
+
         self.* = .{
             .alloc = alloc,
             .window = window,
@@ -131,13 +140,11 @@ pub const Inspector = struct {
             .draw = opts.draw,
             .locked_hook = opts.locked_hook,
         };
-        self.applyScale(opts.dpi);
+        self.applyScale(window.dpi);
+        self.title_hash = titleHash(opts.surface.getTitle());
 
         window.inspector = self;
         opts.surface.inspector = self;
-        if (opts.core) |core| core.activateInspector() catch |err| {
-            log.err("failed to activate inspector err={}", .{err});
-        };
         window.startTimer();
         return self;
     }
@@ -184,12 +191,24 @@ pub const Inspector = struct {
     /// The 30 Hz tick: builds a frame when something changed or the window
     /// has the focus.
     pub fn tick(self: *Inspector) void {
+        self.syncTitle();
         if (!self.dirty and !self.window.isForeground()) return;
         if (user32.IsIconic(self.window.hwnd) != 0) return;
         self.dirty = false;
         self.renderFrame() catch |err| {
+            self.dirty = true;
             log.warn("inspector frame failed err={}", .{err});
         };
+    }
+
+    /// Keeps the caption in step with the title of the surface.
+    fn syncTitle(self: *Inspector) void {
+        const title = self.surface.getTitle();
+        const hash = titleHash(title);
+        if (hash == self.title_hash) return;
+        self.title_hash = hash;
+        var buf: [title_max]u8 = undefined;
+        self.window.setTitle(self.alloc, formatTitle(&buf, title));
     }
 
     pub fn dpiChanged(self: *Inspector, dpi: u32) void {
@@ -214,6 +233,17 @@ pub const Inspector = struct {
         const size = self.window.clientSize();
         if (size.w == 0 or size.h == 0) return;
         if (self.device.isLost()) try self.rebindDevice();
+
+        // Never wait on the display: without a free slot the frame is skipped
+        // and tried again at the next tick.
+        if (self.swap_chain) |sc| {
+            if (sc.waitable) |h| {
+                if (kernel32.WaitForSingleObjectEx(h, 0, 0) != kernel32.WAIT_OBJECT_0) {
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
 
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
 
@@ -257,7 +287,10 @@ pub const Inspector = struct {
         if (self.locked_hook) |hook| hook(self);
         cimgui.ImGui_ImplDX11_RenderDrawData(cimgui.c.ImGui_GetDrawData());
 
-        try sc.present(false);
+        // Not `SwapChain.present`: it books the chain as a terminal frame for
+        // the latency trace and the frame pacer, neither of which applies.
+        const tearing = sc.flags & dxgi.SWAP_CHAIN_FLAG_ALLOW_TEARING != 0;
+        _ = try sc.chain.asSwapChain1().asSwapChain().present(0, if (tearing) dxgi.PRESENT_ALLOW_TEARING else 0);
     }
 
     fn ensureSwapChain(self: *Inspector, width: u32, height: u32) !*SwapChain {
@@ -299,6 +332,26 @@ pub const Inspector = struct {
         self.dirty = true;
     }
 };
+
+/// Longest caption, in bytes.
+const title_max = 256;
+
+fn titleHash(title: ?[]const u8) u64 {
+    return std.hash.Wyhash.hash(0, title orelse "");
+}
+
+/// "Inspector - <title>" in `buf`; a title that does not fit is cut at a
+/// code point boundary.
+fn formatTitle(buf: []u8, title: ?[]const u8) []const u8 {
+    const t = title orelse return "Inspector";
+    if (t.len == 0) return "Inspector";
+    const prefix = "Inspector \u{2014} ";
+    @memcpy(buf[0..prefix.len], prefix);
+    var n = @min(t.len, buf.len - prefix.len);
+    while (n > 0 and n < t.len and t[n] & 0xC0 == 0x80) n -= 1;
+    @memcpy(buf[prefix.len..][0..n], t[0..n]);
+    return buf[0 .. prefix.len + n];
+}
 
 /// Gives a device back to the registry when it came from `Device.acquire`.
 fn releaseDevice(device: *Device) void {
@@ -362,11 +415,8 @@ fn open(app: *App, surface: *Surface) !void {
     const device = try Device.acquire(alloc);
     errdefer releaseDevice(device);
 
-    var buf: [256]u8 = undefined;
-    const title = if (surface.getTitle()) |t|
-        std.fmt.bufPrint(&buf, "Inspector \u{2014} {s}", .{t}) catch "Inspector"
-    else
-        "Inspector";
+    var buf: [title_max]u8 = undefined;
+    const title = formatTitle(&buf, surface.getTitle());
 
     _ = try Inspector.create(.{
         .alloc = alloc,
@@ -413,6 +463,7 @@ const Fixture = struct {
         const surface = try alloc.create(Surface);
         errdefer alloc.destroy(surface);
         surface.inspector = null;
+        surface.title = null;
 
         const hinstance = win32.kernel32.GetModuleHandleW(null) orelse return error.SkipZigTest;
         const insp = try Inspector.create(.{
@@ -503,4 +554,33 @@ test "win32 inspector: render_inspector coalesces to the tick" {
     f.insp.tick();
     f.insp.tick();
     try testing.expectEqual(frames + 1, f.insp.frames);
+}
+
+test "win32 inspector: a frame of the surface marks its inspector dirty" {
+    const f = try Fixture.init(.{});
+    defer f.deinit();
+    defer f.insp.close();
+
+    const core = try testing.allocator.create(CoreSurface);
+    defer testing.allocator.destroy(core);
+    core.rt_surface = f.surface;
+    const app: *App = @ptrFromInt(@alignOf(App));
+
+    f.insp.tick();
+    try testing.expect(!f.insp.dirty);
+    try testing.expect(try @import("../actions/surface_actions.zig").render(app, .{ .surface = core }, {}));
+    try testing.expect(f.insp.dirty);
+}
+
+test "win32 inspector: titles are cut at a code point, never replaced" {
+    var buf: [title_max]u8 = undefined;
+    try testing.expectEqualStrings("Inspector", formatTitle(&buf, null));
+    try testing.expectEqualStrings("Inspector \u{2014} zsh", formatTitle(&buf, "zsh"));
+
+    var long: [400]u8 = undefined;
+    for (0..200) |i| @memcpy(long[i * 2 ..][0..2], "\u{44F}");
+    const cut = formatTitle(&buf, &long);
+    try testing.expect(cut.len <= title_max);
+    try testing.expect(std.unicode.utf8ValidateSlice(cut));
+    try testing.expect(std.mem.startsWith(u8, cut, "Inspector \u{2014} \u{44F}"));
 }
