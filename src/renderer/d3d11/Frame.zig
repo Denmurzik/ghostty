@@ -133,7 +133,6 @@ fn submit(self: *const Self) error{DeviceLost}!void {
 /// Copies the target into the swap chain's back buffer and presents it.
 fn present(self: *const Self) !void {
     const api = self.api;
-    if (api.presentSuspended()) return;
     const sc = try api.swapChain(
         @intCast(self.target.width),
         @intCast(self.target.height),
