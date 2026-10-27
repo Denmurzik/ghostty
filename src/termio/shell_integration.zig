@@ -17,6 +17,10 @@ pub const Shell = enum {
     fish,
     nushell,
     zsh,
+    /// Windows only: PowerShell 7 and Windows PowerShell.
+    pwsh,
+    /// Windows only: cmd.exe.
+    cmd,
 };
 
 /// The result of setting up a shell integration.
@@ -72,6 +76,14 @@ pub fn setup(
             resource_dir,
             env,
         ),
+
+        .pwsh => try setupPwsh(
+            alloc_arena,
+            command,
+            resource_dir,
+        ),
+
+        .cmd => try setupCmd(alloc_arena, command, env),
 
         .elvish, .fish => xdg: {
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
@@ -134,14 +146,30 @@ test "shell integration failure" {
     try testing.expectEqual(0, env.count());
 }
 
+/// The name of the executable `arg0` runs: its basename, without the
+/// ".exe" suffix on Windows (case-insensitive there).
+fn exeName(arg0: []const u8) []const u8 {
+    const base = std.fs.path.basename(arg0);
+    if (comptime builtin.target.os.tag != .windows) return base;
+    if (base.len > 4 and std.ascii.eqlIgnoreCase(base[base.len - 4 ..], ".exe")) {
+        return base[0 .. base.len - 4];
+    }
+    return base;
+}
+
 fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     var arg_iter = try command.argIterator(alloc);
     defer arg_iter.deinit();
 
     const arg0 = arg_iter.next() orelse return null;
-    const exe = std.fs.path.basename(arg0);
+    const exe = exeName(arg0);
 
     if (std.mem.eql(u8, "bash", exe)) {
+        // The bash.exe in System32 is the WSL launcher, not a bash we can inject into.
+        if (comptime builtin.target.os.tag == .windows) {
+            if (std.ascii.findIgnoreCase(arg0, "\\windows\\system32\\") != null or
+                std.ascii.findIgnoreCase(arg0, "\\windows\\sysnative\\") != null) return null;
+        }
         // Apple distributes their own patched version of Bash 3.2
         // on macOS that disables the ENV-based POSIX startup path.
         // This means we're unable to perform our automatic shell
@@ -162,6 +190,12 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     if (std.mem.eql(u8, "fish", exe)) return .fish;
     if (std.mem.eql(u8, "nu", exe)) return .nushell;
     if (std.mem.eql(u8, "zsh", exe)) return .zsh;
+
+    if (comptime builtin.target.os.tag == .windows) {
+        if (std.ascii.eqlIgnoreCase(exe, "pwsh") or
+            std.ascii.eqlIgnoreCase(exe, "powershell")) return .pwsh;
+        if (std.ascii.eqlIgnoreCase(exe, "cmd")) return .cmd;
+    }
 
     return null;
 }
@@ -286,6 +320,114 @@ test "setup features" {
     }
 }
 
+/// Accumulates the arguments of an injected command: a `.direct` argv, or
+/// a space-joined `.shell` string.
+const ArgList = struct {
+    alloc: Allocator,
+    direct: bool,
+    list: std.ArrayList([:0]const u8) = .empty,
+
+    fn appendArg(self: *ArgList, arg: []const u8) Allocator.Error!void {
+        if (arg.len == 0) return;
+        try self.list.append(self.alloc, try self.alloc.dupeSentinel(u8, arg, 0));
+    }
+
+    fn finish(self: *ArgList) !config.Command {
+        if (self.direct) return .{ .direct = try self.list.toOwnedSlice(self.alloc) };
+        var joined: std.Io.Writer.Allocating = .init(self.alloc);
+        for (self.list.items, 0..) |arg, i| {
+            if (i > 0) try joined.writer.writeByte(' ');
+            try joined.writer.writeAll(arg);
+        }
+        return .{ .shell = try joined.toOwnedSliceSentinel(0) };
+    }
+};
+
+/// Setup the PowerShell integration (Windows): the shell starts with
+/// `-NoExit -Command ". '<ghostty.ps1>'"`, which runs after the user's
+/// profile and wraps `prompt` and the Enter key to emit OSC 2 titles (the
+/// working directory at the prompt, the command while it runs). Nothing on
+/// disk changes. Returns null for non-interactive invocations.
+fn setupPwsh(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+) !?config.Command {
+    var args: ArgList = .{ .alloc = alloc, .direct = true };
+
+    var iter = try command.argIterator(alloc);
+    defer iter.deinit();
+    if (iter.next()) |exe| try args.appendArg(exe) else return null;
+    while (iter.next()) |arg| {
+        // A command, script or stdin script is not an interactive session.
+        if (pwshRunsCode(arg)) return null;
+        try args.appendArg(arg);
+    }
+
+    var script_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const script_path = try std.mem.print(
+        &script_path_buf,
+        "{s}\\shell-integration\\pwsh\\ghostty.ps1",
+        .{std.mem.trimEnd(u8, resource_dir, "\\/")},
+    );
+    if (std.Io.Dir.openFileAbsolute(global.io(), script_path, .{})) |file| {
+        file.close(global.io());
+    } else |err| {
+        log.warn("unable to open {s}: {}", .{ script_path, err });
+        return null;
+    }
+
+    // Single quotes inside the path double, as PowerShell requires.
+    var quoted: std.Io.Writer.Allocating = .init(alloc);
+    try quoted.writer.writeAll(". '");
+    for (script_path) |c| {
+        if (c == '\'') try quoted.writer.writeByte('\'');
+        try quoted.writer.writeByte(c);
+    }
+    try quoted.writer.writeByte('\'');
+
+    try args.appendArg("-NoExit");
+    try args.appendArg("-Command");
+    try args.appendArg(quoted.written());
+    return try args.finish();
+}
+
+/// Whether a PowerShell argument asks to run code instead of a session.
+fn pwshRunsCode(arg: []const u8) bool {
+    if (std.mem.eql(u8, arg, "-")) return true;
+    if (arg.len < 2 or (arg[0] != '-' and arg[0] != '/')) return false;
+    const name = arg[1..];
+    // PowerShell accepts any prefix of a parameter name.
+    const runs = [_][]const u8{ "command", "file", "encodedcommand", "version", "help", "?", "stdin" };
+    for (runs) |r| {
+        if (name.len <= r.len and std.ascii.eqlIgnoreCase(name, r[0..name.len])) return true;
+    }
+    return false;
+}
+
+/// Setup the cmd.exe integration (Windows): the PROMPT gets a leading OSC 2
+/// with the current directory (`$P`). cmd cannot tell us which command is
+/// running; conhost's own "<cmd.exe> - <command>" title covers that.
+fn setupCmd(
+    alloc: Allocator,
+    command: config.Command,
+    env: *EnvMap,
+) !?config.Command {
+    var iter = try command.argIterator(alloc);
+    defer iter.deinit();
+    _ = iter.next() orelse return null;
+    while (iter.next()) |arg| {
+        // /c and /r run one command and exit.
+        if (arg.len >= 2 and arg[0] == '/' and (arg[1] == 'c' or arg[1] == 'C' or arg[1] == 'r' or arg[1] == 'R')) return null;
+    }
+
+    const title = "$e]2;$P$e\\";
+    const current = env.get("PROMPT") orelse "$P$G";
+    if (std.mem.startsWith(u8, current, title)) return try command.clone(alloc);
+    try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ title, current }));
+    return try command.clone(alloc);
+}
+
 /// Setup the bash automatic shell integration. This works by
 /// starting bash in POSIX mode and using the ENV environment
 /// variable to load our bash integration script. This prevents
@@ -301,10 +443,12 @@ fn setupBash(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
-    var stack_fallback_buf: [4096]u8 = undefined;
-    var stack_fallback: std.heap.BufferFirstAllocator = .init(&stack_fallback_buf, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
-    defer cmd.deinit();
+    // On Windows a direct argv stays direct: a flattened string would split
+    // the path of bash.exe at a space (it lives under "Program Files").
+    var args: ArgList = .{
+        .alloc = alloc,
+        .direct = builtin.target.os.tag == .windows and command == .direct,
+    };
 
     // Iterator that yields each argument in the original command line.
     // This will allocate once proportionate to the command line length.
@@ -313,9 +457,9 @@ fn setupBash(
 
     // Start accumulating arguments with the executable and initial flags.
     if (iter.next()) |exe| {
-        try cmd.appendArg(exe);
+        try args.appendArg(exe);
     } else return null;
-    try cmd.appendArg("--posix");
+    try args.appendArg("--posix");
 
     // Stores the list of intercepted command line flags that will be passed
     // to our shell integration script: --norc --noprofile
@@ -348,17 +492,17 @@ fn setupBash(
             if (std.mem.indexOfScalar(u8, arg, 'c') != null) {
                 return null;
             }
-            try cmd.appendArg(arg);
+            try args.appendArg(arg);
         } else if (std.mem.eql(u8, arg, "-") or std.mem.eql(u8, arg, "--")) {
             // All remaining arguments should be passed directly to the shell
             // command. We shouldn't perform any further option processing.
-            try cmd.appendArg(arg);
+            try args.appendArg(arg);
             while (iter.next()) |remaining_arg| {
-                try cmd.appendArg(remaining_arg);
+                try args.appendArg(remaining_arg);
             }
             break;
         } else {
-            try cmd.appendArg(arg);
+            try args.appendArg(arg);
         }
     }
 
@@ -407,7 +551,7 @@ fn setupBash(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
+    return try args.finish();
 }
 
 test "bash" {
@@ -1009,6 +1153,111 @@ test "zsh: missing resources" {
     try testing.expectEqual(0, env.count());
 }
 
+test "windows: shells are detected by image name" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const git: config.Command = .{ .direct = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" } };
+    const pwsh: config.Command = .{ .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo" } };
+    const ps5: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"} };
+    const cmd: config.Command = .{ .direct = &.{"C:\\WINDOWS\\system32\\CMD.EXE"} };
+    const wsl: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\bash.exe"} };
+    try testing.expectEqual(.bash, try detectShell(alloc, git));
+    try testing.expectEqual(.pwsh, try detectShell(alloc, pwsh));
+    try testing.expectEqual(.pwsh, try detectShell(alloc, ps5));
+    try testing.expectEqual(.cmd, try detectShell(alloc, cmd));
+    try testing.expect(try detectShell(alloc, wsl) == null);
+}
+
+test "windows: bash keeps a direct argv" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    const git: config.Command = .{ .direct = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" } };
+    const command = (try setupBash(alloc, git, res.path, &env)).?;
+    try testing.expectEqual(@as(usize, 4), command.direct.len);
+    try testing.expectEqualStrings("C:\\Program Files\\Git\\bin\\bash.exe", command.direct[0]);
+    try testing.expectEqualStrings("--posix", command.direct[1]);
+    try testing.expectEqualStrings("--login", command.direct[2]);
+    try testing.expectEqualStrings("-i", command.direct[3]);
+}
+
+test "windows: pwsh" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.pwsh);
+    defer res.deinit();
+
+    const pwsh: config.Command = .{ .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo" } };
+    const command = (try setupPwsh(alloc, pwsh, res.path)).?;
+    try testing.expectEqual(@as(usize, 5), command.direct.len);
+    try testing.expectEqualStrings("-NoLogo", command.direct[1]);
+    try testing.expectEqualStrings("-NoExit", command.direct[2]);
+    try testing.expectEqualStrings("-Command", command.direct[3]);
+    try testing.expect(std.mem.startsWith(u8, command.direct[4], ". '"));
+    try testing.expect(std.mem.endsWith(u8, command.direct[4], "\\shell-integration\\pwsh\\ghostty.ps1'"));
+
+    // Code to run is not a session.
+    inline for (.{ "-Command", "-c", "-File", "-f", "-EncodedCommand", "-", "-Version" }) |arg| {
+        const code: config.Command = .{ .direct = &.{ "pwsh.exe", arg, "x" } };
+        try testing.expect(try setupPwsh(alloc, code, res.path) == null);
+    }
+    const norc: config.Command = .{ .direct = &.{ "pwsh.exe", "-NoProfile", "-NoLogo" } };
+    try testing.expect(try setupPwsh(alloc, norc, res.path) != null);
+}
+
+test "windows: pwsh: missing resources" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const pwsh: config.Command = .{ .direct = &.{"pwsh.exe"} };
+    try testing.expect(try setupPwsh(alloc, pwsh, "C:\\no\\such\\dir") == null);
+}
+
+test "windows: cmd prompt" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    const cmd: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} };
+    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+    try testing.expectEqualStrings("$e]2;$P$e\\$P$G", env.get("PROMPT").?);
+
+    // Set up again, or with a prompt of the user's: prefixed once.
+    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+    try testing.expectEqualStrings("$e]2;$P$e\\$P$G", env.get("PROMPT").?);
+    try env.put("PROMPT", "$T $P$G");
+    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+    try testing.expectEqualStrings("$e]2;$P$e\\$T $P$G", env.get("PROMPT").?);
+
+    // /c runs one command: no prompt shows.
+    var other = EnvMap.init(alloc);
+    defer other.deinit();
+    const run: config.Command = .{ .direct = &.{ "cmd.exe", "/c", "dir" } };
+    try testing.expect(try setupCmd(alloc, run, &other) == null);
+    try testing.expect(other.get("PROMPT") == null);
+}
+
 /// Test helper that creates a temporary resources directory with shell integration paths.
 const TmpResourcesDir = struct {
     tmp_dir: std.testing.TmpDir,
@@ -1039,6 +1288,10 @@ const TmpResourcesDir = struct {
         switch (shell) {
             .bash => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/bash/ghostty.bash",
+                .data = "",
+            }),
+            .pwsh => try tmp_dir.dir.writeFile(std.testing.io, .{
+                .sub_path = "shell-integration/pwsh/ghostty.ps1",
                 .data = "",
             }),
             else => {},

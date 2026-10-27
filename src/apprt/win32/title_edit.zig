@@ -179,7 +179,7 @@ pub fn prompt(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt
                 titleRect(window);
             beginFor(window, .tab, surface.tab.id, rect, surface.tab.title());
         },
-        .surface => beginFor(window, .surface, surface.id, titleRect(window), surface.title orelse ""),
+        .surface => beginFor(window, .surface, surface.id, titleRect(window), surface.getTitle() orelse ""),
         .window => {
             const initial: []const u8 = if (window.title_override) |t|
                 t
@@ -272,16 +272,10 @@ fn apply(window: *Window, kind: Kind, id: u32, title: []const u8) void {
         },
         .surface => {
             const surface = window.findSurface(id) orelse return;
-            const alloc = window.app.core_app.alloc;
-            if (title.len == 0) {
-                if (surface.title) |old| alloc.free(old);
-                surface.title = null;
-            } else {
-                surface.setTitle(title) catch |err| {
-                    log.warn("unable to set the surface title err={}", .{err});
-                    return;
-                };
-            }
+            surface.setUserTitle(title) catch |err| {
+                log.warn("unable to set the surface title err={}", .{err});
+                return;
+            };
             window.surfaceTitleChanged(surface);
         },
     }

@@ -16,6 +16,7 @@ const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const hooks_mod = @import("hooks.zig");
 const title_edit = @import("title_edit.zig");
+const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 const geom = @import("geom.zig");
 const theme = @import("theme.zig");
@@ -483,10 +484,8 @@ pub fn removeSurface(self: *Tab, s: *Surface) void {
 /// The title shown for this tab.
 pub fn title(self: *const Tab) []const u8 {
     if (self.title_override) |t| return t;
-    if (self.focusedSurface()) |s| {
-        if (s.title) |t| return t;
-    }
-    return "Ghostty";
+    if (self.focusedSurface()) |s| return s.shownTitle();
+    return title_rules.fallback;
 }
 
 /// Whether a surface of this tab is ringing the bell.

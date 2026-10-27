@@ -39,6 +39,7 @@ const mouse = @import("mouse.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const scrollbar_mod = @import("scrollbar.zig");
 const taskbar = @import("taskbar.zig");
+const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_surface);
@@ -99,8 +100,14 @@ id: u32,
 size: std.atomic.Value(u64),
 content_scale: apprt.ContentScale,
 
-/// Owned copy of the last title set by core, if any.
-title: ?[:0]const u8,
+/// Owned copy of the last title the program set, if any.
+title: ?[:0]u8,
+
+/// Owned copy of the title the user typed; it wins over `title` until cleared.
+title_user: ?[:0]u8 = null,
+
+/// Set when no title arrived within `title_rules.grace_ms`: the ghost shows.
+title_grace_over: bool = false,
 
 /// Owned copy of the working directory this surface last reported.
 pwd: ?[:0]u8 = null,
@@ -220,6 +227,9 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     errdefer _ = win32.user32.DestroyWindow(hwnd);
     self.hwnd = hwnd;
     scrollbar_mod.init(self);
+    if (win32.user32.SetTimer(hwnd, messages.timers.surface.title_grace, title_rules.grace_ms, null) == 0) {
+        self.title_grace_over = true;
+    }
 
     const client = self.clientSize();
     self.size.store(renderer.D3D11.packSize(client.width, client.height), .release);
@@ -292,6 +302,7 @@ pub fn deinit(self: *Surface) void {
     if (!self.hwnd_destroyed) _ = win32.user32.DestroyWindow(self.hwnd);
 
     if (self.title) |t| alloc.free(t);
+    if (self.title_user) |t| alloc.free(t);
     if (self.pwd) |p| alloc.free(p);
     alloc.destroy(self);
 }
@@ -317,8 +328,9 @@ pub fn close(self: *Surface, process_active: bool) void {
     );
 }
 
-pub fn getTitle(self: *Surface) ?[:0]const u8 {
-    return self.title;
+/// The title shown for this surface: the user's, else the program's.
+pub fn getTitle(self: *const Surface) ?[:0]const u8 {
+    return self.title_user orelse self.title;
 }
 
 /// The working directory this surface last reported, if any.
@@ -338,12 +350,36 @@ fn storePwd(alloc: Allocator, slot: *?[:0]u8, pwd: []const u8) Allocator.Error!v
     slot.* = copy;
 }
 
-/// Remember the title core asked for. The window caption is set separately.
+/// Remember the title the program set (`title_rules.programTitle`: the
+/// console's image path is no title). The caption is set separately.
 pub fn setTitle(self: *Surface, title: []const u8) Allocator.Error!void {
     const alloc = self.app.core_app.alloc;
-    const copy = try alloc.dupeSentinel(u8, title, 0);
+    const copy: ?[:0]u8 = if (title_rules.programTitle(title)) |t| try alloc.dupeSentinel(u8, t, 0) else null;
     if (self.title) |old| alloc.free(old);
     self.title = copy;
+}
+
+/// Pin (or, when empty, release) the title the user typed. A pinned title
+/// ignores the program's, like `titleFromTerminal` on macOS.
+pub fn setUserTitle(self: *Surface, title: []const u8) Allocator.Error!void {
+    const alloc = self.app.core_app.alloc;
+    const copy: ?[:0]u8 = if (title.len == 0) null else try alloc.dupeSentinel(u8, title, 0);
+    if (self.title_user) |old| alloc.free(old);
+    self.title_user = copy;
+}
+
+/// The title the caption and strip show for this surface: what is set,
+/// else the ghost once the first title is overdue, else nothing yet.
+pub fn shownTitle(self: *const Surface) []const u8 {
+    if (self.getTitle()) |t| return t;
+    return if (self.title_grace_over) title_rules.fallback else "";
+}
+
+/// `WM_TIMER`: the first title is overdue.
+fn titleGraceOver(self: *Surface) void {
+    _ = win32.user32.KillTimer(self.hwnd, messages.timers.surface.title_grace);
+    self.title_grace_over = true;
+    if (self.getTitle() == null) self.window.surfaceTitleChanged(self);
 }
 
 pub fn getContentScale(self: *const Surface) error{}!apprt.ContentScale {
@@ -606,6 +642,9 @@ fn wndProc(
 
         win32.user32.WM_TIMER => if (wparam == resize_timer_id) {
             self.flushSize();
+            return 0;
+        } else if (wparam == messages.timers.surface.title_grace) {
+            self.titleGraceOver();
             return 0;
         },
 

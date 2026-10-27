@@ -837,6 +837,8 @@ const Subprocess = struct {
                 .fish => .fish,
                 .nushell => .nushell,
                 .zsh => .zsh,
+                .pwsh => .pwsh,
+                .cmd => .cmd,
             };
 
             const dir = cfg.resources_dir orelse {
@@ -912,7 +914,11 @@ const Subprocess = struct {
         // https://bugs.kde.org/show_bug.cgi?id=242114
         // https://github.com/kovidgoyal/kitty/issues/1595
         // https://github.com/ghostty-org/ghostty/discussions/7769
-        if (cwd) |pwd| try env.put("PWD", pwd);
+        // Not on Windows: an inherited DOS-style PWD keeps MSYS bash from
+        // converting it, so its prompt and titles show "C:/..." instead of "~".
+        if (comptime builtin.target.os.tag != .windows) {
+            if (cwd) |pwd| try env.put("PWD", pwd);
+        }
 
         return .{
             .arena = arena,

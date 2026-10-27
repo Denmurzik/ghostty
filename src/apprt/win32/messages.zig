@@ -70,6 +70,8 @@ pub const timers = struct {
         pub const resize: usize = 1;
         /// Expiry of the bell border (`decor.zig`).
         pub const decor: usize = 2;
+        /// End of the wait for a first title; the ghost shows after it.
+        pub const title_grace: usize = 3;
     };
     /// The overlay windows (`overlay.zig`).
     pub const overlay = struct {
@@ -87,6 +89,8 @@ pub const timers = struct {
         pub const strip_autoscroll: usize = 1;
         /// Drops a stale taskbar progress report (`taskbar.zig`).
         pub const taskbar_stale: usize = 0x2600;
+        /// Coalesces title changes before the caption and strip follow (`title_rules.zig`).
+        pub const title_debounce: usize = 0x2601;
         /// Slide animation and autohide of the quick terminal.
         pub const quick_slide: usize = 2;
     };
@@ -136,9 +140,9 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
     // must differ within one class; the top-level window has several.
     const classes = .{
         [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory },
-        [_]usize{ timers.surface.resize, timers.surface.decor },
+        [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace },
         [_]usize{ timers.overlay.hide, timers.overlay.search_debounce },
-        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide },
+        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce },
     };
     inline for (classes) |ids| {
         for (ids, 0..) |id, i| {

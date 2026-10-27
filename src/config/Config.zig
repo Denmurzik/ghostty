@@ -2946,6 +2946,9 @@ keybind: Keybinds = .{},
 ///
 ///   * `bash`, `elvish`, `fish`, `nushell`, `zsh` - Use this specific shell injection scheme.
 ///
+///   * `pwsh`, `cmd` - Windows only: PowerShell (`pwsh`, `powershell`) and `cmd`
+///     titles (the working directory, and for PowerShell the running command).
+///
 /// The default value is `detect`.
 @"shell-integration": ShellIntegration = .detect,
 
@@ -8954,6 +8957,8 @@ pub const ShellIntegration = enum {
     fish,
     nushell,
     zsh,
+    pwsh,
+    cmd,
 };
 
 /// Shell integration features

@@ -30,6 +30,7 @@ const strip_input_mod = @import("strip_input.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
 const title_edit = @import("title_edit.zig");
+const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 
 const messages = @import("messages.zig");
@@ -685,12 +686,14 @@ fn clientRect(self: *const Window) geom.Rect {
 /// Show the title of the window: the user's, else the active tab's.
 pub fn refreshTitle(self: *Window) void {
     const alloc = self.app.core_app.alloc;
-    const text: []const u8 = if (self.title_override) |t|
+    const shown: []const u8 = if (self.title_override) |t|
         t
     else if (self.activeTab()) |tab|
         tab.title()
     else
         default_title;
+    // Until the first title arrives the taskbar entry reads "Ghostty", not blank.
+    const text = if (shown.len == 0) default_title else shown;
 
     const decorated: ?[:0]u8 = if (self.activeTab()) |tab|
         bell.decorateTitle(alloc, text, tab) catch |err| blk: {
@@ -714,14 +717,19 @@ pub fn refreshTitle(self: *Window) void {
 
 /// A surface got a new title: the caption follows when it is the one the
 /// active tab shows, otherwise only the strip needs a repaint.
+/// The change is coalesced (`title_rules.debounce_ms`): a command that sets
+/// the title twice in a row does not flicker.
 pub fn surfaceTitleChanged(self: *Window, surface: *Surface) void {
-    if (self.activeTab()) |tab| {
-        if (tab == surface.tab and tab.focusedSurface() == surface) {
-            self.refreshTitle();
-            return;
-        }
+    _ = surface;
+    if (win32.user32.SetTimer(self.hwnd, messages.timers.window.title_debounce, title_rules.debounce_ms, null) == 0) {
+        self.titleDebounced();
     }
-    Chrome.invalidate(self);
+}
+
+/// `WM_TIMER` of `surfaceTitleChanged`: show the titles as they are now.
+fn titleDebounced(self: *Window) void {
+    _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.title_debounce);
+    self.refreshTitle();
 }
 
 /// Set (or, when empty, clear) the window's own title.
@@ -1150,6 +1158,11 @@ fn wndProc(
         },
 
         win32.user32.WM_MOVE => hooks_mod.windowChanged(self, .moved),
+
+        win32.user32.WM_TIMER => if (wparam == messages.timers.window.title_debounce) {
+            self.titleDebounced();
+            return 0;
+        },
 
         win32.user32.WM_SIZE => {
             self.handleSize(wparam);
