@@ -84,7 +84,7 @@ pub const Compiler = struct {
             return error.CompilerUnavailable;
         const proc = GetProcAddress(module, "D3DCompile") orelse
             return error.CompilerUnavailable;
-        return .{ .d3d_compile = @ptrCast(proc) };
+        return .{ .d3d_compile = @ptrCast(@alignCast(proc)) };
     }
 
     /// Compiles HLSL to bytecode. The result is owned by the caller. On

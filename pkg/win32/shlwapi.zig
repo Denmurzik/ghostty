@@ -22,7 +22,7 @@ fn assocIsDangerousProc() ?AssocIsDangerousFn {
         // LOAD_LIBRARY_SEARCH_SYSTEM32.
         const module = kernel32.LoadLibraryExW(lib, null, 0x00000800) orelse return null;
         const addr = kernel32.GetProcAddress(module, "AssocIsDangerous") orelse return null;
-        S.proc = @ptrCast(addr);
+        S.proc = @ptrCast(@alignCast(addr));
     }
     return S.proc;
 }

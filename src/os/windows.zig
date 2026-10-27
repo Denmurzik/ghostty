@@ -709,8 +709,8 @@ fn loadDll(path: []const u8, api: *ConPty) !void {
     const create = exp.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse return error.MissingExport;
     const resize = exp.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse return error.MissingExport;
     const close = exp.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse return error.MissingExport;
-    api.create = @ptrCast(create);
-    api.resize = @ptrCast(resize);
-    api.close = @ptrCast(close);
+    api.create = @ptrCast(@alignCast(create));
+    api.resize = @ptrCast(@alignCast(resize));
+    api.close = @ptrCast(@alignCast(close));
     log.info("conpty functions from {s}", .{path});
 }

@@ -98,7 +98,7 @@ fn taskDialogProc() ?TaskDialogIndirectFn {
         const lib = std.unicode.utf8ToUtf16LeStringLiteral("comctl32.dll");
         const module = kernel32.LoadLibraryExW(lib, null, 0x00000800) orelse return null;
         const addr = kernel32.GetProcAddress(module, "TaskDialogIndirect") orelse return null;
-        S.proc = @ptrCast(addr);
+        S.proc = @ptrCast(@alignCast(addr));
     }
     return S.proc;
 }
