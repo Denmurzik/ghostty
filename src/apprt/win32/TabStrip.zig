@@ -45,22 +45,14 @@ pub const Metrics = struct {
     }
 };
 
-/// Width in px of a title as the strip paints it.
+/// What the painter knows about titles: the width of a title as painted and
+/// the width of the title area of tab `index` (so the geometry stays the
+/// painter's).
 pub const Measure = struct {
     ctx: ?*anyopaque = null,
-    func: *const fn (ctx: ?*anyopaque, title: []const u8) i32,
-
-    pub fn width(self: Measure, title: []const u8) i32 {
-        return self.func(self.ctx, title);
-    }
+    width_fn: *const fn (ctx: ?*anyopaque, title: []const u8) i32,
+    area_fn: *const fn (ctx: ?*anyopaque, tab: geom.Rect, index: usize) i32,
 };
-
-/// The width of the title area of a tab `tab_w` wide: as `Chrome.tabParts`
-/// with the close button, which a tab too narrow for it does without.
-pub fn titleWidth(m: Metrics, tab_w: i32) i32 {
-    const right_pad = if (tab_w >= 2 * m.close_w) m.close_w else m.tab_pad;
-    return @max(tab_w - m.tab_pad - right_pad, 0);
-}
 
 pub const Layout = struct {
     mode: Mode = .hidden,
@@ -202,21 +194,24 @@ pub const Layout = struct {
         return if (self.mode == .titlebar) .caption else .nowhere;
     }
 
-    /// Sets `trimmed` from the widths `measure` reports for `titles`, one per
-    /// tab. The title area is the tab less its padding and the close button
-    /// (the hovered tab shows it, and only a hovered tab has a tooltip).
+    /// Whether `title` does not fit the title area of tab `index`.
+    pub fn tabTrimmed(self: *const Layout, index: usize, title: []const u8, measure: Measure) bool {
+        if (index >= self.tabs.items.len) return false;
+        const area = measure.area_fn(measure.ctx, self.tabs.items[index], index);
+        return measure.width_fn(measure.ctx, title) > area;
+    }
+
+    /// Sets `trimmed` from `tabTrimmed`, `titles` having one title per tab.
     pub fn fillTrimmed(
         self: *Layout,
         alloc: Allocator,
-        m: Metrics,
         titles: []const []const u8,
         measure: Measure,
     ) !void {
         self.trimmed.clearRetainingCapacity();
         try self.trimmed.ensureTotalCapacity(alloc, self.tabs.items.len);
-        for (self.tabs.items, 0..) |r, i| {
-            const trimmed = i < titles.len and measure.width(titles[i]) > titleWidth(m, r.w);
-            self.trimmed.appendAssumeCapacity(trimmed);
+        for (0..self.tabs.items.len) |i| {
+            self.trimmed.appendAssumeCapacity(i < titles.len and self.tabTrimmed(i, titles[i], measure));
         }
     }
 
@@ -440,6 +435,14 @@ fn fakeWidth(_: ?*anyopaque, title: []const u8) i32 {
     return @intCast(title.len * 8);
 }
 
+/// The area of the default metrics: padding left, the close button right.
+fn fakeArea(_: ?*anyopaque, tab: geom.Rect, _: usize) i32 {
+    const m = Metrics.forDpi(96);
+    return @max(tab.w - m.tab_pad - m.close_w, 0);
+}
+
+const fake_measure: Measure = .{ .width_fn = fakeWidth, .area_fn = fakeArea };
+
 test "win32 tabstrip: trimmed flags from the measure callback" {
     const alloc = std.testing.allocator;
     var layout: Layout = .{};
@@ -447,13 +450,13 @@ test "win32 tabstrip: trimmed flags from the measure callback" {
     const m = Metrics.forDpi(96);
     // 30 tabs in 800 px: every tab is tab_min_w (72) wide, the title area 72 - 10 - 28 = 34.
     try layout.compute(alloc, m, 800, .titlebar, true, 30, 0);
-    try std.testing.expectEqual(@as(i32, 34), titleWidth(m, layout.tabs.items[0].w));
+    try std.testing.expectEqual(@as(i32, 34), fakeArea(null, layout.tabs.items[0], 0));
 
     var titles: [30][]const u8 = @splat("ab");
     titles[1] = "a title that does not fit";
     titles[2] = "abcd"; // 32 px: fits
     titles[3] = "abcde"; // 40 px: does not
-    try layout.fillTrimmed(alloc, m, &titles, .{ .func = fakeWidth });
+    try layout.fillTrimmed(alloc, &titles, fake_measure);
     try std.testing.expectEqual(@as(usize, 30), layout.trimmed.items.len);
     try std.testing.expect(!layout.trimmed.items[0]);
     try std.testing.expect(layout.trimmed.items[1]);
@@ -463,7 +466,10 @@ test "win32 tabstrip: trimmed flags from the measure callback" {
     // Wide tabs: the same long title fits 240 px less 38.
     try layout.compute(alloc, m, 1200, .titlebar, true, 2, 0);
     var two = [_][]const u8{ "short", "xxxxxxxxxxxxxxxxxxxxxxxxxx" };
-    try layout.fillTrimmed(alloc, m, &two, .{ .func = fakeWidth });
+    try layout.fillTrimmed(alloc, &two, fake_measure);
+    try std.testing.expect(layout.tabTrimmed(1, two[1], fake_measure));
+    try std.testing.expect(!layout.tabTrimmed(0, two[0], fake_measure));
+    try std.testing.expect(!layout.tabTrimmed(9, two[1], fake_measure));
     try std.testing.expectEqual(@as(usize, 2), layout.trimmed.items.len);
     try std.testing.expect(!layout.trimmed.items[0]);
     try std.testing.expect(layout.trimmed.items[1]);

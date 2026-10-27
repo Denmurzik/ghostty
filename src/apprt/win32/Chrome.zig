@@ -517,17 +517,31 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
     p.drawText(r, args.text, p.fm.label, p.pal.text);
 }
 
-/// The measure of tab titles for `TabStrip.Layout.fillTrimmed`: the width
-/// in px the strip's title font gives them at the DPI `dpi` points to.
-pub fn titleMeasure(dpi: *const u32) TabStrip.Measure {
-    return .{ .ctx = @constCast(dpi), .func = measureTitle };
+/// The width of the title area of the tab at `r` when it is hovered (its
+/// close button is shown), from `tabParts`.
+pub fn titleAreaWidth(r: geom.Rect, dpi: u32, bell: bool) i32 {
+    return tabParts(r, dpi, false, true, bell).title.w;
+}
+
+/// The measure of tab titles for `TabStrip.Layout.tabTrimmed`: the width
+/// the strip's title font gives them and the title area `tabParts` leaves,
+/// for the tabs of `window`.
+pub fn titleMeasure(window: *Window) TabStrip.Measure {
+    return .{ .ctx = window, .width_fn = measureTitle, .area_fn = measureArea };
 }
 
 fn measureTitle(ctx: ?*anyopaque, title: []const u8) i32 {
-    const dpi: *const u32 = @ptrCast(@alignCast(ctx.?));
+    const window: *const Window = @ptrCast(@alignCast(ctx.?));
     var buf: [256]u16 = undefined;
     // A title cut at the buffer is still wider than any title area.
-    return measureText(toUtf16(&buf, title), .{ .size_pt = 12 }, dpi.*) catch 0;
+    return measureText(toUtf16(&buf, title), .{ .size_pt = 12 }, window.dpi) catch 0;
+}
+
+fn measureArea(ctx: ?*anyopaque, tab: geom.Rect, index: usize) i32 {
+    const window: *const Window = @ptrCast(@alignCast(ctx.?));
+    const bell = index < window.tabs.items.len and
+        window.app.config.@"bell-features".title and window.tabs.items[index].bellRinging();
+    return titleAreaWidth(tab, window.dpi, bell);
 }
 
 /// Width in px of `text` set in the label font at `dpi`.
@@ -872,6 +886,13 @@ test "win32 chrome: tab parts" {
     // Too narrow for a close button, as in `TabStrip.Layout.hitTest`.
     const narrow = tabParts(.{ .x = 0, .y = 0, .w = 55, .h = 40 }, 96, true, true, false);
     try std.testing.expect(narrow.close == null);
+}
+
+test "win32 chrome: title area for the tooltip follows tabParts" {
+    const r: geom.Rect = .{ .x = 100, .y = 0, .w = 200, .h = 40 };
+    try std.testing.expectEqual(tabParts(r, 96, true, true, false).title.w, titleAreaWidth(r, 96, false));
+    try std.testing.expectEqual(@as(i32, 142), titleAreaWidth(r, 96, true));
+    try std.testing.expect(titleAreaWidth(r, 96, true) < titleAreaWidth(r, 96, false));
 }
 
 test "win32 chrome: colours and utf16 titles" {

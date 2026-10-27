@@ -297,15 +297,13 @@ fn showTooltip(window: *Window) void {
     if (window.strip_input.session != null or index >= window.tabs.items.len) return;
     const alloc = window.app.core_app.alloc;
 
-    const titles = alloc.alloc([]const u8, window.tabs.items.len) catch return;
-    defer alloc.free(titles);
-    for (window.tabs.items, titles) |tab, *t| t.* = tab.title();
-    const m = TabStrip.Metrics.forDpi(window.dpi);
-    window.strip.fillTrimmed(alloc, m, titles, Chrome.titleMeasure(&window.dpi)) catch return;
-    if (index >= window.strip.trimmed.items.len or !window.strip.trimmed.items[index]) return;
+    const title = window.tabs.items[index].title();
+    if (!window.strip.tabTrimmed(index, title, Chrome.titleMeasure(window))) return;
 
     const tip = tooltipWindow(window) orelse return;
-    const wide = util.utf16z(alloc, titles[index]) catch return;
+    // The DPI may have changed since the tooltip was created.
+    _ = user32.SendMessageW(tip, comctl32.TTM_SETMAXTIPWIDTH, 0, geom.scale(tooltip_max_width, window.dpi));
+    const wide = util.utf16z(alloc, title) catch return;
     defer alloc.free(wide);
     var ti = toolInfo(window, wide.ptr);
     _ = user32.SendMessageW(tip, comctl32.TTM_UPDATETIPTEXTW, 0, @bitCast(@intFromPtr(&ti)));
