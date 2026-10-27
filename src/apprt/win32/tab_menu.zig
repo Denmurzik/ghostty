@@ -75,7 +75,7 @@ pub fn show(window: *Window, tab_index: usize, screen_x: i32, screen_y: i32) voi
         // The rename item is set apart from the close and move items.
         if (e.command == .rename_tab) _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
         const flags: u32 = user32.MF_STRING | if (enabled(e.command, count, tab_index)) @as(u32, 0) else MF_GRAYED;
-        _ = user32.AppendMenuW(menu, flags, @intFromEnum(e.command), e.label.ptr);
+        _ = user32.AppendMenuW(menu, flags, @backingInt(e.command), e.label.ptr);
     }
 
     // The menu belongs to the foreground window, or it will not close
@@ -149,5 +149,5 @@ test "win32 tab menu: command → action mapping" {
 
 test "win32 tab menu: command ids are the menu ids" {
     // 0 is "no command" for `TPM_RETURNCMD`.
-    for (entries, 1..) |e, id| try std.testing.expectEqual(@as(u32, @intCast(id)), @intFromEnum(e.command));
+    for (entries, 1..) |e, id| try std.testing.expectEqual(@as(u32, @intCast(id)), @backingInt(e.command));
 }
