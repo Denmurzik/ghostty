@@ -98,14 +98,18 @@ lost_reason: std.atomic.Value(i32) = .init(0),
 simulate_lost_at_ns: u64 = 0,
 
 pub fn init(alloc: Allocator, options: Options) !*Device {
-    const opts = applyEnv(alloc, options);
-
-    const factory = try dxgi.createFactory(opts.debug_layer);
-    errdefer com.release(factory);
+    var opts = applyEnv(alloc, options);
+    // After repeated losses on the hardware adapter (`preferWarp`).
+    if (prefer_warp.load(.acquire)) opts.driver = .warp;
 
     const created = try createDevice(opts);
     errdefer com.release(created.device);
     errdefer com.release(created.context);
+    // The DXGI debug factory only follows a device that really has the layer.
+    opts.debug_layer = created.debug;
+
+    const factory = try dxgi.createFactory(opts.debug_layer);
+    errdefer com.release(factory);
 
     const self = try alloc.create(Device);
     errdefer alloc.destroy(self);
@@ -175,6 +179,41 @@ var next_generation: u32 = 1;
 /// Whether a device was lost and no healthy one has been created since.
 var lost_seen: std.atomic.Value(bool) = .init(false);
 
+/// Set by `preferWarp`: every device made from now on runs on WARP.
+var prefer_warp: std.atomic.Value(bool) = .init(false);
+
+/// Makes future devices (`acquire`, `init`) use the WARP software
+/// rasterizer. Process-global: the recovery turns to it after the hardware
+/// adapter kept failing.
+pub fn preferWarp() void {
+    if (!prefer_warp.swap(true, .acq_rel)) log.warn("d3d11 devices now use WARP", .{});
+}
+
+/// Test hook: tests that call `preferWarp` undo it with this.
+pub fn resetPreferWarp() void {
+    if (comptime !builtin.is_test) @compileError("resetPreferWarp is a test hook");
+    prefer_warp.store(false, .release);
+}
+
+/// Set after a loss while a custom shader was active: the renderers then
+/// build no custom shader pipelines, so a shader that hangs the GPU cannot
+/// take the new device down again.
+var custom_shaders_disabled: std.atomic.Value(bool) = .init(false);
+
+pub fn disableCustomShaders() void {
+    custom_shaders_disabled.store(true, .release);
+}
+
+pub fn customShadersDisabled() bool {
+    return custom_shaders_disabled.load(.acquire);
+}
+
+/// Test hook, like `resetPreferWarp`.
+pub fn resetCustomShadersDisabled() void {
+    if (comptime !builtin.is_test) @compileError("resetCustomShadersDisabled is a test hook");
+    custom_shaders_disabled.store(false, .release);
+}
+
 /// The current healthy shared device, or a new one when there is none or
 /// the current one was lost. Release it with `release`.
 pub fn acquire(alloc: Allocator) !*Shared {
@@ -229,6 +268,7 @@ pub fn shutdown() void {
 pub fn markLost(shared: *Shared, reason: i32) void {
     if (shared.lost.swap(true, .acq_rel)) return;
     shared.lost_reason.store(reason, .monotonic);
+    log.warn("d3d11 device lost generation={d} reason=0x{x:0>8}", .{ shared.generation, @as(u32, @bitCast(reason)) });
 
     registry_mutex.lockUncancelable(global.io());
     defer registry_mutex.unlock(global.io());
@@ -464,7 +504,15 @@ fn applyEnv(alloc: Allocator, options: Options) Options {
     return opts;
 }
 
-fn createDevice(opts: Options) !d3d11.CreatedDevice {
+/// A created device and whether it has the debug layer.
+const Created = struct {
+    device: *d3d11.ID3D11Device,
+    context: *d3d11.ID3D11DeviceContext,
+    level: d3d11.FeatureLevel,
+    debug: bool,
+};
+
+fn createDevice(opts: Options) !Created {
     const driver: d3d11.DriverType = switch (opts.driver) {
         .hardware => .hardware,
         .warp => .warp,
@@ -472,7 +520,7 @@ fn createDevice(opts: Options) !d3d11.CreatedDevice {
 
     if (opts.debug_layer) {
         if (d3d11.createDevice(driver, .{ .bgra_support = true, .debug = true })) |created| {
-            return created;
+            return .{ .device = created.device, .context = created.context, .level = created.level, .debug = true };
         } else |err| {
             // The debug layer is an optional Windows feature ("Graphics
             // Tools"); without it device creation fails.
@@ -480,7 +528,8 @@ fn createDevice(opts: Options) !d3d11.CreatedDevice {
         }
     }
 
-    return try d3d11.createDevice(driver, .{ .bgra_support = true });
+    const created = try d3d11.createDevice(driver, .{ .bgra_support = true });
+    return .{ .device = created.device, .context = created.context, .level = created.level, .debug = false };
 }
 
 test "d3d11 device: WARP device has feature level >= 11_0" {
@@ -687,4 +736,27 @@ test "d3d11 device: a late markLost of a replaced device is not anyLost" {
     try std.testing.expect(!anyLost());
     release(a);
     release(b);
+}
+
+test "d3d11 device: preferWarp switches the adapter" {
+    defer resetPreferWarp();
+    const alloc = std.testing.allocator;
+
+    const before = try Device.init(alloc, .{ .driver = .hardware });
+    defer before.deinit(alloc);
+    // GHOSTTY_D3D11_DRIVER may force an adapter; only the switch is checked.
+    const was_warp = before.options.driver == .warp;
+
+    preferWarp();
+    const after = try Device.init(alloc, .{ .driver = .hardware });
+    defer after.deinit(alloc);
+    try std.testing.expectEqual(Driver.warp, after.options.driver);
+    _ = was_warp;
+}
+
+test "d3d11 device: custom shaders stay disabled once a loss disabled them" {
+    defer resetCustomShadersDisabled();
+    try std.testing.expect(!customShadersDisabled());
+    disableCustomShaders();
+    try std.testing.expect(customShadersDisabled());
 }

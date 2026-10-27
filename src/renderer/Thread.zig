@@ -558,6 +558,10 @@ fn renderCallback(
         return .disarm;
     };
 
+    // A backend whose device was lost and replaced moves over now, even
+    // while hidden (a no-op for the others).
+    t.renderer.recoverDevice();
+
     // If the display is now unrealized, release GPU resources now
     // we're on the render thread, and do not try to update and draw
     // this frame.

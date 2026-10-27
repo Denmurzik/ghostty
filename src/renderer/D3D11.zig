@@ -175,9 +175,14 @@ decor_failed: bool = false,
 /// Frame dump state, or null if `GHOSTTY_D3D11_DUMP` is unset.
 dump: ?Frame.Dump = null,
 
-/// Set once a device loss was logged, so a lost device logs once rather
-/// than once per frame.
-device_lost_logged: bool = false,
+/// Set by `displayRealized` (UI thread) when this renderer's device was lost:
+/// the render thread then moves to a fresh device (`recoverDevice`).
+reacquire_pending: std.atomic.Value(bool) = .init(false),
+
+/// Guards the swap of `device` against `deviceLost` reads from the UI
+/// thread. Everything else reads `device` on the render thread, which is
+/// also the only thread that swaps it.
+device_mutex: std.Io.Mutex = .init,
 
 /// Per-process counter handing out `dump` file indices.
 var next_renderer_index: std.atomic.Value(usize) = .init(0);
@@ -405,15 +410,10 @@ pub fn setViewport(self: *D3D11, width: u32, height: u32) void {
     self.viewport = .{ .width = width, .height = height };
 }
 
-/// Marks the shared device lost with the reason it reports and logs it
-/// once for this renderer.
+/// Marks the shared device lost with the reason it reports (`Device.markLost`
+/// logs the loss once).
 pub fn noteDeviceLost(self: *D3D11) void {
     self.device.markLostFromDevice();
-    if (self.device_lost_logged) return;
-    self.device_lost_logged = true;
-    log.err("d3d11 device lost reason=0x{x:0>8}, the surface will not draw", .{
-        @as(u32, @bitCast(self.device.lost_reason.load(.monotonic))),
-    });
 }
 
 /// Called by the generic renderer when drawing a frame failed, from any
@@ -423,9 +423,69 @@ pub fn frameFailed(self: *D3D11, err: anyerror) void {
     self.device.device.checkDeviceRemoved() catch self.noteDeviceLost();
 }
 
-/// Whether the device is lost: the renderer draws nothing more.
+/// Whether the device is lost and nobody is replacing it yet: the renderer
+/// draws nothing more. Render thread (or under the draw mutex).
 pub fn isLost(self: *const D3D11) bool {
+    if (self.reacquire_pending.load(.acquire)) return false;
     return self.device.isLost();
+}
+
+/// Whether the recovery has to act: the device is lost and no
+/// `displayRealized` asked for a replacement yet. Any thread.
+pub fn deviceLost(self: *const D3D11) bool {
+    if (self.reacquire_pending.load(.acquire)) return false;
+    const mutex: *std.Io.Mutex = @constCast(&self.device_mutex);
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+    return self.device.isLost();
+}
+
+/// Called by the generic renderer from `displayRealized` (UI thread). A
+/// lost device is replaced by the render thread at its next opportunity
+/// (`recoverDevice`); with a healthy one nothing happens.
+pub fn displayRealized(self: *D3D11) void {
+    if (!self.deviceLost()) return;
+    self.reacquire_pending.store(true, .release);
+}
+
+/// Whether `displayRealized` asked for a replacement device. Cheap, any thread.
+pub fn deviceChangePending(self: *const D3D11) bool {
+    return self.reacquire_pending.load(.acquire);
+}
+
+/// Moves to a fresh device generation: drops the decor pass and the swap
+/// chain (the next frame creates a new chain, handing a composition chain
+/// off again) and gives the lost device back. The caller (render thread,
+/// draw mutex held) has released everything it created from the old
+/// device. Returns false when no replacement could be made; the renderer
+/// then stays lost and the recovery tries again.
+pub fn recoverDevice(self: *D3D11) bool {
+    if (!self.reacquire_pending.swap(false, .acq_rel)) return false;
+    const old = self.device;
+    if (!old.isLost() or old.pool_alloc == null) return false;
+
+    {
+        old.lockContext();
+        defer old.unlockContext();
+        if (self.decor_pass) |*d| d.deinit();
+        self.decor_pass = null;
+        self.decor_failed = false;
+        self.dropSwapChain();
+    }
+
+    const fresh = Device.acquire(self.alloc) catch |err| {
+        log.err("d3d11 could not create a new device err={}", .{err});
+        return false;
+    };
+    {
+        self.device_mutex.lockUncancelable(global.io());
+        defer self.device_mutex.unlock(global.io());
+        self.device = fresh;
+    }
+    Device.release(old);
+    self.swap_chain_failure_logged = false;
+    log.info("d3d11 renderer recovered generation={d}", .{fresh.generation});
+    return true;
 }
 
 /// Actions taken before doing anything in `drawFrame`. The immediate
@@ -531,7 +591,10 @@ pub fn initShaders(
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
-    return try shaders.Shaders.init(alloc, self.device, custom_shaders);
+    // After a device loss with a custom shader active, no custom shaders
+    // (`recovery.zig`): the generic renderer then draws straight to the target.
+    const custom = if (Device.customShadersDisabled()) &.{} else custom_shaders;
+    return try shaders.Shaders.init(alloc, self.device, custom);
 }
 
 /// Initialize a new render target which can be presented by this API.
@@ -1290,6 +1353,105 @@ test "d3d11 api: image texture formats are total" {
     // The views read the format the resource was created with.
     const opts = api.imageTextureOptions(.bgra, true);
     try std.testing.expectEqual(opts.format, opts.srv_format);
+}
+
+/// A headless API on a shared device from `Device.acquire`, on WARP.
+fn sharedApi() !D3D11 {
+    Device.preferWarp();
+    return .{
+        .alloc = std.testing.allocator,
+        .blending = .native,
+        .device = try Device.acquire(std.testing.allocator),
+    };
+}
+
+fn lose(api: *D3D11) void {
+    Device.markLost(api.device, win32.foundation.DXGI_ERROR_DEVICE_REMOVED);
+}
+
+test "d3d11 device: renderers re-acquire a fresh generation after realize" {
+    defer Device.resetPreferWarp();
+    defer Device.shutdown();
+    var a = try sharedApi();
+    var b = try sharedApi();
+    try std.testing.expectEqual(a.device, b.device);
+    const old_generation = a.device.generation;
+
+    // Nothing to recover while the device is healthy.
+    try std.testing.expect(!a.deviceLost());
+    a.displayRealized();
+    try std.testing.expect(!a.deviceChangePending());
+
+    lose(&a);
+    try std.testing.expect(a.deviceLost());
+    try std.testing.expect(b.deviceLost());
+    try std.testing.expect(a.isLost());
+
+    // Realizing asks for a new device; the renderer is no longer "lost" to the
+    // sweep that asked, and draws again.
+    a.displayRealized();
+    b.displayRealized();
+    try std.testing.expect(a.deviceChangePending());
+    try std.testing.expect(!a.deviceLost());
+    try std.testing.expect(!a.isLost());
+
+    // The render threads move over; the lost generation is freed with the last
+    // of them (the allocator reports a leak otherwise).
+    try std.testing.expect(a.recoverDevice());
+    try std.testing.expect(b.recoverDevice());
+    try std.testing.expectEqual(a.device, b.device);
+    try std.testing.expect(a.device.generation > old_generation);
+    try std.testing.expect(!a.device.isLost());
+    try std.testing.expect(!a.deviceChangePending());
+
+    Device.release(a.device);
+    Device.release(b.device);
+}
+
+test "d3d11 device: composition chain handed off again after recovery" {
+    defer Device.resetPreferWarp();
+    defer Device.shutdown();
+    var api = try sharedApi();
+    defer Device.release(api.device);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(1);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+    defer api.threadExit();
+
+    {
+        api.device.lockContext();
+        defer api.device.unlockContext();
+        _ = try api.swapChain(32, 32);
+    }
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+
+    lose(&api);
+    api.displayRealized();
+    try std.testing.expect(api.recoverDevice());
+    try std.testing.expect(api.swap_chain == null);
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const sc = try api.swapChain(32, 32);
+    try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
+    try std.testing.expectEqual(@as(u32, 2), fake.calls);
+}
+
+test "d3d11 device: custom shaders are skipped once a loss disabled them" {
+    defer Device.resetPreferWarp();
+    defer Device.resetCustomShadersDisabled();
+    defer Device.shutdown();
+    var api = try sharedApi();
+    defer Device.release(api.device);
+
+    Device.disableCustomShaders();
+    var built = try api.initShaders(std.testing.allocator, &.{"void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }"});
+    defer built.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), built.post_pipelines.len);
 }
 
 test {

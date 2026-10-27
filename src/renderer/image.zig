@@ -67,6 +67,24 @@ pub const State = struct {
         self.overlay_placements.deinit(alloc);
     }
 
+    /// The graphics device was replaced: every texture belonged to the old
+    /// one. All images are dropped, and the next `kittyUpdate` (forced here)
+    /// and `overlayUpdate` prepare them again from the terminal's own copy,
+    /// so they are uploaded to the new device. Backends whose textures
+    /// survive never call this.
+    pub fn deviceChanged(self: *State, alloc: Allocator) void {
+        var it = self.images.iterator();
+        while (it.next()) |kv| kv.value_ptr.image.deinit(alloc);
+        self.images.clearRetainingCapacity();
+        self.kitty_placements.clearRetainingCapacity();
+        self.overlay_placements.clearRetainingCapacity();
+        self.kitty_bg_end = 0;
+        self.kitty_text_end = 0;
+        // Different from any real value, so `kittyRequiresUpdate` holds.
+        self.kitty_placements_generation = std.math.maxInt(u64);
+        self.kitty_storage_generation = std.math.maxInt(u64);
+    }
+
     /// Upload any images to the GPU that need to be uploaded,
     /// and remove any images that are no longer needed on the GPU.
     ///
@@ -1423,4 +1441,68 @@ test "kitty renderer uploads the current animation frame" {
         &.{ 0, 0, 255, 255 },
         entry.image.pending.dataSlice(),
     );
+}
+
+test "d3d11 device: images re-uploaded after recovery" {
+    const D3D11 = @import("D3D11.zig");
+    if (comptime GraphicsAPI != D3D11) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    D3D11.Device.preferWarp();
+    defer D3D11.Device.resetPreferWarp();
+    defer D3D11.Device.shutdown();
+    var api: D3D11 = .{
+        .alloc = alloc,
+        .blending = .native,
+        .device = try D3D11.Device.acquire(alloc),
+    };
+    defer D3D11.Device.release(api.device);
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    t.width_px = 30;
+    t.height_px = 30;
+
+    var state: State = .empty;
+    defer state.deinit(alloc);
+    var render_state: terminal.RenderState = .empty;
+    defer render_state.deinit(alloc);
+
+    const storage = &t.screens.active.kitty_images;
+    try storage.addImage(io, alloc, t.screens.active, .{
+        .id = 1,
+        .width = 1,
+        .height = 1,
+        .format = .rgba,
+        .data = .{ .complete = try alloc.dupe(u8, &.{ 255, 0, 0, 255 }) },
+    });
+    const pin = try t.screens.active.pages.trackPin(t.screens.active.cursor.page_pin.*);
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
+        .location = .{ .pin = pin },
+        .columns = 1,
+        .rows = 1,
+    });
+    try render_state.update(alloc, &t);
+    state.kittyUpdate(alloc, &t, &render_state);
+    try testing.expect(state.upload(alloc, &api));
+    const first_generation = api.device.generation;
+    try testing.expectEqual(api.device, state.images.get(.{ .kitty = 1 }).?.image.ready.device);
+    try testing.expect(!state.kittyRequiresUpdate(&t, &render_state));
+
+    // The device is lost and replaced: the texture of the old one is dropped.
+    D3D11.Device.markLost(api.device, @import("win32").foundation.DXGI_ERROR_DEVICE_REMOVED);
+    api.displayRealized();
+    state.deviceChanged(alloc);
+    try testing.expectEqual(@as(usize, 0), state.images.count());
+    try testing.expect(api.recoverDevice());
+    try testing.expect(api.device.generation > first_generation);
+
+    // The next frame prepares the image again and uploads it to generation 2.
+    try testing.expect(state.kittyRequiresUpdate(&t, &render_state));
+    state.kittyUpdate(alloc, &t, &render_state);
+    try testing.expectEqual(@as(usize, 1), state.kitty_placements.items.len);
+    try testing.expect(state.upload(alloc, &api));
+    try testing.expectEqual(api.device, state.images.get(.{ .kitty = 1 }).?.image.ready.device);
 }

@@ -1040,6 +1040,42 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.target_config_modified = 1;
         }
 
+        /// A graphics API whose device was lost and replaced (D3D11) reports it
+        /// through `deviceChangePending`; this moves the renderer to the new
+        /// device. Render thread, before it draws or hides: the pointer to the
+        /// device is only ever swapped here. No-op for other backends.
+        pub fn recoverDevice(self: *Self) void {
+            if (comptime !@hasDecl(GraphicsAPI, "deviceChangePending")) return;
+            if (!self.api.deviceChangePending()) return;
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+            self.recoverDeviceLocked();
+        }
+
+        /// The body of `recoverDevice`. Caller holds `draw_mutex`.
+        fn recoverDeviceLocked(self: *Self) void {
+            // Everything created from the old device goes first: the swap
+            // chain (frames, atlas copies, targets), the shaders and the
+            // image textures. The background image is read from its file
+            // again, Kitty images from the terminal's copy (`kittyUpdate`).
+            self.releaseGpuResources();
+            self.shaders.deinit(self.alloc);
+            self.images.deviceChanged(self.alloc);
+            if (self.bg_image) |img| {
+                img.deinit(self.alloc);
+                self.bg_image = null;
+            }
+
+            _ = self.api.recoverDevice();
+
+            self.reinitialize_shaders = true;
+            self.target_config_modified +%= 1;
+            self.force_redraw = true;
+            self.prepBackgroundImage() catch |err| {
+                log.warn("error reloading the background image after a device change err={}", .{err});
+            };
+        }
+
         /// This is called when the surface is being unrealized.
         /// This can happen because the surface is being closed but
         /// also when moving the window between displays or splitting.
@@ -1843,6 +1879,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .scrollbar = self.scrollbar,
                 }, .instant) > 0) self.scrollbar_dirty = false;
             };
+
+            // A replaced device is picked up by the render thread, never by a
+            // sync draw on the UI thread.
+            if (comptime @hasDecl(GraphicsAPI, "deviceChangePending")) {
+                if (!sync and self.api.deviceChangePending()) self.recoverDeviceLocked();
+            }
 
             // Let our graphics API do any bookkeeping, etc.
             // that it needs to do before / after `drawFrame`.
