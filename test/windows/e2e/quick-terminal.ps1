@@ -4,7 +4,7 @@
 # toggling again hides it and the shell stays alive; quick-terminal-autohide
 # hides it when another window of the desktop is activated;
 # quick-terminal-position = bottom puts it at the bottom edge; the quick
-# terminal does not count for quit-after-last-window-closed.
+# terminal counts for quit-after-last-window-closed only while shown.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
 Add-Type -AssemblyName System.Windows.Forms
@@ -109,14 +109,18 @@ Invoke-E2eScenario 'quick-terminal' {
     if (($q.rect.y + $q.rect.h) -ne $work.Bottom) { throw "not at the bottom of the work area $($work): $($q.rect | ConvertTo-Json -Compress)" }
     Stop-Ghostty $g
 
-    # 5. The quick terminal does not count: with quit-after-last-window-closed
-    # the process ends with the last normal window although the quick terminal is shown.
+    # 5. A shown quick terminal counts as a window: closing the last normal
+    # window keeps the process; hiding the quick terminal then ends it.
     $g = Start-E2eGhostty -ConfigText ($base + "`nquick-terminal-animation-duration = 0.05`nquick-terminal-autohide = false`nquit-after-last-window-closed = true`n")
     Wait-BashReady $g
     Invoke-QuickToggle $g
-    [void](Wait-Quick $g 'shown (quit)' { param($q) $q.shown -and $q.visible -and -not $q.animating })
-    $normal = @((Get-GhosttyState -Class $g.Class).windows | Where-Object { $_.hwnd -ne (ConvertTo-HwndText $qh) -and $_.id -ne $q.window })
+    $q = Wait-Quick $g 'shown (quit)' { param($q) $q.shown -and $q.visible -and -not $q.animating }
+    $normal = @((Get-GhosttyState -Class $g.Class).windows | Where-Object { $_.id -ne $q.window })
     if ($normal.Count -ne 1) { throw "expected one normal window, got $($normal.Count)" }
     [void][GhosttyE2e.Win]::PostMessageW([IntPtr][Convert]::ToInt64(([string]$normal[0].hwnd).Substring(2), 16), $script:WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-    if (-not (Wait-ProcessExit $g 5).Exited) { throw 'the quick terminal kept the process alive after the last normal window closed' }
+    Start-Sleep -Seconds 2
+    $g.Process.Refresh()
+    if ($g.Process.HasExited) { throw 'the process ended although the quick terminal was shown' }
+    Invoke-QuickToggle $g
+    if (-not (Wait-ProcessExit $g 5).Exited) { throw 'hiding the quick terminal with no normal window left did not end the process' }
 }

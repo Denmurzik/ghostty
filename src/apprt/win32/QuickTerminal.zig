@@ -141,12 +141,12 @@ pub fn reverse(anim: Anim, now_ns: u64, duration_ns: u64, shown: geom.Rect, hidd
 }
 
 /// How many of `windows` (anything with a `kind`) count for
-/// `quit-after-last-window-closed` and the tray: the quick terminal never
-/// does, as a hidden macOS window does not keep the app open either.
-pub fn countNormal(windows: anytype) usize {
+/// `quit-after-last-window-closed` and the tray: the quick terminal only
+/// while it is shown, as a hidden macOS window does not keep the app open.
+pub fn countOpen(windows: anytype, quick_shown: bool) usize {
     var n: usize = 0;
     for (windows) |w| {
-        if (w.kind == .normal) n += 1;
+        if (w.kind == .normal or quick_shown) n += 1;
     }
     return n;
 }
@@ -409,6 +409,8 @@ fn finish(window: *Window) void {
     _ = user32.KillTimer(window.hwnd, messages.timers.window.quick_slide);
     window.app.quick.anim = null;
     _ = user32.ShowWindow(window.hwnd, user32.SW_HIDE);
+    // A hidden terminal no longer keeps the app open.
+    window.app.lastWindowCheck();
 }
 
 pub fn testState(app: *App, jw: *std.json.Stringify) !void {
@@ -567,14 +569,15 @@ test "win32 quick: reverse mid-animation" {
     try testing.expectEqual(shown, again.to);
 }
 
-test "win32 quick: window counting ignores quick windows" {
+test "win32 quick: window counting ignores hidden quick windows" {
     const W = struct { kind: Window.Kind };
     const none = [_]W{};
-    try testing.expectEqual(@as(usize, 0), countNormal(&none));
+    try testing.expectEqual(@as(usize, 0), countOpen(&none, true));
     const only_quick = [_]W{.{ .kind = .quick }};
-    try testing.expectEqual(@as(usize, 0), countNormal(&only_quick));
+    try testing.expectEqual(@as(usize, 0), countOpen(&only_quick, false));
+    try testing.expectEqual(@as(usize, 1), countOpen(&only_quick, true));
     const mixed = [_]W{ .{ .kind = .normal }, .{ .kind = .quick }, .{ .kind = .normal } };
-    try testing.expectEqual(@as(usize, 2), countNormal(&mixed));
+    try testing.expectEqual(@as(usize, 2), countOpen(&mixed, false));
 }
 
 test "win32 quick: strip refuses tab drops" {

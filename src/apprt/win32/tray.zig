@@ -240,7 +240,7 @@ fn wndProc(
 }
 
 fn click(app: *App) void {
-    switch (clickAction(QuickTerminal.countNormal(app.windows.items))) {
+    switch (clickAction(QuickTerminal.countOpen(app.windows.items, false))) {
         .new_window => newWindow(app),
         .present_last => {
             const window = app.last_active orelse lastNormal(app) orelse return;

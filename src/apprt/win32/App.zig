@@ -325,7 +325,7 @@ pub fn startQuitTimer(self: *App) void {
 /// Like `startQuitTimer`, for a config that is not applied to the app yet
 /// (a runtime switch of `quit-after-last-window-closed` with no window open).
 pub fn startQuitTimerFor(self: *App, config: *const Config) void {
-    if (QuickTerminal.countNormal(self.windows.items) > 0) return;
+    if (QuickTerminal.countOpen(self.windows.items, self.quick.shown) > 0) return;
     if (!config.@"quit-after-last-window-closed") return;
 
     if (win32.user32.SetTimer(self.msg_hwnd, quit_timer_id, quitDelayMs(config) orelse 0, null) == 0) {
@@ -351,8 +351,13 @@ pub fn unregisterWindow(self: *App, window: *Window) bool {
 /// Called from the window procedure when a top-level window goes away.
 pub fn windowDestroyed(self: *App, window: *Window) void {
     _ = self.unregisterWindow(window);
-    // The quick terminal does not keep the app open.
-    if (QuickTerminal.countNormal(self.windows.items) > 0) return;
+    self.lastWindowCheck();
+}
+
+/// Act on the last window being gone. A shown quick terminal counts as a
+/// window, a hidden one does not.
+pub fn lastWindowCheck(self: *App) void {
+    if (QuickTerminal.countOpen(self.windows.items, self.quick.shown) > 0) return;
     switch (lastWindowAction(
         self.config.@"quit-after-last-window-closed",
         quitDelayMs(&self.config),
