@@ -103,7 +103,7 @@ function Get-FramePoints($G) {
 function Wait-SystemMenu {
     $script:menu = [IntPtr]::Zero
     $found = Wait-Until {
-        $script:menu = [GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', $null)
+        $script:menu = [GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', [NullString]::Value)
         $script:menu -ne [IntPtr]::Zero
     } 5
     [bool]$found
@@ -223,7 +223,7 @@ Invoke-E2eScenario 'frame-hittest' {
     Invoke-SendInput -Hwnd $h -Keys 'alt'
     Start-Sleep -Milliseconds 400
     if (-not (Test-Responsive $h)) { throw 'the UI thread is blocked after a lone Alt tap' }
-    if ([GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', $null) -ne [IntPtr]::Zero) {
+    if ([GhosttyE2e.Frame]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, '#32768', [NullString]::Value) -ne [IntPtr]::Zero) {
         throw 'a lone Alt tap opened a menu'
     }
 
