@@ -425,8 +425,8 @@ test "d3d11 renderpass: a post pipeline writes raw values to an sRGB target" {
             // Stored as given, not encoded a second time.
             try expectPixel(.{ 30, 20, 10, 255 }, pixelAt(pixels, 4, 1, 1));
         } else {
-            // The sRGB view encodes what the shader wrote.
-            try std.testing.expect(pixels[0] > 30);
+            // The sRGB view encodes what the shader wrote (BGR of 10, 20, 30).
+            try expectPixel(.{ 96, 79, 56, 255 }, pixelAt(pixels, 4, 1, 1));
         }
     }
 }

@@ -389,6 +389,8 @@ language: ?[:0]const u8 = null,
 ///
 /// This affects the appearance of text and of any images with transparency.
 /// Additionally, custom shaders will receive colors in the configured space.
+/// On Windows custom shaders always receive and write the stored (gamma
+/// space) values, as shadertoy math expects, whatever the blending space.
 ///
 /// On macOS the default is `native`, on all other platforms the default is
 /// `linear-corrected`.

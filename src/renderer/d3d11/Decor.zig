@@ -1,4 +1,4 @@
-//! The decor pass: per-surface decorations the apprt asks for, drawn over
+//! The decor pass: per-surface decorations the apprt asks for, drawn oer
 //! the finished frame target right before it is copied to the swap chain.
 //! Unfocused-split dimming and the bell border (Ghostty for macOS draws
 //! both as SwiftUI overlays above the surface).
@@ -11,8 +11,6 @@ const Self = @This();
 
 const std = @import("std");
 const win32 = @import("win32");
-const com = win32.com;
-const d3d11 = win32.d3d11;
 const Device = @import("Device.zig");
 const Pipeline = @import("Pipeline.zig");
 const RenderPass = @import("RenderPass.zig");
@@ -50,20 +48,8 @@ const Constants = extern struct {
 pipeline: Pipeline,
 constants: bufferpkg.Buffer(Constants),
 
-/// `B8G8R8A8_UNORM` views of the targets drawn on (a target's texture is
-/// typeless), replaced round-robin. A view keeps its texture alive.
-views: [view_cache]View = @splat(.{ .resource = null, .rtv = null }),
-next_view: usize = 0,
-
 /// The number of draw calls issued. For tests.
 draw_calls: usize = 0,
-
-const view_cache = 4;
-
-const View = struct {
-    resource: ?*anyopaque,
-    rtv: ?*d3d11.ID3D11RenderTargetView,
-};
 
 pub fn init(device: *Device) !Self {
     const pipeline: Pipeline = try .init(null, .{
@@ -83,44 +69,8 @@ pub fn init(device: *Device) !Self {
 }
 
 pub fn deinit(self: *Self) void {
-    for (self.views) |v| com.release(v.rtv);
     self.constants.deinit();
     self.pipeline.deinit();
-}
-
-/// Drops the cached views, and with them the references to their textures.
-pub fn releaseViews(self: *Self) void {
-    for (&self.views) |*v| {
-        com.release(v.rtv);
-        v.* = .{ .resource = null, .rtv = null };
-    }
-    self.next_view = 0;
-}
-
-/// The cached gamma-space view of `target`'s texture, created on first use.
-fn unormView(self: *Self, target: *const Target) ?*d3d11.ID3D11RenderTargetView {
-    const key: *anyopaque = target.texture.texture;
-    for (self.views) |v| {
-        if (v.resource == key) return v.rtv;
-    }
-
-    // A pass serves the one live target of its surface: views of earlier
-    // ones (before a resize) would keep their textures alive.
-    self.releaseViews();
-
-    const rtv = target.device.device.createRenderTargetView(target.texture.texture.asResource(), &.{
-        .Format = .B8G8R8A8_UNORM,
-        .ViewDimension = .TEXTURE2D,
-        .u = .{ .Texture2D = .{ .MipSlice = 0 } },
-    }) catch |err| {
-        log.warn("unable to create the decor view err={}", .{err});
-        return null;
-    };
-    const slot = &self.views[self.next_view];
-    self.next_view = (self.next_view + 1) % view_cache;
-    com.release(slot.rtv);
-    slot.* = .{ .resource = key, .rtv = rtv };
-    return rtv;
 }
 
 fn channel(rgb: u24, shift: u5) f32 {
@@ -163,9 +113,9 @@ pub fn draw(self: *Self, target: *const Target, word: Word) void {
     const ctx = device.context;
     ctx.psSetConstantBuffers(2, &.{self.constants.buffer.resource});
 
-    const rtv = self.unormView(target) orelse return;
+    // The target's raw view: its own when the target is not sRGB.
     var gamma = target.*;
-    gamma.texture.rtv = rtv;
+    gamma.texture.rtv = target.texture.gamma_rtv orelse target.rtv();
     const attachments = [_]RenderPass.Options.Attachment{.{
         .target = .{ .target = gamma },
     }};

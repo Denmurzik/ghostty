@@ -546,6 +546,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 std.mem.swap(Texture, &self.front_texture, &self.back_texture);
             }
 
+            /// Called after each post pass. A single shader draws straight to
+            /// the frame target and leaves the (1x1) front texture alone.
+            pub fn passDone(self: *CustomShaderState, pipelines: usize) void {
+                if (pipelines > 1) self.swap();
+            }
+
             pub fn init(api: GraphicsAPI) !CustomShaderState {
                 // Create a GPU buffer to hold our uniforms.
                 var uniforms = try UniformBuffer.init(api.uniformBufferOptions(), 1);
@@ -1929,11 +1935,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         self.shaders.post_pipelines.len > 1,
                     );
                 } else if (frame.custom_shader_state) |*state| {
-                    // A reload may have added the second shader.
-                    if (self.shaders.post_pipelines.len > 1 and
-                        state.front_texture.width != state.back_texture.width)
-                    {
-                        try state.resize(self.api, state.back_texture.width, state.back_texture.height, true);
+                    // A reload may have changed the number of shaders.
+                    const front = self.shaders.post_pipelines.len > 1;
+                    if (front != (state.front_texture.width == state.back_texture.width)) {
+                        try state.resize(self.api, state.back_texture.width, state.back_texture.height, front);
                     }
                 }
             } else if (frame.custom_shader_state) |*state| {
@@ -2117,7 +2122,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
                 for (self.shaders.post_pipelines, 0..) |pipeline, i| {
-                    defer if (self.shaders.post_pipelines.len > 1) state.swap();
+                    defer state.passDone(self.shaders.post_pipelines.len);
 
                     var pass = frame_ctx.renderPass(&.{.{
                         .target = if (i < self.shaders.post_pipelines.len - 1)
@@ -3792,4 +3797,42 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+test "renderer: a single custom shader keeps a 1x1 front texture and never swaps" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const D3D11 = @import("D3D11.zig");
+    const Device = @import("d3d11/Device.zig");
+    const State = Renderer(D3D11).CustomShaderState;
+
+    const device = try Device.init(std.testing.allocator, .{ .driver = .warp });
+    defer device.deinit(std.testing.allocator);
+    const api: D3D11 = .{
+        .alloc = std.testing.allocator,
+        .blending = .native,
+        .device = device,
+    };
+
+    var state = try State.init(api);
+    defer state.deinit();
+
+    try state.resize(api, 8, 6, false);
+    try std.testing.expectEqual(@as(usize, 1), state.front_texture.width);
+    try std.testing.expectEqual(@as(usize, 8), state.back_texture.width);
+
+    const back = state.back_texture.texture;
+    state.passDone(1);
+    try std.testing.expect(state.back_texture.texture == back);
+    try std.testing.expectEqual(@as(usize, 8), state.back_texture.width);
+
+    // Two shaders ping-pong between two full size textures.
+    try state.resize(api, 8, 6, true);
+    try std.testing.expectEqual(@as(usize, 8), state.front_texture.width);
+    const back2 = state.back_texture.texture;
+    state.passDone(2);
+    try std.testing.expect(state.back_texture.texture != back2);
+
+    // Back to one shader: the front texture shrinks again.
+    try state.resize(api, 8, 6, false);
+    try std.testing.expectEqual(@as(usize, 1), state.front_texture.width);
 }

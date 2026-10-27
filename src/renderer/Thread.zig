@@ -656,6 +656,9 @@ fn animationTimerCallback(
         // Draw calls don't update from the terminal state so they
         // are much cheaper than a frame update.
         .draw => {
+            // Paced like a frame update: unpaced draws queue frames in the
+            // swap chain and a key echo would land behind them.
+            t.renderer.waitFrameSlot();
             t.drawFrame(false);
             t.armAnimationTimer();
             return .disarm;
