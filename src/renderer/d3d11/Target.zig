@@ -14,6 +14,7 @@ const d3d11 = win32.d3d11;
 const dxgi = win32.dxgi;
 const Device = @import("Device.zig");
 const Texture = @import("Texture.zig");
+const global = @import("../../global.zig");
 
 /// Options for initializing a Target
 pub const Options = struct {
@@ -28,6 +29,37 @@ pub const Options = struct {
 
 pub const Error = Texture.Error;
 
+/// Textures of the targets made by `initShared`, kept per device so that
+/// surfaces of one size draw into one texture instead of one each. A frame
+/// clears its target first and is drawn, copied to the swap chain and
+/// dumped under the device context lock, so nothing outlives it in the
+/// texture; the pool's own mutex only guards the bookkeeping.
+pub const Pool = struct {
+    const slot_count = 8;
+
+    const Entry = struct {
+        texture: ?Texture = null,
+        width: usize = 0,
+        height: usize = 0,
+        srgb: bool = false,
+        refs: u32 = 0,
+    };
+
+    mutex: std.Io.Mutex = .init,
+    entries: [slot_count]Entry = @splat(.{}),
+
+    /// Textures in use; for tests.
+    pub fn live(self: *Pool) usize {
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
+        var n: usize = 0;
+        for (self.entries) |e| {
+            if (e.texture != null) n += 1;
+        }
+        return n;
+    }
+};
+
 /// The device the target lives on.
 device: *Device,
 
@@ -38,6 +70,9 @@ texture: Texture,
 width: usize,
 /// Current height of this target.
 height: usize,
+
+/// The `Pool` entry the texture belongs to; null when the target owns it.
+slot: ?u8 = null,
 
 pub fn init(opts: Options) Error!Self {
     // D3D11 rejects empty textures.
@@ -60,8 +95,63 @@ pub fn init(opts: Options) Error!Self {
     };
 }
 
+/// Like `init`, but targets of the same size, format and device share one
+/// texture. Only for targets drawn under one hold of the context lock that
+/// start with a clear (the generic renderer's frame target); a pool without
+/// a free slot gives an owned target. Content does not survive another
+/// shared target's frame.
+pub fn initShared(opts: Options) Error!Self {
+    if (opts.width == 0 or opts.height == 0) return error.InvalidArgument;
+
+    const pool = &opts.device.target_pool;
+    pool.mutex.lockUncancelable(global.io());
+    defer pool.mutex.unlock(global.io());
+
+    var free: ?u8 = null;
+    for (&pool.entries, 0..) |*e, i| {
+        const texture = e.texture orelse {
+            if (free == null) free = @intCast(i);
+            continue;
+        };
+        if (e.width != opts.width or e.height != opts.height or e.srgb != opts.srgb) continue;
+        e.refs += 1;
+        return .{
+            .device = opts.device,
+            .texture = texture,
+            .width = opts.width,
+            .height = opts.height,
+            .slot = @intCast(i),
+        };
+    }
+
+    var self = try init(opts);
+    if (free) |i| {
+        pool.entries[i] = .{
+            .texture = self.texture,
+            .width = opts.width,
+            .height = opts.height,
+            .srgb = opts.srgb,
+            .refs = 1,
+        };
+        self.slot = i;
+    }
+    return self;
+}
+
 pub fn deinit(self: *Self) void {
-    self.texture.deinit();
+    if (self.slot) |i| {
+        const pool = &self.device.target_pool;
+        pool.mutex.lockUncancelable(global.io());
+        defer pool.mutex.unlock(global.io());
+        const e = &pool.entries[i];
+        e.refs -= 1;
+        if (e.refs == 0) {
+            e.texture.?.deinit();
+            e.* = .{};
+        }
+    } else {
+        self.texture.deinit();
+    }
     self.* = undefined;
 }
 
@@ -148,4 +238,40 @@ test "d3d11 target: readPixelsAlloc returns tightly packed rows" {
         // BGRA: red.
         try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, pixels[i..][0..4]);
     }
+}
+
+test "d3d11 target: shared targets of one size share a texture until the last is gone" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    var a = try initShared(.{ .device = device, .width = 6, .height = 4, .srgb = true });
+    var b = try initShared(.{ .device = device, .width = 6, .height = 4, .srgb = true });
+    var other_size = try initShared(.{ .device = device, .width = 6, .height = 5, .srgb = true });
+    var other_format = try initShared(.{ .device = device, .width = 6, .height = 4, .srgb = false });
+    try std.testing.expect(a.texture.texture == b.texture.texture);
+    try std.testing.expect(a.texture.texture != other_size.texture.texture);
+    try std.testing.expect(a.texture.texture != other_format.texture.texture);
+    try std.testing.expectEqual(@as(usize, 3), device.target_pool.live());
+
+    a.deinit();
+    try std.testing.expectEqual(@as(usize, 3), device.target_pool.live());
+    b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), device.target_pool.live());
+    other_size.deinit();
+    other_format.deinit();
+    try std.testing.expectEqual(@as(usize, 0), device.target_pool.live());
+}
+
+test "d3d11 target: a full pool hands out owned targets" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    var targets: [Pool.slot_count + 1]Self = undefined;
+    for (&targets, 0..) |*t, i| t.* = try initShared(.{ .device = device, .width = 2 + i, .height = 2, .srgb = false });
+    try std.testing.expect(targets[Pool.slot_count].slot == null);
+    try std.testing.expectEqual(@as(usize, Pool.slot_count), device.target_pool.live());
+    for (&targets) |*t| t.deinit();
+    try std.testing.expectEqual(@as(usize, 0), device.target_pool.live());
 }

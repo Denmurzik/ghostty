@@ -84,6 +84,9 @@ refs: usize = 0,
 generation: u32 = 0,
 pool_alloc: ?Allocator = null,
 
+/// Frame targets surfaces of one size share (`Target.initShared`).
+target_pool: @import("Target.zig").Pool = .{},
+
 /// Set once a renderer saw the device removed or reset.
 lost: std.atomic.Value(bool) = .init(false),
 
@@ -381,6 +384,40 @@ pub fn deinit(self: *Device, alloc: Allocator) void {
     com.release(self.device);
     com.release(self.factory);
     alloc.destroy(self);
+}
+
+extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?win32.foundation.HANDLE;
+extern "kernel32" fn HeapCompact(heap: win32.foundation.HANDLE, flags: u32) callconv(.winapi) usize;
+
+/// `IDXGIDevice3`, which `pkg/win32` does not bind: only `Trim` is called.
+const IDXGIDevice3 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = win32.foundation.GUID.parse("6007896c-3244-4afd-bf18-a6d3beda5023");
+
+    const VTable = extern struct {
+        base: dxgi.IDXGIDevice.VTable,
+        SetMaximumFrameLatency: *const anyopaque,
+        GetMaximumFrameLatency: *const anyopaque,
+        OfferResources: *const anyopaque,
+        ReclaimResources: *const anyopaque,
+        EnqueueSetEvent: *const anyopaque,
+        Trim: *const fn (*IDXGIDevice3) callconv(.winapi) void,
+    };
+};
+
+/// Asks the driver to give back the memory it caches for released
+/// resources (swap chain buffers, targets) and compacts the process heap,
+/// which keeps the high-water mark of the closed surfaces' allocations.
+/// Call after surfaces went away, with the context lock held. Failures are
+/// not worth reporting.
+pub fn trim(self: *Device) void {
+    self.assertContextLocked();
+    if (com.queryInterface(self.device, IDXGIDevice3)) |dxgi_device| {
+        defer com.release(dxgi_device);
+        dxgi_device.vtable.Trim(dxgi_device);
+    } else |_| {}
+    if (GetProcessHeap()) |h| _ = HeapCompact(h, 0);
 }
 
 /// Compiles the builtin shaders ahead of the first frame. Static: the app

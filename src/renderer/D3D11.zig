@@ -214,6 +214,13 @@ pub fn threadExit(self: *D3D11) void {
         self.dropSwapChain();
     }
 
+    if (self.present_target != null) {
+        self.device.lockContext();
+        defer self.device.unlockContext();
+        // A closed surface leaves memory behind in the driver and the heap.
+        self.device.trim();
+    }
+
     self.present_target = null;
 }
 
@@ -450,7 +457,7 @@ pub fn initShaders(
 
 /// Initialize a new render target which can be presented by this API.
 pub fn initTarget(self: *const D3D11, width: usize, height: usize) !Target {
-    return Target.init(.{
+    return Target.initShared(.{
         .device = self.device,
         .width = width,
         .height = height,
