@@ -94,6 +94,9 @@ pub const Inspector = struct {
     locked_hook: ?LockedHook,
 
     /// Something changed since the last frame.
+    /// When the last present queued a frame, 0 when it queued none.
+    last_queued_ns: u64 = 0,
+
     /// Redraw at every tick while the window is shown.
     refresh: bool,
     poll_slot: bool,
@@ -180,7 +183,7 @@ pub const Inspector = struct {
 
         // No message reaches us from here on.
         self.window.inspector = null;
-        _ = user32.KillTimer(self.window.hwnd, Window.tick_id);
+        self.window.stopTimer();
 
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
         {
@@ -261,7 +264,8 @@ pub const Inspector = struct {
         const pending_slot = if (self.poll_slot) blk: {
             const sc = self.swap_chain orelse break :blk false;
             const h = sc.waitable orelse break :blk false;
-            break :blk kernel32.WaitForSingleObjectEx(h, 0, 0) != kernel32.WAIT_OBJECT_0;
+            const signalled = kernel32.WaitForSingleObjectEx(h, 0, 0) == kernel32.WAIT_OBJECT_0;
+            break :blk slotBlocked(signalled, self.last_queued_ns, nowNs());
         } else false;
         if (pending_slot) {
             self.dirty = true;
@@ -318,7 +322,8 @@ pub const Inspector = struct {
         // Not `SwapChain.present`: it books the chain as a terminal frame for
         // the latency trace and the frame pacer, neither of which applies.
         const tearing = sc.flags & dxgi.SWAP_CHAIN_FLAG_ALLOW_TEARING != 0;
-        _ = try sc.chain.asSwapChain1().asSwapChain().present(0, if (tearing) dxgi.PRESENT_ALLOW_TEARING else 0);
+        const hr = try sc.chain.asSwapChain1().asSwapChain().present(0, if (tearing) dxgi.PRESENT_ALLOW_TEARING else 0);
+        self.last_queued_ns = queuedAt(hr, nowNs());
     }
 
     fn ensureSwapChain(self: *Inspector, width: u32, height: u32) !*SwapChain {
@@ -331,6 +336,7 @@ pub const Inspector = struct {
             return sc;
         }
         self.swap_chain = try SwapChain.init(self.device, self.window.hwnd, width, height, .hwnd);
+        self.last_queued_ns = 0;
         // The new chain starts with its one slot signalled and a frame is
         // about to take it: consume the signal, or a second present would
         // queue behind the first and block on a window nobody composes.
@@ -364,6 +370,29 @@ pub const Inspector = struct {
         self.dirty = true;
     }
 };
+
+/// A chain that queued nothing for this long has no frame in flight.
+const idle_ns: u64 = SwapChain.Pacer.idle_ns;
+
+fn nowNs() u64 {
+    const io = @import("../../../global.zig").io();
+    return @intCast(@max(0, std.Io.Timestamp.now(io, .awake).toNanoseconds()));
+}
+
+/// The time a present with result `hr` put a frame in the queue; none for an
+/// occluded window.
+fn queuedAt(hr: win32.foundation.HRESULT, now: u64) u64 {
+    return if (hr == dxgi.STATUS_OCCLUDED) 0 else now;
+}
+
+/// Whether the frame must wait for the display. A chain with no frame in
+/// flight, or one idle long enough that none can be, never blocks: the slot
+/// signal may have been consumed by a present that queued nothing.
+fn slotBlocked(signalled: bool, last_queued_ns: u64, now: u64) bool {
+    if (signalled) return false;
+    if (last_queued_ns == 0) return false;
+    return now -| last_queued_ns < idle_ns;
+}
 
 /// Longest caption, in bytes.
 const title_max = 256;
@@ -633,19 +662,34 @@ test "win32 inspector: a refreshing inspector draws at every tick" {
 
     f.insp.tick();
     const frames = f.insp.frames;
-    // The display may have no free slot (a hidden window has none): the
-    // tick then keeps the frame pending.
     f.insp.dirty = false;
     f.insp.tick();
-    try testing.expect(f.insp.dirty or f.insp.frames > frames);
+    try testing.expectEqual(frames + 1, f.insp.frames);
 }
 
-test "win32 inspector: the tick timer lives and dies with the window" {
+test "win32 inspector: the tick timer stops while minimized" {
     const f = try Fixture.init(.{});
     defer f.deinit();
-    const hwnd = f.insp.window.hwnd;
-    // SetTimer with the same id returns it while the timer exists.
-    try testing.expect(win32.user32.SetTimer(hwnd, Window.tick_id, Window.tick_ms, null) != 0);
-    f.insp.close();
-    try testing.expect(win32.user32.KillTimer(hwnd, Window.tick_id) == 0);
+    defer f.insp.close();
+    const w = f.insp.window;
+
+    try testing.expect(w.timer_running);
+    _ = win32.user32.SendMessageW(w.hwnd, win32.user32.WM_SIZE, win32.user32.SIZE_MINIMIZED, 0);
+    try testing.expect(!w.timer_running);
+    _ = win32.user32.SendMessageW(w.hwnd, win32.user32.WM_SIZE, win32.user32.SIZE_RESTORED, 0);
+    try testing.expect(w.timer_running);
+}
+
+test "win32 inspector: a present that queued nothing frees the slot" {
+    const now: u64 = 10 * idle_ns;
+    // Signalled, or nothing in flight: never blocked.
+    try testing.expect(!slotBlocked(true, now, now));
+    try testing.expect(!slotBlocked(false, 0, now));
+    // A frame in flight and no signal yet: wait.
+    try testing.expect(slotBlocked(false, now - 1, now));
+    // The same frame, long past: the signal was lost, go on.
+    try testing.expect(!slotBlocked(false, now - idle_ns, now));
+    // An occluded present queues nothing.
+    try testing.expectEqual(@as(u64, 0), queuedAt(dxgi.STATUS_OCCLUDED, now));
+    try testing.expectEqual(now, queuedAt(0, now));
 }

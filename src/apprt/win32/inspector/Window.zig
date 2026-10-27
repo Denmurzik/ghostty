@@ -44,6 +44,9 @@ dpi: u32,
 /// it can take messages, cleared before the window goes.
 inspector: ?*Inspector = null,
 
+/// Whether the render tick runs; it stops while the window is minimized.
+timer_running: bool = false,
+
 pub fn create(alloc: Allocator, opts: Options) !*Window {
     try util.registerClass(&.{
         .style = 0,
@@ -113,7 +116,14 @@ pub fn destroy(self: *Window, alloc: Allocator) void {
 }
 
 pub fn startTimer(self: *Window) void {
-    _ = user32.SetTimer(self.hwnd, tick_id, tick_ms, null);
+    if (self.timer_running) return;
+    self.timer_running = user32.SetTimer(self.hwnd, tick_id, tick_ms, null) != 0;
+}
+
+pub fn stopTimer(self: *Window) void {
+    if (!self.timer_running) return;
+    _ = user32.KillTimer(self.hwnd, tick_id);
+    self.timer_running = false;
 }
 
 pub fn setTitle(self: *Window, alloc: Allocator, title: []const u8) void {
@@ -194,6 +204,10 @@ fn wndProc(
         user32.WM_TIMER => {
             if (wparam == tick_id) insp.tick();
             return 0;
+        },
+        user32.WM_SIZE => {
+            if (wparam == user32.SIZE_MINIMIZED) self.stopTimer() else self.startTimer();
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         user32.WM_ERASEBKGND => return 1,
         user32.WM_DPICHANGED => {
