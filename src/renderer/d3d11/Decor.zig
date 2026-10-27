@@ -1,4 +1,4 @@
-//! The decor pass: per-surface decorations the apprt asks for, drawn oer
+//! The decor pass: per-surface decorations the apprt asks for, drawn over
 //! the finished frame target right before it is copied to the swap chain.
 //! Unfocused-split dimming and the bell border (Ghostty for macOS draws
 //! both as SwiftUI overlays above the surface).
