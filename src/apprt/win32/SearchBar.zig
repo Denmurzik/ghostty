@@ -83,30 +83,36 @@ const Panel = struct {
 
 pub const Part = enum { none, next, previous, close };
 
-pub const KeyAction = enum { next, previous, end };
+pub const KeyAction = enum { next, previous, end, focus_surface };
 
 /// The key a focused EDIT routes to the search: Enter and F3 go to the next
-/// match, with Shift to the previous, Esc ends the search.
-pub fn keyAction(vk: usize, shift: bool) ?KeyAction {
+/// match, with Shift to the previous. Esc ends the search when the field is
+/// empty and otherwise only gives the focus back to the surface, as on macOS.
+pub fn keyAction(vk: usize, shift: bool, empty: bool) ?KeyAction {
     return switch (vk) {
         user32.VK_RETURN, user32.VK_F3 => if (shift) .previous else .next,
-        user32.VK_ESCAPE => .end,
+        user32.VK_ESCAPE => if (empty) .end else .focus_surface,
         else => null,
     };
 }
 
 /// "3/17" for the third of 17 matches, "-/17" with matches but none selected
-/// (and "0/0" when there are none), "" while the total is unknown. `selected`
-/// is the zero-based index core reports.
+/// (and "0/0" when there are none), "3/?" while only the selection is known
+/// and "" when neither is. `selected` is the
+/// zero-based index core reports.
 pub fn counterText(buf: []u8, total_: ?usize, selected_: ?usize) []const u8 {
-    const t = total_ orelse return "";
-    const text = if (selected_) |s|
-        std.fmt.bufPrint(buf, "{d}/{d}", .{ s + 1, t })
-    else if (t == 0)
-        std.fmt.bufPrint(buf, "0/0", .{})
-    else
-        std.fmt.bufPrint(buf, "-/{d}", .{t});
-    return text catch "";
+    const text = counterFmt(buf, total_, selected_) catch return "";
+    return text;
+}
+
+fn counterFmt(buf: []u8, total_: ?usize, selected_: ?usize) std.fmt.BufPrintError![]const u8 {
+    if (total_) |t| {
+        if (selected_) |s| return std.fmt.bufPrint(buf, "{d}/{d}", .{ s + 1, t });
+        if (t == 0) return std.fmt.bufPrint(buf, "0/0", .{});
+        return std.fmt.bufPrint(buf, "-/{d}", .{t});
+    }
+    if (selected_) |s| return std.fmt.bufPrint(buf, "{d}/?", .{s + 1});
+    return "";
 }
 
 // -- Layout ----------------------------------------------------------------------
@@ -353,12 +359,16 @@ fn layoutChildren(panel: *Panel) void {
     const pal = theme.palette(window);
 
     if (panel.font_dpi != dpi) {
-        freeFonts(panel);
+        // The EDIT gets the new font before the old one is deleted.
+        const old = [3]?gdi32.HFONT{ panel.font, panel.small_font, panel.icon_font };
         panel.font = makeFont(14, dpi, L("Segoe UI"));
         panel.small_font = makeFont(11, dpi, L("Segoe UI"));
         panel.icon_font = makeFont(12, dpi, L("Segoe Fluent Icons"));
         panel.font_dpi = dpi;
         if (panel.font) |f| _ = user32.SendMessageW(edit, WM_SETFONT, @intFromPtr(f), 1);
+        for (old) |h| if (h) |o| {
+            _ = gdi32.DeleteObject(@ptrCast(o));
+        };
     }
     if (panel.dark_applied != pal.dark) {
         panel.dark_applied = pal.dark;
@@ -418,6 +428,7 @@ fn run(panel: *Panel, action: KeyAction) void {
         .next => perform(surface, .{ .navigate_search = .next }),
         .previous => perform(surface, .{ .navigate_search = .previous }),
         .end => perform(surface, .end_search),
+        .focus_surface => _ = user32.SetFocus(surface.hwnd),
     }
 }
 
@@ -464,7 +475,8 @@ fn editProc(
     switch (msg) {
         user32.WM_KEYDOWN => {
             const shift = user32.GetKeyState(user32.VK_SHIFT) < 0;
-            if (keyAction(wparam, shift)) |action| {
+            const empty = user32.GetWindowTextLengthW(hwnd) == 0;
+            if (keyAction(wparam, shift, empty)) |action| {
                 run(panel, action);
                 return 0;
             }
@@ -481,6 +493,11 @@ fn onMessage(p: *overlay.Popup, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESU
     const panel = Panel.of(p);
     const hwnd = p.hwnd orelse return null;
     switch (msg) {
+        // The host resized the panel (dpi change): fonts and EDIT follow.
+        user32.WM_SIZE => {
+            layoutChildren(panel);
+            return null;
+        },
         user32.WM_COMMAND => {
             const edit = panel.surface.search.edit orelse return null;
             if (@as(usize, @bitCast(lparam)) != @intFromPtr(edit)) return null;
@@ -579,8 +596,6 @@ fn fieldBrush(panel: *Panel, c: theme.Color) LRESULT {
 
 fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     const panel = Panel.of(p);
-    // A dpi or theme change reaches the children through the next paint.
-    if (panel.font_dpi != ctx.dpi or panel.dark_applied != ctx.palette.dark) layoutChildren(panel);
 
     const c = colors(ctx.palette);
     const l = Layout.forDpi(ctx.dpi);
@@ -677,20 +692,21 @@ test "win32 search: counter text" {
     try std.testing.expectEqualStrings("0/0", counterText(&buf, 0, null));
     try std.testing.expectEqualStrings("-/5", counterText(&buf, 5, null));
     try std.testing.expectEqualStrings("", counterText(&buf, null, null));
-    try std.testing.expectEqualStrings("", counterText(&buf, null, 3));
+    try std.testing.expectEqualStrings("4/?", counterText(&buf, null, 3));
     var tiny: [2]u8 = undefined;
     try std.testing.expectEqualStrings("", counterText(&tiny, 100, 5));
 }
 
 test "win32 search: key routing" {
-    try std.testing.expectEqual(KeyAction.next, keyAction(user32.VK_RETURN, false).?);
-    try std.testing.expectEqual(KeyAction.previous, keyAction(user32.VK_RETURN, true).?);
-    try std.testing.expectEqual(KeyAction.next, keyAction(user32.VK_F3, false).?);
-    try std.testing.expectEqual(KeyAction.previous, keyAction(user32.VK_F3, true).?);
-    try std.testing.expectEqual(KeyAction.end, keyAction(user32.VK_ESCAPE, false).?);
-    try std.testing.expectEqual(KeyAction.end, keyAction(user32.VK_ESCAPE, true).?);
-    try std.testing.expect(keyAction('A', false) == null);
-    try std.testing.expect(keyAction(user32.VK_SHIFT, true) == null);
+    try std.testing.expectEqual(KeyAction.next, keyAction(user32.VK_RETURN, false, false).?);
+    try std.testing.expectEqual(KeyAction.previous, keyAction(user32.VK_RETURN, true, false).?);
+    try std.testing.expectEqual(KeyAction.next, keyAction(user32.VK_F3, false, false).?);
+    try std.testing.expectEqual(KeyAction.previous, keyAction(user32.VK_F3, true, false).?);
+    try std.testing.expectEqual(KeyAction.end, keyAction(user32.VK_ESCAPE, false, true).?);
+    try std.testing.expectEqual(KeyAction.end, keyAction(user32.VK_ESCAPE, true, true).?);
+    try std.testing.expectEqual(KeyAction.focus_surface, keyAction(user32.VK_ESCAPE, false, false).?);
+    try std.testing.expect(keyAction('A', false, false) == null);
+    try std.testing.expect(keyAction(user32.VK_SHIFT, true, false) == null);
 }
 
 test "win32 search: layout fits the bar" {
