@@ -295,6 +295,13 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
     return sc;
 }
 
+/// Per-frame uniforms: a frame for a composition chain premultiplies in sRGB
+/// space (`shaders/hlsl/common.hlsli` `load_color`), the way DWM blends it.
+pub fn adjustUniforms(self: *const D3D11, uniforms: *shaders.Uniforms) void {
+    const target = self.present_target orelse return;
+    uniforms.bools.composition = self.blending.isLinear() and currentMode(target) == .composition;
+}
+
 /// The mode to create a chain in: composition only when the apprt asked
 /// for it and can take the chain.
 fn currentMode(target: PresentTarget) SwapChain.Mode {

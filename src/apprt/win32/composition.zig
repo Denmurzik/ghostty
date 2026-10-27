@@ -49,6 +49,7 @@ const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
 const messages = @import("messages.zig");
 const theme = @import("theme.zig");
+const Chrome = @import("Chrome.zig");
 const recovery = @import("recovery.zig");
 const frame = @import("frame.zig");
 
@@ -402,6 +403,8 @@ fn applyGlass(window: *Window, backdrop: Backdrop) void {
         },
     }
     repaintSurfaces(window);
+    // The rows are painted at the window's alpha.
+    Chrome.invalidate(window);
 }
 
 fn disableBlurBehind(window: *Window) void {
@@ -446,6 +449,15 @@ pub fn fillWithAlpha(hdc: win32.user32.HDC, rc: *const win32.foundation.RECT, br
     const b = hbp orelse return;
     if (!see_through) _ = uxtheme.BufferedPaintSetAlpha(b, rc, 255);
     _ = uxtheme.EndBufferedPaint(b, 1);
+}
+
+/// `windowAlpha` as the 0..255 alpha of the chrome rows.
+pub fn alphaByte(window: *const Window) u8 {
+    return alphaToByte(windowAlpha(window));
+}
+
+fn alphaToByte(alpha: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(alpha, 0.0, 1.0) * 255.0));
 }
 
 /// Whether the surface child must erase to alpha 0 (the glass shows
@@ -887,4 +899,12 @@ test "win32 composition: background-blur defaults on for Windows" {
     const frosted = testConfig(0.9, .true);
     try std.testing.expectEqual(Backdrop.acrylic, backdropFor(&frosted, false, false));
     try std.testing.expect(!wantComposition(&testConfig(1.0, .true), false));
+}
+
+test "win32 composition: chrome alpha byte" {
+    try std.testing.expectEqual(@as(u8, 255), alphaToByte(1.0));
+    try std.testing.expectEqual(@as(u8, 0), alphaToByte(0.0));
+    try std.testing.expectEqual(@as(u8, 153), alphaToByte(0.6));
+    try std.testing.expectEqual(@as(u8, 230), alphaToByte(0.9));
+    try std.testing.expectEqual(@as(u8, 255), alphaToByte(7.0));
 }

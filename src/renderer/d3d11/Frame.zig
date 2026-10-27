@@ -713,6 +713,51 @@ test "d3d11 frame: linear blending encodes through the srgb view" {
     try expectPixel(.{ 128, 64, 200, 255 }, pixelAt(pixels, 8, 7, 3), 1);
 }
 
+test "d3d11 frame: composition premultiplies in sRGB space, linear blending does not" {
+    // bg (16, 32, 48) at alpha 128. DWM blends the stored bytes in sRGB, so a
+    // composition chain must store (8, 16, 24, 128); the plain linear path
+    // stores the premultiplied linear colour re-encoded (brighter).
+    const Case = struct { composition: bool, want_rgb: [3]u8, tol: u8 };
+    for ([_]Case{
+        .{ .composition = true, .want_rgb = .{ 8, 16, 24 }, .tol = 1 },
+        .{ .composition = false, .want_rgb = .{ 8, 20, 33 }, .tol = 2 },
+    }) |c| {
+        var fx: Fixture = try .init(.linear, 8, 4);
+        defer fx.deinit();
+        var uniforms = try bufferpkg.Buffer(shaderspkg.Uniforms).init(fx.api.uniformBufferOptions(), 1);
+        defer uniforms.deinit();
+
+        fx.api.drawFrameStart();
+        defer fx.api.drawFrameEnd();
+
+        var u = fx.uniforms(8, 4, 1, 1);
+        u.bg_color = .{ 16, 32, 48, 128 };
+        u.bools.composition = c.composition;
+        try uniforms.sync(&.{u});
+
+        var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+        {
+            var pass = frame.renderPass(&.{.{
+                .target = .{ .target = fx.target },
+                .clear_color = .{ 0, 0, 0, 0 },
+            }});
+            defer pass.complete();
+            pass.step(.{
+                .pipeline = fx.shaders.pipelines.bg_color,
+                .uniforms = uniforms.buffer,
+                .draw = .{ .type = .triangle, .vertex_count = 3 },
+            });
+        }
+        frame.complete(false);
+
+        const pixels = try fx.pixels();
+        defer testing.allocator.free(pixels);
+        // BGRA.
+        const px = pixelAt(pixels, 8, 3, 2);
+        try expectPixel(.{ c.want_rgb[2], c.want_rgb[1], c.want_rgb[0], 128 }, px, c.tol);
+    }
+}
+
 test "d3d11 frame: dump hook writes a BMP" {
     var fx: Fixture = try .init(.native, 5, 3);
     defer fx.deinit();

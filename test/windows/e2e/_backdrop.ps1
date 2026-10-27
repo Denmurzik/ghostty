@@ -28,6 +28,8 @@ function New-BackdropForm([int]$X, [int]$Y, [int]$W, [int]$H, [switch]$Stripes) 
     $f.FormBorderStyle = 'None'
     $f.ShowInTaskbar = $false
     $f.StartPosition = 'Manual'
+    # Above the owner's own windows, so that they cannot cover the measured area.
+    $f.TopMost = $true
     $f.Bounds = New-Object Drawing.Rectangle $X, $Y, $W, $H
     if ($Stripes) {
         $bmp = New-Object Drawing.Bitmap $W, $H
@@ -108,10 +110,11 @@ function Test-ColorNear([Drawing.Color]$C, [int[]]$Rgb, [int]$Tol) {
     ([Math]::Abs($C.R - $Rgb[0]) -le $Tol) -and ([Math]::Abs($C.G - $Rgb[1]) -le $Tol) -and ([Math]::Abs($C.B - $Rgb[2]) -le $Tol)
 }
 
-# Moves/sizes a top-level window (physical pixels) without changing z-order.
+# Moves/sizes a top-level window (physical pixels) and makes it topmost, above
+# the backdrop form (which is topmost too) and the owner windows.
 function Move-Window([IntPtr]$Hwnd, [int]$X, [int]$Y, [int]$W, [int]$H) {
-    # SWP_NOZORDER | SWP_NOACTIVATE
-    [void][GhosttyE2e.BackdropNative]::SetWindowPos($Hwnd, [IntPtr]::Zero, $X, $Y, $W, $H, 0x4 -bor 0x10)
+    # HWND_TOPMOST, SWP_NOACTIVATE
+    [void][GhosttyE2e.BackdropNative]::SetWindowPos($Hwnd, [IntPtr]::op_Explicit(-1), $X, $Y, $W, $H, 0x10)
 }
 
 # Takes the foreground away from Ghostty without covering it: a small window

@@ -248,7 +248,11 @@ pub const Uniforms = extern struct {
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool = false,
 
-        _padding: u28 = 0,
+        /// The frame goes to a composition swap chain: premultiply in
+        /// sRGB space (DWM blends the stored bytes), see `load_color`.
+        composition: bool = false,
+
+        _padding: u27 = 0,
     };
 
     const PaddingExtend = packed struct(u32) {

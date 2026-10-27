@@ -12,6 +12,7 @@ const Chrome = @import("Chrome.zig");
 const overlay_host = @import("overlay.zig");
 const Window = @import("Window.zig");
 const util = @import("util.zig");
+const composition = @import("composition.zig");
 
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
@@ -276,12 +277,16 @@ pub fn windowActive(window: *const Window) bool {
 
 pub fn palette(window: *const Window) Palette {
     const active = windowActive(window);
-    return computeWith(
+    var p = computeWith(
         applied orelse .from(&window.app.config),
         system_dark orelse false,
         active,
         if (highContrast()) SystemColors.read() else null,
     );
+    // A translucent window: the title and tab rows are the terminal
+    // background at the terminal's alpha (the painter's target is premultiplied).
+    if (composition.isTranslucent(window)) p.strip_bg.a = composition.alphaByte(window);
+    return p;
 }
 
 /// Dark title bar and scrollbars of one window, and a repaint of its chrome.

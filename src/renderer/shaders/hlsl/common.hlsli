@@ -46,6 +46,7 @@ static const uint BOOL_CURSOR_WIDE = 1u;
 static const uint BOOL_USE_DISPLAY_P3 = 2u;
 static const uint BOOL_USE_LINEAR_BLENDING = 4u;
 static const uint BOOL_USE_LINEAR_CORRECTION = 8u;
+static const uint BOOL_COMPOSITION = 16u;
 
 uint2 unpack_ushort2(uint v) {
   return uint2(v & 0xFFFFu, v >> 16);
@@ -63,6 +64,7 @@ bool uniform_cursor_wide() { return (bools_packed & BOOL_CURSOR_WIDE) != 0u; }
 bool uniform_use_display_p3() { return (bools_packed & BOOL_USE_DISPLAY_P3) != 0u; }
 bool uniform_use_linear_blending() { return (bools_packed & BOOL_USE_LINEAR_BLENDING) != 0u; }
 bool uniform_use_linear_correction() { return (bools_packed & BOOL_USE_LINEAR_CORRECTION) != 0u; }
+bool uniform_composition() { return (bools_packed & BOOL_COMPOSITION) != 0u; }
 
 //-------------------------------------------------------------------
 // Resources
@@ -186,6 +188,15 @@ float4 load_color(
 ) {
   // 0 .. 255 -> 0.0 .. 1.0
   float4 color = float4(in_color) / 255.0f;
+
+  // A composition chain is blended by DWM on the stored sRGB bytes, which
+  // must hold the premultiplied sRGB colour: premultiply the encoded colour,
+  // then linearize it so that the hardware's encode on write gives it back.
+  if (is_linear && uniform_composition()) {
+    color.rgb *= color.a;
+    color.rgb = linearize(float4(color.rgb, 1.0)).rgb;
+    return color;
+  }
 
   // Linearize if necessary.
   if (is_linear) {

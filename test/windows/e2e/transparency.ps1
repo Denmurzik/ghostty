@@ -1,8 +1,8 @@
 # e2e: milestone=M3 timeout=300 order=630
 # transparency: background-opacity = 0.5 over a magenta backdrop window of our
 # own, terminal background #102030. The screen-rect capture of an empty cell
-# is the 50% blend (135, 16, 151) +-12 (the renderer premultiplies in linear
-# space, DWM blends in sRGB: up to ~9 levels off, see the report) and the frame
+# is the 50% blend (135, 16, 151) +-3 (the renderer premultiplies in sRGB space for
+# composition chains, as DWM blends; Task 15b) and the frame
 # dump alpha is ~128
 # (premultiplied composition chain), also while the window is inactive;
 # toggle_background_opacity makes the same pixel the solid background; a
@@ -70,7 +70,7 @@ Invoke-E2eScenario 'transparency' {
             $script:lastC
         }
 
-        $c1 = Check 'translucent' $translucent 12
+        $c1 = Check 'translucent' $translucent 3
         & $shot 'translucent'
         $d = Read-Dump $g.Dump
         $p = Get-DumpPixel $d ($d.Width - 80) ($d.Height - 80)
@@ -79,7 +79,7 @@ Invoke-E2eScenario 'transparency' {
         # Inactive: another window of ours has the foreground.
         $away = Switch-AwayFromGhostty $g
         try {
-            $c2 = Check 'inactive' $translucent 12
+            $c2 = Check 'inactive' $translucent 3
             & $shot 'inactive'
         } finally { $away.Close() }
 
@@ -87,14 +87,14 @@ Invoke-E2eScenario 'transparency' {
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
         if (-not (Invoke-GhosttyAction -Class $g.Class -Action 'toggle_background_opacity')) { throw 'toggle_background_opacity was not performed' }
         Start-Sleep -Milliseconds 700
-        $c3 = Check 'toggled' $solid 12
+        $c3 = Check 'toggled' $solid 3
         & $shot 'toggled'
         if (-not @((Get-Comp $g).windows)[0].toggled_opaque) { throw 'state does not show toggled_opaque' }
 
         # And back.
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'toggle_background_opacity')
         Start-Sleep -Milliseconds 700
-        $c4 = Check 'toggled back' $translucent 12
+        $c4 = Check 'toggled back' $translucent 3
 
         # Reload with opacity 1: solid, the window keeps its chain.
         Set-Opacity $g '1'
@@ -104,7 +104,7 @@ Invoke-E2eScenario 'transparency' {
         }
         if (-not $c) { throw "after background-opacity = 1 the backdrop is not opaque: $((Get-Comp $g) | ConvertTo-Json -Depth 6 -Compress)" }
         Start-Sleep -Milliseconds 700
-        $c5 = Check 'opacity 1' $solid 12
+        $c5 = Check 'opacity 1' $solid 3
         & $shot 'opacity-1'
 
         # And translucent again, without a restart.
@@ -115,7 +115,7 @@ Invoke-E2eScenario 'transparency' {
         }
         if (-not $c) { throw "after background-opacity = 0.5 the backdrop is not transparent: $((Get-Comp $g) | ConvertTo-Json -Depth 6 -Compress)" }
         Start-Sleep -Milliseconds 700
-        $c6 = Check 'translucent again' $translucent 12
+        $c6 = Check 'translucent again' $translucent 3
         & $shot 'translucent-again'
         Write-E2eInfo "translucent $(Format-Color $c1), inactive $(Format-Color $c2), toggled $(Format-Color $c3), back $(Format-Color $c4), opacity 1 $(Format-Color $c5), again $(Format-Color $c6)"
 
@@ -133,7 +133,7 @@ Invoke-E2eScenario 'transparency' {
         if ($w.glass -or $w.surfaces[0].mode -ne 'composition') { throw "a window created opaque did not follow the config: $((Get-Comp $g2) | ConvertTo-Json -Depth 6 -Compress)" }
         $cs = Get-ClientSize $g2.Hwnd
         $pt = Get-ClientScreenPoint $g2.Hwnd ($cs.Width - 80) ($cs.Height - 80)
-        $c7 = Check 'created opaque, reloaded 0.5' $solid 12
+        $c7 = Check 'created opaque, reloaded 0.5' $solid 3
         Set-Opacity $g2 '1'
         $back1 = Wait-Until -TimeoutSec 10 -PollMs 150 -Condition {
             $c = Get-Comp $g2
@@ -141,7 +141,7 @@ Invoke-E2eScenario 'transparency' {
         }
         if (-not $back1) { throw "a window created opaque did not return to hwnd mode: $((Get-Comp $g2) | ConvertTo-Json -Depth 6 -Compress)" }
         Start-Sleep -Milliseconds 700
-        $c8 = Check 'created opaque, back to opacity 1' $solid 6
+        $c8 = Check 'created opaque, back to opacity 1' $solid 3
 
         Set-Opacity $g2 '0.5'
         Start-Sleep -Milliseconds 800
