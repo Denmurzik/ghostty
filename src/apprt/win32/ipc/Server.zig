@@ -337,7 +337,8 @@ fn serve(self: *Server, io: client.Io) void {
     defer release(pending, self.alloc);
 
     if (pending.response) |response| {
-        self.send(io, response);
+        // An empty answer is the double-OOM fallback of `ops.reply`.
+        if (response.len == 0) self.reply(io, .failed, "no response") else self.send(io, response);
     } else {
         self.reply(io, .failed, "no response");
     }

@@ -63,10 +63,10 @@ pub fn status(comptime key: apprt.Action.Key) Status {
 /// the surface.
 fn rendererHealth(app: *App, target: apprt.Target, value: apprt.Action.Value(.renderer_health)) bool {
     const core = switch (target) {
-        .app => return false,
+        .app => return true,
         .surface => |s| s,
     };
-    const surface = app.surfaceFor(core) orelse return false;
+    const surface = app.surfaceFor(core) orelse return true;
     hooks.rendererHealth(surface, value);
     return true;
 }

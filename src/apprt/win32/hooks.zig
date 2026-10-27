@@ -31,6 +31,8 @@ const recovery = @import("recovery.zig");
 const shell_open = @import("shell_open.zig");
 
 const Config = configpkg.Config;
+
+const log = std.log.scoped(.win32_hooks);
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
@@ -85,13 +87,17 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
     switch (msg) {
         win32.user32.WM_ACTIVATE => {
             // Both features see the activation; the overlays' answer wins.
+            const overlays = overlay.windowMessage(window, msg, wparam, lparam);
             const quick = QuickTerminal.windowMessage(window, msg, wparam, lparam);
-            return overlay.windowMessage(window, msg, wparam, lparam) orelse quick;
+            return overlays orelse quick;
         },
         win32.user32.WM_NCACTIVATE => return overlay.windowMessage(window, msg, wparam, lparam),
         win32.user32.WM_TIMER => return QuickTerminal.windowMessage(window, msg, wparam, lparam),
         messages.WM_GHOSTTY_POSTED_DIALOG => {
-            const kind = std.enums.fromInt(DialogKind, wparam) orelse return 0;
+            const kind = std.enums.fromInt(DialogKind, wparam) orelse {
+                log.warn("unknown dialog kind={}", .{wparam});
+                return 0;
+            };
             switch (kind) {
                 .export_io => export_io.postedDialog(window, lparam),
                 .config_errors => config_errors.postedDialog(window, lparam),
@@ -100,7 +106,10 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             return 0;
         },
         messages.WM_GHOSTTY_OVERLAY_CMD => {
-            if (!CommandPalette.command(window, lparam)) _ = SearchBar.command(window, lparam);
+            // The handler owns the heap command: nobody claiming it frees it here.
+            if (!CommandPalette.command(window, lparam) and !SearchBar.command(window, lparam)) {
+                overlay.freeCommand(lparam);
+            }
             return 0;
         },
         else => return null,
@@ -226,7 +235,7 @@ test "win32 hooks: testState writes an m3 object" {
     defer parsed.deinit();
     const m3 = parsed.value.object.get("m3") orelse return error.TestUnexpectedResult;
     try std.testing.expect(m3 == .object);
-    inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector" }) |key| {
+    inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io" }) |key| {
         try std.testing.expect(m3.object.get(key) != null);
     }
 }

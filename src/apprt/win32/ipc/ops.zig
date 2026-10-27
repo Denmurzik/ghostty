@@ -130,7 +130,7 @@ fn reply(
 ) []u8 {
     return protocol.encodeResponse(alloc, code, stdout, stderr, data_json) catch {
         // Out of memory twice over: nothing can be allocated for an answer. An
-        // empty one frees as a no-op; the client sees a closed pipe and fails.
+        // empty one frees as a no-op; `Server` turns it into "no response".
         return &.{};
     };
 }
@@ -267,12 +267,37 @@ fn toggleQuickTerminal(app: *App, alloc: Allocator) []u8 {
     return reply(alloc, .ok, "", "", null);
 }
 
+/// A test-op destination: an absolute path on a drive (`X:\`). UNC, device
+/// (`\\?\`, `\\.\`), rooted-only and relative paths are refused.
+fn testPathOk(path: []const u8) bool {
+    if (path.len < 3) return false;
+    if (!std.ascii.isAlphabetic(path[0]) or path[1] != ':') return false;
+    if (path[2] != '\\' and path[2] != '/') return false;
+    if (path.len > 3 and (path[3] == '\\' or path[3] == '/')) return false;
+    return std.mem.indexOfScalar(u8, path, 0) == null;
+}
+
+test "win32 ipc: export-io path must be an absolute drive path" {
+    const testing = std.testing;
+    try testing.expect(testPathOk("C:\\tmp\\out.txt"));
+    try testing.expect(testPathOk("d:/tmp/out.txt"));
+    try testing.expect(!testPathOk(""));
+    try testing.expect(!testPathOk("out.txt"));
+    try testing.expect(!testPathOk("C:out.txt"));
+    try testing.expect(!testPathOk("\\tmp\\out.txt"));
+    try testing.expect(!testPathOk("\\\\server\\share\\x"));
+    try testing.expect(!testPathOk("//server/share/x"));
+    try testing.expect(!testPathOk("\\\\?\\C:\\x"));
+    try testing.expect(!testPathOk("\\\\.\\C:\\x"));
+    try testing.expect(!testPathOk("C:\\\\x"));
+}
+
 /// Test op: what the inspector's export button emits, which a script cannot
 /// click. `path` is the destination; no dialog is shown.
 fn exportIo(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
     const surface = targetSurface(app, req.surface) orelse
         return reply(alloc, .failed, "", "no such surface", null);
-    if (req.path.len == 0) return reply(alloc, .bad_request, "", "missing path", null);
+    if (!testPathOk(req.path)) return reply(alloc, .bad_request, "", "invalid path", null);
     const saved = export_io.saveTest(app, .{ .surface = surface.core() }, .{ .contents = req.text }, req.path);
     if (!saved) return reply(alloc, .failed, "", "export failed", null);
     return reply(alloc, .ok, "", "", null);

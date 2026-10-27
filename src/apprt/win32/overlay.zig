@@ -71,3 +71,8 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.beginObject();
     try jw.endObject();
 }
+
+/// Frees the heap `Command` of a `WM_GHOSTTY_OVERLAY_CMD` nobody claimed.
+pub fn freeCommand(lparam: win32.foundation.LPARAM) void {
+    _ = lparam;
+}
