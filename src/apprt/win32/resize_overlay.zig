@@ -25,7 +25,6 @@ const margin_px = 0;
 const pad_x = 5;
 const char_w = 8;
 const height_px = 26;
-const corner_px = 4;
 
 pub const State = struct {
     hwnd: ?win32.foundation.HWND = null,

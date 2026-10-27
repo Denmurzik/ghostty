@@ -1,14 +1,11 @@
 //! Window-level actions: size, state, title prompt and attention.
 const std = @import("std");
-const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
 const title_edit = @import("../title_edit.zig");
 const placement = @import("../placement.zig");
 const bell = @import("../bell.zig");
 const taskbar = @import("../taskbar.zig");
-
-const log = std.log.scoped(.win32_actions);
 
 pub fn close_window(app: *App, target: apprt.Target, value: void) !bool {
     _ = value;

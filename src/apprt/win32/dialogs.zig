@@ -27,11 +27,6 @@ const control_pictures: u21 = 0x2400;
 
 const w16 = std.unicode.utf8ToUtf16LeStringLiteral;
 
-/// Ask whether a surface with a running process may be closed.
-pub fn confirmClose(owner: win32.foundation.HWND) bool {
-    return confirmCloseKind(owner, .surface);
-}
-
 /// What a close would take down. Decides the sentence of the confirmation.
 pub const CloseKind = enum { surface, tab, window, all_windows, app };
 
@@ -300,7 +295,7 @@ test "win32 dialogs: every close kind has its own sentence" {
             try std.testing.expect(!std.mem.eql(u8, closeBody(a), closeBody(b)));
         }
     }
-    // confirmClose keeps the M1 text.
+    // The surface wording keeps the M1 text.
     try std.testing.expectEqualStrings("Close Terminal", closeTitle(.surface));
 }
 

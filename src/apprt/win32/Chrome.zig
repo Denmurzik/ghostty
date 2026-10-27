@@ -6,7 +6,6 @@
 //! process, all used from the UI thread only. The target is drawn at 96 DPI
 //! in pixels; text formats are cached per window DPI.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const Window = @import("Window.zig");
 const TabStrip = @import("TabStrip.zig");

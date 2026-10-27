@@ -21,7 +21,6 @@ const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
 const HRESULT = win32.foundation.HRESULT;
-const HWND = win32.foundation.HWND;
 const POINT = win32.foundation.POINT;
 
 const log = std.log.scoped(.win32_drop);
@@ -476,7 +475,7 @@ pub fn revoke(window: *Window) void {
     }
 }
 
-/// `WM_GHOSTTY_DROP`: lparam is a `*Payload`.
+/// `WM_GHOSTTY_DROP`: lparam is the id of a pending drop.
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
     _ = wparam;
     if (msg != WM_GHOSTTY_DROP) return null;

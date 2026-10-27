@@ -1,12 +1,9 @@
 //! Split actions.
 const std = @import("std");
-const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
 const SplitLayout = @import("../SplitLayout.zig");
 const Surface = @import("../Surface.zig");
-
-const log = std.log.scoped(.win32_actions);
 
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
     return switch (target) {

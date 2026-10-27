@@ -90,16 +90,11 @@ pub fn init(app: *App) !void {
     ));
 
     app.tray.icon = loadIcon(app.hinstance, hwnd);
-    sync(app);
-}
-
-/// Shows or hides the icon to match the config: visible exactly when the
-/// process outlives its last window.
-pub fn sync(app: *App) void {
     syncTo(app, app.config.@"quit-after-last-window-closed");
 }
 
-/// Like `sync`, for a config that is not applied to the app yet.
+/// Shows or hides the icon to match `quit_after_last`: visible exactly when
+/// the process outlives its last window.
 pub fn syncTo(app: *App, quit_after_last: bool) void {
     if (app.tray.hwnd == null) return;
     const want = !quit_after_last;

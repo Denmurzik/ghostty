@@ -1,13 +1,10 @@
 //! Per-surface actions: pointer, rendering and child exit.
 const std = @import("std");
-const win32 = @import("win32");
 const apprt = @import("../../../apprt.zig");
 const mouse = @import("../mouse.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const scrollbar_mod = @import("../scrollbar.zig");
-
-const log = std.log.scoped(.win32_actions);
 
 /// The apprt surface an action is aimed at.
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {

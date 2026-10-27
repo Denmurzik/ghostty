@@ -3,7 +3,6 @@
 const App = @This();
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");
@@ -63,12 +62,6 @@ wakeup_pending: std.atomic.Value(bool) = .init(false),
 /// server could not start. Main thread only.
 server: ?*ipc.Server = null,
 
-/// Whether this process owns the IPC pipe (`server != null`). A process
-/// that does not (standalone after `AddressInUse`, `windows-single-instance
-/// = false` next to a running instance) has no tray icon and quits after
-/// its last window.
-pipe_owner: bool = false,
-
 /// The notification-area icon; only a pipe owner has one.
 tray: tray_mod.State = .{},
 
@@ -107,6 +100,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     errdefer win32.ole32.OleUninitialize();
 
     _ = win32.uxtheme.BufferedPaintInit();
+    errdefer _ = win32.uxtheme.BufferedPaintUnInit();
 
     const hinstance = win32.kernel32.GetModuleHandleW(null) orelse
         return error.GetModuleHandleFailed;
@@ -138,7 +132,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     window.show();
     renderer.Device.logPrivateUsage("first surface");
 
-    if (self.pipe_owner) tray_mod.init(self) catch |err| {
+    if (self.serving()) tray_mod.init(self) catch |err| {
         log.warn("unable to create the notification icon err={}", .{err});
     };
 }
@@ -179,7 +173,10 @@ pub fn terminate(self: *App) void {
     win32.ole32.OleUninitialize();
 }
 
-/// Whether this instance owns the IPC pipe.
+/// Whether this process owns the IPC pipe (`server != null`). A process that
+/// does not (standalone after `AddressInUse`, `windows-single-instance =
+/// false` next to a running instance) has no tray icon and quits after its
+/// last window.
 pub fn serving(self: *const App) bool {
     return self.server != null;
 }
@@ -209,7 +206,6 @@ fn startServer(self: *App) void {
         return;
     };
     self.server = server;
-    self.pipe_owner = true;
 }
 
 /// Hands this launch to the instance that owns the pipe `name`, when
@@ -249,7 +245,6 @@ fn forwardLaunch(self: *App, name: [:0]const u16) bool {
 fn stopServer(self: *App) void {
     const server = self.server orelse return;
     self.server = null;
-    self.pipe_owner = false;
     server.stop();
 }
 
@@ -338,7 +333,7 @@ pub fn windowDestroyed(self: *App, window: *Window) void {
         quitDelayMs(&self.config),
         // Without an icon nothing could bring a staying process back.
         // After a GPU device loss the process quits rather than stay resident.
-        self.pipe_owner and self.tray.hwnd != null and !renderer.Device.anyLost(),
+        self.serving() and self.tray.hwnd != null and !renderer.Device.anyLost(),
     )) {
         .quit_now => win32.user32.PostQuitMessage(0),
         .quit_timer => self.startQuitTimer(),
