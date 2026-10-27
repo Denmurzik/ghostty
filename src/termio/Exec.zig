@@ -1156,12 +1156,10 @@ const Subprocess = struct {
     /// Called to notify that we exited externally so we can unset our
     /// running state.
     pub fn externalExit(self: *Subprocess) void {
-        // The child is gone on its own. Whatever it left running stays,
-        // but we're done with the job.
+        // The child is gone on its own. Whatever it left running stays.
         if (comptime is_windows) {
             if (self.process) |*p| switch (p.*) {
                 .fork_exec => |*cmd| {
-                    cmd.closeJob();
                     cmd.closeProcess();
                 },
                 .flatpak => {},
@@ -1234,7 +1232,6 @@ const Subprocess = struct {
                     // to its pseudo console end when stop closes it; ones
                     // with a console of their own and GUI programs stay.
                     defer command.closeProcess();
-                    defer command.closeJob();
                     try command.killChild();
 
                     _ = try command.wait(false);
@@ -2857,6 +2854,51 @@ test "windows exec: output before child exit is drained and EOF follows" {
     try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-drain-token") != null);
 }
 
+/// A handle (terminate, synchronize) to a child process of `parent` whose
+/// image is named `name`, found with a Toolhelp snapshot; null if none yet.
+fn openChildNamed(parent: windows.HANDLE, name: []const u8) ?windows.HANDLE {
+    const PROCESSENTRY32W = extern struct {
+        dwSize: windows.DWORD,
+        cntUsage: windows.DWORD,
+        th32ProcessID: windows.DWORD,
+        th32DefaultHeapID: windows.ULONG_PTR,
+        th32ModuleID: windows.DWORD,
+        cntThreads: windows.DWORD,
+        th32ParentProcessID: windows.DWORD,
+        pcPriClassBase: i32,
+        dwFlags: windows.DWORD,
+        szExeFile: [260]u16,
+    };
+    const T = struct {
+        extern "kernel32" fn GetProcessId(process: windows.HANDLE) callconv(.winapi) windows.DWORD;
+        extern "kernel32" fn CreateToolhelp32Snapshot(flags: windows.DWORD, pid: windows.DWORD) callconv(.winapi) windows.HANDLE;
+        extern "kernel32" fn Process32FirstW(snapshot: windows.HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+        extern "kernel32" fn Process32NextW(snapshot: windows.HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+    };
+    const TH32CS_SNAPPROCESS = 0x2;
+    const parent_pid = T.GetProcessId(parent);
+    const snapshot = T.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == windows.INVALID_HANDLE_VALUE) return null;
+    defer _ = windows.exp.kernel32.CloseHandle(snapshot);
+
+    var entry: PROCESSENTRY32W = undefined;
+    entry.dwSize = @sizeOf(PROCESSENTRY32W);
+    var ok = T.Process32FirstW(snapshot, &entry);
+    while (ok != windows.FALSE) : (ok = T.Process32NextW(snapshot, &entry)) {
+        if (entry.th32ParentProcessID != parent_pid) continue;
+        const len = std.mem.indexOfScalar(u16, &entry.szExeFile, 0) orelse entry.szExeFile.len;
+        var buf: [260 * 3]u8 = undefined;
+        const n = std.unicode.utf16LeToUtf8(&buf, entry.szExeFile[0..len]) catch continue;
+        if (!std.ascii.eqlIgnoreCase(buf[0..n], name)) continue;
+        return windows.OpenProcess(
+            windows.SYNCHRONIZE | windows.PROCESS_TERMINATE,
+            windows.FALSE,
+            entry.th32ProcessID,
+        );
+    }
+    return null;
+}
+
 test "windows exec: closing the pseudo console ends attached console clients" {
     if (comptime !is_windows) return error.SkipZigTest;
     const testing = std.testing;
@@ -2876,14 +2918,14 @@ test "windows exec: closing the pseudo console ends attached console clients" {
         .pseudo_console = pty.pseudo_console,
     };
     try cmd.start(testing.allocator);
-    defer cmd.closeJob();
+    defer cmd.closeProcess();
     pty.closeChildSide();
 
     var loop = try TestReadLoop.init(pty.out_pipe);
     defer loop.deinit();
     try loop.start();
 
-    // Find the ping among the job's processes and keep a handle to it.
+    // Find the ping among the shell's children and keep a handle to it.
     var ping: ?windows.HANDLE = null;
     defer if (ping) |h| {
         _ = k32.TerminateProcess(h, 0);
@@ -2891,27 +2933,7 @@ test "windows exec: closing the pseudo console ends attached console clients" {
     };
     const begin: std.Io.Timestamp = .now(global.io(), .awake);
     while (ping == null) {
-        var ids: [64]windows.DWORD = undefined;
-        for (cmd.jobProcessIds(&ids)) |id| {
-            const proc = windows.OpenProcess(
-                windows.SYNCHRONIZE | windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION,
-                windows.FALSE,
-                id,
-            ) orelse continue;
-            var buf: [1024]u16 = undefined;
-            var len: windows.DWORD = buf.len;
-            var is_ping = false;
-            if (windows.QueryFullProcessImageNameW(proc, 0, @ptrCast(&buf), &len) != windows.FALSE and len >= 8) {
-                var tail: [8]u8 = undefined;
-                for (buf[len - 8 .. len], &tail) |w, *d| d.* = std.ascii.toLower(@truncate(w));
-                is_ping = std.mem.eql(u8, &tail, "ping.exe");
-            }
-            if (is_ping) {
-                ping = proc;
-                break;
-            }
-            _ = k32.CloseHandle(proc);
-        }
+        ping = openChildNamed(cmd.pid.?, "ping.exe");
         if (ping != null) break;
         try testing.expect(testElapsedMs(begin) < 8000);
         try std.Io.sleep(global.io(), .fromMilliseconds(50), .awake);
