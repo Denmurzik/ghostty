@@ -3,7 +3,7 @@
 Screenshot checks of the terminal emulation on the Windows port. Each case in
 `cases/<name>.sh` prints its escape sequences with `printf` in a fresh
 `ghostty.exe`; the frame dump (`GHOSTTY_D3D11_DUMP`, the surface without window
-chrome) is compared with `ref/<name>.png`.
+chrome) is compared with `ref/<name>@<dpi>.png`.
 
 ```
 powershell -NoProfile -File test/windows/vt-smoke.ps1 [-Only a,b] [-Update] [-Driver warp|hardware] [-EvidenceDir d]
@@ -38,10 +38,9 @@ exec sleep 600
 
 ## References
 
-`ref/*.png` are the dumps of the surface as it is rendered: 1685x1125 at the
-display scale of the machine that generated them, WARP driver. They are the
-machine's own: another display scale gives
-a different size, which is a FAIL ("size mismatch"); regenerate with `-Update`
+`ref/<case>@<dpi>.png` (dpi: 96 at 100 %, 168 at 175 %) are the dumps of the surface as it is rendered: 1685x1125 at 168 dpi, 1004x634 at 96 dpi,
+WARP driver. A case without a reference for the current DPI SKIPs ("no reference for N dpi"); generate it with `-Only <case> -Update`.
+They are the machine's own: another display scale gives a different size, which would be a FAIL ("size mismatch"), hence the DPI key; regenerate with `-Update`
 there. `Compare-Image` accepts a per-channel difference of 24 on 99.5 % of the
 pixels. A failing case keeps `vts-<case>.png` and `vts-<case>.diff.png` (red =
 pixels over the tolerance) in `-EvidenceDir`.

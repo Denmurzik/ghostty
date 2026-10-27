@@ -20,7 +20,8 @@ Per case: a sandbox with its own config (class ghostty-vts-<hex>, font-size
 12, window 100x30 cells, no cursor blink, the embedded font, command =
 Git Bash running the case), wait until the shell touched $VTS_DONE and the
 frame dump is stable (two equal dumps 300 ms apart), convert the dump to a PNG
-and compare it with vt-smoke/ref/<case>.png (Compare-Image, tolerance 24,
+and compare it with vt-smoke/ref/<case>@<dpi>.png (<dpi> is the DPI of the window: 96 at 100 %,
+168 at 175 %; a case without a reference for the current DPI SKIPs; Compare-Image, tolerance 24,
 99.5 % of the pixels). The references depend on the display scale and the
 driver: generate and compare with the same -Driver (warp by default, it is
 deterministic across machines at the same scale).
@@ -56,6 +57,7 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'e2e\_common.ps1')
 Import-Module (Join-Path $PSScriptRoot 'lib\ImageCompare.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\GhosttyIpc.psm1') -Force
 
 $vtsDir = Join-Path $PSScriptRoot 'vt-smoke'
 $casesDir = Join-Path $vtsDir 'cases'
@@ -119,17 +121,22 @@ function Wait-StableDump($G, [double]$TimeoutSec = 20) {
     $null
 }
 
+# The DPI the window runs at (state document of the test IPC), read once per run.
+function Get-VtsDpi($G) {
+    if ($script:VtsDpi) { return $script:VtsDpi }
+    $w = Wait-Until -TimeoutSec 10 -PollMs 200 -Condition {
+        $d = Get-GhosttyState -Class $G.Class
+        $x = @($d.windows)[0]
+        if ($x -and $x.dpi) { $x }
+    }
+    if (-not $w) { throw 'cannot read the window dpi from the state document' }
+    $script:VtsDpi = [int]$w.dpi
+    $script:VtsDpi
+}
+
 function Invoke-VtsCase($Case, [string]$Bash) {
     $name = $Case.Name
-    $ref = Join-Path $refDir "$name.png"
-    $haveRef = Test-Path -LiteralPath $ref
-    if ($Update) {
-        if ($Case.Requires -ne 'none' -and $Only.Count -eq 0) { return "SKIP $name`: requires $($Case.Requires), not written without -Only" }
-    } elseif ($Case.Requires -ne 'none' -and -not $haveRef) {
-        return "SKIP $name`: requires $($Case.Requires), no reference yet"
-    } elseif (-not $haveRef) {
-        return "FAIL $name`: no reference PNG (run with -Only $name -Update)"
-    }
+    if ($Update -and $Case.Requires -ne 'none' -and $Only.Count -eq 0) { return "SKIP $name`: requires $($Case.Requires), not written without -Only" }
 
     $sbx = $script:Sbx
     $script = Join-Path $sbx.Tmp "$name.sh"
@@ -154,6 +161,10 @@ function Invoke-VtsCase($Case, [string]$Bash) {
 
     $g = Start-E2eGhostty -ConfigText (($lines -join "`n") + "`n") -ClassPrefix 'ghostty-vts' -Env $envVars
     try {
+        # The references are keyed by the DPI of the window: ref/<case>@<dpi>.png.
+        $dpi = Get-VtsDpi $g
+        $ref = Join-Path $refDir "$name@$dpi.png"
+        if (-not $Update -and -not (Test-Path -LiteralPath $ref)) { return "SKIP $name`: no reference for $dpi dpi" }
         $ok = Wait-File $done 25
         if (-not $ok) { Save-Evidence "$name-stuck" $g -Window; Save-Log; return "FAIL $name`: the case script did not finish within 25 s" }
         # ConPTY and the renderer lag behind the script.
@@ -191,6 +202,7 @@ function Invoke-VtsCase($Case, [string]$Bash) {
 $bash = Find-GitBash
 if (-not $bash) { Write-Output 'SKIP vt-smoke: Git Bash is not installed'; exit 2 }
 
+$script:VtsDpi = $null
 $global:VtsFailed = @()
 $global:VtsCases = $cases
 $global:VtsRun = ${function:Invoke-VtsCase}
