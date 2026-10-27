@@ -19,6 +19,7 @@ const util = @import("util.zig");
 const geom = @import("geom.zig");
 const theme = @import("theme.zig");
 const messages = @import("messages.zig");
+const taskbar = @import("taskbar.zig");
 
 const log = std.log.scoped(.win32_tab);
 
@@ -214,7 +215,7 @@ pub fn destroy(self: *Tab) void {
 }
 
 /// The focused surface if it is still in the tree, else the first leaf.
-pub fn focusedSurface(self: *Tab) ?*Surface {
+pub fn focusedSurface(self: *const Tab) ?*Surface {
     if (self.focused) |f| {
         if (self.tree.locate(f) != null) return f;
     }
@@ -223,9 +224,18 @@ pub fn focusedSurface(self: *Tab) ?*Surface {
     return first.view;
 }
 
+/// Whether `SetFocus` may run for a tab of the window `own`: it activates
+/// the top-level of its target, so a background window must not take it
+/// (a shell exiting there would steal the activation). Activation forwards
+/// focus to the active tab through `WM_SETFOCUS` anyway.
+fn mayTakeFocus(active: ?win32.foundation.HWND, own: win32.foundation.HWND) bool {
+    return active == own;
+}
+
 /// Give keyboard focus to the focused surface.
 pub fn focus(self: *Tab) void {
     const s = self.focusedSurface() orelse return;
+    if (!mayTakeFocus(win32.user32.GetActiveWindow(), self.window.hwnd)) return;
     _ = win32.user32.SetFocus(s.hwnd);
 }
 
@@ -467,9 +477,7 @@ pub fn removeSurface(self: *Tab, s: *Surface) void {
 /// The title shown for this tab.
 pub fn title(self: *const Tab) []const u8 {
     if (self.title_override) |t| return t;
-    // `focusedSurface` needs a mutable tab; the lookup does not mutate.
-    const mutable: *Tab = @constCast(self);
-    if (mutable.focusedSurface()) |s| {
+    if (self.focusedSurface()) |s| {
         if (s.title) |t| return t;
     }
     return "Ghostty";
@@ -497,6 +505,9 @@ pub fn needsConfirmClose(self: *const Tab) bool {
 /// Move the tab to another top-level window.
 pub fn setWindow(self: *Tab, window: *Window) void {
     const rescale = self.window.dpi != window.dpi;
+    // The progress bar of the moved surface stays on the old button otherwise.
+    var moved = self.tree.iterator();
+    while (moved.next()) |entry| taskbar.surfaceClosed(self.window, entry.view.id);
     self.window = window;
     _ = win32.user32.SetParent(self.hwnd, window.hwnd);
     var it = self.tree.iterator();
@@ -850,4 +861,12 @@ test "win32 tab: split layout hides zoomed-out leaves" {
     const same = try visibilityChanges(TestLayout.Leaf, alloc, plain.leaves, plain.leaves);
     defer alloc.free(same);
     try std.testing.expectEqual(@as(usize, 0), same.len);
+}
+
+test "win32 tab: focus is taken only inside the active top-level" {
+    const a: win32.foundation.HWND = @ptrFromInt(0x1000);
+    const b: win32.foundation.HWND = @ptrFromInt(0x2000);
+    try std.testing.expect(mayTakeFocus(a, a));
+    try std.testing.expect(!mayTakeFocus(b, a));
+    try std.testing.expect(!mayTakeFocus(null, a));
 }

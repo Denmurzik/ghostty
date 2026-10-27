@@ -491,6 +491,8 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     defer self.tearing_down = was;
 
     if (!self.unlinkTab(tab)) {
+        // Hidden first, like `beginTeardown`: the thread joins take a while.
+        _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
         tab.destroy();
         self.requestClose(true);
         return;
@@ -885,8 +887,8 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
     self.layout();
 }
 
-/// Tell the visible surfaces whether the window is minimized.
-// TODO(task14): replace the loop below with activeTab().applyOcclusion(!minimized)
+/// Tell the active tab whether the window is minimized (its surfaces are
+/// occluded then).
 fn setMinimized(self: *Window, minimized: bool) void {
     const tab = self.activeTab() orelse return;
     tab.applyOcclusion(!minimized);
