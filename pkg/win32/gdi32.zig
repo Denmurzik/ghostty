@@ -38,7 +38,20 @@ pub const BITMAPINFO = extern struct {
     bmiColors: [1]RGBQUAD = .{.{}},
 };
 
+pub const BITMAP = extern struct {
+    bmType: i32 = 0,
+    bmWidth: i32 = 0,
+    bmHeight: i32 = 0,
+    bmWidthBytes: i32 = 0,
+    bmPlanes: u16 = 0,
+    bmBitsPixel: u16 = 0,
+    /// The pixels of a DIB section; null for other bitmaps.
+    bmBits: ?*anyopaque = null,
+};
+
 pub extern "gdi32" fn GetStockObject(index: i32) callconv(.winapi) ?HANDLE;
+/// Fills `out` (a `BITMAP` for a bitmap) and returns the bytes written, 0 on failure.
+pub extern "gdi32" fn GetObjectW(HGDIOBJ, size: i32, out: ?*anyopaque) callconv(.winapi) i32;
 pub extern "gdi32" fn CreateCompatibleDC(?HDC) callconv(.winapi) ?HDC;
 /// `bits` receives the pixel memory owned by the returned bitmap.
 pub extern "gdi32" fn CreateDIBSection(

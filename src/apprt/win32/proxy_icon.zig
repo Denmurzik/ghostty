@@ -157,7 +157,54 @@ fn folderIcon(alloc: Allocator, path: []const u8, px: i32) ?gdi32.HBITMAP {
     const factory: *shell32.IShellItemImageFactory = @ptrCast(@alignCast(out orelse return null));
     defer com.release(factory);
     const bitmap = factory.getImage(.{ .cx = px, .cy = px }, shell32.SIIGBF_ICONONLY) catch return null;
-    return @ptrCast(@alignCast(bitmap));
+    const hbitmap: gdi32.HBITMAP = @ptrCast(@alignCast(bitmap));
+    premultiplyBitmap(hbitmap);
+    return hbitmap;
+}
+
+/// The shell hands icons out with straight (not premultiplied) alpha, while
+/// `GdiAlphaBlend` with `AC_SRC_ALPHA` wants premultiplied pixels: the
+/// half-transparent edge would add a colour brighter than its coverage and
+/// overflow into a fringe (green around a yellow folder). Premultiplies the
+/// 32-bit DIB in place unless it already is.
+fn premultiplyBitmap(bitmap: gdi32.HBITMAP) void {
+    var info: gdi32.BITMAP = .{};
+    if (gdi32.GetObjectW(@ptrCast(bitmap), @sizeOf(gdi32.BITMAP), &info) == 0) return;
+    if (info.bmBitsPixel != 32 or info.bmWidth <= 0) return;
+    const bits = info.bmBits orelse return;
+    const rows: usize = @abs(info.bmHeight);
+    const len = rows * @as(usize, @intCast(info.bmWidthBytes));
+    premultiply(@as([*]u8, @ptrCast(bits))[0..len]);
+}
+
+/// Premultiplies BGRA pixels when some colour channel exceeds its alpha
+/// (which a premultiplied image never has); leaves them alone otherwise.
+fn premultiply(pixels: []u8) void {
+    var straight = false;
+    var i: usize = 0;
+    while (i + 4 <= pixels.len) : (i += 4) {
+        const a = pixels[i + 3];
+        if (pixels[i] > a or pixels[i + 1] > a or pixels[i + 2] > a) {
+            straight = true;
+            break;
+        }
+    }
+    if (!straight) return;
+    i = 0;
+    while (i + 4 <= pixels.len) : (i += 4) {
+        const a: u16 = pixels[i + 3];
+        for (pixels[i .. i + 3]) |*c| c.* = @intCast((@as(u16, c.*) * a + 127) / 255);
+    }
+}
+
+test "win32 proxy_icon: straight alpha is premultiplied, premultiplied is kept" {
+    var straight = [_]u8{ 0, 200, 255, 128, 10, 20, 30, 255 };
+    premultiply(&straight);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 100, 128, 128, 10, 20, 30, 255 }, &straight);
+
+    var pre = [_]u8{ 0, 100, 128, 128, 0, 0, 0, 0 };
+    premultiply(&pre);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 100, 128, 128, 0, 0, 0, 0 }, &pre);
 }
 
 /// Draws the icon into `hdc` (the strip's DC); dimmed while the window is
