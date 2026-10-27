@@ -1081,8 +1081,9 @@ function Get-ScreenShot([int]$X, [int]$Y, [int]$W, [int]$H) {
     $bmp
 }
 
-# Saves the window rect of `$Hwnd` plus a small margin (the backdrop around it).
-function Save-WindowShot([IntPtr]$Hwnd, [string]$Path, [int]$Margin = 40) {
+# Saves the exact window rect of `$Hwnd`; a margin only when the scenario'"'"'s own
+# backdrop form covers it (a foreign window below ours would show in it).
+function Save-WindowShot([IntPtr]$Hwnd, [string]$Path, [int]$Margin = 0) {
     $r = New-Object GhosttyE2e.Capture+RC
     [void][GhosttyE2e.Capture]::GetWindowRect($Hwnd, [ref]$r)
     $bmp = Get-ScreenShot ($r.Left - $Margin) ($r.Top - $Margin) ($r.Right - $r.Left + 2 * $Margin) ($r.Bottom - $r.Top + 2 * $Margin)

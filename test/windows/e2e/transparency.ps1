@@ -33,7 +33,7 @@ Invoke-E2eScenario 'transparency' {
     $dir = Get-EvidenceDir
     $shot = {
         param($Tag)
-        if ($dir) { Save-WindowShot $g.Hwnd (Join-Path $dir "transparency-$Tag-screen.png") }
+        if ($dir) { Save-WindowShot $g.Hwnd -Margin 40 (Join-Path $dir "transparency-$Tag-screen.png") }
     }
     $translucent = 135, 16, 151
     $solid = 16, 32, 48

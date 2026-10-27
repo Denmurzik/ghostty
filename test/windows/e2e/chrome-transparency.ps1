@@ -62,7 +62,7 @@ Invoke-E2eScenario 'chrome-transparency' {
                 $pa = Get-SettledPixel $above $want 3
                 $pt = Get-SettledPixel $title $want 3
                 $pb = Get-SettledPixel $below $want 3
-                if ($dir) { Save-WindowShot $g.Hwnd (Join-Path $dir "chrome-transparency-$($c.Tag)-active.png") }
+                if ($dir) { Save-WindowShot $g.Hwnd -Margin 40 (Join-Path $dir "chrome-transparency-$($c.Tag)-active.png") }
                 Write-E2eInfo "$($c.Tag): want $($want -join ','), title row $(Format-Color $pt), tab row $(Format-Color $pa), terminal $(Format-Color $pb)"
                 foreach ($p in @(@('title row', $pt), @('tab row', $pa), @('terminal', $pb))) {
                     if (-not (Test-ColorNear $p[1] $want 3)) { throw ("$($c.Tag) $($p[0]) is $(Format-Color $p[1]), expected $($want -join ',') +-3") }
@@ -81,7 +81,7 @@ Invoke-E2eScenario 'chrome-transparency' {
                 try {
                     $ia = Get-SettledPixel $above $want 3
                     $ib = Get-SettledPixel $below $want 3
-                    if ($dir) { Save-WindowShot $g.Hwnd (Join-Path $dir "chrome-transparency-$($c.Tag)-inactive.png") }
+                    if ($dir) { Save-WindowShot $g.Hwnd -Margin 40 (Join-Path $dir "chrome-transparency-$($c.Tag)-inactive.png") }
                     if (-not (Test-ColorNear $ia $want 3) -or -not (Test-ColorNear $ib $want 3)) { throw "$($c.Tag) inactive: tab row $(Format-Color $ia), terminal $(Format-Color $ib), expected $($want -join ',')" }
                 } finally { $away.Close() }
             } finally {
@@ -105,7 +105,7 @@ Invoke-E2eScenario 'chrome-transparency' {
                 param($Tag)
                 $pa = Get-ScreenPixel $above[0] $above[1]
                 $pb = Get-ScreenPixel $below[0] $below[1]
-                if ($dir) { Save-WindowShot $g.Hwnd (Join-Path $dir "chrome-transparency-acrylic-$Tag.png") }
+                if ($dir) { Save-WindowShot $g.Hwnd -Margin 40 (Join-Path $dir "chrome-transparency-acrylic-$Tag.png") }
                 Write-E2eInfo "acrylic $Tag : strip $(Format-Color $pa), terminal $(Format-Color $pb)"
                 if (-not (Test-ColorNear $pa @($pb.R, $pb.G, $pb.B) 3)) { throw "acrylic $Tag : seam between the strip $(Format-Color $pa) and the terminal $(Format-Color $pb)" }
             }
