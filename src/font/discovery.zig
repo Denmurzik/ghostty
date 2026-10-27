@@ -14,6 +14,10 @@ const Library = @import("main.zig").Library;
 const Presentation = @import("main.zig").Presentation;
 const Variation = @import("main.zig").face.Variation;
 const WindowsFontFile = @import("WindowsFontFile.zig");
+const DirectWrite = if (options.backend == .freetype_windows)
+    @import("directwrite.zig").DirectWrite
+else
+    void;
 const global = @import("../global.zig");
 
 const log = std.log.scoped(.discovery);
@@ -70,6 +74,10 @@ pub const Descriptor = struct {
     /// will be preferred, but not guaranteed.
     variations: []const Variation = &.{},
 
+    /// The presentation the caller needs. Only the Windows backend reads
+    /// this: emoji presentation skips the DirectWrite text fallback.
+    presentation: ?Presentation = null,
+
     /// Hash the descriptor with the given hasher.
     pub fn hash(self: Descriptor, hasher: anytype) void {
         const autoHash = std.hash.autoHash;
@@ -81,6 +89,7 @@ pub const Descriptor = struct {
         autoHash(hasher, self.bold);
         autoHash(hasher, self.italic);
         autoHash(hasher, self.monospace);
+        autoHash(hasher, self.presentation);
         autoHash(hasher, self.variations.len);
         for (self.variations) |variation| {
             autoHash(hasher, variation.id);
@@ -953,14 +962,21 @@ pub const CoreText = struct {
     };
 };
 
-/// Windows font discovery. A process-wide index of the system and
-/// per-user font files (family, style, OS/2 weight, italic, monospace,
-/// path, face index) is built once on first use by opening each file
-/// with FreeType through a UTF-16 mapped view. Queries then filter and
-/// rank that index instead of touching the disk; only the candidates
-/// that are actually returned (or probed for a codepoint) are opened.
+/// Windows font discovery. DirectWrite resolves families, styles and
+/// `MapCharacters` fallback to font files; the files are opened with
+/// FreeType through a UTF-16 mapped view.
+///
+/// If DirectWrite cannot be initialized, a process-wide index of the
+/// system and per-user font files (family, style, OS/2 weight, italic,
+/// monospace, path, face index) is built once on first use by opening each
+/// file with FreeType. Queries then filter and rank that index instead of
+/// touching the disk; only the candidates that are actually returned (or
+/// probed for a codepoint) are opened.
 pub const Windows = struct {
     lib: Library,
+
+    /// Null when DirectWrite is unusable; the file index is used instead.
+    dw: ?DirectWrite,
 
     /// Families tried first by `discoverFallback`, in order (SPEC section 9).
     const fallback_families = [_][]const u8{
@@ -975,11 +991,11 @@ pub const Windows = struct {
     };
 
     pub fn init(lib: Library) Windows {
-        return .{ .lib = lib };
+        return .{ .lib = lib, .dw = DirectWrite.init() };
     }
 
     pub fn deinit(self: *Windows) void {
-        _ = self;
+        if (self.dw) |*dw| dw.deinit();
     }
 
     pub fn discover(
@@ -987,12 +1003,18 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) !DiscoverIterator {
+        if (self.dw) |dw| return .{ .dw = .{
+            .first = try dw.discover(alloc, self.lib, desc),
+            .second = null,
+        } };
+
         const index = try Index.get(self.lib);
-        return DiscoverIterator.init(self.lib, alloc, index, desc, false);
+        return .{ .index = try IndexIterator.init(self.lib, alloc, index, desc, false) };
     }
 
-    /// Like `discover`, but when no family is requested the fixed list of
-    /// well-known fallback families is tried before the rest of the index.
+    /// Like `discover`, but when no family is requested the system's
+    /// `MapCharacters` choice comes first, then the fixed list of
+    /// well-known fallback families.
     pub fn discoverFallback(
         self: *const Windows,
         alloc: Allocator,
@@ -1000,14 +1022,23 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         _ = collection;
+        if (self.dw) |dw| {
+            if (desc.family != null) return self.discover(alloc, desc);
+
+            var first = try dw.fallback(alloc, self.lib, null, desc);
+            errdefer first.deinit();
+            const second = try dw.discoverFamilies(alloc, self.lib, &fallback_families, desc);
+            return .{ .dw = .{ .first = first, .second = second } };
+        }
+
         const index = try Index.get(self.lib);
-        return DiscoverIterator.init(
+        return .{ .index = try IndexIterator.init(
             self.lib,
             alloc,
             index,
             desc,
             desc.family == null,
-        );
+        ) };
     }
 
     /// One face of one font file.
@@ -1224,7 +1255,42 @@ pub const Windows = struct {
     /// Upper bound on faces indexed from a single collection file.
     const max_faces_per_file = 64;
 
-    pub const DiscoverIterator = struct {
+    /// The faces found by `discover` and `discoverFallback`.
+    pub const DiscoverIterator = union(enum) {
+        index: IndexIterator,
+        dw: DirectWriteIterator,
+
+        pub fn deinit(self: *DiscoverIterator) void {
+            switch (self.*) {
+                inline else => |*it| it.deinit(),
+            }
+        }
+
+        pub fn next(self: *DiscoverIterator) !?DeferredFace {
+            return switch (self.*) {
+                inline else => |*it| try it.next(),
+            };
+        }
+    };
+
+    /// Two DirectWrite result lists read one after the other.
+    const DirectWriteIterator = struct {
+        first: DirectWrite.Iterator,
+        second: ?DirectWrite.Iterator,
+
+        fn deinit(self: *DirectWriteIterator) void {
+            self.first.deinit();
+            if (self.second) |*s| s.deinit();
+        }
+
+        fn next(self: *DirectWriteIterator) !?DeferredFace {
+            if (try self.first.next()) |face| return face;
+            const second = if (self.second) |*s| s else return null;
+            return try second.next();
+        }
+    };
+
+    const IndexIterator = struct {
         lib: Library,
         alloc: Allocator,
         index: *const Index,
@@ -1241,7 +1307,7 @@ pub const Windows = struct {
             index: *const Index,
             desc: Descriptor,
             fallback: bool,
-        ) !DiscoverIterator {
+        ) !IndexIterator {
             var order: std.ArrayList(u32) = .empty;
             errdefer order.deinit(alloc);
 
@@ -1292,12 +1358,12 @@ pub const Windows = struct {
             order.* = result;
         }
 
-        pub fn deinit(self: *DiscoverIterator) void {
+        pub fn deinit(self: *IndexIterator) void {
             self.alloc.free(self.order);
             self.* = undefined;
         }
 
-        pub fn next(self: *DiscoverIterator) !?DeferredFace {
+        pub fn next(self: *IndexIterator) !?DeferredFace {
             while (self.pos < self.order.len) {
                 const entry = self.index.entries[self.order[self.pos]];
                 self.pos += 1;
@@ -1308,7 +1374,7 @@ pub const Windows = struct {
 
         /// Open a candidate and check that it covers the requested
         /// codepoint. Files that vanished or fail to parse are skipped.
-        fn open(self: *DiscoverIterator, entry: Entry) !?DeferredFace {
+        fn open(self: *IndexIterator, entry: Entry) !?DeferredFace {
             const file = WindowsFontFile.open(entry.path) catch return null;
             var face = Face.initMapped(
                 self.lib,
@@ -1464,7 +1530,8 @@ test "windows font: index is built once" {
 
     var lib: Library = try .init(std.testing.allocator);
     defer lib.deinit();
-    var disco: Windows = .init(lib);
+    // Without DirectWrite the file index answers every query.
+    var disco: Windows = .{ .lib = lib, .dw = null };
     defer disco.deinit();
 
     for (0..3) |_| {
@@ -1816,4 +1883,8 @@ test "windows" {
     var face = (try it.next()) orelse return error.TestFontNotFound;
     defer face.deinit();
     try testing.expect(face.hasCodepoint('A', null));
+}
+
+test {
+    if (options.backend == .freetype_windows) _ = @import("directwrite.zig");
 }

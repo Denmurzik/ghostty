@@ -171,3 +171,46 @@ test "win32 d2d: DC render target draws into a premultiplied DIB" {
     }
     try std.testing.expect(inked);
 }
+
+test "win32 dwrite: M3 interface slot counts" {
+    // Total slots including inherited ones, from SDK 10.0.26100 dwrite.h,
+    // dwrite_1.h and dwrite_2.h.
+    try std.testing.expectEqual(31, slots(dwrite.IDWriteFactory2));
+    try std.testing.expectEqual(7, slots(dwrite.IDWriteFontCollection));
+    try std.testing.expectEqual(6, slots(dwrite.IDWriteFontList));
+    try std.testing.expectEqual(9, slots(dwrite.IDWriteFontFamily));
+    try std.testing.expectEqual(14, slots(dwrite.IDWriteFont));
+    try std.testing.expectEqual(18, slots(dwrite.IDWriteFont1));
+    try std.testing.expectEqual(18, slots(dwrite.IDWriteFontFace));
+    try std.testing.expectEqual(6, slots(dwrite.IDWriteFontFile));
+    try std.testing.expectEqual(4, slots(dwrite.IDWriteFontFileLoader));
+    try std.testing.expectEqual(7, slots(dwrite.IDWriteLocalFontFileLoader));
+    try std.testing.expectEqual(9, slots(dwrite.IDWriteLocalizedStrings));
+    try std.testing.expectEqual(4, slots(dwrite.IDWriteFontFallback));
+    try std.testing.expectEqual(8, slots(dwrite.IDWriteTextAnalysisSource));
+
+    try std.testing.expectEqual(26, slot(dwrite.IDWriteFactory2, "GetSystemFontFallback"));
+    try std.testing.expectEqual(3, slot(dwrite.IDWriteFontCollection, "GetFontFamilyCount"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteFontCollection, "GetFontFamily"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteFontList, "GetFontCount"));
+    try std.testing.expectEqual(6, slot(dwrite.IDWriteFontFamily, "GetFamilyNames"));
+    try std.testing.expectEqual(7, slot(dwrite.IDWriteFontFamily, "GetFirstMatchingFont"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteFont, "GetWeight"));
+    try std.testing.expectEqual(8, slot(dwrite.IDWriteFont, "GetFaceNames"));
+    try std.testing.expectEqual(9, slot(dwrite.IDWriteFont, "GetInformationalStrings"));
+    try std.testing.expectEqual(12, slot(dwrite.IDWriteFont, "HasCharacter"));
+    try std.testing.expectEqual(13, slot(dwrite.IDWriteFont, "CreateFontFace"));
+    try std.testing.expectEqual(17, slot(dwrite.IDWriteFont1, "IsMonospacedFont"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteFontFace, "GetFiles"));
+    try std.testing.expectEqual(5, slot(dwrite.IDWriteFontFace, "GetIndex"));
+    try std.testing.expectEqual(3, slot(dwrite.IDWriteFontFile, "GetReferenceKey"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteFontFile, "GetLoader"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteLocalFontFileLoader, "GetFilePathLengthFromKey"));
+    try std.testing.expectEqual(5, slot(dwrite.IDWriteLocalFontFileLoader, "GetFilePathFromKey"));
+    try std.testing.expectEqual(4, slot(dwrite.IDWriteLocalizedStrings, "FindLocaleName"));
+    try std.testing.expectEqual(7, slot(dwrite.IDWriteLocalizedStrings, "GetStringLength"));
+    try std.testing.expectEqual(8, slot(dwrite.IDWriteLocalizedStrings, "GetString"));
+    try std.testing.expectEqual(3, slot(dwrite.IDWriteFontFallback, "MapCharacters"));
+    try std.testing.expectEqual(3, slot(dwrite.IDWriteTextAnalysisSource, "GetTextAtPosition"));
+    try std.testing.expectEqual(7, slot(dwrite.IDWriteTextAnalysisSource, "GetNumberSubstitution"));
+}

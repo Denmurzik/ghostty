@@ -306,11 +306,30 @@ pub const IDWriteFontCollection = extern struct {
 
     pub const VTable = extern struct {
         base: IUnknown.VTable,
-        GetFontFamilyCount: *const anyopaque,
-        GetFontFamily: *const anyopaque,
+        GetFontFamilyCount: *const fn (*IDWriteFontCollection) callconv(.winapi) u32,
+        GetFontFamily: *const fn (*IDWriteFontCollection, u32, *?*IDWriteFontFamily) callconv(.winapi) HRESULT,
         FindFamilyName: *const fn (*IDWriteFontCollection, [*:0]const u16, *u32, *foundation.BOOL) callconv(.winapi) HRESULT,
         GetFontFromFontFace: *const anyopaque,
     };
+
+    pub inline fn getFontFamilyCount(self: *IDWriteFontCollection) u32 {
+        return self.vtable.GetFontFamilyCount(self);
+    }
+
+    /// The family at `index`; the caller releases it.
+    pub inline fn getFontFamily(self: *IDWriteFontCollection, index: u32) Error!*IDWriteFontFamily {
+        var out: ?*IDWriteFontFamily = null;
+        try check(self.vtable.GetFontFamily(self, index, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// Index of the family called `name` (case-insensitive, any locale), or null.
+    pub inline fn findFamilyName(self: *IDWriteFontCollection, name: [*:0]const u16) Error!?u32 {
+        var index: u32 = 0;
+        var exists: foundation.BOOL = 0;
+        try check(self.vtable.FindFamilyName(self, name, &index, &exists));
+        return if (exists != 0) index else null;
+    }
 
     /// Whether the collection has a family called `name`.
     pub inline fn hasFamily(self: *IDWriteFontCollection, name: [*:0]const u16) Error!bool {
@@ -327,3 +346,405 @@ pub inline fn getSystemFontCollection(factory: *IDWriteFactory) Error!*IDWriteFo
     try check(factory.vtable.GetSystemFontCollection(factory, &out, 0));
     return out orelse error.ComFailure;
 }
+
+/// DWRITE_INFORMATIONAL_STRING_ID (the subset consumers need).
+pub const InformationalStringId = enum(u32) {
+    WIN32_FAMILY_NAMES = 11,
+    WIN32_SUBFAMILY_NAMES = 12,
+    TYPOGRAPHIC_FAMILY_NAMES = 13,
+    TYPOGRAPHIC_SUBFAMILY_NAMES = 14,
+    FULL_NAME = 16,
+    POSTSCRIPT_NAME = 17,
+    _,
+};
+
+pub const DWRITE_INFORMATIONAL_STRING_FULL_NAME = InformationalStringId.FULL_NAME;
+
+/// DWRITE_READING_DIRECTION
+pub const ReadingDirection = enum(u32) {
+    LEFT_TO_RIGHT = 0,
+    RIGHT_TO_LEFT = 1,
+};
+
+pub const IID_IDWriteLocalFontFileLoader = IDWriteLocalFontFileLoader.iid;
+
+/// IDWriteFactory1 adds two slots, IDWriteFactory2 five more.
+pub const IDWriteFactory2 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("0439fc60-ca44-4994-8dee-3a9af7b732ec");
+
+    pub const VTable = extern struct {
+        base: IDWriteFactory.VTable,
+        // IDWriteFactory1
+        GetEudcFontCollection: *const anyopaque,
+        CreateCustomRenderingParams1: *const anyopaque,
+        // IDWriteFactory2
+        GetSystemFontFallback: *const fn (*IDWriteFactory2, *?*IDWriteFontFallback) callconv(.winapi) HRESULT,
+        CreateFontFallbackBuilder: *const anyopaque,
+        TranslateColorGlyphRun: *const anyopaque,
+        CreateCustomRenderingParams2: *const anyopaque,
+        CreateGlyphRunAnalysis: *const anyopaque,
+    };
+
+    /// The system font fallback; the caller releases it.
+    pub inline fn getSystemFontFallback(self: *IDWriteFactory2) Error!*IDWriteFontFallback {
+        var out: ?*IDWriteFontFallback = null;
+        try check(self.vtable.GetSystemFontFallback(self, &out));
+        return out orelse error.ComFailure;
+    }
+};
+
+pub const IDWriteLocalizedStrings = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("08256209-099a-4b34-b86d-c22b110e7771");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetCount: *const fn (*IDWriteLocalizedStrings) callconv(.winapi) u32,
+        FindLocaleName: *const fn (*IDWriteLocalizedStrings, [*:0]const u16, *u32, *foundation.BOOL) callconv(.winapi) HRESULT,
+        GetLocaleNameLength: *const anyopaque,
+        GetLocaleName: *const anyopaque,
+        GetStringLength: *const fn (*IDWriteLocalizedStrings, u32, *u32) callconv(.winapi) HRESULT,
+        GetString: *const fn (*IDWriteLocalizedStrings, u32, [*]u16, u32) callconv(.winapi) HRESULT,
+    };
+
+    pub inline fn getCount(self: *IDWriteLocalizedStrings) u32 {
+        return self.vtable.GetCount(self);
+    }
+
+    /// Index of `locale`, or null when the set has no such locale.
+    pub inline fn findLocaleName(self: *IDWriteLocalizedStrings, locale: [*:0]const u16) Error!?u32 {
+        var index: u32 = 0;
+        var exists: foundation.BOOL = 0;
+        try check(self.vtable.FindLocaleName(self, locale, &index, &exists));
+        return if (exists != 0) index else null;
+    }
+
+    /// Length in UTF-16 units, without the terminator.
+    pub inline fn getStringLength(self: *IDWriteLocalizedStrings, index: u32) Error!u32 {
+        var len: u32 = 0;
+        try check(self.vtable.GetStringLength(self, index, &len));
+        return len;
+    }
+
+    /// Copies string `index` and a NUL into `buf`; `buf.len` must exceed the
+    /// string length. Returns the string without the terminator.
+    pub inline fn getString(self: *IDWriteLocalizedStrings, index: u32, buf: []u16) Error![]const u16 {
+        const len = try self.getStringLength(index);
+        if (len >= buf.len) return error.InvalidArgument;
+        try check(self.vtable.GetString(self, index, buf.ptr, @intCast(buf.len)));
+        return buf[0..len];
+    }
+};
+
+pub const IDWriteFontFileLoader = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("727cad4e-d6af-4c9e-8a08-d695b11caa49");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        CreateStreamFromKey: *const anyopaque,
+    };
+};
+
+pub const IDWriteLocalFontFileLoader = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("b2d9f3ec-c9fe-4a11-a2ec-d86208f7c0a2");
+
+    pub const VTable = extern struct {
+        base: IDWriteFontFileLoader.VTable,
+        GetFilePathLengthFromKey: *const fn (*IDWriteLocalFontFileLoader, *const anyopaque, u32, *u32) callconv(.winapi) HRESULT,
+        GetFilePathFromKey: *const fn (*IDWriteLocalFontFileLoader, *const anyopaque, u32, [*]u16, u32) callconv(.winapi) HRESULT,
+        GetLastWriteTimeFromKey: *const anyopaque,
+    };
+
+    /// Length in UTF-16 units of the path for `key`, without the terminator.
+    pub inline fn getFilePathLengthFromKey(self: *IDWriteLocalFontFileLoader, key: *const anyopaque, key_size: u32) Error!u32 {
+        var len: u32 = 0;
+        try check(self.vtable.GetFilePathLengthFromKey(self, key, key_size, &len));
+        return len;
+    }
+
+    /// Copies the path and a NUL into `buf`; `buf.len` must exceed the path.
+    pub inline fn getFilePathFromKey(self: *IDWriteLocalFontFileLoader, key: *const anyopaque, key_size: u32, buf: []u16) Error!void {
+        try check(self.vtable.GetFilePathFromKey(self, key, key_size, buf.ptr, @intCast(buf.len)));
+    }
+};
+
+pub const IDWriteFontFile = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("739d886a-cef5-47dc-8769-1a8b41bebbb0");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetReferenceKey: *const fn (*IDWriteFontFile, *?*const anyopaque, *u32) callconv(.winapi) HRESULT,
+        GetLoader: *const fn (*IDWriteFontFile, *?*IDWriteFontFileLoader) callconv(.winapi) HRESULT,
+        Analyze: *const anyopaque,
+    };
+
+    pub const ReferenceKey = struct { key: *const anyopaque, size: u32 };
+
+    /// The key is owned by the file and valid while it lives.
+    pub inline fn getReferenceKey(self: *IDWriteFontFile) Error!ReferenceKey {
+        var key: ?*const anyopaque = null;
+        var size: u32 = 0;
+        try check(self.vtable.GetReferenceKey(self, &key, &size));
+        return .{ .key = key orelse return error.ComFailure, .size = size };
+    }
+
+    /// The loader; the caller releases it.
+    pub inline fn getLoader(self: *IDWriteFontFile) Error!*IDWriteFontFileLoader {
+        var out: ?*IDWriteFontFileLoader = null;
+        try check(self.vtable.GetLoader(self, &out));
+        return out orelse error.ComFailure;
+    }
+};
+
+pub const IDWriteFontFace = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("5f49804d-7024-4d43-bfa9-d25984f53849");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetType: *const anyopaque,
+        GetFiles: *const fn (*IDWriteFontFace, *u32, ?[*]?*IDWriteFontFile) callconv(.winapi) HRESULT,
+        GetIndex: *const fn (*IDWriteFontFace) callconv(.winapi) u32,
+        GetSimulations: *const anyopaque,
+        IsSymbolFont: *const anyopaque,
+        GetMetrics: *const anyopaque,
+        GetGlyphCount: *const anyopaque,
+        GetDesignGlyphMetrics: *const anyopaque,
+        GetGlyphIndices: *const anyopaque,
+        TryGetFontTable: *const anyopaque,
+        ReleaseFontTable: *const anyopaque,
+        GetGlyphRunOutline: *const anyopaque,
+        GetRecommendedRenderingMode: *const anyopaque,
+        GetGdiCompatibleMetrics: *const anyopaque,
+        GetGdiCompatibleGlyphMetrics: *const anyopaque,
+    };
+
+    /// Number of files the face is made of.
+    pub inline fn getFileCount(self: *IDWriteFontFace) Error!u32 {
+        var n: u32 = 0;
+        try check(self.vtable.GetFiles(self, &n, null));
+        return n;
+    }
+
+    /// Fills `out` (sized by `getFileCount`); the caller releases each file.
+    pub inline fn getFiles(self: *IDWriteFontFace, out: []?*IDWriteFontFile) Error!void {
+        var n: u32 = @intCast(out.len);
+        try check(self.vtable.GetFiles(self, &n, out.ptr));
+    }
+
+    pub inline fn getIndex(self: *IDWriteFontFace) u32 {
+        return self.vtable.GetIndex(self);
+    }
+};
+
+pub const IDWriteFont = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("acd16696-8c14-4f5d-877e-fe3fc1d32737");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetFontFamily: *const fn (*IDWriteFont, *?*IDWriteFontFamily) callconv(.winapi) HRESULT,
+        GetWeight: *const fn (*IDWriteFont) callconv(.winapi) u32,
+        GetStretch: *const fn (*IDWriteFont) callconv(.winapi) u32,
+        GetStyle: *const fn (*IDWriteFont) callconv(.winapi) u32,
+        IsSymbolFont: *const anyopaque,
+        GetFaceNames: *const fn (*IDWriteFont, *?*IDWriteLocalizedStrings) callconv(.winapi) HRESULT,
+        GetInformationalStrings: *const fn (*IDWriteFont, InformationalStringId, *?*IDWriteLocalizedStrings, *foundation.BOOL) callconv(.winapi) HRESULT,
+        GetSimulations: *const anyopaque,
+        GetMetrics: *const anyopaque,
+        HasCharacter: *const fn (*IDWriteFont, u32, *foundation.BOOL) callconv(.winapi) HRESULT,
+        CreateFontFace: *const fn (*IDWriteFont, *?*IDWriteFontFace) callconv(.winapi) HRESULT,
+    };
+
+    pub inline fn getWeight(self: *IDWriteFont) u32 {
+        return self.vtable.GetWeight(self);
+    }
+
+    pub inline fn getStretch(self: *IDWriteFont) u32 {
+        return self.vtable.GetStretch(self);
+    }
+
+    pub inline fn getStyle(self: *IDWriteFont) FontStyle {
+        return @fromBackingInt(@intCast(self.vtable.GetStyle(self)));
+    }
+
+    /// The family; the caller releases it.
+    pub inline fn getFontFamily(self: *IDWriteFont) Error!*IDWriteFontFamily {
+        var out: ?*IDWriteFontFamily = null;
+        try check(self.vtable.GetFontFamily(self, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// Style names such as "Bold Italic"; the caller releases them.
+    pub inline fn getFaceNames(self: *IDWriteFont) Error!*IDWriteLocalizedStrings {
+        var out: ?*IDWriteLocalizedStrings = null;
+        try check(self.vtable.GetFaceNames(self, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// Null when the font has no such string; the caller releases it.
+    pub inline fn getInformationalStrings(self: *IDWriteFont, id: InformationalStringId) Error!?*IDWriteLocalizedStrings {
+        var out: ?*IDWriteLocalizedStrings = null;
+        var exists: foundation.BOOL = 0;
+        try check(self.vtable.GetInformationalStrings(self, id, &out, &exists));
+        return if (exists != 0) out else null;
+    }
+
+    pub inline fn hasCharacter(self: *IDWriteFont, codepoint: u32) Error!bool {
+        var exists: foundation.BOOL = 0;
+        try check(self.vtable.HasCharacter(self, codepoint, &exists));
+        return exists != 0;
+    }
+
+    /// The face; the caller releases it.
+    pub inline fn createFontFace(self: *IDWriteFont) Error!*IDWriteFontFace {
+        var out: ?*IDWriteFontFace = null;
+        try check(self.vtable.CreateFontFace(self, &out));
+        return out orelse error.ComFailure;
+    }
+};
+
+pub const IDWriteFont1 = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("acd16696-8c14-4f5d-877e-fe3fc1d32738");
+
+    pub const VTable = extern struct {
+        base: IDWriteFont.VTable,
+        GetMetrics1: *const anyopaque,
+        GetPanose: *const anyopaque,
+        GetUnicodeRanges: *const anyopaque,
+        IsMonospacedFont: *const fn (*IDWriteFont1) callconv(.winapi) foundation.BOOL,
+    };
+
+    pub inline fn isMonospacedFont(self: *IDWriteFont1) bool {
+        return self.vtable.IsMonospacedFont(self) != 0;
+    }
+};
+
+pub const IDWriteFontList = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("1a0d8438-1d97-4ec1-aef9-a2fb86ed6acb");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetFontCollection: *const anyopaque,
+        GetFontCount: *const fn (*IDWriteFontList) callconv(.winapi) u32,
+        GetFont: *const fn (*IDWriteFontList, u32, *?*IDWriteFont) callconv(.winapi) HRESULT,
+    };
+};
+
+pub const IDWriteFontFamily = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("da20d8ef-812a-4c43-9802-62ec4abd7add");
+
+    pub const VTable = extern struct {
+        base: IDWriteFontList.VTable,
+        GetFamilyNames: *const fn (*IDWriteFontFamily, *?*IDWriteLocalizedStrings) callconv(.winapi) HRESULT,
+        GetFirstMatchingFont: *const fn (*IDWriteFontFamily, FontWeight, FontStretch, FontStyle, *?*IDWriteFont) callconv(.winapi) HRESULT,
+        GetMatchingFonts: *const anyopaque,
+    };
+
+    pub inline fn getFontCount(self: *IDWriteFontFamily) u32 {
+        return self.vtable.base.GetFontCount(@ptrCast(self));
+    }
+
+    /// The font at `index`; the caller releases it.
+    pub inline fn getFont(self: *IDWriteFontFamily, index: u32) Error!*IDWriteFont {
+        var out: ?*IDWriteFont = null;
+        try check(self.vtable.base.GetFont(@ptrCast(self), index, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// Family names per locale; the caller releases them.
+    pub inline fn getFamilyNames(self: *IDWriteFontFamily) Error!*IDWriteLocalizedStrings {
+        var out: ?*IDWriteLocalizedStrings = null;
+        try check(self.vtable.GetFamilyNames(self, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// The font closest to the request; the caller releases it.
+    pub inline fn getFirstMatchingFont(self: *IDWriteFontFamily, weight: FontWeight, stretch: FontStretch, style: FontStyle) Error!*IDWriteFont {
+        var out: ?*IDWriteFont = null;
+        try check(self.vtable.GetFirstMatchingFont(self, weight, stretch, style, &out));
+        return out orelse error.ComFailure;
+    }
+};
+
+pub const IDWriteFontFallback = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("efa008f9-f7a1-48bf-b05c-f224713cc0ff");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        MapCharacters: *const fn (
+            *IDWriteFontFallback,
+            *IDWriteTextAnalysisSource,
+            u32,
+            u32,
+            ?*IDWriteFontCollection,
+            ?[*:0]const u16,
+            FontWeight,
+            FontStyle,
+            FontStretch,
+            *u32,
+            *?*IDWriteFont,
+            *f32,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    pub const Mapped = struct {
+        /// Null when no installed font covers the range.
+        font: ?*IDWriteFont,
+        length: u32,
+        scale: f32,
+    };
+
+    pub inline fn mapCharacters(
+        self: *IDWriteFontFallback,
+        source: *IDWriteTextAnalysisSource,
+        position: u32,
+        length: u32,
+        base_family: ?[*:0]const u16,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+    ) Error!Mapped {
+        var mapped_len: u32 = 0;
+        var font: ?*IDWriteFont = null;
+        var scale: f32 = 1;
+        try check(self.vtable.MapCharacters(self, source, position, length, null, base_family, weight, style, stretch, &mapped_len, &font, &scale));
+        return .{ .font = font, .length = mapped_len, .scale = scale };
+    }
+};
+
+/// Vtable type for a text source implemented by the caller (an object whose
+/// first field is a `*const IDWriteTextAnalysisSource.VTable`).
+pub const IDWriteTextAnalysisSource = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("688e1a58-5094-47c8-adc8-fbcea60ae92b");
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        GetTextAtPosition: *const fn (*IDWriteTextAnalysisSource, u32, *?[*]const u16, *u32) callconv(.winapi) HRESULT,
+        GetTextBeforePosition: *const fn (*IDWriteTextAnalysisSource, u32, *?[*]const u16, *u32) callconv(.winapi) HRESULT,
+        GetParagraphReadingDirection: *const fn (*IDWriteTextAnalysisSource) callconv(.winapi) ReadingDirection,
+        GetLocaleName: *const fn (*IDWriteTextAnalysisSource, u32, *u32, *?[*:0]const u16) callconv(.winapi) HRESULT,
+        GetNumberSubstitution: *const fn (*IDWriteTextAnalysisSource, u32, *u32, *?*anyopaque) callconv(.winapi) HRESULT,
+    };
+};
