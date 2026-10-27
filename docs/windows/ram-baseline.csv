@@ -54,3 +54,7 @@ date,commit,optimize,adapter,scenario,private_mb,ws_mb
 2026-10-27,4aed01079-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g1-font-consolas-m1,69.7,95.6
 2026-10-27,4aed01079-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g1-custom-shader,101.2,138.2
 2026-10-27,4aed01079-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g1-custom-shader,101,129.8
+2026-10-27,8bfa906ff-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g71-custom-shader,75,102.5
+2026-10-27,8bfa906ff-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g71-custom-shader,76.7,105.5
+2026-10-27,8bfa906ff-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g71-one-surface,62,86.2
+2026-10-27,8bfa906ff-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,g71-one-surface,62,87.9

@@ -85,6 +85,7 @@ pub fn init(opts: Options) Error!Self {
         .srv_format = view_format,
         .render_target = true,
         .rtv_format = view_format,
+        .gamma_rtv = opts.srgb,
     }, opts.width, opts.height, null);
 
     return .{

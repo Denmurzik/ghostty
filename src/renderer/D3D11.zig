@@ -487,18 +487,17 @@ pub inline fn uniformBufferOptions(self: D3D11) bufferpkg.Options {
 }
 
 /// Returns the options to use when constructing textures. Custom shader
-/// ping-pong textures are rendered to, so they match the target's format.
+/// ping-pong textures are typeless: the scene is drawn into them through
+/// the target's views, and the custom shader passes sample and write the
+/// raw stored values (`srv`, `gamma_rtv`), as shadertoy math expects.
 pub inline fn textureOptions(self: D3D11) Texture.Options {
-    const format: win32.dxgi.Format = if (self.blending.isLinear())
-        .B8G8R8A8_UNORM_SRGB
-    else
-        .B8G8R8A8_UNORM;
     return .{
         .device = self.device,
-        .format = format,
-        .srv_format = format,
+        .format = .B8G8R8A8_TYPELESS,
+        .srv_format = .B8G8R8A8_UNORM,
         .render_target = true,
-        .rtv_format = format,
+        .rtv_format = if (self.blending.isLinear()) .B8G8R8A8_UNORM_SRGB else .B8G8R8A8_UNORM,
+        .gamma_rtv = self.blending.isLinear(),
     };
 }
 

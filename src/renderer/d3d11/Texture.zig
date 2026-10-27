@@ -23,6 +23,10 @@ pub const Options = struct {
 
     /// The format of the render target view; `.UNKNOWN` uses `format`.
     rtv_format: dxgi.Format = .UNKNOWN,
+
+    /// Also creates `gamma_rtv`, a `B8G8R8A8_UNORM` view of a typeless
+    /// render target, for passes that write raw (gamma space) values.
+    gamma_rtv: bool = false,
 };
 
 pub const Error = win32.foundation.Error;
@@ -41,6 +45,10 @@ srv: *d3d11.ID3D11ShaderResourceView,
 
 /// The view the texture is rendered through, if `Options.render_target`.
 rtv: ?*d3d11.ID3D11RenderTargetView,
+
+/// A `B8G8R8A8_UNORM` view of the texture, if `Options.gamma_rtv`. Custom
+/// shaders run in gamma space like on macOS, whatever `rtv` encodes.
+gamma_rtv: ?*d3d11.ID3D11RenderTargetView = null,
 
 /// The width of this texture.
 width: usize,
@@ -118,18 +126,31 @@ pub fn init(
     else
         null;
 
+    errdefer com.release(rtv);
+
+    const gamma_rtv: ?*d3d11.ID3D11RenderTargetView = if (opts.render_target and opts.gamma_rtv)
+        try opts.device.device.createRenderTargetView(texture.asResource(), &.{
+            .Format = .B8G8R8A8_UNORM,
+            .ViewDimension = .TEXTURE2D,
+            .u = .{ .Texture2D = .{ .MipSlice = 0 } },
+        })
+    else
+        null;
+
     return .{
         .device = opts.device,
         .format = opts.format,
         .texture = texture,
         .srv = srv,
         .rtv = rtv,
+        .gamma_rtv = gamma_rtv,
         .width = width,
         .height = height,
     };
 }
 
 pub fn deinit(self: Self) void {
+    com.release(self.gamma_rtv);
     com.release(self.rtv);
     com.release(self.srv);
     com.release(self.texture);

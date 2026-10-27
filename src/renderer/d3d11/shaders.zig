@@ -149,6 +149,7 @@ fn initPostPipelines(
             .vertex = .full_screen_vs,
             .pixel_bytecode = code,
             .blending_enabled = true,
+            .post = true,
         }) catch |err| {
             log.warn("custom shader {d} pipeline failed, custom shaders disabled: {}", .{ i, err });
             return dropPostPipelines(alloc, &pipelines);

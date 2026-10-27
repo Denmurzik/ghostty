@@ -79,6 +79,8 @@ pub fn begin(
 const Bound = struct {
     device: *Device,
     rtv: *d3d11.ID3D11RenderTargetView,
+    /// The raw view `Pipeline.post` passes draw through, if the target has one.
+    gamma_rtv: ?*d3d11.ID3D11RenderTargetView,
     width: usize,
     height: usize,
 };
@@ -88,6 +90,7 @@ fn bound(self: *const Self) ?Bound {
         .target => |t| return .{
             .device = t.device,
             .rtv = t.rtv(),
+            .gamma_rtv = t.texture.gamma_rtv,
             .width = t.width,
             .height = t.height,
         },
@@ -97,6 +100,7 @@ fn bound(self: *const Self) ?Bound {
                 log.warn("render pass attachment texture has no render target view", .{});
                 return null;
             },
+            .gamma_rtv = t.gamma_rtv,
             .width = t.width,
             .height = t.height,
         },
@@ -112,12 +116,14 @@ pub fn step(self: *Self, s: Step) void {
     device.assertContextLocked();
     const ctx = device.context;
 
-    ctx.omSetRenderTargets(&.{att.rtv});
+    // Custom shader passes work in gamma space whatever the views encode.
+    const rtv = if (s.pipeline.post) att.gamma_rtv orelse att.rtv else att.rtv;
+    ctx.omSetRenderTargets(&.{rtv});
 
     // If we have a clear color and this is the
     // first step in the pass, go ahead and clear.
     if (self.step_number == 0) if (self.attachments[0].clear_color) |c| {
-        ctx.clearRenderTargetView(att.rtv, c);
+        ctx.clearRenderTargetView(rtv, c);
     };
     self.step_number += 1;
 
@@ -366,4 +372,61 @@ test "d3d11 renderpass: structured buffers bind at t4 for the pixel stage" {
     // BGRA.
     try expectPixel(.{ 0, 0, 255, 255 }, pixelAt(pixels, 8, 1, 1));
     try expectPixel(.{ 255, 0, 0, 255 }, pixelAt(pixels, 8, 6, 2));
+}
+
+test "d3d11 renderpass: a post pipeline writes raw values to an sRGB target" {
+    const alloc = std.testing.allocator;
+    const device = try Device.init(alloc, .{ .driver = .warp });
+    defer device.deinit(alloc);
+
+    var target = try Target.init(.{ .device = device, .width = 4, .height = 2, .srgb = true });
+    defer target.deinit();
+    try std.testing.expect(target.texture.gamma_rtv != null);
+
+    var uniforms = try bufferpkg.Buffer(Uniforms).init(
+        .{ .device = device, .role = .constant },
+        1,
+    );
+    defer uniforms.deinit();
+
+    device.lockContext();
+    defer device.unlockContext();
+
+    var u = std.mem.zeroes(Uniforms);
+    u.bg_color = .{ 10, 20, 30, 255 };
+    u.bools = .{ .cursor_wide = false, .use_display_p3 = true, .use_linear_blending = false };
+    try uniforms.sync(&.{u});
+
+    for ([_]bool{ true, false }) |post| {
+        const pipeline = try Pipeline.init(null, .{
+            .device = device,
+            .vertex = .full_screen_vs,
+            .pixel = .bg_color_ps,
+            .blending_enabled = false,
+            .post = post,
+        });
+        defer pipeline.deinit();
+
+        const attachments = [_]Options.Attachment{.{
+            .target = .{ .target = target },
+            .clear_color = .{ 1, 1, 1, 1 },
+        }};
+        var pass = begin(.{ .attachments = &attachments });
+        pass.step(.{
+            .pipeline = pipeline,
+            .uniforms = uniforms.buffer,
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+
+        const pixels = try target.readPixelsAlloc(alloc);
+        defer alloc.free(pixels);
+        if (post) {
+            // Stored as given, not encoded a second time.
+            try expectPixel(.{ 30, 20, 10, 255 }, pixelAt(pixels, 4, 1, 1));
+        } else {
+            // The sRGB view encodes what the shader wrote.
+            try std.testing.expect(pixels[0] > 30);
+        }
+    }
 }

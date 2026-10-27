@@ -32,6 +32,10 @@ pub const Options = struct {
     /// Whether to enable blending.
     blending_enabled: bool = true,
 
+    /// A custom shader pass: reads and writes raw (gamma space) values
+    /// like on macOS, so `RenderPass` binds the gamma view of its target.
+    post: bool = false,
+
     pub const StepFunction = enum {
         constant,
         per_vertex,
@@ -56,6 +60,9 @@ rasterizer_state: *d3d11.ID3D11RasterizerState,
 stride: usize,
 
 blending_enabled: bool,
+
+/// See `Options.post`.
+post: bool,
 
 pub fn init(comptime VertexAttributes: ?type, opts: Options) !Self {
     const device = opts.device.device;
@@ -103,6 +110,7 @@ pub fn init(comptime VertexAttributes: ?type, opts: Options) !Self {
         .rasterizer_state = rasterizer_state,
         .stride = if (VertexAttributes) |VA| @sizeOf(VA) else 0,
         .blending_enabled = opts.blending_enabled,
+        .post = opts.post,
     };
 }
 

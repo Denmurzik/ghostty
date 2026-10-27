@@ -505,9 +505,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 api: GraphicsAPI,
                 width: usize,
                 height: usize,
+                front: bool,
             ) !void {
                 if (self.custom_shader_state) |*state| {
-                    try state.resize(api, width, height);
+                    try state.resize(api, width, height, front);
                 }
                 const target = try api.initTarget(width, height);
                 self.target.deinit();
@@ -585,16 +586,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.deinit();
             }
 
+            /// The front texture only receives the output of a pass that is
+            /// not the last one: with a single custom shader (`front` false)
+            /// it stays 1x1, as that shader draws straight to the frame target.
             pub fn resize(
                 self: *CustomShaderState,
                 api: GraphicsAPI,
                 width: usize,
                 height: usize,
+                front: bool,
             ) !void {
                 const front_texture = try Texture.init(
                     api.textureOptions(),
-                    @intCast(width),
-                    @intCast(height),
+                    @intCast(if (front) width else 1),
+                    @intCast(if (front) height else 1),
                     null,
                 );
                 errdefer front_texture.deinit();
@@ -1921,7 +1926,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         self.api,
                         surface_size.width,
                         surface_size.height,
+                        self.shaders.post_pipelines.len > 1,
                     );
+                } else if (frame.custom_shader_state) |*state| {
+                    // A reload may have added the second shader.
+                    if (self.shaders.post_pipelines.len > 1 and
+                        state.front_texture.width != state.back_texture.width)
+                    {
+                        try state.resize(self.api, state.back_texture.width, state.back_texture.height, true);
+                    }
                 }
             } else if (frame.custom_shader_state) |*state| {
                 state.deinit();
@@ -1949,6 +1962,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.api,
                     self.size.screen.width,
                     self.size.screen.height,
+                    self.shaders.post_pipelines.len > 1,
                 );
                 frame.target_config_modified = self.target_config_modified;
             }
@@ -2103,7 +2117,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
                 for (self.shaders.post_pipelines, 0..) |pipeline, i| {
-                    defer state.swap();
+                    defer if (self.shaders.post_pipelines.len > 1) state.swap();
 
                     var pass = frame_ctx.renderPass(&.{.{
                         .target = if (i < self.shaders.post_pipelines.len - 1)
