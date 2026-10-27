@@ -31,7 +31,9 @@ const ns_per_ms = std.time.ns_per_ms;
 pub const Mode = enum {
     /// A swap chain on a window handle.
     hwnd,
-    // .composition arrives with transparency in M3.
+    /// A swap chain without a window, premultiplied alpha, shown through a
+    /// DirectComposition visual the apprt attaches (`PresentTarget.hand_off`).
+    composition,
 };
 
 pub const Error = foundation.Error;
@@ -46,6 +48,7 @@ const format: dxgi.Format = .B8G8R8A8_UNORM;
 
 device: *Device,
 chain: *dxgi.IDXGISwapChain2,
+mode: Mode,
 
 /// The frame latency waitable object, closed by `deinit`.
 waitable: ?foundation.HANDLE,
@@ -79,9 +82,6 @@ pub fn init(
     height: u32,
     mode: Mode,
 ) Error!Self {
-    switch (mode) {
-        .hwnd => {},
-    }
     if (width == 0 or height == 0) return error.InvalidArgument;
 
     const window: foundation.HWND = @ptrCast(hwnd);
@@ -89,7 +89,7 @@ pub fn init(
     var flags: u32 = dxgi.SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     if (device.tearing_supported) flags |= dxgi.SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
-    const chain1 = try device.factory.createSwapChainForHwnd(device.device, window, &.{
+    const desc: dxgi.SWAP_CHAIN_DESC1 = .{
         .Width = width,
         .Height = height,
         .Format = format,
@@ -97,15 +97,25 @@ pub fn init(
         .BufferCount = buffer_count,
         .Scaling = .STRETCH,
         .SwapEffect = .FLIP_DISCARD,
-        .AlphaMode = .IGNORE,
+        // The frame is premultiplied already (the target is), so the
+        // backbuffer copy is the same in both modes.
+        .AlphaMode = switch (mode) {
+            .hwnd => .IGNORE,
+            .composition => .PREMULTIPLIED,
+        },
         .Flags = flags,
-    });
+    };
+    const chain1 = switch (mode) {
+        .hwnd => try device.factory.createSwapChainForHwnd(device.device, window, &desc),
+        .composition => try device.factory.createSwapChainForComposition(device.device, &desc),
+    };
     defer com.release(chain1);
 
     // After creation, which registers the window association itself, and
     // before the first `Present`: DXGI must neither watch the window for
-    // Alt+Enter and size changes nor subclass it.
-    try device.factory.asFactory().makeWindowAssociation(
+    // Alt+Enter and size changes nor subclass it. A composition chain has
+    // no window.
+    if (mode == .hwnd) try device.factory.asFactory().makeWindowAssociation(
         window,
         dxgi.MWA_NO_WINDOW_CHANGES | dxgi.MWA_NO_ALT_ENTER,
     );
@@ -119,7 +129,8 @@ pub fn init(
         _ = kernel32.CloseHandle(h);
     };
 
-    log.info("d3d11 swap chain created size={d}x{d} tearing={}", .{
+    log.info("d3d11 swap chain created mode={s} size={d}x{d} tearing={}", .{
+        @tagName(mode),
         width,
         height,
         flags & dxgi.SWAP_CHAIN_FLAG_ALLOW_TEARING != 0,
@@ -128,6 +139,7 @@ pub fn init(
     return .{
         .device = device,
         .chain = chain,
+        .mode = mode,
         .waitable = waitable,
         .width = width,
         .height = height,

@@ -30,6 +30,7 @@ pub const CompositeMode = enum(u32) {
 const CreateDevice2Fn = *const fn (?*IUnknown, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT;
 
 /// Resolved on first use; the module stays loaded for the life of the process.
+/// Not synchronized: only called from the UI thread.
 var create_device2: ?CreateDevice2Fn = null;
 
 fn resolveCreateDevice2() error{DCompUnavailable}!CreateDevice2Fn {
@@ -43,7 +44,7 @@ fn resolveCreateDevice2() error{DCompUnavailable}!CreateDevice2Fn {
     return create_device2.?;
 }
 
-/// Creates a DirectComposition device. `rendering` is the D3D11/DXGI/D2D device
+/// Creates a DirectComposition device. `rendering` is the IDXGIDevice or ID2D1Device
 /// the surfaces are created on, or null for a device that owns none (it then
 /// only accepts swap chains and keeps working when the D3D device is recreated).
 pub fn createDevice(rendering: anytype) (Error || error{DCompUnavailable})!*IDCompositionDevice {

@@ -75,6 +75,28 @@ pub const PresentTarget = struct {
     /// dimming and the bell border, read by the render thread each frame.
     /// Null: no decorations.
     decor: ?*const std.atomic.Value(u64) = null,
+
+    /// Swap chain mode written by the apprt (UI thread): 0 = hwnd, 1 =
+    /// composition (transparency). Read when a swap chain is (re)created; a
+    /// value that differs from the live chain's mode replaces the chain on
+    /// the next frame. Null: always hwnd.
+    mode: ?*const std.atomic.Value(u8) = null,
+
+    /// Receives every composition swap chain right after its creation.
+    /// Null: nobody can show a composition chain, so the mode is ignored.
+    hand_off: ?HandOff = null,
+
+    /// Called on the render thread, under the context lock, right after a
+    /// composition swap chain was created or recreated, with one reference
+    /// held for the callee. The callee must not call back into the renderer
+    /// or wait for the UI thread: it stores the chain (releasing a previous
+    /// one) and posts a wakeup, and the UI thread then does `SetContent` and
+    /// `Commit`. `generation` is the target's generation the chain was
+    /// created with. hwnd mode never calls it.
+    pub const HandOff = struct {
+        ctx: *anyopaque,
+        func: *const fn (ctx: *anyopaque, swap_chain: *win32.dxgi.IDXGISwapChain1, generation: u32) void,
+    };
 };
 
 /// Pack a size into one word so it can be read and written atomically.
@@ -112,6 +134,10 @@ swap_chain: ?SwapChain = null,
 /// (or last presented successfully) with. Same locking as `swap_chain`.
 swap_chain_hwnd: ?*anyopaque = null,
 swap_chain_generation: u32 = 0,
+
+/// The chain a mode change replaced, kept (its content stays on screen)
+/// until the new chain presented once. Same locking as `swap_chain`.
+retired_chain: ?SwapChain = null,
 
 /// Whether presents wait for the vertical blank (config `window-vsync`).
 vsync: bool = true,
@@ -208,7 +234,7 @@ pub fn threadExit(self: *D3D11) void {
         self.decor_pass = null;
     }
 
-    if (self.swap_chain != null) {
+    if (self.swap_chain != null or self.retired_chain != null) {
         self.device.lockContext();
         defer self.device.unlockContext();
         self.dropSwapChain();
@@ -222,20 +248,75 @@ pub fn threadExit(self: *D3D11) void {
 /// holds the context lock.
 pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
     const target = self.present_target orelse return error.InvalidArgument;
+    const mode = currentMode(target);
     if (self.swap_chain) |*sc| {
-        if (self.swap_chain_hwnd == target.hwnd) return sc;
-        // The apprt handed over another window: the chain belongs to the old one.
-        self.dropSwapChain();
+        if (self.swap_chain_hwnd == target.hwnd) {
+            if (sc.mode == mode) return sc;
+            // The apprt switched modes: the old chain keeps showing its last
+            // frame until the new one presented (`presentSucceeded`).
+            self.retireSwapChain();
+        } else {
+            // The apprt handed over another window: the chain belongs to the old one.
+            self.dropSwapChain();
+        }
     }
 
     self.swap_chain_hwnd = target.hwnd;
     self.swap_chain_generation = currentGeneration(target);
-    self.swap_chain = SwapChain.init(self.device, target.hwnd, width, height, .hwnd) catch |err| {
+    self.swap_chain = SwapChain.init(self.device, target.hwnd, width, height, mode) catch |err| {
         self.logSwapChainFailure("create", err);
         return err;
     };
-    self.swap_chain.?.surface_id = target.id;
-    return &self.swap_chain.?;
+    const sc = &self.swap_chain.?;
+    sc.surface_id = target.id;
+    if (mode == .composition) self.handOff(target, sc);
+    return sc;
+}
+
+/// The mode to create a chain in: composition only when the apprt asked
+/// for it and can take the chain.
+fn currentMode(target: PresentTarget) SwapChain.Mode {
+    const m = target.mode orelse return .hwnd;
+    if (target.hand_off == null) return .hwnd;
+    return if (m.load(.acquire) == 1) .composition else .hwnd;
+}
+
+fn handOff(self: *D3D11, target: PresentTarget, sc: *SwapChain) void {
+    const hand_off = target.hand_off orelse return;
+    // The callee owns this reference.
+    const ref = win32.com.queryInterface(sc.chain, win32.dxgi.IDXGISwapChain1) catch |err| {
+        self.logSwapChainFailure("hand-off", err);
+        return;
+    };
+    hand_off.func(hand_off.ctx, ref, self.swap_chain_generation);
+}
+
+/// Whether the frame must not be presented: a composition chain keeps
+/// accepting presents while its window is minimized (at the display rate,
+/// never `STATUS_OCCLUDED`), so a minimized window does not present. Costs
+/// nothing in hwnd mode. The restore redraws through its size change.
+pub fn presentSuspended(self: *const D3D11) bool {
+    const sc = if (self.swap_chain) |*sc| sc else return false;
+    if (sc.mode != .composition) return false;
+    const target = self.present_target orelse return false;
+    return win32.user32.IsIconic(@ptrCast(target.hwnd)) != 0;
+}
+
+/// Moves the live chain aside so a new one of another mode can be created.
+/// A chain retired earlier is released first. The caller holds the lock.
+fn retireSwapChain(self: *D3D11) void {
+    self.releaseRetired();
+    self.retired_chain = self.swap_chain;
+    self.swap_chain = null;
+}
+
+fn releaseRetired(self: *D3D11) void {
+    const old = if (self.retired_chain) |*old| old else return;
+    self.device.assertContextLocked();
+    self.device.context.clearState();
+    self.device.context.flush();
+    old.deinit();
+    self.retired_chain = null;
 }
 
 fn currentGeneration(target: PresentTarget) u32 {
@@ -250,6 +331,7 @@ fn currentGeneration(target: PresentTarget) u32 {
 /// starts with a fresh `Pacer`. The caller holds the context lock.
 pub fn dropSwapChain(self: *D3D11) void {
     self.device.assertContextLocked();
+    self.releaseRetired();
     const sc = if (self.swap_chain) |*sc| sc else return;
     self.device.context.clearState();
     self.device.context.flush();
@@ -288,6 +370,8 @@ pub fn presentGeneration(self: *const D3D11) u32 {
 /// chain worked with that window state, so older bumps need no recreation.
 pub fn presentSucceeded(self: *D3D11, generation: u32) void {
     self.swap_chain_generation = generation;
+    // The replacement showed a frame: the old chain is no longer needed.
+    self.releaseRetired();
     // A later failure is news again.
     self.swap_chain_failure_logged = false;
 }
@@ -957,6 +1041,158 @@ test "d3d11 swapchain: a different window recreates the swap chain" {
     // A released COM object's address may be reused, so the binding is the proof.
     try std.testing.expectEqual(b.hwnd, @as(@TypeOf(b.hwnd), @ptrCast(api.swap_chain_hwnd.?)));
     try sc.present(true);
+}
+
+/// A hand-off that counts its calls and releases the reference like the apprt
+/// does after `Commit`.
+const FakeHandOff = struct {
+    calls: u32 = 0,
+    last_generation: u32 = 0,
+    alpha: ?win32.dxgi.AlphaMode = null,
+
+    fn func(ctx: *anyopaque, chain: *win32.dxgi.IDXGISwapChain1, generation: u32) void {
+        const self: *FakeHandOff = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        self.last_generation = generation;
+        if (chain.getDesc1()) |desc| self.alpha = desc.AlphaMode else |_| {}
+        win32.com.release(chain);
+    }
+
+    fn handOff(self: *FakeHandOff) PresentTarget.HandOff {
+        return .{ .ctx = self, .func = func };
+    }
+};
+
+test "d3d11 swapchain: composition mode creates a premultiplied chain and hands it off once" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(1);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const sc = try api.swapChain(32, 32);
+    try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expectEqual(win32.dxgi.AlphaMode.PREMULTIPLIED, fake.alpha.?);
+
+    // Later frames reuse the chain: no second hand-off.
+    for (0..3) |_| try std.testing.expectEqual(sc, try api.swapChain(32, 32));
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+
+    // A composition target without a taker stays an hwnd chain.
+    api.dropSwapChain();
+    api.present_target.?.hand_off = null;
+    try std.testing.expectEqual(SwapChain.Mode.hwnd, (try api.swapChain(32, 32)).mode);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+}
+
+test "d3d11 swapchain: mode change recreates the chain on the next frame" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var generation: std.atomic.Value(u32) = .init(0);
+    var mode: std.atomic.Value(u8) = .init(0);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{
+        .hwnd = window.hwnd,
+        .size = &packed_size,
+        .generation = &generation,
+        .mode = &mode,
+        .hand_off = fake.handOff(),
+    };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const hwnd_chain = (try api.swapChain(32, 32)).chain;
+    try std.testing.expectEqual(@as(u32, 0), fake.calls);
+
+    mode.store(1, .release);
+    _ = generation.fetchAdd(1, .release);
+    const sc = try api.swapChain(32, 32);
+    try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
+    try std.testing.expect(sc.chain != hwnd_chain);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expectEqual(@as(u32, 1), fake.last_generation);
+
+    // The old chain stays until the new one presented, then goes.
+    try std.testing.expect(api.retired_chain != null);
+    try std.testing.expectEqual(hwnd_chain, api.retired_chain.?.chain);
+    try sc.present(true);
+    api.presentSucceeded(api.presentGeneration());
+    try std.testing.expect(api.retired_chain == null);
+
+    // And back; a second switch before a present releases the first retiree.
+    mode.store(0, .release);
+    const back = try api.swapChain(32, 32);
+    try std.testing.expectEqual(SwapChain.Mode.hwnd, back.mode);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expect(api.retired_chain != null);
+    api.dropSwapChain();
+    try std.testing.expect(api.retired_chain == null);
+}
+
+test "d3d11 swapchain: composition resize keeps the hand-off count" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(1);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const sc = try api.swapChain(32, 32);
+    var target = try api.initTarget(48, 40);
+    defer target.deinit();
+    try sc.copyToBackbuffer(api.device.context, &target);
+    try std.testing.expectEqual(@as(u32, 48), sc.width);
+    try std.testing.expectEqual(@as(u32, 40), sc.height);
+    try sc.present(true);
+    try std.testing.expectEqual(sc, try api.swapChain(48, 40));
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+}
+
+test "d3d11 swapchain: waitable pacing in composition mode" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(1);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    const sc = try api.swapChain(32, 32);
+    try std.testing.expect(sc.waitable != null);
+    try std.testing.expect(!sc.waitArmed());
+
+    // As in hwnd mode: a present arms the wait, a wait consumes it.
+    try sc.present(true);
+    try std.testing.expect(sc.waitArmed());
+    try std.testing.expect(sc.waitForSlot(frame_slot_wait_ms));
+    try std.testing.expect(!sc.waitArmed());
+
+    // The suspension check only looks at composition chains of iconic windows.
+    try std.testing.expect(!api.presentSuspended());
 }
 
 test "d3d11 api: blending selects the target and texture formats" {
