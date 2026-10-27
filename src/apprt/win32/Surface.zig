@@ -117,6 +117,9 @@ resize: ResizeCoalescer = .{},
 /// Set by WM_NCDESTROY: the HWND is gone (for example with its parent).
 hwnd_destroyed: bool = false,
 
+/// The window was filled with the terminal background once; see WM_ERASEBKGND.
+background_painted: bool = false,
+
 keyboard_state: keyboard.State,
 mouse_state: mouse.State,
 ime_state: ime.State,
@@ -233,6 +236,16 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     hooks_mod.surfaceCreated(self);
 
     return self;
+}
+
+/// Fill the client area with the configured terminal background.
+fn fillBackground(self: *Surface, hdc: win32.user32.HDC) void {
+    var rc: win32.foundation.RECT = undefined;
+    if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
+    const c = self.window.app.config.background;
+    const brush = win32.gdi32.CreateSolidBrush(@as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16)) orelse return;
+    defer _ = win32.gdi32.DeleteObject(@ptrCast(brush));
+    _ = win32.gdi32.FillRect(hdc, &rc, brush);
 }
 
 /// Take a reference. The split tree calls this for every node it holds.
@@ -620,8 +633,16 @@ fn wndProc(
             return 0;
         },
 
-        // The renderer paints every pixel; erasing would only flicker.
-        win32.user32.WM_ERASEBKGND => return 1,
+        // The renderer paints every pixel; erasing would only flicker. Only
+        // the first erase fills the window: a new tab is shown before its
+        // renderer presented, and an empty flip-model window shows black.
+        win32.user32.WM_ERASEBKGND => {
+            if (!self.background_painted) {
+                self.background_painted = true;
+                self.fillBackground(@ptrFromInt(wparam));
+            }
+            return 1;
+        },
 
         win32.user32.WM_PAINT => {
             _ = win32.user32.ValidateRect(hwnd, null);
