@@ -50,6 +50,7 @@ pub fn appStarted(app: *App) void {
 /// The start of `App.terminate`.
 pub fn appStopping(app: *App) void {
     hotkeys.appStopping(app);
+    app.visibility.deinit(app.core_app.alloc);
     shell_open.appStopping(app);
     Inspector.appStopping(app);
 }

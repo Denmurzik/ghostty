@@ -24,8 +24,14 @@ pub const Leaf = Binding.Set.Value;
 /// Registered hotkeys; owned by `App`.
 pub const State = struct {
     ids: std.AutoHashMapUnmanaged(i32, Leaf) = .empty,
+    /// The trigger each id was registered for, to find its leaf again in a
+    /// new config.
+    triggers: std.AutoHashMapUnmanaged(i32, Binding.Trigger) = .empty,
     next_id: i32 = 1,
     failed: u32 = 0,
+    /// Hash of the global binds that were registered; equal for a config
+    /// that changed nothing about them.
+    signature: u64 = 0,
 };
 
 /// What registers a chord and runs a binding's actions.
@@ -78,8 +84,40 @@ fn nativeFor(key: input.Key) ?u32 {
     return null;
 }
 
+fn leafHash(value: Leaf) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    switch (value) {
+        .leader => {},
+        .leaf => |l| {
+            std.hash.autoHash(&hasher, l.action.hash());
+            std.hash.autoHash(&hasher, l.flags);
+        },
+        .leaf_chained => |l| {
+            for (l.actions.items) |act| std.hash.autoHash(&hasher, act.hash());
+            std.hash.autoHash(&hasher, l.flags);
+        },
+    }
+    return hasher.final();
+}
+
+/// Order-independent hash of the global binds of `set`.
+fn signatureOf(set: *const Binding.Set) u64 {
+    var sum: u64 = 0;
+    var it = set.bindings.iterator();
+    while (it.next()) |entry| {
+        const global = switch (entry.value_ptr.*) {
+            .leader => false,
+            inline .leaf, .leaf_chained => |l| l.flags.global,
+        };
+        if (!global) continue;
+        sum +%= entry.key_ptr.hash() *% 31 +% leafHash(entry.value_ptr.*);
+    }
+    return sum;
+}
+
 /// Registers every global leaf of `set`.
 fn registerAll(state: *State, alloc: Allocator, set: *const Binding.Set, backend: Backend) void {
+    state.signature = signatureOf(set);
     var it = set.bindings.iterator();
     while (it.next()) |entry| {
         const flags = switch (entry.value_ptr.*) {
@@ -89,13 +127,13 @@ fn registerAll(state: *State, alloc: Allocator, set: *const Binding.Set, backend
         if (!flags.global) continue;
 
         const chord = chordFor(entry.key_ptr.*, null) orelse {
-            log.warn("global keybind has no hotkey form", .{});
+            log.warn("global keybind has no hotkey form: {f}", .{entry.key_ptr.*});
             state.failed += 1;
             continue;
         };
         const id = state.next_id;
         if (!backend.register(backend.ctx, id, chord)) {
-            log.warn("global hotkey is taken mods={x} vk={x}", .{ chord.mods, chord.vk });
+            log.warn("global hotkey is taken: {f} mods={x} vk={x} err={}", .{ entry.key_ptr.*, chord.mods, chord.vk, win32.kernel32.GetLastError() });
             state.failed += 1;
             continue;
         }
@@ -104,15 +142,36 @@ fn registerAll(state: *State, alloc: Allocator, set: *const Binding.Set, backend
             state.failed += 1;
             continue;
         };
+        state.triggers.put(alloc, id, entry.key_ptr.*) catch {
+            _ = state.ids.remove(id);
+            backend.unregister(backend.ctx, id);
+            state.failed += 1;
+            continue;
+        };
         state.next_id += 1;
     }
+}
+
+/// When the global binds of `set` are the ones already registered, point
+/// the stored leaves at `set` (the old config is about to be freed) and
+/// return true; nothing is registered again.
+fn refresh(state: *State, set: *const Binding.Set) bool {
+    if (state.failed != 0 or state.signature != signatureOf(set)) return false;
+    var it = state.triggers.iterator();
+    while (it.next()) |entry| {
+        const value = set.bindings.get(entry.value_ptr.*) orelse return false;
+        state.ids.getPtr(entry.key_ptr.*).?.* = value;
+    }
+    return true;
 }
 
 fn unregisterAll(state: *State, alloc: Allocator, backend: Backend) void {
     var it = state.ids.keyIterator();
     while (it.next()) |id| backend.unregister(backend.ctx, id.*);
     state.ids.clearAndFree(alloc);
+    state.triggers.clearAndFree(alloc);
     state.failed = 0;
+    state.signature = 0;
 }
 
 /// Runs the actions bound to hotkey `id`; false when the id is not ours.
@@ -157,6 +216,7 @@ pub fn appStopping(app: *App) void {
 /// Runs before the old config is freed, so no id maps to freed memory.
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
     const alloc = app.core_app.alloc;
+    if (refresh(&app.hotkeys, &config.keybind.set)) return;
     unregisterAll(&app.hotkeys, alloc, backendOf(app));
     registerAll(&app.hotkeys, alloc, &config.keybind.set, backendOf(app));
 }
@@ -367,4 +427,25 @@ test "win32 hotkeys: chained global bind runs every action" {
     try testing.expect(fire(&state, fake.registered.items[0], fake.backend()));
     try testing.expectEqual(@as(usize, 2), fake.performed.items.len);
     try testing.expect(!fire(&state, 12345, fake.backend()));
+}
+
+test "win32 hotkeys: unchanged global binds are not registered again" {
+    var set_a: Binding.Set = .{};
+    var set_b: Binding.Set = .{};
+    var set_c: Binding.Set = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try set_a.parseAndPut(a, "global:ctrl+alt+shift+f23=new_window");
+    try set_b.parseAndPut(a, "global:ctrl+alt+shift+f23=new_window");
+    try set_c.parseAndPut(a, "global:ctrl+alt+shift+f23=toggle_visibility");
+
+    var fake: FakeBackend = .{};
+    defer fake.deinit();
+    var state: State = .{};
+    defer unregisterAll(&state, testing.allocator, fake.backend());
+    registerAll(&state, testing.allocator, &set_a, fake.backend());
+    try testing.expect(refresh(&state, &set_b));
+    try testing.expect(!refresh(&state, &set_c));
+    try testing.expectEqual(@as(usize, 1), fake.registered.items.len);
 }

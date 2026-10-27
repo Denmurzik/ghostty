@@ -23,10 +23,11 @@ pub const State = struct {
         self.* = .{};
     }
 
-    /// Remember `ids` as hidden.
+    /// Remember `ids` as hidden, next to those hidden before.
     fn hide(self: *State, alloc: Allocator, ids: []const u32, foreground: ?u32) !void {
-        self.hidden.clearRetainingCapacity();
-        try self.hidden.appendSlice(alloc, ids);
+        for (ids) |id| {
+            if (std.mem.indexOfScalar(u32, self.hidden.items, id) == null) try self.hidden.append(alloc, id);
+        }
         self.foreground = foreground;
     }
 
@@ -48,14 +49,15 @@ pub fn toggle(app: *App) !bool {
     const alloc = app.core_app.alloc;
     const state = &app.visibility;
 
-    if (foregroundWindow(app)) |fg| {
+    if (foregroundWindow(app)) |fg| hide: {
         var ids: std.ArrayList(u32) = .empty;
         defer ids.deinit(alloc);
         for (app.windows.items) |w| {
             if (w.kind != .normal or user32.IsWindowVisible(w.hwnd) == 0) continue;
             try ids.append(alloc, w.id);
         }
-        try state.hide(alloc, ids.items, fg.id);
+        if (ids.items.len == 0) break :hide;
+        try state.hide(alloc, ids.items, if (fg.kind == .normal) fg.id else null);
         for (app.windows.items) |w| {
             for (ids.items) |id| {
                 if (id == w.id) _ = user32.ShowWindow(w.hwnd, user32.SW_HIDE);
@@ -82,11 +84,12 @@ pub fn toggle(app: *App) !bool {
     return shown;
 }
 
-/// The normal window of the app that is in the foreground, if any.
+/// The window of the app (the quick terminal included) that is in the
+/// foreground, if any.
 fn foregroundWindow(app: *App) ?*Window {
     const fg = user32.GetForegroundWindow() orelse return null;
     for (app.windows.items) |w| {
-        if (w.kind == .normal and w.hwnd == fg and user32.IsWindowVisible(w.hwnd) != 0) return w;
+        if (w.hwnd == fg and user32.IsWindowVisible(w.hwnd) != 0) return w;
     }
     return null;
 }
@@ -133,4 +136,9 @@ test "win32 visibility: hide then show restores the same set" {
     try state.hide(alloc, &.{7}, null);
     try testing.expectEqualSlices(u32, &.{7}, state.hidden.items);
     try testing.expectEqual(@as(?u32, null), state.foreground);
+
+    // A window shown later and hidden again joins the remembered ones.
+    try state.hide(alloc, &.{ 7, 8 }, 8);
+    try testing.expectEqualSlices(u32, &.{ 7, 8 }, state.hidden.items);
+    try testing.expectEqual(@as(?u32, 8), state.foreground);
 }
