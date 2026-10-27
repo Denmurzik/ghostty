@@ -91,6 +91,8 @@ pub const timers = struct {
         pub const taskbar_stale: usize = 0x2600;
         /// Coalesces title changes before the caption and strip follow (`title_rules.zig`).
         pub const title_debounce: usize = 0x2601;
+        /// Hover delay of the tab tooltip (`strip_input.zig`).
+        pub const tab_tooltip: usize = 0x2700;
         /// Slide animation and autohide of the quick terminal.
         pub const quick_slide: usize = 2;
     };
@@ -142,7 +144,7 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
         [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory },
         [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace },
         [_]usize{ timers.overlay.hide, timers.overlay.search_debounce },
-        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce },
+        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce, timers.window.tab_tooltip },
     };
     inline for (classes) |ids| {
         for (ids, 0..) |id, i| {

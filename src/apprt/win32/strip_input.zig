@@ -15,8 +15,11 @@ const App = @import("App.zig");
 const Tab = @import("Tab.zig");
 const drag_ghost = @import("drag_ghost.zig");
 const tab_drag = @import("tab_drag.zig");
+const tab_menu = @import("tab_menu.zig");
+const util = @import("util.zig");
 
 const user32 = win32.user32;
+const comctl32 = win32.comctl32;
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
@@ -24,6 +27,11 @@ const LRESULT = win32.foundation.LRESULT;
 const log = std.log.scoped(.win32_strip_input);
 
 const MK_LBUTTON = 0x0001;
+
+/// Hover time before the tooltip of a trimmed title shows.
+const tooltip_delay_ms = 500;
+/// Widest tooltip, DIP; longer titles wrap.
+const tooltip_max_width = 600;
 
 /// A tab drag through `tab_drag.Machine`, from the press to the outcome.
 pub const Session = struct {
@@ -50,6 +58,9 @@ pub const State = struct {
     pointer_x: i32 = 0,
     /// The inline title editor, while there is one.
     edit: ?title_edit.Session = null,
+    /// The tooltip window, created with the first tooltip.
+    tooltip: ?win32.foundation.HWND = null,
+    tooltip_visible: bool = false,
 };
 
 pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT {
@@ -58,6 +69,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             const x = user32.getXLparam(lparam);
             const y = user32.getYLparam(lparam);
             const part = hitTest(window, x, y);
+            hideTooltip(window);
             if (msg == user32.WM_LBUTTONDBLCLK) switch (part) {
                 .tab => |i| {
                     if (title_edit.tabRect(window, i)) |rect| {
@@ -93,6 +105,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             const x = user32.getXLparam(lparam);
             setHover(window, hoverOf(hitTest(window, x, user32.getYLparam(lparam))));
             if (window.strip_input.session != null) {
+                hideTooltip(window);
                 if (wparam & MK_LBUTTON == 0) {
                     finish(window, .cancel, true);
                 } else {
@@ -127,6 +140,25 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             return null;
         },
 
+        user32.WM_RBUTTONUP => {
+            if (window.strip_input.session != null) return null;
+            const part = hitTest(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
+            const index = switch (part) {
+                .tab, .tab_close => |i| i,
+                else => return null,
+            };
+            const at = toScreen(window, user32.getXLparam(lparam), user32.getYLparam(lparam));
+            tab_menu.show(window, index, at.x, at.y);
+            return 0;
+        },
+
+        user32.WM_TIMER => {
+            if (wparam != messages.timers.window.tab_tooltip) return null;
+            _ = user32.KillTimer(window.hwnd, messages.timers.window.tab_tooltip);
+            showTooltip(window);
+            return 0;
+        },
+
         user32.WM_MBUTTONUP => {
             switch (hitTest(window, user32.getXLparam(lparam), user32.getYLparam(lparam))) {
                 .tab => |i| postClose(window, i),
@@ -140,6 +172,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
         user32.WM_MOUSELEAVE => {
             window.strip_input.tracking = false;
             setHover(window, .nowhere);
+            hideTooltip(window);
             return null;
         },
 
@@ -189,9 +222,103 @@ fn trackLeave(window: *Window) void {
 fn setHover(window: *Window, part: TabStrip.Part) void {
     if (std.meta.eql(window.strip_input.hover, part)) return;
     window.strip_input.hover = part;
+    // A new hover restarts the tooltip delay.
+    hideTooltip(window);
+    switch (part) {
+        .tab, .tab_close => _ = user32.SetTimer(window.hwnd, messages.timers.window.tab_tooltip, tooltip_delay_ms, null),
+        else => {},
+    }
     // The two hovers are exclusive: the client one wins while it is set.
     if (part != .nowhere) window.frame.hover = .nowhere;
     Chrome.invalidate(window);
+}
+
+/// Hides the tooltip and cancels the wait for it.
+pub fn hideTooltip(window: *Window) void {
+    _ = user32.KillTimer(window.hwnd, messages.timers.window.tab_tooltip);
+    const si = &window.strip_input;
+    if (!si.tooltip_visible) return;
+    si.tooltip_visible = false;
+    const tip = si.tooltip orelse return;
+    var ti = toolInfo(window, null);
+    _ = user32.SendMessageW(tip, comctl32.TTM_TRACKACTIVATE, 0, @bitCast(@intFromPtr(&ti)));
+}
+
+fn toolInfo(window: *const Window, text: ?[*:0]u16) comctl32.TOOLINFOW {
+    return .{
+        .uFlags = comctl32.TTF_IDISHWND | comctl32.TTF_TRACK | comctl32.TTF_ABSOLUTE,
+        .hwnd = window.hwnd,
+        .uId = @intFromPtr(window.hwnd),
+        .lpszText = text,
+    };
+}
+
+/// The tooltip window of `window`: one tracking tool, created on first use.
+fn tooltipWindow(window: *Window) ?win32.foundation.HWND {
+    if (window.strip_input.tooltip) |tip| return tip;
+    // The tooltip class is registered by the common controls.
+    _ = comctl32.InitCommonControlsEx(&.{ .dwSize = @sizeOf(comctl32.INITCOMMONCONTROLSEX), .dwICC = comctl32.ICC_WIN95_CLASSES });
+    const tip = user32.CreateWindowExW(
+        user32.WS_EX_TOPMOST,
+        comctl32.TOOLTIPS_CLASSW,
+        null,
+        user32.WS_POPUP | comctl32.TTS_NOPREFIX | comctl32.TTS_ALWAYSTIP,
+        user32.CW_USEDEFAULT,
+        user32.CW_USEDEFAULT,
+        user32.CW_USEDEFAULT,
+        user32.CW_USEDEFAULT,
+        window.hwnd,
+        null,
+        window.app.hinstance,
+        null,
+    ) orelse {
+        log.warn("unable to create the tab tooltip err={}", .{win32.kernel32.GetLastError()});
+        return null;
+    };
+    var text = [_:0]u16{0};
+    var ti = toolInfo(window, &text);
+    if (user32.SendMessageW(tip, comctl32.TTM_ADDTOOLW, 0, @bitCast(@intFromPtr(&ti))) == 0) {
+        log.warn("unable to add the tab tooltip tool", .{});
+        _ = user32.DestroyWindow(tip);
+        return null;
+    }
+    _ = user32.SendMessageW(tip, comctl32.TTM_SETMAXTIPWIDTH, 0, geom.scale(tooltip_max_width, window.dpi));
+    window.strip_input.tooltip = tip;
+    return tip;
+}
+
+/// The hover delay is over: shows the full title when the hovered tab
+/// draws it trimmed.
+fn showTooltip(window: *Window) void {
+    const index = switch (window.strip_input.hover) {
+        .tab, .tab_close => |i| i,
+        else => return,
+    };
+    if (window.strip_input.session != null or index >= window.tabs.items.len) return;
+    const alloc = window.app.core_app.alloc;
+
+    const titles = alloc.alloc([]const u8, window.tabs.items.len) catch return;
+    defer alloc.free(titles);
+    for (window.tabs.items, titles) |tab, *t| t.* = tab.title();
+    const m = TabStrip.Metrics.forDpi(window.dpi);
+    window.strip.fillTrimmed(alloc, m, titles, Chrome.titleMeasure(&window.dpi)) catch return;
+    if (index >= window.strip.trimmed.items.len or !window.strip.trimmed.items[index]) return;
+
+    const tip = tooltipWindow(window) orelse return;
+    const wide = util.utf16z(alloc, titles[index]) catch return;
+    defer alloc.free(wide);
+    var ti = toolInfo(window, wide.ptr);
+    _ = user32.SendMessageW(tip, comctl32.TTM_UPDATETIPTEXTW, 0, @bitCast(@intFromPtr(&ti)));
+
+    // Below the tab, at the pointer.
+    var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
+    _ = user32.GetCursorPos(&pt);
+    var below: win32.foundation.POINT = .{ .x = 0, .y = window.strip.bounds.h };
+    _ = user32.ClientToScreen(window.hwnd, &below);
+    const pos = user32.makeLparam(@truncate(@as(u32, @bitCast(pt.x))), @truncate(@as(u32, @bitCast(below.y + geom.scale(2, window.dpi)))));
+    _ = user32.SendMessageW(tip, comctl32.TTM_TRACKPOSITION, 0, pos);
+    _ = user32.SendMessageW(tip, comctl32.TTM_TRACKACTIVATE, 1, @bitCast(@intFromPtr(&ti)));
+    window.strip_input.tooltip_visible = true;
 }
 
 fn beginDrag(window: *Window, index: usize, x: i32, y: i32) void {

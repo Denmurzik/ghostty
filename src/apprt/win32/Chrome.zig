@@ -517,6 +517,19 @@ fn drawLabelBody(args: LabelArgs, p: *Painter) void {
     p.drawText(r, args.text, p.fm.label, p.pal.text);
 }
 
+/// The measure of tab titles for `TabStrip.Layout.fillTrimmed`: the width
+/// in px the strip's title font gives them at the DPI `dpi` points to.
+pub fn titleMeasure(dpi: *const u32) TabStrip.Measure {
+    return .{ .ctx = @constCast(dpi), .func = measureTitle };
+}
+
+fn measureTitle(ctx: ?*anyopaque, title: []const u8) i32 {
+    const dpi: *const u32 = @ptrCast(@alignCast(ctx.?));
+    var buf: [256]u16 = undefined;
+    // A title cut at the buffer is still wider than any title area.
+    return measureText(toUtf16(&buf, title), .{ .size_pt = 12 }, dpi.*) catch 0;
+}
+
 /// Width in px of `text` set in the label font at `dpi`.
 pub fn measureLabel(text: []const u16, dpi: u32) !i32 {
     const sh = try shared();

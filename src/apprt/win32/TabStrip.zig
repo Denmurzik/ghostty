@@ -45,6 +45,23 @@ pub const Metrics = struct {
     }
 };
 
+/// Width in px of a title as the strip paints it.
+pub const Measure = struct {
+    ctx: ?*anyopaque = null,
+    func: *const fn (ctx: ?*anyopaque, title: []const u8) i32,
+
+    pub fn width(self: Measure, title: []const u8) i32 {
+        return self.func(self.ctx, title);
+    }
+};
+
+/// The width of the title area of a tab `tab_w` wide: as `Chrome.tabParts`
+/// with the close button, which a tab too narrow for it does without.
+pub fn titleWidth(m: Metrics, tab_w: i32) i32 {
+    const right_pad = if (tab_w >= 2 * m.close_w) m.close_w else m.tab_pad;
+    return @max(tab_w - m.tab_pad - right_pad, 0);
+}
+
 pub const Layout = struct {
     mode: Mode = .hidden,
     show_tabs: bool = false,
@@ -60,6 +77,9 @@ pub const Layout = struct {
     /// Where tabs are visible; tabs are clipped to this by the painter.
     clip: geom.Rect = .{},
     scroll: i32 = 0,
+    /// Per tab: its title does not fit the title area (it is drawn with an
+    /// ellipsis). Filled by `fillTrimmed`, not by `compute`.
+    trimmed: std.ArrayList(bool) = .empty,
 
     pub fn compute(
         self: *Layout,
@@ -182,6 +202,24 @@ pub const Layout = struct {
         return if (self.mode == .titlebar) .caption else .nowhere;
     }
 
+    /// Sets `trimmed` from the widths `measure` reports for `titles`, one per
+    /// tab. The title area is the tab less its padding and the close button
+    /// (the hovered tab shows it, and only a hovered tab has a tooltip).
+    pub fn fillTrimmed(
+        self: *Layout,
+        alloc: Allocator,
+        m: Metrics,
+        titles: []const []const u8,
+        measure: Measure,
+    ) !void {
+        self.trimmed.clearRetainingCapacity();
+        try self.trimmed.ensureTotalCapacity(alloc, self.tabs.items.len);
+        for (self.tabs.items, 0..) |r, i| {
+            const trimmed = i < titles.len and measure.width(titles[i]) > titleWidth(m, r.w);
+            self.trimmed.appendAssumeCapacity(trimmed);
+        }
+    }
+
     /// Shifts the tabs by `delta` px, clamped to `[0, overflow]`.
     pub fn scrollBy(self: *Layout, delta: i32) void {
         const n: i32 = @intCast(self.tabs.items.len);
@@ -196,6 +234,7 @@ pub const Layout = struct {
 
     pub fn deinit(self: *Layout, alloc: Allocator) void {
         self.tabs.deinit(alloc);
+        self.trimmed.deinit(alloc);
     }
 };
 
@@ -395,4 +434,37 @@ test "win32 tabstrip: hidden mode has zero height" {
     try std.testing.expectEqual(@as(i32, 0), layout.bounds.h);
     try std.testing.expectEqual(@as(usize, 0), layout.tabs.items.len);
     try std.testing.expectEqual(Part.nowhere, layout.hitTest(m, 5, 5, false));
+}
+
+fn fakeWidth(_: ?*anyopaque, title: []const u8) i32 {
+    return @intCast(title.len * 8);
+}
+
+test "win32 tabstrip: trimmed flags from the measure callback" {
+    const alloc = std.testing.allocator;
+    var layout: Layout = .{};
+    defer layout.deinit(alloc);
+    const m = Metrics.forDpi(96);
+    // 30 tabs in 800 px: every tab is tab_min_w (72) wide, the title area 72 - 10 - 28 = 34.
+    try layout.compute(alloc, m, 800, .titlebar, true, 30, 0);
+    try std.testing.expectEqual(@as(i32, 34), titleWidth(m, layout.tabs.items[0].w));
+
+    var titles: [30][]const u8 = @splat("ab");
+    titles[1] = "a title that does not fit";
+    titles[2] = "abcd"; // 32 px: fits
+    titles[3] = "abcde"; // 40 px: does not
+    try layout.fillTrimmed(alloc, m, &titles, .{ .func = fakeWidth });
+    try std.testing.expectEqual(@as(usize, 30), layout.trimmed.items.len);
+    try std.testing.expect(!layout.trimmed.items[0]);
+    try std.testing.expect(layout.trimmed.items[1]);
+    try std.testing.expect(!layout.trimmed.items[2]);
+    try std.testing.expect(layout.trimmed.items[3]);
+
+    // Wide tabs: the same long title fits 240 px less 38.
+    try layout.compute(alloc, m, 1200, .titlebar, true, 2, 0);
+    var two = [_][]const u8{ "short", "xxxxxxxxxxxxxxxxxxxxxxxxxx" };
+    try layout.fillTrimmed(alloc, m, &two, .{ .func = fakeWidth });
+    try std.testing.expectEqual(@as(usize, 2), layout.trimmed.items.len);
+    try std.testing.expect(!layout.trimmed.items[0]);
+    try std.testing.expect(layout.trimmed.items[1]);
 }
