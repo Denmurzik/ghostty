@@ -24,6 +24,7 @@ const messages = @import("messages.zig");
 const overlay = @import("overlay.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
+const global = @import("../../global.zig");
 
 const user32 = win32.user32;
 const gdi32 = win32.gdi32;
@@ -97,6 +98,8 @@ const Panel = struct {
     entries: []filter.Entry = &.{},
     /// Row heights in DIP, parallel to `State.rows`.
     heights: []i32 = &.{},
+    /// The list area in DIP the popup was last sized for.
+    area: i32 = empty_h,
     /// The query as typed, trimmed.
     query: std.ArrayList(u8) = .empty,
     /// Set while the palette closes itself: losing the focus is expected.
@@ -120,11 +123,27 @@ const Panel = struct {
 
 var next_serial: u32 = 0;
 
+/// "PALT".
+const palette_magic: u32 = 0x544C4150;
+
 /// What `WM_GHOSTTY_OVERLAY_CMD` carries to a window. It owns its memory
 /// (the action is a copy, not a view of the config) and the handler frees it.
 pub const Command = struct {
+    /// What `lparam` points at: every sender of `WM_GHOSTTY_OVERLAY_CMD`
+    /// starts its block with a `Header`, so that a receiver can tell whose
+    /// block it holds before it reads more.
+    header: Header align(8) = .{ .magic = palette_magic },
     arena: std.heap.ArenaAllocator,
     kind: Kind,
+
+    pub const Header = extern struct { magic: u32 };
+
+    fn fromLparam(lparam: LPARAM) ?*Command {
+        if (lparam == 0 or lparam == -1) return null;
+        const header: *const Header = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        if (header.magic != palette_magic) return null;
+        return @fieldParentPtr("header", @as(*align(8) Header, @alignCast(@constCast(header))));
+    }
 
     pub const Kind = union(enum) {
         /// Closes the palette `serial` if it is still the open one.
@@ -140,6 +159,7 @@ pub const Command = struct {
         var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
         const cmd = try arena.allocator().create(Command);
+        cmd.header = .{ .magic = palette_magic };
         cmd.arena = arena;
         cmd.kind = switch (kind) {
             .execute => |e| .{ .execute = .{
@@ -425,6 +445,18 @@ fn itemLess(_: void, a: Item, b: Item) bool {
 /// A surface the palette can bring forward.
 const Jump = struct { id: u32, title: []const u8, pwd: []const u8 };
 
+/// `pwd` with the home directory written as "~".
+pub fn abbreviatePwd(alloc: Allocator, pwd: []const u8, home: []const u8) ![]const u8 {
+    const home_trim = std.mem.trimEnd(u8, home, "\\/");
+    if (home_trim.len > 0 and pwd.len >= home_trim.len and
+        std.ascii.eqlIgnoreCase(pwd[0..home_trim.len], home_trim) and
+        (pwd.len == home_trim.len or pwd[home_trim.len] == '/' or pwd[home_trim.len] == '\\'))
+    {
+        return std.fmt.allocPrint(alloc, "~{s}", .{pwd[home_trim.len..]});
+    }
+    return alloc.dupe(u8, pwd);
+}
+
 /// Builds the panel of a palette for `target_id` from `commands` and `jumps` (copied;
 /// `keybinds` gives the shortcut texts) and registers it with the window.
 /// Nothing is shown yet.
@@ -433,6 +465,7 @@ fn begin(
     target_id: u32,
     commands: []const input.Command,
     jumps: []const Jump,
+    home: []const u8,
     keybinds: ?*const input.Binding.Set,
 ) !*Panel {
     const alloc = window.app.core_app.alloc;
@@ -480,7 +513,7 @@ fn begin(
         try items.append(a, .{
             .title = try std.fmt.allocPrint(a, "Focus: {s}", .{title}),
             // The working directory, unless the title shows it already.
-            .description = if (j.pwd.len > 0 and std.mem.indexOf(u8, title, j.pwd) == null) try a.dupe(u8, j.pwd) else "",
+            .description = if (j.pwd.len > 0 and std.mem.indexOf(u8, title, j.pwd) == null) try abbreviatePwd(a, j.pwd, home) else "",
             .shortcut = "",
             .run = .{ .jump = j.id },
         });
@@ -528,6 +561,11 @@ fn close(window: *Window) void {
             const to = if (window.palette.target_id) |id| (if (window.findSurface(id)) |s| s.hwnd else window.hwnd) else window.hwnd;
             _ = user32.SetFocus(to);
         }
+    }
+    // The EDIT may outlive the panel when the owner is going away: it must
+    // not call back into freed memory.
+    if (window.palette.edit) |edit| {
+        if (user32.IsWindow(edit) != 0) _ = comctl32.RemoveWindowSubclass(edit, editProc, subclass_id);
     }
     // Takes the EDIT down with the window (unless the host already did).
     p.destroy();
@@ -577,13 +615,22 @@ pub fn toggle(app: *App, target: apprt.Target) !bool {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 const v = entry.view;
-                try jumps.append(app.core_app.alloc, .{ .id = v.id, .title = v.title orelse "", .pwd = v.pwd orelse "" });
+                // The user's title of the tab wins over the surface's; a
+                // surface without one shows the title of its tab.
+                const title: []const u8 = if (tab.focused == v and tab.title_override != null)
+                    tab.title_override.?
+                else
+                    v.title orelse tab.title();
+                try jumps.append(app.core_app.alloc, .{ .id = v.id, .title = title, .pwd = v.pwd orelse "" });
             }
         }
     }
 
+    const home = global.environ().getAlloc(app.core_app.alloc, "USERPROFILE") catch null;
+    defer if (home) |h| app.core_app.alloc.free(h);
+
     const config = &app.config;
-    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, &config.keybind.set);
+    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, home orelse "", &config.keybind.set);
     errdefer close(window);
     try show(panel);
     return true;
@@ -642,9 +689,9 @@ fn layoutChildren(panel: *Panel) void {
 
     if (panel.font_dpi != dpi) {
         freeFonts(panel);
-        panel.font = makeFont(14, dpi, FW_NORMAL, L("Segoe UI"));
-        panel.bold_font = makeFont(14, dpi, FW_BOLD, L("Segoe UI"));
-        panel.small_font = makeFont(11, dpi, FW_NORMAL, L("Segoe UI"));
+        panel.font = makeFont(13, dpi, FW_NORMAL, L("Segoe UI"));
+        panel.bold_font = makeFont(13, dpi, FW_BOLD, L("Segoe UI"));
+        panel.small_font = makeFont(10, dpi, FW_NORMAL, L("Segoe UI"));
         panel.query_font = makeFont(20, dpi, FW_LIGHT, L("Segoe UI Light"));
         panel.font_dpi = dpi;
         if (panel.query_font) |f| _ = user32.SendMessageW(edit, WM_SETFONT, @intFromPtr(f), 1);
@@ -733,7 +780,8 @@ fn listAreaDip(panel: *const Panel) i32 {
 }
 
 fn resizeToRows(panel: *Panel) void {
-    panel.popup.setSize(.{ .w = max_w, .h = panelHeight(listAreaDip(panel)) });
+    panel.area = listAreaDip(panel);
+    panel.popup.setSize(.{ .w = max_w, .h = panelHeight(panel.area) });
 }
 
 fn editChanged(panel: *Panel) void {
@@ -776,19 +824,22 @@ pub fn keyAction(vk: usize, ctrl: bool) ?KeyAction {
     };
 }
 
-fn postCommand(window: *Window, cmd: *Command) void {
-    const lparam: LPARAM = @bitCast(@intFromPtr(cmd));
+/// Whether the command is on its way; if not it is already freed.
+fn postCommand(window: *Window, cmd: *Command) bool {
+    const lparam: LPARAM = @bitCast(@intFromPtr(&cmd.header));
     if (user32.PostMessageW(window.hwnd, messages.WM_GHOSTTY_OVERLAY_CMD, 0, lparam) == 0) {
         log.warn("unable to post a palette command err={}", .{win32.kernel32.GetLastError()});
         cmd.destroy();
+        return false;
     }
+    return true;
 }
 
 fn postClose(panel: *Panel) void {
     if (panel.closing) return;
     const window = panel.popup.window;
     const cmd = Command.create(window.app.core_app.alloc, .{ .close = panel.serial }) catch return;
-    postCommand(window, cmd);
+    _ = postCommand(window, cmd);
 }
 
 /// Runs the entry at `row` (a position in `State.rows`): the command goes to
@@ -818,14 +869,14 @@ fn postExecute(panel: *Panel, row: usize) void {
     };
     // Typing and clicking must not run it twice.
     panel.closing = true;
-    postCommand(window, cmd);
+    if (!postCommand(window, cmd)) panel.closing = false;
 }
 
 fn run(panel: *Panel, action: KeyAction) void {
     const window = panel.popup.window;
     const state = &window.palette;
     const total = state.rows.len;
-    const area = listAreaDip(panel);
+    const area = panel.area;
     const shown = fitCount(panel.heights, state.scroll, area);
     switch (action) {
         .up => state.sel = moveSel(state.sel, total, -1),
@@ -836,23 +887,24 @@ fn run(panel: *Panel, action: KeyAction) void {
         .close => return postClose(panel),
     }
     state.scroll = scrollFor(panel.heights, state.scroll, state.sel, area);
+    panel.hover = null;
     panel.popup.invalidate();
 }
 
 fn scrollBy(panel: *Panel, notches: i32) void {
     const state = &panel.popup.window.palette;
-    const max_scroll = maxScroll(panel.heights, listAreaDip(panel));
+    const max_scroll = maxScroll(panel.heights, panel.area);
     const step: i64 = @as(i64, notches) * 3;
     const next = std.math.clamp(@as(i64, @intCast(state.scroll)) - step, 0, @as(i64, @intCast(max_scroll)));
     state.scroll = @intCast(next);
+    panel.hover = null;
     panel.popup.invalidate();
 }
 
 /// `WM_GHOSTTY_OVERLAY_CMD` on a top-level window; true when the command
 /// was for the palette (it always is: it is the only sender).
 pub fn command(window: *Window, lparam: LPARAM) bool {
-    if (lparam == 0 or lparam == -1) return false;
-    const cmd: *Command = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    const cmd = Command.fromLparam(lparam) orelse return false;
     defer cmd.destroy();
     switch (cmd.kind) {
         .close => |serial| closeIfSerial(window, serial),
@@ -885,9 +937,11 @@ pub fn windowDestroying(window: *Window) void {
     var msg: user32.MSG = undefined;
     const m = messages.WM_GHOSTTY_OVERLAY_CMD;
     while (user32.PeekMessageW(&msg, window.hwnd, m, m, user32.PM_REMOVE) != 0) {
-        if (msg.lParam == 0) continue;
-        const cmd: *Command = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
-        cmd.destroy();
+        if (Command.fromLparam(msg.lParam)) |cmd| {
+            cmd.destroy();
+        } else {
+            overlay.freeCommand(msg.lParam);
+        }
     }
     close(window);
 }
@@ -1002,7 +1056,7 @@ fn rowUnder(panel: *Panel, lparam: LPARAM) ?usize {
     const dpi = p.window.dpi;
     const g = Geometry.forWidth(rc.right - rc.left, dpi);
     var rects: [16]geom.Rect = undefined;
-    const n = g.rows(panel.heights, p.window.palette.scroll, listAreaDip(panel), rc.right - rc.left, dpi, &rects);
+    const n = g.rows(panel.heights, p.window.palette.scroll, panel.area, rc.right - rc.left, dpi, &rects);
     const x = user32.getXLparam(lparam);
     const y = user32.getYLparam(lparam);
     for (rects[0..n], 0..) |r, i| if (r.contains(x, y)) return i;
@@ -1065,8 +1119,8 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     const dpi = ctx.dpi;
     const g = Geometry.forWidth(w, dpi);
     const s = geom.scale;
-    const body: Chrome.Font = .{ .size_pt = 14 };
-    const small: Chrome.Font = .{ .size_pt = 11 };
+    const body: Chrome.Font = .{ .size_pt = 13 };
+    const small: Chrome.Font = .{ .size_pt = 10 };
 
     var scene: Scene = .{};
     scene.add(.{ .box = .{ .rect = .{ .x = 0, .y = g.divider_y, .w = w, .h = 1 }, .radius = 0, .fill = c.divider } });
@@ -1078,7 +1132,7 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
     }
 
     var rects: [16]geom.Rect = undefined;
-    const area = @divTrunc((ctx.rect.h - g.list_top) * 96, @as(i32, @intCast(@max(dpi, 1))));
+    const area = panel.area;
     const shown = g.rows(panel.heights, state.scroll, area, w, dpi, &rects);
     for (0..shown) |i| {
         const pos = state.scroll + i;
@@ -1122,8 +1176,8 @@ fn paintPopup(p: *overlay.Popup, ctx: overlay.PaintContext) void {
 
 /// The title, with the characters the query matched in bold and the accent.
 fn addTitle(panel: *Panel, scene: *Scene, title: []const u8, r: geom.Rect, c: Colors, dpi: u32) void {
-    const normal: Chrome.Font = .{ .size_pt = 14 };
-    const bold: Chrome.Font = .{ .size_pt = 14, .weight = .BOLD };
+    const normal: Chrome.Font = .{ .size_pt = 13 };
+    const bold: Chrome.Font = .{ .size_pt = 13, .weight = .BOLD };
     var mask_buf: [256]bool = undefined;
     const mask: ?[]bool = blk: {
         if (panel.query.items.len == 0 or title.len > mask_buf.len) break :blk null;
@@ -1366,7 +1420,7 @@ test "win32 palette: target closed while open" {
         .{ .action = .undo, .title = "Undo", .description = "" },
     };
 
-    const panel = try begin(window, 42, &cmds, &.{}, null);
+    const panel = try begin(window, 42, &cmds, &.{}, "", null);
     try panel.popup.show();
     const hwnd = panel.popup.hwnd.?;
     try std.testing.expect(window.palette.popup != null);
@@ -1391,9 +1445,9 @@ test "win32 palette: target closed while open" {
     // A command queued for the gone target is a no-op that frees its copy.
     const alloc = std.testing.allocator;
     const queued = try Command.create(alloc, .{ .execute = .{ .serial = 1, .target_id = 42, .action = .{ .text = "queued" } } });
-    try std.testing.expect(command(window, @bitCast(@intFromPtr(queued))));
+    try std.testing.expect(command(window, @bitCast(@intFromPtr(&queued.header))));
     const stale = try Command.create(alloc, .{ .close = 1 });
-    try std.testing.expect(command(window, @bitCast(@intFromPtr(stale))));
+    try std.testing.expect(command(window, @bitCast(@intFromPtr(&stale.header))));
     try std.testing.expect(!command(window, 0));
 }
 
@@ -1404,19 +1458,19 @@ test "win32 palette: a posted close of an older palette keeps the new one" {
     const cmds = [_]input.Command{
         .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
     };
-    const first = try begin(window, 1, &cmds, &.{}, null);
+    const first = try begin(window, 1, &cmds, &.{}, "", null);
     const old_serial = first.serial;
     close(window);
-    const second = try begin(window, 1, &cmds, &.{}, null);
+    const second = try begin(window, 1, &cmds, &.{}, "", null);
     defer close(window);
     try std.testing.expect(second.serial != old_serial);
 
     const stale = try Command.create(std.testing.allocator, .{ .close = old_serial });
-    try std.testing.expect(command(window, @bitCast(@intFromPtr(stale))));
+    try std.testing.expect(command(window, @bitCast(@intFromPtr(&stale.header))));
     try std.testing.expect(window.palette.popup != null);
 
     const current = try Command.create(std.testing.allocator, .{ .close = second.serial });
-    try std.testing.expect(command(window, @bitCast(@intFromPtr(current))));
+    try std.testing.expect(command(window, @bitCast(@intFromPtr(&current.header))));
     try std.testing.expect(window.palette.popup == null);
 }
 
@@ -1447,7 +1501,7 @@ test "win32 palette: nothing selected until a query, jump entries" {
         .{ .id = 6, .title = "vim C:/work/a.txt", .pwd = "C:/work" },
         .{ .id = 7, .title = "", .pwd = "" },
     };
-    const panel = try begin(window, 5, &cmds, &jumps, null);
+    const panel = try begin(window, 5, &cmds, &jumps, "C:/Users/me", null);
     defer close(window);
     const state = &window.palette;
 
@@ -1474,4 +1528,31 @@ test "win32 palette: nothing selected until a query, jump entries" {
     state.sel = 2;
     try applyQuery(panel, "oc");
     try std.testing.expect(state.sel < state.rows.len);
+}
+
+test "win32 palette: home directory is written as a tilde" {
+    const alloc = std.testing.allocator;
+    const cases = [_][3][]const u8{
+        .{ "C:/Users/me/src", "C:/Users/me", "~/src" },
+        .{ "c:/users/me", "C:/Users/me/", "~" },
+        .{ "C:/Users/medium", "C:/Users/me", "C:/Users/medium" },
+        .{ "D:/work", "C:/Users/me", "D:/work" },
+        .{ "D:/work", "", "D:/work" },
+        .{ "C:\\Users\\me\\src", "C:\\Users\\me\\", "~\\src" },
+    };
+    for (cases) |c| {
+        const got = try abbreviatePwd(alloc, c[0], c[1]);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(c[2], got);
+    }
+}
+
+test "win32 palette: only the palette's own command block is taken" {
+    const owner = try TestOwner.create();
+    defer owner.destroy();
+    // Another sender's block starts with a different tag: not ours.
+    var foreign: Command.Header = .{ .magic = 0x12345678 };
+    try std.testing.expect(!command(&owner.window, @bitCast(@intFromPtr(&foreign))));
+    try std.testing.expect(Command.fromLparam(@bitCast(@intFromPtr(&foreign))) == null);
+    try std.testing.expect(!command(&owner.window, -1));
 }
