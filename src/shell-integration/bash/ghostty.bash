@@ -80,7 +80,9 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
 fi
 
 # Add Ghostty binary to PATH if the path feature is enabled
-if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* && -n "$GHOSTTY_BIN_DIR" ]]; then
+# Skipped under MSYS: a `C:/...` dir would split at the colon, and the exe
+# dir is already first on PATH there.
+if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* && -n "$GHOSTTY_BIN_DIR" && "$OSTYPE" != msys* && "$OSTYPE" != cygwin* ]]; then
   if [[ ":$PATH:" != *":$GHOSTTY_BIN_DIR:"* ]]; then
     export PATH="$PATH:$GHOSTTY_BIN_DIR"
   fi
