@@ -74,7 +74,8 @@ Invoke-E2eScenario 'jumplist' {
         Write-E2eInfo "jump list: $($t -join ' | ')"
 
         # 2. Quitting deletes the test list.
-        [void](Invoke-GhosttyAction -Class $a.Class -Action 'quit')
+        # The process may exit before the answer is complete.
+        try { [void](Invoke-GhosttyAction -Class $a.Class -Action 'quit') } catch {}
         if (-not $a.Process.WaitForExit(15000)) { throw 'ghostty did not exit after quit' }
         $log = Get-Content -LiteralPath $a.Log -Raw -ErrorAction Stop
         if ($log -notlike '*(jumplist): deleted e2e list hr=0x0*') { throw 'the log has no "(jumplist): deleted e2e list hr=0x0" line' }
@@ -124,7 +125,7 @@ Invoke-E2eScenario 'jumplist' {
         }
         if (-not $win) { throw 'the started instance showed no window' }
         [void](Wait-GhosttyState -Class $class -TimeoutSec 10 -Predicate { @($_.windows).Count -eq 1 })
-        [void](Invoke-GhosttyAction -Class $class -Action 'quit')
+        try { [void](Invoke-GhosttyAction -Class $class -Action 'quit') } catch {}
         $p = Get-Process -Id $started.ProcessId -ErrorAction SilentlyContinue
         if ($p -and -not $p.WaitForExit(15000)) { throw 'the started instance did not exit after quit' }
     } finally {
