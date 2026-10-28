@@ -188,12 +188,21 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
 
-    var launch_arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
-    defer launch_arena.deinit();
-    const window = try Window.create(self, .{ .overrides = self.profileOverrides(launch_arena.allocator()) });
-    errdefer window.destroy();
-    window.show();
-    renderer.Device.logPrivateUsage("first surface");
+    // `initial-window = false`: only the tray icon and the pipe server
+    // start; the first `new-window` (IPC, jump list, tray) creates a window.
+    // A process that does not own the pipe is unreachable then, so it still
+    // opens one.
+    if (self.config.@"initial-window" or !self.serving()) {
+        var launch_arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
+        defer launch_arena.deinit();
+        const window = try Window.create(self, .{ .overrides = self.profileOverrides(launch_arena.allocator()) });
+        errdefer window.destroy();
+        window.show();
+        renderer.Device.logPrivateUsage("first surface");
+    } else {
+        log.info("initial-window is off: starting without a window", .{});
+        self.startQuitTimer();
+    }
 
     if (self.serving()) tray_mod.init(self) catch |err| {
         log.warn("unable to create the notification icon err={}", .{err});
