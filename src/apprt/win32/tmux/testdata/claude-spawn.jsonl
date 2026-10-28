@@ -1,0 +1,32 @@
+{"argv":["show","-Av","mouse"],"stdin":null}
+{"argv":["show","-gv","focus-events"],"stdin":null}
+{"argv":["display-message","-p","-t","%1","#{client_termtype}\t#{allow-passthrough}\t#{focus-events}\t#{pane_top}\t#{pane_left}\t#{status}\t#{status-position}\t#{window_bigger}"],"stdin":null}
+{"argv":["display-message","-p","-t","%1","#{session_name}:#{window_id}.#{pane_id}"],"stdin":null}
+{"argv":["display-message","-p","-t","%1","#{client_termtype}\t#{allow-passthrough}\t#{focus-events}\t#{pane_top}\t#{pane_left}\t#{status}\t#{status-position}\t#{window_bigger}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","display-message","-t","%1","-p","#{window_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","split-window","-d","-t","%1","-h","-l","70%","-P","-F","#{pane_id}","--","cat"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%2","window-style","bg=default,fg=blue"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%2","pane-border-style","fg=blue"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%2","pane-active-border-style","fg=blue"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","select-pane","-t","%2","-T","alpha"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%2","pane-border-format","#[fg=blue,bold] #{pane_title} #[default]"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-w","-t","@1","pane-border-status","top"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%2","remain-on-exit","failed"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","respawn-pane","-k","-t","%2","--","cd 'C:\\Users\\user\\AppData\\Local\\Temp\\ghostty-claude-20261028093515' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS= 'C:\\Users\\user\\.local\\bin\\claude.exe' --agent-id alpha@session-00000000 --agent-name alpha --team-name session-00000000 --agent-color blue --parent-session-id 00000000-0000-0000-0000-000000000000 --settings '{\"teammateMode\":\"tmux\",\"permissions\":{\"allow\":[\"SendMessage\",\"Agent\",\"Task\",\"TaskCreate\",\"TaskUpdate\",\"TaskList\",\"TaskGet\"],\"deny\":[\"Bash\",\"PowerShell\",\"Edit\",\"Write\",\"NotebookEdit\",\"WebFetch\",\"WebSearch\"]}}' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-a' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-b' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-c' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-d' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-e' --model sonnet"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","split-window","-d","-t","%2","-v","-P","-F","#{pane_id}","--","cat"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%3","window-style","bg=default,fg=green"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%3","pane-border-style","fg=green"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%3","pane-active-border-style","fg=green"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","select-pane","-t","%3","-T","beta"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%3","pane-border-format","#[fg=green,bold] #{pane_title} #[default]"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","select-layout","-t","@1","main-vertical"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","resize-pane","-t","%1","-x","30%"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","set-option","-p","-t","%3","remain-on-exit","failed"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","respawn-pane","-k","-t","%3","--","cd 'C:\\Users\\user\\AppData\\Local\\Temp\\ghostty-claude-20261028093515' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS= 'C:\\Users\\user\\.local\\bin\\claude.exe' --agent-id beta@session-00000000 --agent-name beta --team-name session-00000000 --agent-color green --parent-session-id 00000000-0000-0000-0000-000000000000 --settings '{\"teammateMode\":\"tmux\",\"permissions\":{\"allow\":[\"SendMessage\",\"Agent\",\"Task\",\"TaskCreate\",\"TaskUpdate\",\"TaskList\",\"TaskGet\"],\"deny\":[\"Bash\",\"PowerShell\",\"Edit\",\"Write\",\"NotebookEdit\",\"WebFetch\",\"WebSearch\"]}}' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-a' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-b' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-c' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-d' --plugin-dir 'C:\\Users\\user\\.claude\\mods\\plugin-e' --model sonnet"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","kill-pane","-t","%2"],"stdin":null}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-capture-0","kill-pane","-t","%3"],"stdin":null}

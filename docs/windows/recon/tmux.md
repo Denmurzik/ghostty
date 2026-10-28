@@ -278,3 +278,59 @@ argv-forwarder (fast startup matters, see section 9 timeouts); all semantics liv
     own pane/window may be closing; server must tolerate concurrent requests and missing panes.
 13. Version drift: strings above are from 2.1.310; format tuples and the cat/respawn protocol have been stable
     but should be re-verified on updates (re-run the extraction recipe at top).
+
+## 13. Re-check 2026-10-28, Claude Code 2.1.311 (static) and 2.1.312 (live)
+
+Static re-extraction on 2.1.311 (`class fTi{type="tmux"`, spawn code, env helpers); the exe auto-updated to
+2.1.312 between runs, and the live capture ran on 2.1.312. A literal grep of the command shapes on 2.1.312
+matches 2.1.311. Live trace: `src/apprt/win32/tmux/testdata/claude-spawn.jsonl` (32 calls); driver
+`test/windows/lib/ClaudeRun.psm1`, capture `test/windows/tmux-capture/run.ps1`, answerer `fake_tmux.zig`.
+
+### CLI spellings (Step 0)
+
+| item | 2.1.311 |
+|---|---|
+| `--agent-teams` | hidden from `--help`, and commander REJECTS it at start (`error: unknown option '--agent-teams'`; only `--version` ignores it). Use env `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. |
+| `--teammate-mode <auto\|tmux\|iterm2\|in-process>` | hidden, works |
+| `--model sonnet` | alias accepted (owner decision: sonnet for real runs) |
+| `--permission-mode` | `--help` lists acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; `default` is accepted as well |
+| `--settings <file-or-json>` | inline JSON works; Claude forwards it to the teammate command line |
+| trust option | none (only `-p` skips the trust dialog); the dialog is answered with Enter |
+| `--debug-file <path>` | enables the debug log |
+
+### Static diff against sections 2-9
+
+- Backend detection, `TMUX` snapshot (text before the first comma becomes `-S`), `-V` probe: none.
+- Command table rows 1-15 (argv shapes, `-t` before `-p`, `-l 70%`, `-v`/`-h` alternation, `main-vertical`, `resize-pane -x 30%`): none.
+- `remain-on-exit failed` then `respawn-pane -k -t %N -- <string>`: none, except the string is `SSi("agent", cmd)`: on Linux with a tool cgroup it is prefixed by `sh -c '...cgroup.procs...' sh <dir>; `; on Windows the string is unchanged.
+- ENVS: two differences.
+  - `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=` (EMPTY value) is always appended after `CLAUDE_CODE_ATTRIBUTION_PROJECT=`. The sh_command grammar must accept `NAME=` with an empty value.
+  - `CLAUDE_CODE_TASK_LIST_ID=<q>` follows `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` when a task list id is set.
+- IDENT/FLAGS: `--settings '<json>'` and one `--plugin-dir '<path>'` per loaded plugin are forwarded; the JSON holds `"` and no `'`.
+- `no space` / `too small` substring check (`h(stderr)`): none.
+- Startup probes (section 9): unchanged, plus TWO NEW probes (2 s timeout, stdout trimmed, exit 0 required, else value unknown):
+  - `tmux show -gv focus-events`
+  - `tmux show -Av mouse`: `on` or non-zero exit shows no hint; any other value makes Claude print "tmux detected - scroll with PgUp/PgDn - or add 'set -g mouse on' ...". The shim should answer `on`.
+  - Both are sent with no `-S`. The `client_termtype` probe is sent twice.
+- Nested-session guard: `CLAUDE_CODE_CHILD_SESSION || CLAUDECODE` (the second variable was the only one in the recon). The driver removes every `CLAUDE_*` variable except `CLAUDE_CODE_GIT_BASH_PATH`.
+- **No `TeamCreate` tool exists in this version.** With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` set, Claude creates the session team at startup (`~/.claude/teams/session-<first 8 hex of the session id>`, plus `~/.claude/tasks/session-...`). A teammate is the ordinary `Agent` tool with a `name`; `--team-name` and `--agent-id` use the session team (`alpha@session-00000000`). Claude removes its own team dir at exit.
+
+### Live trace summary (inside mode, 2 teammates, `/exit`)
+
+32 calls: startup probes (`show -gv focus-events`, `show -Av mouse`, `display-message` termtype/session), then per spawn the order of section 4 (`display-message -t %1 -p #{window_id}` once, `list-panes`, `split-window`, `set-option` x3, `select-pane -T`, `set-option pane-border-format`, `list-panes`, `set-option -w pane-border-status top` first spawn only, `remain-on-exit`, `respawn-pane`; spawn 2 adds `list-panes` x2, `select-layout main-vertical`, `resize-pane -t %1 -x 30%`), and at `/exit` `kill-pane -t %2`, `kill-pane -t %3`.
+- Ids the fake answered: leader `%1`, window `@1`, `%2`, `%3`. Spawn 2 splits `%2` with `-v`.
+- `-S` arrives as `\.\pipe\ghostty-tmux-capture-0` (backslashes intact through Git Bash/MSYS; the `,1,0` suffix is cut off).
+- `TMUX_PANE` is used directly: no `display-message -p #{pane_id}`.
+- The respawn string: `cd 'C:\Users\...\ghostty-claude-<run>' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS= 'C:\Users\user\.local\bin\claude.exe' --agent-id alpha@session-<id> --agent-name alpha --team-name session-<id> --agent-color blue --parent-session-id <uuid> --settings '<json>' --plugin-dir '<dir>'... --model sonnet`. Colours: alpha blue, beta green.
+
+### DCS observation (Step 3b, input to C2)
+
+In the whole run (a short one: startup, two spawns, `/exit`) the Debug log of Ghostty holds no `unknown DCS hook` line and no `desktop_notification` line: Claude emitted no `ESC P tmux;` that reached the core. Plain OSC 0/2 titles did arrive (`changing title "Claude Code"`, then the task title). The notification path (OSC 9/777, DCS-wrapped when `TMUX` is set) needs a finished turn while the window is unfocused, which this run never produced, so the DCS verdict is "not observed", not "dropped". The deterministic DCS probe (M4 Task 2) stays the authority.
+- Claude's own debug log: `tmux images: kitty no, iTerm2 no (TMUX is set, but the terminal did not answer as tmux ...)` and `DECSTBM: gated (TMUX=set ...)`: cosmetic, as predicted in section 10.
+
+### Differences -> plan impact
+
+1. `TeamCreate` does not exist: every plan, brief and prompt that names it needs the note above (driver prompt already uses the `Agent` tool with `name`).
+2. `show`/`show-options` with `-A`, `-g`, `-v` must parse and answer (`show -Av mouse` -> `on`, `show -gv focus-events` -> `on`, both exit 0): Task 3 template and Task 7 commands.
+3. `sh_command` must accept an empty-valued assignment `NAME=` in the `env` list, and `--settings '<json>'` / `--plugin-dir '<path>'` words.
+4. `--agent-teams` flag is unusable; real runs use the env variable (G1, Task 15 use the driver).
