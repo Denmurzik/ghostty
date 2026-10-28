@@ -139,6 +139,9 @@ Invoke-E2eScenario 'split-many' {
     if (-not $second) { throw 'the second window never appeared' }
     $second = [IntPtr]$second
 
+    # 100 ms is the ReleaseFast gate; a Debug build measured 71-110 ms on the
+    # same machine (M5 Task 19), so Debug gets headroom like the pacing gate.
+    $limit = if ($build -eq 'ReleaseFast') { 100 } else { 150 }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Invoke-SplitAction $g 'close_window' -Surface $streamers[0].Id
     $hiddenMs = -1
@@ -147,12 +150,12 @@ Invoke-E2eScenario 'split-many' {
     while ($sw.Elapsed.TotalSeconds -lt 15) {
         if ($hiddenMs -lt 0 -and -not [GhosttyE2e.Win]::IsWindowVisible($g.Hwnd)) { $hiddenMs = $sw.ElapsedMilliseconds }
         $ans = 0L
-        if (-not [GhosttyE2e.Win]::Responsive($second, 100, [ref]$ans)) { $slow++ }
+        if (-not [GhosttyE2e.Win]::Responsive($second, $limit, [ref]$ans)) { $slow++ }
         if ($ans -gt $worst) { $worst = $ans }
         if (-not [GhosttyE2e.Win]::IsWindow($g.Hwnd)) { break }
         Start-Sleep -Milliseconds 10
     }
     Write-E2eInfo "first window hidden after $hiddenMs ms; second window worst WM_NULL $worst ms, $slow timeouts"
     if ($hiddenMs -lt 0 -or $hiddenMs -gt 300) { throw "the closing window was not invisible within 300 ms (took $hiddenMs ms)" }
-    if ($slow -gt 0 -or $worst -gt 100) { throw "the second window stalled during the teardown (worst $worst ms, $slow timeouts; limit 100 ms)" }
+    if ($slow -gt 0 -or $worst -gt $limit) { throw "the second window stalled during the teardown (worst $worst ms, $slow timeouts; limit $limit ms)" }
 }
