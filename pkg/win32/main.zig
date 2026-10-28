@@ -20,6 +20,9 @@ pub const shlwapi = @import("shlwapi.zig");
 pub const dcomp = @import("dcomp.zig");
 pub const winrt = @import("winrt.zig");
 pub const comdlg32 = @import("comdlg32.zig");
+pub const shobjidl = @import("shobjidl.zig");
+pub const winhttp = @import("winhttp.zig");
+pub const tip = @import("tip.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

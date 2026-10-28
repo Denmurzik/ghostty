@@ -64,6 +64,17 @@ test {
     _ = @import("win32/tmux/keys.zig");
     _ = @import("win32/tmux/Registry.zig");
     _ = @import("win32/tmux/pane_io.zig");
+    _ = @import("win32/tmux/namespaces.zig");
+    _ = @import("win32/profiles.zig");
+    _ = @import("win32/profiles_menu.zig");
+    _ = @import("win32/jumplist.zig");
+    _ = @import("win32/secure_input.zig");
+    _ = @import("win32/undo.zig");
+    _ = @import("win32/osk.zig");
+    _ = @import("win32/actions/undo_actions.zig");
+    _ = @import("win32/update/release.zig");
+    _ = @import("win32/update/state.zig");
+    _ = @import("win32/update/Updater.zig");
     _ = @import("win32/tmux/labels.zig");
 
     // Force analysis of the stub signatures (function bodies are lazy).

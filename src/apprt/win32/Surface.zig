@@ -361,6 +361,13 @@ pub fn core(self: *Surface) *CoreSurface {
     return &self.core_surface;
 }
 
+/// Whether the surface sits in a parked (hidden, undoable) window or tab.
+/// Filled by M5 Task 15a.
+pub fn parked(self: *const Surface) bool {
+    _ = self;
+    return false;
+}
+
 pub fn rtApp(self: *const Surface) *App {
     return self.app;
 }

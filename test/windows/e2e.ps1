@@ -35,7 +35,7 @@ The scenarios send real keyboard input to the Ghostty window they started:
 do not type while the run is in progress.
 
 .PARAMETER Milestone
-M1, M2, M3 or all (default): which scenarios the headers select.
+M1, M2, M3, M4, M5 or all (default): which scenarios the headers select.
 
 .PARAMETER Only
 Run just these scenarios (names without .ps1).
@@ -50,7 +50,7 @@ powershell -NoProfile -File test/windows/e2e.ps1 -Milestone M1
 powershell -NoProfile -File test/windows/e2e.ps1 -Only startup,render -EvidenceDir C:\tmp\evidence
 #>
 param(
-    [ValidateSet('M1', 'M2', 'M3', 'M4', 'all')][string]$Milestone = 'all',
+    [ValidateSet('M1', 'M2', 'M3', 'M4', 'M5', 'all')][string]$Milestone = 'all',
     [string[]]$Only,
     [string]$EvidenceDir
 )

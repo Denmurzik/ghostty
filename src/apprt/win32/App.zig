@@ -29,6 +29,11 @@ const ipc = struct {
 };
 const messages = @import("messages.zig");
 const notify_mod = @import("notify.zig");
+const profiles_mod = @import("profiles.zig");
+const secure_input_mod = @import("secure_input.zig");
+const undo_actions_mod = @import("actions/undo_actions.zig");
+const Updater = @import("update/Updater.zig");
+const jumplist = @import("jumplist.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const recovery_mod = @import("recovery.zig");
 const shell_open_mod = @import("shell_open.zig");
@@ -100,6 +105,17 @@ tmux_server: tmux_Server.State = .{},
 tmux: tmux_Registry_mod.State = .{},
 tmux_keys: tmux_pane_io_mod.State = .{},
 tmux_labels: tmux_labels_mod.State = .{},
+
+/// M5 state: the shell profile cache, the close-undo stack, the update
+/// checker and secure input.
+profiles: profiles_mod.Cache = .{},
+undo: undo_actions_mod.State = .{},
+update: Updater.State = .{},
+secure: secure_input_mod.State = .{},
+
+/// Windows hidden by the close-undo (filled by M5 Task 15a). `windows` never
+/// holds a parked window.
+parked_windows: std.ArrayList(*Window) = .empty,
 
 /// Set while a hard config reload runs, so that the `config_change` it
 /// produces is told apart from a soft apply.
@@ -211,6 +227,8 @@ pub fn terminate(self: *App) void {
     // never gets to unregister itself, and must not be retried forever.
     self.last_active = null;
     while (self.windows.pop()) |window| window.destroy();
+    while (self.parked_windows.pop()) |window| window.destroy();
+    self.parked_windows.deinit(self.core_app.alloc);
     self.windows.deinit(self.core_app.alloc);
     composition_mod.appStopped(self);
 
@@ -431,6 +449,31 @@ pub fn surfaceFor(self: *App, core: *CoreSurface) ?*Surface {
     return core.rt_surface;
 }
 
+/// Walks `windows`, then `parked_windows` when asked.
+pub const WindowIterator = struct {
+    app: *const App,
+    include_parked: bool,
+    index: usize = 0,
+
+    pub fn next(self: *WindowIterator) ?*Window {
+        const live = self.app.windows.items;
+        if (self.index < live.len) {
+            defer self.index += 1;
+            return live[self.index];
+        }
+        if (!self.include_parked) return null;
+        const parked = self.app.parked_windows.items;
+        const i = self.index - live.len;
+        if (i >= parked.len) return null;
+        self.index += 1;
+        return parked[i];
+    }
+};
+
+pub fn forEachWindow(self: *App, include_parked: bool) WindowIterator {
+    return .{ .app = self, .include_parked = include_parked };
+}
+
 /// The window that holds a core surface.
 pub fn windowFor(self: *App, core: *CoreSurface) ?*Window {
     return (self.surfaceFor(core) orelse return null).window;
@@ -604,6 +647,9 @@ pub fn performIpc(
     switch (sent.result) {
         .forwarded => return true,
         .no_server => {
+            if (action == .new_tab) {
+                return jumplist.newTabFallback(alloc, class, value.arguments orelse &.{});
+            }
             ipcError("no running Ghostty instance (class {s})", .{class orelse instance.defaultClass()});
             return error.IPCFailed;
         },
@@ -762,4 +808,25 @@ test "win32 app: wakeup re-arms after the queued message is handled" {
         WM_GHOSTTY_WAKEUP,
         win32.user32.PM_REMOVE,
     ) != 0);
+}
+
+test "win32 app: forEachWindow walks parked windows only when asked" {
+    var app: App = undefined;
+    app.windows = .empty;
+    app.parked_windows = .empty;
+    defer app.windows.deinit(std.testing.allocator);
+    defer app.parked_windows.deinit(std.testing.allocator);
+    const live: *Window = @ptrFromInt(0x1000);
+    const parked: *Window = @ptrFromInt(0x2000);
+    try app.windows.append(std.testing.allocator, live);
+    try app.parked_windows.append(std.testing.allocator, parked);
+
+    var it = app.forEachWindow(false);
+    try std.testing.expectEqual(live, it.next().?);
+    try std.testing.expect(it.next() == null);
+
+    it = app.forEachWindow(true);
+    try std.testing.expectEqual(live, it.next().?);
+    try std.testing.expectEqual(parked, it.next().?);
+    try std.testing.expect(it.next() == null);
 }

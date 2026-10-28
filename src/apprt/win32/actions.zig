@@ -15,6 +15,9 @@ const hooks = @import("hooks.zig");
 const key_state = @import("key_state.zig");
 const link = @import("link.zig");
 const notify = @import("notify.zig");
+const osk = @import("osk.zig");
+const secure_input = @import("secure_input.zig");
+const Updater = @import("update/Updater.zig");
 const visibility = @import("visibility.zig");
 
 const log = std.log.scoped(.win32_actions);
@@ -25,6 +28,7 @@ const handlers = struct {
     const tab_actions = @import("actions/tab_actions.zig");
     const split_actions = @import("actions/split_actions.zig");
     const surface_actions = @import("actions/surface_actions.zig");
+    const undo_actions = @import("actions/undo_actions.zig");
 };
 
 pub const Status = union(enum) {
@@ -46,10 +50,7 @@ pub fn status(comptime key: apprt.Action.Key) Status {
         .inspector, .render_inspector, .export_terminal_io => .implemented,
         .desktop_notification, .command_finished, .mouse_over_link, .renderer_health, .readonly => .implemented,
         .start_search, .end_search, .search_total, .search_selected, .key_sequence, .key_table => .implemented,
-        .check_for_updates, .show_on_screen_keyboard, .secure_input, .undo, .redo => .{ .deferred = .{
-            .milestone = "M5",
-            .reason = "Windows extras, analog of a macOS-only feature",
-        } },
+        .check_for_updates, .show_on_screen_keyboard, .secure_input, .undo, .redo => .implemented,
         .selection_changed => .{ .deferred = .{
             .milestone = "post-v1",
             .reason = "needs UI Automation",
@@ -152,6 +153,11 @@ pub fn perform(
         .renderer_health => rendererHealth(app, target, value),
         .readonly => badges.readonly(app, target, value),
         .toggle_background_opacity => composition.toggleOpacity(app, target),
+        .check_for_updates => Updater.checkNow(app, target, value),
+        .show_on_screen_keyboard => osk.show(app, target, value),
+        .secure_input => secure_input.perform(app, target, value),
+        .undo => handlers.undo_actions.undo(app, target, value),
+        .redo => handlers.undo_actions.redo(app, target, value),
         else => comptime unreachable,
     };
 }
@@ -176,14 +182,22 @@ test "win32 actions: M3 scope list" {
             .unsupported => unsupported += 1,
         }
     }
-    try std.testing.expectEqual(62, implemented);
-    try std.testing.expectEqual(6, deferred);
+    try std.testing.expectEqual(67, implemented);
+    try std.testing.expectEqual(1, deferred);
     try std.testing.expectEqual(2, unsupported);
 
-    try std.testing.expectEqualStrings("M5", comptime status(.undo).deferred.milestone);
     try std.testing.expectEqualStrings("post-v1", comptime status(.selection_changed).deferred.milestone);
     try std.testing.expect(comptime status(.start_search) == .implemented);
     try std.testing.expect(comptime status(.open_url) == .implemented);
     try std.testing.expect(comptime status(.quit) == .implemented);
     try std.testing.expect(comptime status(.show_gtk_inspector) == .unsupported);
+}
+
+test "win32 actions: M5 actions are implemented" {
+    try std.testing.expect(comptime status(.undo) == .implemented);
+    try std.testing.expect(comptime status(.redo) == .implemented);
+    try std.testing.expect(comptime status(.check_for_updates) == .implemented);
+    try std.testing.expect(comptime status(.show_on_screen_keyboard) == .implemented);
+    try std.testing.expect(comptime status(.secure_input) == .implemented);
+    try std.testing.expect(comptime status(.selection_changed) == .deferred);
 }

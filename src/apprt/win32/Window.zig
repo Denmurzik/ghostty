@@ -32,6 +32,7 @@ const strip_input_mod = @import("strip_input.zig");
 const tab_anim_mod = @import("tab_anim.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
+const secure_input = @import("secure_input.zig");
 const title_edit = @import("title_edit.zig");
 const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
@@ -211,6 +212,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
     self.dpi = if (system_dpi == 0) dpi_mod.default_dpi else system_dpi;
 
     theme.applyToWindow(self);
+    secure_input.apply(hwnd);
     frame_mod.apply(self);
     drop.register(self);
     self.layout();

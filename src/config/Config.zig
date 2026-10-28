@@ -2745,6 +2745,11 @@ keybind: Keybinds = .{},
 /// `1h1h` is equivalent to `2h`. This is confusing and should be avoided.
 /// A future update may disallow this.
 ///
+/// On Windows, closing a tab, a window or a split can be undone with `undo`
+/// (`ctrl+shift+z`, redo is `ctrl+shift+y`) until this time has passed. The
+/// closed item is hidden, not closed: its programs keep running until the
+/// time has passed. `0` turns undo off.
+///
 /// This configuration is only supported on macOS. Linux doesn't
 /// support undo operations at all so this configuration has no
 /// effect.
@@ -3602,6 +3607,10 @@ keybind: Keybinds = .{},
 /// or it is manually (and typically temporarily) enabled. However, if you
 /// always have secure input enabled, the indication can be distracting and
 /// you may want to disable it.
+///
+/// On Windows, secure input hides Ghostty windows from screen capture and
+/// keeps copied text out of the clipboard history. This setting shows a lock
+/// badge on each surface while it is on.
 @"macos-secure-input-indication": bool = true,
 
 /// If true, Ghostty exposes and handles the built-in AppleScript dictionary
@@ -3861,6 +3870,26 @@ else
 ///
 /// This only applies to Windows.
 @"windows-tmux-shim": bool = true,
+
+/// Whether programs outside of Ghostty can drive Ghostty with `tmux.exe`
+/// (for `new-session`, `new-window`, `kill-session` and the like). When
+/// disabled (the default), `tmux.exe` answers only inside Ghostty sessions,
+/// where `TMUX` is set.
+///
+/// When enabled, a second private pipe is opened that any process of the
+/// same user can ask to run tmux commands; only enable it when a tool
+/// needs it. `tmux.exe` is found outside Ghostty only if its directory is on
+/// `PATH`. A restart is needed for a change to take effect.
+///
+/// This only applies to Windows.
+@"windows-tmux-external": bool = false,
+
+/// Whether Ghostty fills the taskbar jump list (right click on the taskbar
+/// icon) with a new window and the shell profiles it finds. When disabled,
+/// the jump list is cleared at the next start.
+///
+/// This only applies to Windows.
+@"windows-jump-list": bool = true,
 
 /// When enabled, the full GTK titlebar is displayed instead of your window
 /// manager's simple titlebar. The behavior of this option will vary with your
@@ -7224,6 +7253,23 @@ pub const Keybinds = struct {
             .{ .key = .{ .unicode = 'p' }, .mods = inputpkg.ctrlOrSuper(.{ .shift = true }) },
             .toggle_command_palette,
         );
+
+        // Windows: undo/redo of a close (`ctrl+z` belongs to the shell and
+        // `ctrl+shift+t` is new_tab).
+        if (comptime builtin.target.os.tag == .windows) {
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'z' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .undo = {} },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'y' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .redo = {} },
+                .{ .performable = true },
+            );
+        }
 
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
@@ -11515,4 +11561,34 @@ test "windows config: CHERE_INVOKING lookup ignores case" {
     var it: TestIterator = .{ .data = &.{"--env=Chere_Invoking=0"} };
     try cfg.loadIter(alloc, &it);
     try testing.expect(hasEnvKeyIgnoreCase(&cfg.env, "CHERE_INVOKING"));
+}
+
+test "windows config: undo binds on windows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    const undo_key: inputpkg.Binding.Trigger = .{ .key = .{ .unicode = 'z' }, .mods = .{ .ctrl = true, .shift = true } };
+    const redo_key: inputpkg.Binding.Trigger = .{ .key = .{ .unicode = 'y' }, .mods = .{ .ctrl = true, .shift = true } };
+    const undo_entry = cfg.keybind.set.get(undo_key);
+    const redo_entry = cfg.keybind.set.get(redo_key);
+    if (comptime builtin.target.os.tag == .windows) {
+        try testing.expect(undo_entry != null);
+        try testing.expect(redo_entry != null);
+        try testing.expect(undo_entry.?.value_ptr.*.leaf.action == .undo);
+        try testing.expect(redo_entry.?.value_ptr.*.leaf.action == .redo);
+    } else {
+        try testing.expect(undo_entry == null);
+        try testing.expect(redo_entry == null);
+    }
+}
+
+test "windows config: M5 keys default" {
+    const testing = std.testing;
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    try testing.expect(!cfg.@"windows-tmux-external");
+    try testing.expect(cfg.@"windows-jump-list");
 }

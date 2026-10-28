@@ -22,17 +22,23 @@ const config_errors = @import("config_errors.zig");
 const decor = @import("decor.zig");
 const export_io = @import("export_io.zig");
 const hotkeys = @import("hotkeys.zig");
+const jumplist = @import("jumplist.zig");
 const key_state = @import("key_state.zig");
 const link = @import("link.zig");
 const messages = @import("messages.zig");
 const notify = @import("notify.zig");
+const osk = @import("osk.zig");
 const overlay = @import("overlay.zig");
+const profiles = @import("profiles.zig");
 const recovery = @import("recovery.zig");
+const secure_input = @import("secure_input.zig");
 const shell_open = @import("shell_open.zig");
 const tmux_Registry = @import("tmux/Registry.zig");
 const tmux_Server = @import("tmux/Server.zig");
 const tmux_pane_io = @import("tmux/pane_io.zig");
 const tmux_labels = @import("tmux/labels.zig");
+const undo_actions = @import("actions/undo_actions.zig");
+const Updater = @import("update/Updater.zig");
 
 const Config = configpkg.Config;
 
@@ -45,11 +51,18 @@ const LRESULT = win32.foundation.LRESULT;
 pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm };
 
 /// The end of `App.init`.
+/// Set by the crash handler (M5 Task 12): looks for a crash dump of the last run.
+pub var crash_recheck: ?*const fn () void = null;
+
 pub fn appStarted(app: *App) void {
     hotkeys.appStarted(app);
     composition.appStarted();
     notify.appStarted(app);
     config_errors.appStarted(app);
+    jumplist.schedule(app);
+    Updater.start(app);
+    secure_input.appStarted(app);
+    if (crash_recheck) |recheck| recheck();
 }
 
 /// The start of `App.terminate`.
@@ -62,6 +75,9 @@ pub fn appStopping(app: *App) void {
     notify.deinit(app);
     tmux_Registry.appStopping(app);
     tmux_pane_io.appStopping(app);
+    undo_actions.flushAll(app);
+    Updater.stop(app);
+    jumplist.stop(app);
     drainDialogs(app.msg_hwnd);
 }
 
@@ -84,6 +100,8 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     composition.configChanged(app, config);
     notify.configChanged(app, config);
     config_errors.configChanged(app, config, reloaded);
+    jumplist.configChanged(app, config);
+    Updater.configChanged(app, config);
     if (reloaded) app_toast.configReloaded(app);
 }
 
@@ -106,7 +124,23 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
                 tmux_pane_io.onTimer(app);
                 return 0;
             }
+            if (wparam == messages.timers.msg_window.update) {
+                Updater.onTimer(app);
+                return 0;
+            }
+            if (wparam == messages.timers.msg_window.undo_expire) {
+                undo_actions.onTimer(app);
+                return 0;
+            }
+            if (wparam == messages.timers.msg_window.jumplist_delay) {
+                jumplist.onTimer(app);
+                return 0;
+            }
             return null;
+        },
+        messages.WM_GHOSTTY_UPDATE_RESULT => {
+            Updater.onResult(app, lparam);
+            return 0;
         },
         messages.WM_GHOSTTY_POSTED_DIALOG => {
             // Posted before any window existed (start-up config errors).
@@ -293,6 +327,21 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.objectField("config_errors");
     try config_errors.testState(app, jw);
     try jw.endObject();
+    try jw.objectField("m5");
+    try jw.beginObject();
+    try jw.objectField("profiles");
+    try profiles.testState(app, jw);
+    try jw.objectField("jumplist");
+    try jumplist.testState(app, jw);
+    try jw.objectField("update");
+    try Updater.testState(app, jw);
+    try jw.objectField("secure_input");
+    try secure_input.testState(app, jw);
+    try jw.objectField("undo");
+    try undo_actions.testState(app, jw);
+    try jw.objectField("osk");
+    try osk.testState(app, jw);
+    try jw.endObject();
     try tmux_Server.testState(app, jw);
 }
 
@@ -308,6 +357,10 @@ test "win32 hooks: testState writes an m3 object" {
     app.shell_open = .{};
     app.tmux_server = .{};
     app.tmux_labels = .{};
+    app.profiles = .{};
+    app.undo = .{};
+    app.update = .{};
+    app.secure = .{};
     try testState(&app, &jw);
     try jw.endObject();
 
@@ -317,6 +370,10 @@ test "win32 hooks: testState writes an m3 object" {
     try std.testing.expect(m3 == .object);
     const tmux = parsed.value.object.get("tmux") orelse return error.TestUnexpectedResult;
     try std.testing.expect(tmux.object.get("panes") != null);
+    const m5 = parsed.value.object.get("m5") orelse return error.TestUnexpectedResult;
+    inline for (.{ "profiles", "jumplist", "update", "secure_input", "undo", "osk" }) |key| {
+        try std.testing.expect(m5.object.get(key) != null);
+    }
     inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io", "config_errors" }) |key| {
         try std.testing.expect(m3.object.get(key) != null);
     }

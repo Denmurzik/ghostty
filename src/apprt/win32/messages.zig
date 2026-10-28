@@ -44,7 +44,10 @@ pub const WM_GHOSTTY_POSTED_DIALOG = win32.user32.WM_APP + 14;
 /// Posted to a top-level window to run an overlay command (lparam = heap
 /// `overlay.Command`, freed by the handler).
 pub const WM_GHOSTTY_OVERLAY_CMD = win32.user32.WM_APP + 15;
-// WM_APP + 16 ... WM_APP + 31 are reserved for M4 and later.
+/// Posted to the message window by the update worker (lparam = heap
+/// `Updater.Result`, freed by the receiver).
+pub const WM_GHOSTTY_UPDATE_RESULT = win32.user32.WM_APP + 16;
+// WM_APP + 17 ... WM_APP + 31 are reserved for M5 and later.
 
 /// `WM_TIMER` ids, unique per window class (a timer id is only meaningful
 /// to the window that owns the timer).
@@ -58,6 +61,12 @@ pub const timers = struct {
         pub const release_memory: usize = 3;
         /// tmux `send-keys` gate and pane input timing (`tmux/pane_io.zig`).
         pub const tmux_keys: usize = 4;
+        /// Update check schedule and the fetch deadline (`update/Updater.zig`).
+        pub const update: usize = 5;
+        /// Expiry of the oldest undo entry (`actions/undo_actions.zig`).
+        pub const undo_expire: usize = 6;
+        /// Delay before the jump list is rebuilt (`jumplist.zig`).
+        pub const jumplist_delay: usize = 7;
     };
     pub const tab = struct {
         /// Throttled relayout while a split divider is dragged.
@@ -123,6 +132,7 @@ test "win32 skeleton: M3 message ids are unique and keep M1/M2 values" {
         WM_GHOSTTY_SET_CONTENT,
         WM_GHOSTTY_POSTED_DIALOG,
         WM_GHOSTTY_OVERLAY_CMD,
+        WM_GHOSTTY_UPDATE_RESULT,
     };
     for (ids, 0..) |id, i| {
         try std.testing.expect(id > win32.user32.WM_APP);
@@ -149,7 +159,7 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
     // A timer id is only meaningful to the window that owns it, so ids
     // must differ within one class; the top-level window has several.
     const classes = .{
-        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory, timers.msg_window.tmux_keys },
+        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory, timers.msg_window.tmux_keys, timers.msg_window.update, timers.msg_window.undo_expire, timers.msg_window.jumplist_delay },
         [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace },
         [_]usize{ timers.overlay.hide, timers.overlay.search_debounce, timers.overlay.scroller_hold, timers.overlay.scroller_fade },
         [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce, timers.window.tab_tooltip, timers.window.tab_anim },
@@ -167,4 +177,11 @@ test "win32 skeleton: M4 timer id unique" {
     for (ids, 0..) |id, i| {
         for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
     }
+}
+
+test "win32 skeleton: M5 ids" {
+    try std.testing.expectEqual(win32.user32.WM_APP + 16, WM_GHOSTTY_UPDATE_RESULT);
+    try std.testing.expectEqual(@as(usize, 5), timers.msg_window.update);
+    try std.testing.expectEqual(@as(usize, 6), timers.msg_window.undo_expire);
+    try std.testing.expectEqual(@as(usize, 7), timers.msg_window.jumplist_delay);
 }

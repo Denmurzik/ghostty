@@ -102,6 +102,7 @@ pub fn handleEarly(app: *App, alloc: Allocator, request: []const u8, early: ?*Se
         .@"color-scheme" => colorScheme(app, alloc, req),
         .state => state(app, alloc),
         .@"export-io" => exportIo(app, alloc, req),
+        .crash => crash(alloc, req),
     };
 }
 
@@ -115,11 +116,12 @@ pub const Op = enum {
     @"color-scheme",
     state,
     @"export-io",
+    crash,
 
     fn isTest(self: Op) bool {
         return switch (self) {
             .@"new-window", .@"new-tab", .@"toggle-quick-terminal" => false,
-            .action, .dpi, .pwd, .@"color-scheme", .state, .@"export-io" => true,
+            .action, .dpi, .pwd, .@"color-scheme", .state, .@"export-io", .crash => true,
         };
     }
 };
@@ -190,10 +192,16 @@ fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, 
     const id = std.fmt.parseInt(u64, req.core_surface, 10) catch
         return reply(alloc, .bad_request, "", "bad surface id", null);
 
-    const core = if (id == 0)
+    var core = if (id == 0)
         app.core_app.focusedSurface()
     else
         app.core_app.findSurfaceByID(id);
+    // A parked surface is not a target.
+    if (core) |c| {
+        if (app.surfaceFor(c)) |s| {
+            if (s.parked()) core = null;
+        }
+    }
     const window = if (core) |c| app.windowFor(c) else null;
 
     const w = window orelse return openWindow(app, alloc, core, overrides, early);
@@ -213,16 +221,33 @@ fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, 
 fn targetSurface(app: *App, id: u32) ?*Surface {
     if (id != 0) {
         for (app.windows.items) |w| {
-            if (w.findSurface(id)) |s| return s;
+            if (w.findSurface(id)) |s| return if (s.parked()) null else s;
         }
         return null;
     }
     if (app.core_app.focusedSurface()) |core| {
-        if (app.surfaceFor(core)) |s| return s;
+        if (app.surfaceFor(core)) |s| {
+            if (!s.parked()) return s;
+        }
     }
     const w = app.last_active orelse return null;
     const tab = w.activeTab() orelse return null;
-    return tab.focusedSurface();
+    const s = tab.focusedSurface() orelse return null;
+    return if (s.parked()) null else s;
+}
+
+/// Set by the crash handler (M5 Task 12); runs the deliberate crash of the
+/// test op `crash` (`kind` is `av`, `stack` or `panic`).
+pub var crash_hook: ?*const fn ([]const u8) void = null;
+
+/// Test op: crashes this process on purpose. The kind comes in `text`.
+fn crash(alloc: Allocator, req: protocol.Request) []u8 {
+    const hook = crash_hook orelse return reply(alloc, .failed, "", "crash hook not installed", null);
+    if (!std.mem.eql(u8, req.text, "av") and !std.mem.eql(u8, req.text, "stack") and !std.mem.eql(u8, req.text, "panic")) {
+        return reply(alloc, .bad_request, "", "invalid crash kind", null);
+    }
+    hook(req.text);
+    return reply(alloc, .ok, "", "", null);
 }
 
 fn targetWindow(app: *App, id: u32) ?*Window {
@@ -566,4 +591,24 @@ test "win32 ipc ops: unknown and test ops are refused without the env flag" {
             return err;
         };
     }
+}
+
+test "win32 ipc ops: crash op is a test op and needs its hook" {
+    const testing = std.testing;
+    const app: *App = undefined;
+
+    test_ops_override = false;
+    {
+        defer test_ops_override = null;
+        const out = handle(app, testing.allocator, "{\"v\":1,\"op\":\"crash\",\"text\":\"av\"}");
+        defer testing.allocator.free(out);
+        try expectCode(testing.allocator, out, .bad_request);
+    }
+
+    test_ops_override = true;
+    defer test_ops_override = null;
+    try testing.expect(crash_hook == null);
+    const out = handle(app, testing.allocator, "{\"v\":1,\"op\":\"crash\",\"text\":\"av\"}");
+    defer testing.allocator.free(out);
+    try expectCode(testing.allocator, out, .failed);
 }
