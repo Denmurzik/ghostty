@@ -27,6 +27,8 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 ## Release
 - Portable zip + Inno Setup installer (shortcuts, "Open Ghostty here", uninstall), built by GitHub Actions on tag. No code signing certificate (SmartScreen warning accepted).
 - v1.0 gate: feature checklist closed with automated tests (upstream tests on Windows, win32 apprt tests, vttest-style checks, RAM measurements, Claude Code tmux-mode run) + a pre-release smoked manually by the owner.
+- 2026-10-28 (owner): releases are built locally with `dist/windows/release.ps1`; GitHub Actions is optional and manual-only. (Amends "built by GitHub Actions on tag": the owner's Actions minutes are exhausted.)
+- 2026-10-28 (lead ruling, owner sign-off pending in the M6 acceptance): ARM64 release artifacts use `aarch64-windows-gnu` (amends R3); `-Arm64Abi msvc` once the VS ARM64 component is installed.
 
 ## Process constraints
 - Machine: 15.5 GB RAM, ~4–5 GB free. Builds/test suites strictly one at a time via the teamlead `test-lock` script; zig builds with `-j6` (owner speed rules 2026-10-26; `-j4` if a build OOMs).

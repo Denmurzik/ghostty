@@ -70,7 +70,7 @@ platform-neutral improvements (e.g. `SplitTree.replace`). Every core touch point
 
 - New enum members: `apprt.Runtime.win32` (default on Windows), `renderer.Backend.d3d11` (default on Windows). OpenGL is
   not supported on Windows (no EGL); `-Drenderer=opengl` with a Windows target is a build error with a clear message.
-- ABI: MSVC (R3; `src/build/Config.zig:105-116` already forces it). Targets `x86_64-windows-msvc`, `aarch64-windows-msvc`.
+- ABI: MSVC for x64 (R3; `src/build/Config.zig:105-116` already forces it): `x86_64-windows-msvc`. The ARM64 release artifacts use `aarch64-windows-gnu` (R-M6-11; amends R3, owner sign-off pending); `-Arm64Abi msvc` once the Visual Studio ARM64 component is installed.
 - `SharedDeps` Windows arm: import module `win32`; link system libs `user32 gdi32 dwmapi imm32 shell32 ole32 uxtheme
   d3d11 dxgi` (+ `dcomp d2d1 dwrite windowscodecs` from M2/M3, `advapi32` for registry). `d3dcompiler_47` is loaded at
   runtime, never linked.
@@ -83,7 +83,7 @@ platform-neutral improvements (e.g. `SplitTree.replace`). Every core touch point
   test exe has no manifest, so no code path may rely on the ANSI code page being UTF-8 (fonts are opened via UTF-16, §9).
 - `tmux.exe` (M4): separate exe, console subsystem, root `src/tmux_shim/main.zig`, **no SharedDeps** (only std + `src/tmux_shim`),
   installed next to `ghostty.exe`.
-- Release recipe flags: `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true`.
+- Release recipe flags (R-M6-3): `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false` (PDBs, shipped only in `-symbols.zip`) `-Dtic=<Git's tic.exe> -Dversion-string=<zon>-win.<N> -Dconpty-dir=<arch dir>`, an explicit `-Dtarget`, `-j4`, and `ZIG_GLOBAL_CACHE_DIR` set to a neutral folder so the user name stays out of the files.
 - Local builds always `-j4` through the test-lock (DECISIONS).
 
 ## 4. Bindings package `pkg/win32` (D6)
@@ -592,31 +592,61 @@ M2 adds a per-user pipe (name in §18.5) served by the same IPC thread for `+new
 `--working-directory`) forwards `new_window` to the running instance and exits; any other argument starts a separate
 process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` pattern).
 
-## 13. Packaging (M6)
-- Portable zip `ghostty-<ver>-windows-<arch>.zip`: `ghostty.exe`, `tmux.exe`, `share\ghostty\…` (themes, shell-integration,
-  terminfo source), `share\terminfo\…`, `LICENSE`, `README-windows.txt`. Resources found via existing `resourcesdir.zig`.
-- Inno Setup (`dist/windows/installer/ghostty.iss`): per-user install default (`{localappdata}\Programs\Ghostty`), Start
-  Menu shortcut with AUMID `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut,
-  Explorer "Open Ghostty here" (as built in M5, R-M5-5, written by `+install-explorer-integration`; the installer writes the same
-  keys): HKCU `Software\Classes\{Directory,Directory\Background,Drive}\shell\GhosttyOpenHere` with `(default)` = `Open Ghostty here`,
-  `Icon` = `"<exe>",0` and `command\(default)` = `"<exe>" "--working-directory=%V\."` (the `\.` keeps a drive root's backslash
-  away from the closing quote; `Overrides.parse` normalises it with `GetFullPathNameW`). The uninstaller removes exactly these three keys
-  (what `+uninstall-explorer-integration` does: only keys whose command starts with `"` and names `ghostty.exe`). Windows 11 shows the
-  entry under "Show more options" only; the top-level menu needs package identity (out of scope). No PATH change.
-- The Start Menu shortcut must carry `PKEY_AppUserModel_ID` = `com.mitchellh.ghostty.windows-unofficial` (the Debug build uses
-  `...windows-unofficial-debug`; `src/os/windows_explorer.zig` defines it once). Without it the jump list (R-M5-4) shows only on a
-  pin made from a running window, and toasts do not group under the shortcut.
-- Release scheme (R-M5-9a, amended in M5): releases may be **pre-releases**. `build.zig.zon` keeps upstream's version; fork releases build
-  with `-Dversion-string=<zon>-win.<N>` (for example `1.3.2-dev-win.3`) and are tagged `win-<zon>-<N>` (for example `win-1.3.2-dev-3`),
-  `N` a fork-wide counter that never resets. The update check (R-M5-9) compares only `N`, read from the `-win.<N>` suffix of
-  `build_config.version`. M6 hand-over: the tag check in `src/build/Config.zig` (the `vX.Y.Z format matching build.zig` panic for a
-  git-detected tag) must accept `win-` tags, or the release workflow must always pass `-Dversion-string`.
+## 13. Packaging (M6, as built)
+- Artifacts (R-M6-3): per arch (`x64`, `arm64`) `ghostty-<ver>-windows-<arch>.zip`, `...-setup.exe`, `...-symbols.zip`
+  (`ghostty.pdb`, `tmux.pdb`), plus one `SHA256SUMS.txt`: 6 artifacts + sums. `<ver>` is the `-Dversion-string`.
+- Portable zip: one top folder `ghostty-<ver>-windows-<arch>/` with `ghostty.exe`, `tmux.exe`, `conpty.dll`, `OpenConsole.exe`,
+  `share\` (allowlist: `ghostty`, `terminfo`, `bash-completion`, `fish`, `zsh`, `vim`, `nvim`, `bat`, `man`; the compiled
+  `share\terminfo\78\xterm-ghostty` is required), `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `README-windows.txt`; no PDBs.
+  Resources found via existing `resourcesdir.zig`.
+- Inno Setup (`dist/windows/installer/ghostty.iss`, built by `installer/build.ps1`), R-M6-4: per-user only
+  (`PrivilegesRequired=lowest`, `{autopf}\Ghostty` = `%LOCALAPPDATA%\Programs\Ghostty`; per-machine is a v1.0 gap), fixed
+  `AppId={{37134A5A-16BD-4127-9CC0-134E0CF32BA5}`, `MinVersion=10.0.17763`, English, no licence page. Start Menu shortcut with AUMID
+  `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut (`desktopicon`, unticked), optional task `explorer`
+  (unticked): after install `{app}\ghostty.exe +install-explorer-integration` runs hidden; a failure warns and does not fail Setup.
+  Explorer "Open Ghostty here" (R-M5-5) keys: HKCU `Software\Classes\{Directory,Directory\Background,Drive}\shell\GhosttyOpenHere`
+  with `(default)` = `Open Ghostty here`, `Icon` = `"<exe>",0` and `command\(default)` = `"<exe>" "--working-directory=%V\."`
+  (the `\.` keeps a drive root's backslash away from the closing quote; `Overrides.parse` normalises it with `GetFullPathNameW`).
+  Windows 11 shows the entry under "Show more options" only (the top-level menu needs package identity). No PATH change.
+  `[InstallDelete]` drops `{app}\share\ghostty\themes` and `...\shell-integration` before copying (never `{app}\*`).
+- Running Ghostty (guards, `[Code]`): tray window class `GhosttyTray` (one `#define`, checked against `tray.zig`).
+  `PrepareToInstall` asks Retry/Cancel while it exists; a silent install fails there (exit code 7, nothing changed).
+  `InitializeUninstall` does the same before `[UninstallRun]` (silent: exit 1). `CloseApplications=no` (the Restart Manager step
+  comes after `PrepareToInstall` and would never be reached).
+- Uninstall: `[UninstallRun]` always runs `{app}\ghostty.exe +uninstall-explorer-integration --all --only-this-exe`
+  (hidden, `RunOnceId: ExplorerRevert`). `--only-this-exe` (R-M6-5) removes a verb key only when its `command\(default)` names this
+  exe (full paths after `GetFullPathNameW`/`GetLongPathNameW`, `CompareStringOrdinal` ignoring case), so a portable copy's verbs
+  stay; `--all` also removes the AUMID key and toast icon. No `[UninstallDelete]`; the config is never touched.
+- The `/DGhosttyTest` variant (`...-setup-test.exe`, own AppId, `%TEMP%\GhosttyTestInstall`, no uninstall entry, no shortcuts, no
+  Explorer step) is for `installer-test` only; the running-Ghostty guards are compiled into it (they write nothing).
 - Toasts (ruling): Ghostty itself registers the AUMID under `HKCU\Software\Classes\AppUserModelId\<AUMID>`
   (`DisplayName`, `IconUri`) on first notification and calls `SetCurrentProcessExplicitAppUserModelID`, so the portable
-  zip gets toasts too; the uninstaller removes the key.
-- Version resource fields from `build_config.version` (generated `.rc` include), product name "Ghostty — Unofficial Windows port".
-- CI (GitHub Actions): `windows-latest` x64 build + tests; ARM64 cross-build on x64 and tests on `windows-11-arm`;
-  release workflow on tag `win-<zon>-<N>` (R-M5-9a; not `v*`) uploads zip + installer for both arches as a GitHub pre-release.
+  zip gets toasts too; the uninstaller removes the key. The Debug build uses `...windows-unofficial-debug`;
+  `src/os/windows_explorer.zig` defines the AUMID once and `package.ps1` checks the `.iss` against it.
+- Version (R-M5-9a, R-M6-1/2): `build.zig.zon` keeps upstream's version; releases build with
+  `-Dversion-string=<zon>-win.<N>` (for example `1.3.2-dev-win.3`) and are tagged **`win-<zon>-<N>`** (annotated, by the
+  owner, pinned to the built SHA), `N` a fork-wide counter from 1 that never resets or repeats. A `win-` git tag is ignored by the
+  `Config.zig` tag check (falls through to the dev version); the `-win.` rule applies to the raw `-Dversion-string` (must end in
+  `-win.<N>`, `N` canonical and <= 65535, no `+build`). The update check compares only `N`. Both exes carry a VERSIONINFO
+  resource (`dist/windows/versioninfo.rc`; `FILEVERSION` = `major,minor,patch,N`, `VS_FF_PRERELEASE`, product name
+  "Ghostty — Unofficial Windows port", no company name).
+- Local release script (R-M6-6/7, owner decision: no CI in M6): `dist/windows/release.ps1 -N <N> -ConptyPackage <nupkg>`
+  validates (clean tree, HEAD on `origin/windows`, `N` above every local `win-*` tag, RAM gate), runs the unit-test groups,
+  builds x64 (`x86_64-windows-msvc`) and ARM64 (R-M6-11), calls `package.ps1`, verifies, writes `release-notes.md` and **prints**
+  the `git tag`, `git push`, `gh release create --prerelease --draft --verify-tag` and `gh release edit --draft=false` lines
+  into `publish.txt`; it executes none of them. `-Rehearsal -N 0` marks them "do not run". Runbook: `docs/windows/RELEASING.md`.
+- Signing hook (R-M6-8): artifacts are unsigned. `-SignCommand '<command with {file}>'` signs `ghostty.exe`, `tmux.exe` (in the
+  stage, before zipping) and, through ISCC `/DSign`, `setup.exe` and the uninstaller; never `conpty.dll`/`OpenConsole.exe`.
+  `package.ps1 -FromZip` repackages an existing zip for later signing.
+- Bundled ConPTY (R-M6-12): `conpty.dll` + `OpenConsole.exe` from NuGet `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (MIT),
+  per arch, next to `ghostty.exe` (`-Dconpty-dir`); version, SHA-256 and the Microsoft Authenticode signature are checked in the
+  preflight and again when packaging; `windows-conpty = inbox` is the fallback.
+- Third-party notices (R-M6-10): `THIRD_PARTY_NOTICES.txt` at the zip root and in the install dir; `third-party-check.ps1` fails
+  packaging when a dependency, a toolchain runtime of the arch or `microsoft/terminal` has no section.
+- Unsigned (R-M6-9): SmartScreen shows "Unknown publisher" (More info, Run anyway); Smart App Control blocks the build with no
+  override ("not supported with Smart App Control on").
+- No GitHub Actions workflow in M6 (the owner's minutes are exhausted; upstream workflows stay untouched and are switched
+  off in the fork's settings). A `workflow_dispatch`-only `windows-ci.yml` with ARM64 unit tests is a backlog line.
 
 ## 14. RAM budget
 Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CONFIG_HOME` pointing at a temp config
@@ -699,8 +729,8 @@ Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas ini
 | R12 | Git Bash `bash -c` (R2) mangles Windows env/paths for teammates | Pass Windows paths only inside quoted args; e2e test covers it; built-in parser path also tested; owner may flip R2 order. |
 | R13 | Font discovery cost (O(files) per query) and wrong styles | M1 index + ranking; M3 DirectWrite. |
 | R14 | RAM budget missed due to GPU driver UMD | Measure in M1 on hardware + WARP; shared device; report per-adapter numbers; owner decides if target moves. |
-| R15 | MSVC toolchain/ARM64 libs on CI | R3 MSVC; GitHub images ship VS Build Tools with ARM64; fallback `-gnu` noted. |
-| R16 | Unsigned binaries + named pipes trigger SmartScreen/AV | Accepted (DECISIONS); README documents it; no code injection/hooks used. |
+| R15 | MSVC toolchain/ARM64 libs on CI | Outcome (M6): no CI; releases are built locally (R-M6-6). ARM64 uses `aarch64-windows-gnu`, which needs no VS ARM64 component (R-M6-11); `-Arm64Abi msvc` once installed. |
+| R16 | Unsigned binaries + named pipes trigger SmartScreen/AV | Accepted (DECISIONS); no code injection/hooks used. Outcome (M6): README, release notes and CHANGELOG say it; Smart App Control blocks the unsigned build with no override ("not supported with Smart App Control on"); signing hook in place, no certificate (R-M6-8, R-M6-9). |
 | R17 | Low-RAM dev machine | Builds `-j4` via test-lock only; tasks verify with focused filters. |
 
 ## 17. Milestones
@@ -786,9 +816,10 @@ update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), cr
 Windows analogs of macOS-only actions (`secure_input`, `undo`/`redo`), on-screen keyboard.
 Exit: each feature has a test or scripted screenshot; update check tested against a fake release JSON.
 
-**M6 — packaging, CI, release.** Zip + Inno Setup (x64 + ARM64), version resource, GitHub Actions (build + tests on x64
-and `windows-11-arm`, release on tag), pre-release published, v1.0 gate of DECISIONS (feature checklist closed, RAM rows,
-Claude Code run, owner smoke). Exit: owner sign-off.
+**M6 — packaging and release (in progress; plan `docs/windows/plans/M6-release.md`; "done" is recorded by Task 11).** Zip + Inno Setup
+(x64 + ARM64), version resource, third-party notices, bundled ConPTY, a local release script that prints the publish commands
+(no CI: R-M6-6), pre-release published by the owner, v1.0 gate of DECISIONS (feature checklist closed, RAM rows, Claude Code run,
+owner smoke). Exit: owner sign-off.
 
 ## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
 1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
@@ -1168,3 +1199,24 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     - R-M5-16, `split-many` teardown gates are 100 ms on ReleaseFast and 150 ms on Debug; 112 ms was measured once on ReleaseFast. Cost if wrong: Debug teardown regressions up to 150 ms go unflagged.
     - R-M5-17, `windows-conpty = auto` is the default: inbox console for MSYS2/Cygwin programs (the bundled one loses the first key after a pty resize there), bundled otherwise; Kitty graphics and SGR 58 therefore do not work in Git Bash. A time-boxed input hold-back was ruled out by timing evidence. Cost if wrong: Git Bash users miss graphics, or MSYS2 loses keys if `bundled` is forced.
     - R-M5-18, the 50 MB Debug `stream-integrity` run (never finished since M1) and the per-feature RAM rows (no `measure-ram.ps1` recipes) are documented limits, not blockers; ReleaseFast passes the stream in 42 s.
+    - M6 rulings (plan-m6 and lead, 2026-10-28; the owner may overturn; full text in `docs/windows/plans/M6-release.md`):
+      - R-M6-1, versions: a `win-` git tag is treated like `tip` by the `Config.zig` tag check; the release version comes only from
+        `-Dversion-string=<zon>-win.<N>`; the raw text must end in `-win.<N>` (`N` canonical, <= 65535, no `+build`) or the build fails
+        naming the value. Cost if wrong: one `switch` arm and one text check.
+      - R-M6-2, version resource: one `versioninfo.rc` for `ghostty.exe` and `tmux.exe` (numeric literals, no `winver.h`); no `CompanyName`;
+        `tmux.exe` still imports only kernel32/ntdll/advapi32 (the M5 SID check needs advapi32; the allowlist was amended in M6).
+      - R-M6-3, artifacts: six artifacts + `SHA256SUMS.txt`; zip with one top folder; `-Dstrip=false` for PDBs in `-symbols.zip` only. Cost
+        if wrong: the default strip and no symbols.
+      - R-M6-4, installer: per-user only, running-Ghostty guards in `PrepareToInstall`/`InitializeUninstall` (Retry/Cancel; silent setup
+        exit 7), `CloseApplications=no`, `/DGhosttyTest` variant for the e2e. Cost if wrong: the owner closes Ghostty by hand before an upgrade.
+      - R-M6-5, `+uninstall-explorer-integration --only-this-exe`: a verb counts as ours only if it names this exe.
+      - R-M6-6, local release path, no CI (owner: Actions minutes exhausted); upstream workflows untouched; ARM64 unit tests are an
+        owner check and never block; `workflow_dispatch`-only `windows-ci.yml` is a backlog line.
+      - R-M6-7, release: tag `win-<zon>-<N>`, `N` from 1 and never reused; `release.ps1` prints, the owner runs; draft first, then published.
+      - R-M6-8, signing hook without a certificate; `-SignCommand` never touches the Microsoft ConPTY files.
+      - R-M6-9, v1.0 gaps: per-machine install, MSIX/top-level menu, winget/scoop, signing (Smart App Control blocks the unsigned build, no
+        override), ARM64 automated tests, jump-list removal on uninstall.
+      - R-M6-10, third-party notices with full licence texts, checked at packaging.
+      - R-M6-11, ARM64 release ABI `aarch64-windows-gnu` (amends R3; owner sign-off pending). Cost if wrong: add the VS ARM64 component
+        (admin, once) and pass `-Arm64Abi msvc`.
+      - R-M6-12, bundled ConPTY ships (owner approval 2026-10-28), package 1.25.260930003, signature and hashes checked.

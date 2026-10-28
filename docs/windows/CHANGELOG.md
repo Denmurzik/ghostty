@@ -361,3 +361,72 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
 
 See `docs/windows/plans/M5-windows-extras.md` ("M5 exit checklist"). RAM and latency rows, the import check and the ARM64
 cross-build are recorded by the M5 acceptance commit.
+
+## M6 — packaging and release
+
+### What ships
+
+A release is a GitHub **pre-release** with six artifacts and one checksum file. `<arch>` is `x64` or `arm64`; `<version>` is
+`<zon>-win.<N>` (for example `1.3.2-dev-win.3`).
+
+| File | Content |
+| --- | --- |
+| `ghostty-<version>-windows-<arch>.zip` | portable: one top folder with `ghostty.exe`, `tmux.exe`, `conpty.dll`, `OpenConsole.exe`, `share\` (themes, shell integration, terminfo), `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `README-windows.txt`; no PDBs |
+| `ghostty-<version>-windows-<arch>-setup.exe` | per-user Inno Setup installer with the same files |
+| `ghostty-<version>-windows-<arch>-symbols.zip` | `ghostty.pdb` and `tmux.pdb` for crash dumps; never installed |
+| `SHA256SUMS.txt` | checksums of all of the above |
+
+- **Install.** The installer is per-user only: `%LOCALAPPDATA%\Programs\Ghostty`, no administrator prompt. It adds a Start Menu
+  shortcut with the app id `com.mitchellh.ghostty.windows-unofficial` (jump list and toasts group under it), an optional desktop
+  shortcut and an optional "Open Ghostty here" Explorer entry (unticked by default; the same keys as
+  `+install-explorer-integration`). It changes no PATH. Upgrading over a previous install replaces the files and drops files
+  Ghostty owns that the new version no longer has (`share\ghostty\themes`, `share\ghostty\shell-integration`).
+- **Ghostty running.** Setup and the uninstaller refuse to touch a running Ghostty (a window or the tray icon): they ask to close
+  it, with Retry and Cancel. A silent setup exits with code 7 and changes nothing; a silent uninstall exits with 1.
+- **Portable.** Extract the zip anywhere and run `ghostty.exe`; nothing is written outside the folder, the config and
+  `%LOCALAPPDATA%\ghostty`. Resources are found next to the exe.
+- **Uninstall.** Removes the installed files, the Start Menu shortcut, the Explorer verbs that name this `ghostty.exe` (a portable
+  copy's verbs stay: `--only-this-exe`), the app id registration and the toast icon. It never touches your config
+  (`%USERPROFILE%\.config\ghostty`) or `%LOCALAPPDATA%\ghostty`.
+- **Version.** `build.zig.zon` keeps upstream's version; the fork's releases are built with `-Dversion-string=<zon>-win.<N>`
+  and tagged `win-<zon>-<N>`. `N` starts at 1, counts across the whole fork and is never reused; a bad release loses its GitHub
+  release but keeps its tag. Both exes carry a version resource (`FILEVERSION` = `major.minor.patch.N`, product name
+  "Ghostty — Unofficial Windows port"). The update check compares only `N`; `auto-update = off` turns it off and
+  `auto-update-channel = stable` skips pre-releases.
+- **Bundled console.** The package holds Microsoft's `conpty.dll` and `OpenConsole.exe` (1.25.260930003, MIT, Microsoft
+  signature checked at packaging), used by default (`windows-conpty = bundled`): Kitty graphics and SGR 58 work. The MSYS2
+  first-key caveat of the bundled console: see M5 above and "Known limitations" below. <final decision: dbg-e2e fix landed or
+  caveat documented>
+- **Third-party notices.** `THIRD_PARTY_NOTICES.txt` lists the licence of every library, font, colour scheme, Zig package,
+  toolchain runtime and the bundled console that ends up in the files. Packaging fails if a dependency has no section.
+- **Release path.** The owner's GitHub Actions minutes are used up, so a release is built locally by `dist/windows/release.ps1`
+  (steps in `docs/windows/RELEASING.md`). The script runs the three unit-test groups and the tmux shim tests, builds x64 and
+  ARM64, packages, verifies and prints the `git tag`, `git push` and `gh release create --prerelease --draft` commands into
+  `publish.txt`; it publishes nothing itself. Build flags: ReleaseFast, `-Dstrip=false` (PDBs), `-j4`, a neutral global cache
+  folder so no user name reaches the files.
+- **Signing hook.** `release.ps1 -SignCommand '<command with {file}>'` signs `ghostty.exe`, `tmux.exe`, `setup.exe` and the
+  uninstaller; the Microsoft ConPTY files keep their own signature. There is no certificate yet.
+- **ARM64** is cross-built with `aarch64-windows-gnu` (MinGW C runtime and libc++ instead of the VC runtime), because the
+  owner's machine has no MSVC ARM64 tools. `release.ps1 -Arm64Abi msvc` switches back after the Visual Studio ARM64 component
+  is installed. ARM64 checks never block a release; `-Arm64TestExe` builds a test exe for an ARM64 device.
+
+### Gaps of v1.0
+
+- **Unsigned builds.** Windows SmartScreen shows "Unknown publisher" on downloaded files (More info, Run anyway). Not
+  supported with Smart App Control on: Smart App Control blocks the setup and the exe outright, with no "Run anyway". It is on
+  by default on clean Windows 11 22H2+ installs, and turning it off is a one-way switch in Windows Security.
+- Per-machine (all users) install; a PATH entry for external tmux mode (documented instead).
+- MSIX and the Windows 11 top-level context menu entry; winget and scoop manifests.
+- ARM64: no automated unit tests (an owner check on a device); the backlog line below would close it.
+- Uninstall does not delete the jump list (Explorer drops it with the shortcut).
+- The installer's Retry button (running-Ghostty guard) is covered by a manual check only.
+
+### Backlog
+
+- An optional `workflow_dispatch`-only `windows-ci.yml` with ARM64 unit tests on `windows-11-arm`. Standard runners are
+  normally free for public repositories, so this can return after v1.0; the release path stays local.
+
+### Acceptance
+
+<rehearsal: Task 9 results (artifact list, sizes, unit-test counts per group, e2e `package-portable` and `installer-test`,
+RAM and latency rows of Task 11, ARM64 outcome) go here>

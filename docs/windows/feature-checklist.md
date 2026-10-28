@@ -125,6 +125,16 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | About dialog (palette, tray, tab menu; version, icon) | M5 | unit: about.zig, palette tests; icon and centring are a GUI check | done (GUI check pending) |
 | `window-step-resize`, `initial-window = false`, `window-subtitle`, `bell-audio-volume`, `auto-update-channel` | M5 | unit: step_resize.zig, title_rules, bell PCM scaling, update/release.zig; e2e/initial-window (PENDING first run) | done (e2e pending) |
 | Undo polish: split follows config on unpark, taskbar progress restored, popups follow the window, parked windows render nothing | M5 | unit: win32 undo, tab, window, taskbar tests; GUI checks (progress after undo, popup order) in the Task 19 batch | done (GUI check pending) |
+| Portable zip per arch (one top folder, `ghostty.exe`, `tmux.exe`, `conpty.dll`, `OpenConsole.exe`, `share\`, licence, notices, README; no PDBs), runs with Mark of the Web from a path with a space and a Cyrillic letter | M6 | e2e/package-portable (`GHOSTTY_E2E_PACKAGE`); package.ps1 verification. <rehearsal: result on the final zip> | done (final zip pending) |
+| Inno Setup installer, per-user: shortcut with AUMID, optional desktop shortcut and Explorer entry, upgrade drops stale `themes`/`shell-integration` files, uninstall reverts with `--all --only-this-exe`, config untouched | M6 | e2e/installer-test (`GHOSTTY_E2E_SETUP`, test variant: files, upgrade, uninstall against an app hive) | done (the real installer's HKCU/Start Menu writes: manual) |
+| Installer refuses while Ghostty runs (setup and uninstaller; silent setup exits 7, silent uninstall exits 1) | M6 | e2e/installer-test asserts the exit codes; the Retry/Cancel dialog | done (silent) / manual (Retry click) |
+| Per-machine (all users) install | M6 | R-M6-9 | gap |
+| Version resource in `ghostty.exe` and `tmux.exe` (`FILEVERSION` = major.minor.patch.N, pre-release flag, product name), `win-` tags and the `-win.<N>` rule | M6 | unit: windows_version.zig (`zig build test -Dtest-filter="windows version"`); package.ps1 checks both exes | done |
+| Local release script (`release.ps1`: version and tree validation, RAM gate, unit-test groups, x64 + ARM64 builds, packaging, notes, printed publish commands, signing hook) | M6 | `release.ps1 -SelfTest`; `-DryRun`; <rehearsal: `-Rehearsal -N 0` full run> | done (rehearsal pending) |
+| `THIRD_PARTY_NOTICES.txt` with every shipped component and full licence text | M6 | `third-party-check.ps1` (run by package.ps1) passes for x64 and arm64 | done |
+| Bundled ConPTY shipped per arch, Microsoft signature and SHA-256 checked at preflight and packaging | M6 | package.ps1 verification; e2e/package-portable (OpenConsole.exe runs from the folder) | done (final package pending) |
+| ARM64 artifacts (`aarch64-windows-gnu`) | M6 | cross-build; unit tests are an owner check on a device (`-Arm64TestExe`) | manual |
+| Code signing; Smart App Control compatibility; MSIX; winget/scoop; Windows 11 top-level Explorer menu | M6 | R-M6-9 | gap |
 
 ## Notes
 

@@ -422,9 +422,28 @@ loopback release server), `e2e/_selftest-clipboard.ps1` (clipboard save and rest
   from a path with a space and a Cyrillic letter. Input: `GHOSTTY_E2E_PACKAGE=<zip>`. It checks `+version`, `+list-themes`, a cmd
   session with the folder's resources, `TERM` and `tmux.exe`, the bundled `OpenConsole.exe` running from the folder, a clean close,
   a moved `share\` (TERM falls back with one warning) and no writes into the folder. A SKIP counts as a FAIL here.
-- `installer-test` (milestone M6, M6 Task 7, in progress): installs the per-user Inno Setup test variant into a sandbox and
-  checks files, shortcut, uninstall and the running-Ghostty guard. Not in the tree at the time of writing; the Retry button of the
-  guard is a manual check.
+- `installer-test` (milestone M6, order 1001): see "M6 scenarios" below.
+
+### M6 scenarios (milestone M6)
+
+`e2e.ps1 -Milestone M6` runs `package-portable` (order 1000) and `installer-test` (order 1001). Both take their input from the
+environment and SKIP when it is missing; **a SKIP counts as a FAIL for the M6 acceptance** (and so does any SKIP that needs the
+lead's input: a SKIP with the lead's input = FAIL).
+
+- `package-portable`: `GHOSTTY_E2E_PACKAGE=<ghostty-...-windows-x64.zip>` (an arm64 zip is refused on an x64 host). See the entry above.
+- `installer-test`: `GHOSTTY_E2E_SETUP=<ghostty-...-setup-test.exe>`, the `/DGhosttyTest` variant built by
+  `dist/windows/installer/build.ps1`. Optional `GHOSTTY_E2E_STAGE_ZIP=<package zip>` for an exact file-list comparison. It installs
+  into a sandbox folder (Cyrillic letter and space), upgrades over it, seeds an application hive (`GHOSTTY_WIN32_TEST_HIVE`) with
+  the verbs of the installed exe and an AUMID key, uninstalls, and checks that the hive is empty, the user's files stay and the
+  real HKCU, Start Menu and uninstall list are unchanged (read-only snapshots). With a scenario-launched Ghostty running, a silent
+  setup (exit 7) and a silent uninstall (exit 1) must fail and change nothing; a foreign `GhosttyTray` window is a FAIL, not a SKIP.
+  The interactive Retry click is a manual check.
+
+**Installer safety rule.** On the owner's machine only the `/DGhosttyTest` installer is ever run by a script. It has its own
+AppId, installs into `%TEMP%\GhosttyTestInstall`, writes no uninstall entry and no shortcuts, and its Explorer step is absent. The
+real `...-setup.exe` is run only by hand, never by a scenario; no scenario touches the real `HKCU\Software\Classes` or the
+real Start Menu. Packaging scripts never publish `package.log` or `release.log` and never print the Windows user name
+(the paths are `%USERPROFILE%` and `%LOCALAPPDATA%`).
 
 ### Headless shell integration check (`shell-marks/run.ps1`)
 
