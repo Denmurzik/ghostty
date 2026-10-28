@@ -3886,7 +3886,12 @@ else
 /// When enabled, a second private pipe is opened that any process of the
 /// same user can ask to run tmux commands; only enable it when a tool
 /// needs it. `tmux.exe` is found outside Ghostty only if its directory is on
-/// `PATH`. A restart is needed for a change to take effect.
+/// `PATH`. A reload opens or closes the pipe at once.
+///
+/// `tmux.exe` finds the pipe by the instance class of its own build; for a
+/// Ghostty with another `class` (or a Debug Ghostty driven by a Release
+/// `tmux.exe`) set `GHOSTTY_TMUX_CLASS` to that class in the environment of
+/// the tool.
 ///
 /// This only applies to Windows.
 @"windows-tmux-external": bool = false,

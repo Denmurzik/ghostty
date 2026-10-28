@@ -283,9 +283,11 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
 ### Config
 
 - `windows-jump-list = true|false` (default `true`, Windows only).
-- `windows-tmux-external = true|false` (default `false`, Windows only, needs a restart). It opens a second private pipe that
+- `windows-tmux-external = true|false` (default `false`, Windows only; a reload opens or closes the pipe). It opens a second private pipe that
   any process of your user can ask to run tmux commands, which relaxes the M2 rule that nothing but Ghostty's own CLI may do
   so; enable it only for a tool that needs it. Put the Ghostty folder on `PATH` so `tmux.exe` is found outside Ghostty.
+  `tmux.exe` picks the pipe by the instance class of its own build; for a Ghostty with another `class` set `GHOSTTY_TMUX_CLASS`
+  in the environment of the tool.
 - `undo-timeout`: default `5s` on Windows, like macOS. The default binds are `ctrl+shift+z` = `undo` and `ctrl+shift+y` =
   `redo` (`ctrl+shift+t` is already `new_tab` and `ctrl+z` belongs to the shell). The cost: for 5 s after a close, the
   closed tab's programs keep running (a dev server keeps its port), unlike Windows Terminal where they end at once. Set

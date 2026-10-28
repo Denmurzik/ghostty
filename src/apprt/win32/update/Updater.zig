@@ -469,7 +469,9 @@ fn evaluate(app: *App, config: *const Config) void {
             _ = win32.user32.KillTimer(app.msg_hwnd, messages.timers.msg_window.update);
             st.phase = .idle;
         },
-        .check => if (st.phase == .idle) {
+        // Only the process that owns the pipe checks on its own, so that two
+        // instances never announce the same release twice.
+        .check => if (st.phase == .idle and app.serving()) {
             const now_s = nowSeconds();
             // 60 s after the start; later when the last check is recent.
             var delay: i64 = first_check_ms;
