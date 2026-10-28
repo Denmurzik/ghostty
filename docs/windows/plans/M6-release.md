@@ -10,17 +10,20 @@
   - builds x64 and ARM64 ReleaseFast with `-Dversion-string`;
   - runs the headless unit filters through the test-lock;
   - packages the zips and installers and writes `SHA256SUMS.txt`;
-  - **prints** (never runs) the `git tag`/`git push`/`gh release create … --prerelease` commands for the owner;
+  - **prints** (never runs) the `git tag`/`git push`/`gh release create … --prerelease --draft` commands for the owner;
+- `THIRD_PARTY_NOTICES.txt` in the zip and the install dir (owner decision 1);
 - the v1.0 acceptance checklist, signed by the owner.
 
 A GitHub Actions workflow is optional, manual-only and never needed for a release (R-M6-6, Task 12).
 
 Exit (SPEC §17 M6): the owner signs the acceptance checklist (§ M6 exit checklist).
 
-**Revision 2 (plan-m6, 2026-10-28):** owner update (binding): the GitHub Actions minutes on the owner's account are exhausted.
-- The release path is local (R-M6-6, R-M6-7).
+**Revision 3 (plan-m6, 2026-10-28):** owner update (binding): the GitHub Actions minutes on the owner's account are exhausted, so the release path is local and CI is off the critical path (R-M6-6, R-M6-7).
 - The CI tasks of revision 1 became the local release script (Task 8) and a local rehearsal (Task 9).
-- A manual-only workflow is kept as an optional post-v1.0 Task 12.
+- An optional `workflow_dispatch`-only `windows-ci.yml` is Task 12; nothing depends on it.
+- ARM64 unit tests became an owner check.
+- The printed `gh release create` makes a draft pre-release.
+- The owner's answers to the open questions are recorded under "Owner decisions"; the third-party notices are a new Task 13.
 
 **Architecture:**
 - **Build.** A std-only helper `src/build/windows_version.zig` owns the version rules: `win-` tag handling, `-win.<N>` parsing, FILEVERSION and the generated `.rc` header. `Config.zig`, `GhosttyExe.zig` and `GhosttyTmuxShim.zig` call it. Its tests run in the main test exe.
@@ -161,8 +164,8 @@ Over budget: DONE_WITH_CONCERNS with numbers. If `-Dstrip=false` is the cause, R
 6. **Release binaries run on every target machine.**
    - Always an explicit `-Dtarget=<arch>-windows-msvc`: CPU baseline, never the build machine's native features.
    - The ARM64 MSVC cross-link needs the VS ARM64 libraries on the owner's machine (SPEC R15). `release.ps1` checks them up front and names the missing VS component.
-   - The ARM64 unit tests cannot run locally (R-M6-6).
-   - Tests: Task 9 (both arches build and package; `+version` of x64 only); owner ARM64 smoke.
+   - The ARM64 unit tests cannot run on this machine; they are an owner check (R-M6-6).
+   - Tests: Task 9 (both arches build and package; `+version` of x64 only); owner ARM64 test exe and smoke (non-blocking).
 
 ## Rulings (plan-m6, 2026-10-28; lead/owner may overturn; recorded in SPEC §18 by Task 10)
 
@@ -173,7 +176,8 @@ The owner's M6 decisions (binding, not re-asked):
 - signing is manual;
 - per-user installer with the AUMID shortcut, opt-in Explorer integration, terminfo, `tmux.exe`; uninstall reverts with `--all` and never touches the config;
 - the v1.0 checklist signed by the owner;
-- **(revision 2)** the release path is local, and a workflow, if any, is manual-only and not required.
+- **(revision 3)** the release path is local, and a workflow, if any, is `workflow_dispatch`-only and not required;
+- **(revision 3, answers to the open questions; see § Owner decisions)** a third-party notices file before v1.0; Inno Setup is installed per-user; per-machine install stays a gap; ARM64 checks do not block a release.
 
 - **R-M6-1 `src/build/Config.zig` ignores `win-` tags.**
   - Today a commit whose exact tag is not `tip` and not `v<zon>` panics the build (`tagged releases must be in vX.Y.Z format`) unless `-Dversion-string` is given.
@@ -198,7 +202,7 @@ The owner's M6 decisions (binding, not re-asked):
 - **R-M6-3 Artifacts and layout.**
   - Names: `ghostty-<version>-windows-<arch>.zip`, `ghostty-<version>-windows-<arch>-setup.exe`, `ghostty-<version>-windows-<arch>-symbols.zip`, and one `SHA256SUMS.txt` for all assets. `<arch>` is `x64` or `arm64`; `<version>` is the `-Dversion-string`.
   - The zip has one top folder `ghostty-<version>-windows-<arch>\`, so that extraction never spills files. Inside:
-    - `ghostty.exe`, `tmux.exe`, `LICENSE`, `README-windows.txt`;
+    - `ghostty.exe`, `tmux.exe`, `LICENSE`, `THIRD_PARTY_NOTICES.txt` (R-M6-10), `README-windows.txt`;
     - `share\` with the existing subfolders among `ghostty`, `terminfo`, `bash-completion`, `fish`, `zsh`, `vim`, `nvim`, `bat`, `man` (an allowlist; anything else the prefix has, e.g. Linux desktop files, is left out);
     - no `.pdb`.
   - Required, else packaging fails:
@@ -238,7 +242,7 @@ The owner's M6 decisions (binding, not re-asked):
     - Zig 0.17.0;
     - VS Build Tools with the x64 **and ARM64** MSVC libraries;
     - Git for Windows (`tic.exe`, `bash.exe`);
-    - Inno Setup 6.4+ (one-time per-user install by the owner, open question 2);
+    - Inno Setup 6.4+, already installed per-user (owner decision 2). Found at `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`, else `%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe` or `%ProgramFiles%\Inno Setup 6\ISCC.exe`. `$env:ISCC` overrides. None → the release stops with `ISCC.exe not found (looked in: <the three paths>); install Inno Setup 6 or set ISCC`;
     - `gh` logged in (used only by the owner, by hand).
   - **Unit tests** in `release.ps1`: three groups, each one test-exe compile through the test-lock, then `test-tmux-shim`. These are the M1–M5 exit filters, all headless:
     1. `-Dtest-filter="win32 "`;
@@ -246,15 +250,18 @@ The owner's M6 decisions (binding, not re-asked):
     3. `-Dtest-filter="terminal" -Dtest-filter="config" -Dtest-filter="input" -Dtest-filter="font"`.
 
     The groups are defined once, in `release.ps1`. Any failure stops the release.
-  - **ARM64:**
-    - Cross-built with `aarch64-windows-msvc`. Its unit tests are **not run**: there is no ARM64 machine, and no CI run is required. That is a v1.0 gap, covered by the owner's ARM64 smoke.
-    - If the VS ARM64 libraries are missing, `release.ps1` stops and names the VS component to add.
-    - `-Arm64Abi gnu` (SPEC R15, the target M2–M5 compiled) exists only as an explicit owner choice and is printed in the notes.
-  - **Optional workflow (Task 12, after v1.0, may be skipped).**
-    - One file, `.github/workflows/windows-manual.yml`, with `on: workflow_dispatch` **only** (no push, tag, schedule or PR triggers) and `permissions: contents: read` (it can never create a release).
+  - **ARM64** (owner decision 4: ARM64 checks never block a release):
+    - Cross-built locally with `aarch64-windows-msvc`. If the VS ARM64 libraries are missing, `release.ps1` stops and names the VS component to add. `-Arm64Abi gnu` (SPEC R15, the target M2–M5 compiled) is an explicit owner choice, printed in the notes.
+    - ARM64 unit tests are an **owner check**, because there is no ARM64 runner.
+      - With `-Arm64TestExe`, `release.ps1` builds one ARM64 test exe (`-Demit-test-exe`, groups 1+2 filters, `-Dtarget=aarch64-windows-msvc`) without running it.
+      - It zips that exe as `ghostty-<v>-windows-arm64-tests.zip`, local only and never published.
+      - The owner runs it on an ARM64 device. Exit 0 = PASS; a failure is recorded, not blocking.
+      - Task 8's implementer confirms the build path that installs the foreign test exe without trying to run it. If none exists, the owner check is the ARM64 smoke alone and the report says so.
+  - **Optional workflow (Task 12, may be skipped; nothing depends on it).**
+    - One file, `.github/workflows/windows-ci.yml`, with `on: workflow_dispatch` **only** (no push, tag, schedule or PR triggers) and `permissions: contents: read` (it can never create a release).
     - It runs `release.ps1 -Ci` on `windows-2025` plus the ARM64 unit groups on `windows-11-arm` (`continue-on-error`), and uploads the artifacts to the run.
-    - Ruling for the owner to overturn: standard GitHub-hosted runners are normally free for **public** repositories, so the exhausted minutes may not apply to this public fork. If the owner confirms that, Task 12 can be done, and its ARM64 test job closes the ARM64 gap. A release never depends on it.
-  - Upstream workflow files are not edited (clean merges). Their jobs ask for `namespace-profile-*` runners the fork does not have; the owner may disable them in the fork's Actions settings so they stop queueing.
+    - Ruling: standard GitHub-hosted runners are normally free for **public** repositories, so the exhausted minutes may not apply to this public fork. The owner may confirm this and later re-enable push triggers (a one-line change). The release path stays local either way.
+  - Upstream workflow files are not edited (clean merges). Their jobs ask for `namespace-profile-*` runners the fork does not have; the owner may disable them in the fork's Actions settings so that they stop queueing.
 - **R-M6-7 Release.**
   - **Tag** `win-<zon>-<N>`, annotated, created and pushed by the owner from the command `release.ps1` prints. The tag is pinned to the built commit's SHA. `N` starts at **1**, is fork-wide and never reused, even for a deleted release.
   - **Validation** (`dist/windows/release-version.ps1`, R-M5-9a rules) refuses when:
@@ -269,16 +276,17 @@ The owner's M6 decisions (binding, not re-asked):
     ```
     git tag -a win-<zon>-<N> <sha> -m "Ghostty <zon>-win.<N>"
     git push origin win-<zon>-<N>
-    gh release create win-<zon>-<N> --repo Denmurzik/ghostty --prerelease --verify-tag \
+    gh release create win-<zon>-<N> --repo Denmurzik/ghostty --prerelease --draft --verify-tag \
       --title "Ghostty <zon>-win.<N> (unofficial Windows port)" --notes-file <OutDir>\release-notes.md \
       <the 6 artifacts> <OutDir>\SHA256SUMS.txt
+    # after checking the draft page:
+    gh release edit win-<zon>-<N> --repo Denmurzik/ghostty --draft=false
     ```
-    plus a commented `--draft` variant for an owner who wants to look at the page first.
-  - **Order:** the owner smokes the **local** artifacts first (exit checklist 8), then runs the commands. The published pre-release is visible to the update check at once, because R-M5-9 reads pre-releases. That is why the smoke comes before the upload.
+  - **Order:** the owner smokes the **local** artifacts first (exit checklist 8), then runs the commands, checks the draft page and publishes. The update check ignores drafts and reads pre-releases (R-M5-9), so users see the release only after the last command.
   - **Notes** from `dist/windows/release-notes.md`:
     - the version, and "Windows port v1.0" when `-V1` is given;
     - the unsigned/SmartScreen note, install and portable notes;
-    - the unit-test counts per group, "ARM64: built, not tested (no ARM64 runner)";
+    - the unit-test counts per group, and "ARM64: built; unit tests are an owner check (no ARM64 runner)" with the owner's result if given;
     - the checksums.
   - `release_channel` stays `tip` for `-win.<N>` builds (semver pre-release). At this plan's base it only shows in `+version` on Windows. The M5 19.n batch 2 "update channel" item may give it a meaning; Task 1's implementer re-checks that the updater still looks only at `N` (R-M5-9a).
 - **R-M6-8 Signing hook, no certificate (gap).**
@@ -287,12 +295,15 @@ The owner's M6 decisions (binding, not re-asked):
   - The PDBs still match: signing does not change the code.
   - `package.ps1 -FromZip` re-signs an existing zip without a build, for a release that was already published unsigned. The owner then uses `gh release upload --clobber` and a regenerated `SHA256SUMS.txt`.
 - **R-M6-9 What M6 does not do** (v1.0 gaps, in the CHANGELOG):
-  - all-users install; a PATH entry for external tmux (documented instead);
+  - all-users (per-machine) install (owner decision 3); a PATH entry for external tmux (documented instead);
   - MSIX and the Windows 11 top-level context menu;
-  - a certificate; ARM64 unit tests (unless Task 12 runs);
+  - a certificate; automated ARM64 unit tests (an owner check, non-blocking; owner decision 4);
   - winget/scoop manifests;
-  - jump-list removal on uninstall (Explorer drops it when the shortcut is gone; the CLI has no COM, R-M5-5);
-  - a third-party notices file beyond `LICENSE` (open question 1).
+  - jump-list removal on uninstall (Explorer drops it when the shortcut is gone; the CLI has no COM, R-M5-5).
+- **R-M6-10 Third-party notices** (owner decision 1).
+  - `dist/windows/THIRD_PARTY_NOTICES.txt` ships at the zip root and in the install dir.
+  - It lists every component compiled, linked or embedded into the Windows `ghostty.exe`/`tmux.exe`, or shipped under `share` (e.g. the iTerm2 colour schemes), with its licence name and full licence text: fonts (JetBrains Mono, Nerd Fonts symbols), FreeType, HarfBuzz, zlib, libpng, oniguruma, simdutf, highway, wuffs, glslang, SPIRV-Cross, Dear ImGui, the Zig packages and the vendored `pkg/*` C sources.
+  - Packaging fails when a `build.zig.zon` dependency is neither in the file nor in the check's exclusion list. Each exclusion carries a reason, e.g. `gtk4_layer_shell: Linux only`.
 
 ## Waves (parallelism)
 
@@ -303,14 +314,14 @@ The owner's M6 decisions (binding, not re-asked):
 | W1 | 1 version helper + `win-` tags · 3 `--only-this-exe` · 4 `package.ps1` + `README-windows.txt` | M5 accepted, M5 19.n `Config.zig` landed (1); — (3, 4) |
 | W2 | 2 version resources · 5 Inno script + `installer/build.ps1` · 6 `package-portable.ps1` scenario | 1 (2); 3+4 (5); 4 (6) |
 | G1 | **Lead batch:** `RF -Dversion-string=<zon>-win.0`, `PS dist/windows/package.ps1 -Prefix zig-out-rf …`, `E2E -Only explorer-cli,package-portable,dpi-sim`; ISCC present → also the test installer | 2, 3, 5, 6 |
-| W3 | 7 `installer-test.ps1` scenario · 8 `release.ps1`, `release-version.ps1`, notes template, `RELEASING.md` | 5 (7); 2+4+5 (8) |
-| G2 | **Task 9 (lead):** `release.ps1 -Rehearsal` on the owner's machine, `E2E -Only package-portable,installer-test` on its output, 9.n fixes | 7, 8 |
+| W3 | 7 `installer-test.ps1` scenario · 8 `release.ps1`, `release-version.ps1`, notes template, `RELEASING.md` · 13 `THIRD_PARTY_NOTICES.txt` + check | 5 (7); 2+4+5 (8); 4 (13) |
+| G2 | **Task 9 (lead):** `release.ps1 -Rehearsal` on the owner's machine, `E2E -Only package-portable,installer-test` on its output, 9.n fixes (no CI run is a gate) | 7, 8, 13 |
 | W4 | 10 docs: CHANGELOG, SPEC, DECISIONS amendment line, feature checklist, test README (alone) | 9.* |
 | W5 | 11 release candidate, v1.0 acceptance, owner sign-off (lead + owner) | 10 |
-| opt | 12 manual-only workflow (only if the owner confirms R-M6-6's free-runner ruling) | 11 |
+| opt | 12 `workflow_dispatch`-only `windows-ci.yml` (any time after 8; no task or release depends on it) | 8 |
 
 Hot-file chains (every file touched by more than one task):
-- `dist/windows/package.ps1`: 4 → 9.n.
+- `dist/windows/package.ps1`: 4 → 13 → 9.n.
 - `dist/windows/installer/ghostty.iss`: 5 → 9.n.
 - `dist/windows/release.ps1`: 8 → 9.n → 12 (`-Ci` mode).
 - `test/windows/e2e.ps1` (`ValidateSet` += `M6`): 6 only.
@@ -327,7 +338,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   - With `-Installer`, calls `dist/windows/installer/build.ps1 -Stage <stage> -Version <v> -Arch <arch> -OutDir <OutDir> [-Test] [-SignCommand …]`.
   - Prints one `artifact: <path>` line per file. Exit 0, or 1 with the failed check.
 - `installer/build.ps1` (Task 5): the parameters above.
-  - Finds ISCC in order: `$env:ISCC`, PATH, `${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe`, `$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe`. None → exit 2 with `ISCC not found`.
+  - Finds ISCC in this order: `$env:ISCC`, `$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe` (the owner's install), `${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe`, `$env:ProgramFiles\Inno Setup 6\ISCC.exe`. None → exit 2 with the R-M6-6 message, which lists the paths it looked in.
   - Writes `ghostty-<v>-windows-<arch>-setup[-test].exe`.
   - `build.ps1 -Probe` only looks for ISCC: exit 0 and the path, or exit 2 (used by `release.ps1`'s preflight).
 - `release-version.ps1` (Task 8):
@@ -338,7 +349,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - `release.ps1` (Task 8):
   ```
   release.ps1 -N <int> [-Rehearsal] [-V1] [-OutDir <dir>] [-Force] [-SignCommand '<cmd {file}>']
-              [-Arm64Abi msvc|gnu] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
+              [-Arm64Abi msvc|gnu] [-Arm64TestExe] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
   ```
   - `-SkipTests` is refused without `-Rehearsal`.
   - `-DryRun` prints every step and command line and runs nothing heavy (preflight checks only).
@@ -517,8 +528,8 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Verify:**
   - the parse check and `-SelfTest`;
-  - if ISCC is on this machine: `ISCC /Q` compiles the release and the test variant from a Task 4 stage (an `-AllowNoTic` stage is fine). Install nothing;
-  - if ISCC is absent: report `ISCC absent: compile check moved to G1/Task 9`. Do not install Inno Setup without the owner (open question 2; a release needs it, R-M6-6).
+  - `build.ps1 -Probe` finds the owner's `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` (owner decision 2). With `$env:ISCC` set to a missing file, it exits 2 with the R-M6-6 message;
+  - ISCC compiles the release and the test variant, x64 and arm64, from a Task 4 stage (an `-AllowNoTic` stage is fine). Install nothing; delete the outputs.
 - [ ] **Step 4: Commit** `git commit -m "build(windows): per-user Inno Setup installer with AUMID shortcut and opt-in Explorer integration"`
 
 ### Task 6: e2e `package-portable.ps1` (milestone M6)
@@ -599,7 +610,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
      - free physical memory ≥ 3 GB (`Win32_OperatingSystem.FreePhysicalMemory`).
   2. **Unit tests:** the three groups of R-M6-6, then `test-tmux-shim`, each as `bash <lock> -- <zig> build test -j6 …` with a 1500 s timeout and the RAM check before it. The pass/skip/fail counts are parsed from the output and written to `tests.txt`.
   3. **Build x64:** `bash <lock> -- <zig> build -j6` with the R-M6-3 flags, `--prefix <OutDir>\prefix-x64`.
-  4. **Build arm64:** the same with `aarch64-windows-<abi>` and `--prefix <OutDir>\prefix-arm64`.
+  4. **Build arm64:** the same with `aarch64-windows-<abi>` and `--prefix <OutDir>\prefix-arm64`. With `-Arm64TestExe`, then the ARM64 test exe of R-M6-6, never run, zipped as `ghostty-<v>-windows-arm64-tests.zip`. It is not in `SHA256SUMS.txt` or `publish.txt`.
   5. **Package:** `package.ps1 -Prefix … -Installer -Symbols [-SignCommand …]` per arch, into `<OutDir>`.
   6. **Check:** `<OutDir>\prefix-x64\bin\ghostty.exe +version` prints the version.
   7. **Sums:** `SHA256SUMS.txt` (`Get-FileHash`, lower-case hex, two spaces, file name), written to a temp file and renamed when complete.
@@ -633,8 +644,8 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 
 **Files:** none planned. Each 9.n touches only the files its note names (the Task 4/5/8 files).
 
-- [ ] **Step 1:** If ISCC or the VS ARM64 component is missing, ask the owner (one-time setup, RELEASING.md 1) before going on.
-- [ ] **Step 2:** `PS dist/windows/release.ps1 -Rehearsal -N 0` (no `-SkipTests`), started with `run_in_background`. Record the wall time per step and the peak free-memory low point.
+- [ ] **Step 1:** If the VS ARM64 component is missing, ask the owner (one-time setup, RELEASING.md 1) before going on. ISCC is already installed (owner decision 2).
+- [ ] **Step 2:** `PS dist/windows/release.ps1 -Rehearsal -N 0 -Arm64TestExe` (no `-SkipTests`), started with `run_in_background`. Record the wall time per step and the lowest free memory seen.
 - [ ] **Step 3:** On its output:
   - `GHOSTTY_E2E_PACKAGE=<x64 zip>` `E2E -Only package-portable`;
   - build the test setup with `PS dist/windows/package.ps1 -FromZip <x64 zip> -Version <zon>-win.0 -Arch x64 -OutDir <scratch> -Installer -Test`, then `GHOSTTY_E2E_SETUP=<…-setup-test.exe>` `E2E -Only installer-test`;
@@ -652,7 +663,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   - §3: release flags with `-Dstrip=false`;
   - §16 R15/R16: the outcome;
   - §17 M6: plan link, then "done" in Task 11;
-  - §18: R-M6-1…9.
+  - §18: R-M6-1…10.
 - `docs/windows/DECISIONS.md`, "Release": one dated line, "2026-10-28 (owner): releases are built locally with `dist/windows/release.ps1`; GitHub Actions is optional and manual-only".
 - `docs/windows/feature-checklist.md`: rows for zip, installer, version resource, release script; every row `done`, `manual` or a gap.
 - `test/windows/README.md`: the M6 scenarios and their env (`GHOSTTY_E2E_PACKAGE`, `GHOSTTY_E2E_SETUP`) and the installer safety rule.
@@ -672,13 +683,13 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - [ ] **Step 5:** Record `docs/windows/m6/acceptance.md`; amend SPEC §17 (M6 done) and the CHANGELOG acceptance line. Commit `git commit -m "docs(windows): M6 acceptance — Windows port v1.0"`.
 - [ ] **Step 6 (owner):** push the `windows` branch, then run the commands in `publish.txt` (tag, push the tag, `gh release create … --prerelease`). Then the update-check line of the checklist.
 
-### Task 12 (optional, after v1.0): manual-only GitHub Actions workflow
+### Task 12 (optional): `workflow_dispatch`-only GitHub Actions workflow
 
-**Review:** opus (supply chain). Done only if the owner confirms R-M6-6's free-runner ruling. A release never waits for it.
+**Review:** opus (supply chain). Optional. No task, gate or release depends on it. It is useful once the owner confirms R-M6-6's free-runner ruling, because it gives automated ARM64 unit tests.
 
 **Files:**
 - Create:
-  - `.github/workflows/windows-manual.yml`;
+  - `.github/workflows/windows-ci.yml`;
   - `dist/windows/ci/install-zig.ps1` (download from `https://ziglang.org/download/0.17.0/`, a pinned SHA-256, append to `$env:GITHUB_PATH`; refuses outside `GITHUB_ACTIONS=true`);
   - `dist/windows/ci/installer-smoke.ps1` (refuses outside CI). It runs:
     1. the real silent install with `/TASKS="explorer,desktopicon"`;
@@ -700,12 +711,43 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Verify:**
   - parse checks, the self-tests;
-  - `git grep -n "^on:\|push:\|schedule:\|pull_request" .github/workflows/windows-manual.yml` shows only `workflow_dispatch`;
+  - `git grep -n "^on:\|push:\|schedule:\|pull_request" .github/workflows/windows-ci.yml` shows only `workflow_dispatch`;
   - the `uses:` lines are all `@<40 hex>`;
   - no `secrets.`.
 
   A real run needs the owner's push and dispatch.
 - [ ] **Step 4: Commit** `git commit -m "ci(windows): optional manual-only workflow with ARM64 unit tests and installer smoke"`
+
+### Task 13: `THIRD_PARTY_NOTICES.txt` and its coverage check
+
+**Review:** light (lead reads the licence list).
+
+**Files:**
+- Create:
+  - `dist/windows/THIRD_PARTY_NOTICES.txt`;
+  - `dist/windows/third-party-check.ps1`.
+- Modify `dist/windows/package.ps1`: stage the file at the zip root; add it to the required files; run the check before zipping.
+
+**Steps:**
+- [ ] **Step 1: Failing check.** `third-party-check.ps1 -RepoRoot .` → exit 1, because the file is missing.
+  - The check reads the dependency names of `build.zig.zon` (and of `pkg/*/build.zig.zon`).
+  - Each name must have a `== <name> ==` section in the notices file, or be in the script's exclusion table with a one-line reason.
+  - Its `-SelfTest` covers: a section present; an exclusion; a missing name → fail.
+- [ ] **Step 2: Decide what ships.** Find what the Windows exes really compile, link or embed:
+  - `src/build/SharedDeps.zig` and `GhosttyTmuxShim.zig` (`tmux.exe` is std only);
+  - the embedded fonts in `src/font/embedded.zig`;
+  - the `share` content (iTerm2 colour schemes).
+
+  Everything else goes in the exclusion table with its reason, for example: GTK/Wayland/fontconfig/`gtk4_layer_shell`/`libintl` Linux only; `macos`/`zig_objc`/`apple_sdk` macOS only; `android_ndk`; `zig_js`; `translate_c` build-time only; `sentry` if not linked on Windows.
+- [ ] **Step 3: Write the file** (UTF-8, no BOM):
+  - a header naming the port, Ghostty's own MIT licence pointer (`LICENSE`), and the date;
+  - then one section per component: name, version or commit (from `build.zig.zon`), upstream URL, licence name, and the full licence text copied from the fetched package (`zig-pkg`/the Zig cache) or from `src/font/res/{OFL,MIT}.txt`.
+  - It contains no local paths.
+- [ ] **Step 4: Verify:**
+  - parse checks; `-SelfTest`; the check passes on the repo;
+  - `package.ps1` on the Debug `zig-out` with `-AllowNoTic` → the zip has `THIRD_PARTY_NOTICES.txt` at its root;
+  - the Task 5 installer installs it automatically, because the stage is the source.
+- [ ] **Step 5: Commit** `git commit -m "docs(windows): third-party notices shipped in the zip and installer, with a coverage check"`
 
 ## M6 exit checklist (v1.0 gate; owner signs, PASS/FAIL per line)
 
@@ -722,7 +764,8 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 4. **Budgets.** The RC rows within § RAM and latency budget.
 5. **Claude Code.** The `claude-team.ps1` agent-team run passes against the RC (DECISIONS v1.0 gate).
 6. **Feature checklist** closed: every row done, manual or a documented gap (DECISIONS v1.0 gate).
-7. **ARM64.** Built and packaged (line 1). Unit tests: not run (gap R-M6-9), or green in the optional Task 12 run.
+7. **ARM64** (owner checks; recorded, never blocking — owner decision 4): built and packaged (line 1); the `-arm64-tests.zip` test exe run on an ARM64 device (exit code), or the optional Task 12 run, or N/A.
+7a. **Third-party notices.** `THIRD_PARTY_NOTICES.txt` is at the zip root and in the install dir; `third-party-check.ps1` passed in the release run (owner decision 1).
 8. **Owner manual checks** (x64, the owner's real account, on the local artifacts before publishing):
    - **Install.** The setup runs without a UAC prompt; the SmartScreen warning is as documented; it installs to `%LOCALAPPDATA%\Programs\Ghostty`; there is a Start-menu entry; "Launch Ghostty" opens a window in `%USERPROFILE%`.
    - **Pin and toasts.** Pin from Start: the jump list shows New Window, New Tab and the profiles. Toasts show under "Ghostty" with the icon, and the running window groups with the pinned icon (AUMID).
@@ -733,7 +776,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
      - Kept: `%USERPROFILE%\.config\ghostty` and `%LOCALAPPDATA%\ghostty\logs`.
      - A portable copy's verbs (made with `+install-explorer-integration` from an extracted zip before the uninstall) are still there and point to the portable exe.
    - **Portable.** The zip runs from a path with spaces and from a USB/read-only folder; `+uninstall-explorer-integration --all` cleans up after it.
-   - **ARM64 smoke** (on an ARM64 device; else N/A recorded): the arm64 setup installs, Ghostty opens, Git Bash prompt, a split, `tmux.exe -V`, uninstall.
+   - **ARM64 smoke** (on an ARM64 device; else N/A recorded; not blocking): the arm64 setup installs, Ghostty opens, Git Bash prompt, a split, `tmux.exe -V`, uninstall.
    - **After publishing (Task 11 step 6):** the pre-release page shows the 7 assets, and the checksums match the local ones. A local ReleaseFast build with `-Dversion-string=<zon>-win.0` and `auto-update = check` shows the update toast for it, and the click opens the release page.
 9. **Docs.** CHANGELOG M6; SPEC §3, §13, §17, §18 R-M6-*; the DECISIONS line; RELEASING.md; README-windows.txt in the zip.
 10. **Gaps accepted by the owner:** R-M6-9.
@@ -751,8 +794,11 @@ Owner sign-off: name, date, tag, PASS/FAIL per line, decision (publish / fix and
   | Version resource (FILEVERSION/PRODUCTVERSION, ProductName, icon) in both exes | 1, 2 |
   | `-Dversion-string=<zon>-win.<N>`, tag `win-<zon>-<N>`, pre-release; `Config.zig` and `win-` tags | 1 (R-M6-1), 8 (R-M6-7) |
   | Update check sees the releases | R-M5-9 unchanged; smoke before the upload (R-M6-7); exit checklist 8 |
-  | **Local** release script: builds both, headless unit filters through the lock, zip + installers, SHA256, printed `gh release create … --prerelease` | 8 (R-M6-6/7), 9 |
-  | Workflow optional, manual-only, not required; free public runners as an overturnable ruling | R-M6-6, Task 12 |
+  | **Local** release script: builds both, headless unit filters through the lock, zip + symbols + installers, SHA256, tag rules, printed `git tag`/`git push`/`gh release create … --prerelease --draft` | 8 (R-M6-6/7), 9 |
+  | Workflow `workflow_dispatch` only, nothing depends on it; free public runners as an overturnable ruling | R-M6-6, Task 12 |
+  | ARM64 cross-built locally; ARM64 tests an owner check, non-blocking | R-M6-6, 8 (`-Arm64TestExe`), exit checklist 7 |
+  | Third-party notices in zip + installer | 13 (R-M6-10) |
+  | ISCC found in the owner's per-user path or Program Files, clear failure otherwise | 5 (`build.ps1 -Probe`), 8 (preflight) |
   | `GITHUB_TOKEN` only; signing hook, owner signs manually (gap) | R-M6-8, 4, 5, 8 |
   | Per-user, no admin; Start shortcut with AUMID | 5 (R-M6-4) |
   | Opt-in Explorer integration; uninstall reverts with `--all` | 3, 5 |
@@ -772,10 +818,11 @@ Owner sign-off: name, date, tag, PASS/FAIL per line, decision (publish / fix and
   | W2 | 6 | `e2e/package-portable.ps1`, `e2e.ps1` |
   | W3 | 7 | `e2e/installer-test.ps1` |
   | W3 | 8 | `release.ps1`, `release-version.ps1`, `release-notes.md`, `docs/windows/RELEASING.md` |
+  | W3 | 13 | `THIRD_PARTY_NOTICES.txt`, `third-party-check.ps1`, `package.ps1` |
   | W4 | 10 | CHANGELOG, SPEC, DECISIONS, feature checklist, test README |
-  | opt | 12 | `windows-manual.yml`, `ci/install-zig.ps1`, `ci/installer-smoke.ps1`, `release.ps1` (`-Ci`) |
+  | opt | 12 | `windows-ci.yml`, `ci/install-zig.ps1`, `ci/installer-smoke.ps1`, `release.ps1` (`-Ci`) |
 
-  No file is shared inside a wave. Cross-wave chains: `package.ps1` 4 → 9.n; `ghostty.iss` 5 → 9.n; `release.ps1` 8 → 9.n → 12. `src/build/Config.zig` follows the M5 19.n `tic` fix. `installer/build.ps1 -Probe`, used by Task 8, is part of Task 5's file (the interface says it exits 0/2 without compiling).
+  No file is shared inside a wave (Task 8 calls `package.ps1` but does not edit it). Cross-wave chains: `package.ps1` 4 → 13 → 9.n; `ghostty.iss` 5 → 9.n; `release.ps1` 8 → 9.n → 12. `src/build/Config.zig` follows the M5 19.n `tic` fix. `installer/build.ps1 -Probe`, used by Task 8, is part of Task 5's file (the interface says it exits 0/2 without compiling).
 - **Names defined once:**
 
   | Task | Names |
@@ -786,17 +833,23 @@ Owner sign-off: name, date, tag, PASS/FAIL per line, decision (publish / fix and
   | 4 | the `package.ps1` parameters |
   | 5 | the `AppId`s, `AppAumid`, the `GhosttyTest`/`Sign` defines, `build.ps1 -Probe` |
   | 8 | the `release.ps1`/`release-version.ps1` parameters, the unit groups, the notes placeholders, `publish.txt` |
-  | 12 | `windows-manual.yml` inputs |
+  | 12 | `windows-ci.yml` inputs |
+  | 13 | the notices section format `== <name> ==`, the exclusion table |
 - **Review Focus → tests:** 1 → Tasks 3, 7; 2 → owner checklist; 3 → Tasks 1, 4, 8, 9; 4 → Tasks 8, 9; 5 → Task 6; 6 → Task 9, owner checklist.
 - **Proportion:** the code blocks are signatures, interfaces and command lines only.
 - **Known risks:**
-  - A release needs ISCC and the VS ARM64 component on the owner's machine (one-time setup).
-  - A full `release.ps1` run is long (three test compiles, two ReleaseFast builds) on a 15.5 GB machine. The test-lock, the RAM checks and the step order keep it to one heavy step at a time.
-  - ARM64 is never unit-tested without Task 12.
+  - A release needs the VS ARM64 component on the owner's machine (one-time setup; `-Arm64Abi gnu` is the fallback that needs no VS change).
+  - A full `release.ps1` run is long (three test compiles, two ReleaseFast builds, optionally the ARM64 test exe) on a 15.5 GB machine. The test-lock, the RAM checks and the step order keep it to one heavy step at a time.
+  - ARM64 is unit-tested only by the owner on a device, or by the optional Task 12.
 
-### Open questions → recommended answers (owner)
+### Owner decisions (2026-10-28, binding; answers to revision 1's open questions)
 
-1. *Third-party notices:* the zip ships upstream's `LICENSE` only. Do the fonts and libraries compiled in (JetBrains Mono under OFL, FreeType, HarfBuzz, …) need a `THIRD-PARTY-NOTICES.txt`? → Recommended: yes, before publishing v1.0 — one generated file listing the vendored packages of `build.zig.zon` with their licence names (a small 9.n task if accepted).
-2. *One-time setup on the owner's machine:* install Inno Setup 6 per-user (`winget install JRSoftware.InnoSetup --scope user`) and the VS component "MSVC ARM64 build tools"? → Recommended: yes. A release cannot be built without them (R-M6-6). `-Arm64Abi gnu` is the fallback that needs no VS change.
-3. *All-users install:* stays a gap for v1.0 (R-M6-4)? → Recommended: yes. It would need HKLM verbs and the common Start menu, and nobody has asked for it.
-4. *Free public runners (R-M6-6):* is the fork public, and do standard runners cost minutes on this account? → If they are free, do Task 12 after v1.0 to get the ARM64 unit tests; otherwise leave ARM64 as a gap.
+1. **Third-party notices: yes, before the v1.0 publication.** `THIRD_PARTY_NOTICES.txt` covers the fonts, FreeType, HarfBuzz, the Zig dependencies and the rest, and ships in the zip and the installer (R-M6-10, Task 13).
+2. **Inno Setup is already installed** per-user at `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`. `release.ps1` looks there and in Program Files, and fails clearly otherwise (R-M6-6, Tasks 5 and 8).
+3. **Per-machine install stays a v1.0 gap** (R-M6-4, R-M6-9).
+4. **ARM64 checks do not block a release.** They are recorded owner checks (R-M6-6, exit checklist 7).
+
+No open questions remain. The remaining overturnable lead rulings for the owner:
+- R-M6-6: free public runners; the workflow is `workflow_dispatch` only until the owner re-enables triggers;
+- R-M6-3: `-Dstrip=false` with symbols;
+- R-M6-1: ignore rather than accept `win-` tags.
