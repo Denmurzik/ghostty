@@ -109,7 +109,8 @@ shell_kind: drop.ShellKind,
 /// down. Window messages arriving outside that span never reach core.
 initialized: bool,
 id: u32,
-/// The tmux pane number (`%N`): `id` unless `CreateOptions.pane_id` says otherwise.
+/// The tmux pane number (`%N`): the next number of the app's counter (like tmux,
+/// never derived from `id`) unless `CreateOptions.pane_id` says otherwise (a respawn).
 pane_id: u32,
 /// What `defaultTermioEnv` put into TMUX_PANE (test state only).
 env_tmux_pane: ?u32 = null,
@@ -212,7 +213,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
         .shell_kind = drop.shellKindFor(config.command),
         .scrollbar = .{ .enabled = config.scrollbar == .system },
         .id = id,
-        .pane_id = opts.pane_id orelse id,
+        .pane_id = opts.pane_id orelse app.tmux.takePane(),
         .tmux_env = tmux_env,
         .size = .init(0),
         .content_scale = dpi.contentScale(window.dpi),

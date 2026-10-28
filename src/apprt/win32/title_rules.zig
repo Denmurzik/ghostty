@@ -70,6 +70,8 @@ test "win32 title rules: conhost image path is no title" {
         "C:\\WINDOWS\\SYSTEM32\\cmd.exe",
         "c:\\windows\\system32\\CMD.EXE",
         "C:\\Program Files\\Git\\bin\\bash.exe",
+        // The idle placeholder pane of the tmux shim.
+        "C:\\D\\Ghostty\\zig-out\\bin\\tmux.exe",
         "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
         "Administrator: C:\\Program Files\\PowerShell\\7\\pwsh.exe",
         "\"C:\\Program Files\\Git\\bin\\bash.exe\"",

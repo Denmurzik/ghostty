@@ -202,6 +202,8 @@ Invoke-E2eScenario 'tmux-replay' {
 
     # --- the spawn ---
     Wait-PaneCount 3 'after the replay'
+    # Pane numbers follow tmux: a respawn keeps its number, the next split takes the next one.
+    if ($map['%2'] -cne '%2' -or $map['%3'] -cne '%3') { throw "pane numbers are not tmux's: fixture %2 -> $($map['%2']), %3 -> $($map['%3'])" }
     $panes = Get-Panes
     $s = Get-GhosttyState -Class $g.Class
     $w = @($s.windows)[0]

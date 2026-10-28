@@ -42,7 +42,8 @@ Fallbacks if a build hides a flag: env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 an
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'GhosttyIpc.psm1') -Force
+# No -Force: it would remove the caller's own import of GhosttyIpc from the session.
+Import-Module (Join-Path $PSScriptRoot 'GhosttyIpc.psm1')
 
 # The prompt is fixed. {TEAM} becomes the team name of the run.
 $ClaudeRunPrompt = 'Use the Agent tool to spawn two teammates named alpha and beta (pass the name parameter), with the same model as you (sonnet). Tell each teammate: touch no files, run no commands, send one short message to team-lead and then stop. When both have reported, reply with the single word DONE. Team marker: {TEAM}.'

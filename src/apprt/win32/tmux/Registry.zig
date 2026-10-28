@@ -31,6 +31,15 @@ pub const State = struct {
     exited: std.AutoHashMapUnmanaged(u32, i32) = .empty,
     /// Panes created by the shim: only these obey `remain-on-exit`.
     shim_panes: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// The next pane number. Like tmux's: it only goes up, and a respawn
+    /// keeps its pane's number without taking one.
+    next_pane: u32 = 1,
+
+    pub fn takePane(self: *State) u32 {
+        const n = self.next_pane;
+        self.next_pane +%= 1;
+        return n;
+    }
 };
 
 pub const Reply = struct {
@@ -624,4 +633,15 @@ test "win32 tmux registry: cells and split ratio from a leaf rectangle" {
     _ = try splitRatio(800, .{ .percent = 30 }, 4, 10, false);
     try std.testing.expectError(error.NoSpace, splitRatio(30, null, 4, 10, false));
     try std.testing.expectError(error.TooSmall, splitRatio(800, .{ .cells = 0 }, 4, 10, false));
+}
+
+test "win32 tmux registry: pane numbers only go up" {
+    var st: State = .{};
+    // The leader, a split, (a respawn of the split takes none), another split.
+    try std.testing.expectEqual(@as(u32, 1), st.takePane());
+    try std.testing.expectEqual(@as(u32, 2), st.takePane());
+    try std.testing.expectEqual(@as(u32, 3), st.takePane());
+    // A pane that went away does not give its number back.
+    try std.testing.expectEqual(@as(u32, 4), st.takePane());
+    try std.testing.expectEqual(@as(u32, 5), st.next_pane);
 }
