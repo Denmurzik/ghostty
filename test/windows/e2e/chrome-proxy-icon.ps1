@@ -75,7 +75,7 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
         if (-not $rec) { throw "the click did not record $folder as open: $((Get-GhosttyState -Class $g.Class).m3 | ConvertTo-Json -Compress -Depth 6)" }
         Write-E2eInfo 'click recorded as open'
 
-        # Drag onto the terminal: the folder is pasted (msys form in Git Bash).
+        # Drag onto the terminal: the folder is pasted (its Windows path, also in Git Bash).
         $oracle = Join-Path $g.Sandbox.Tmp 'gt-proxy.txt'
         Remove-Item -LiteralPath $oracle -Force -ErrorAction SilentlyContinue
         Send-Typed $g.Hwnd "echo -n "
@@ -89,7 +89,7 @@ Invoke-E2eScenario 'chrome-proxy-icon' {
         if (-not (Wait-File $oracle 20)) { Save-Evidence 'drag-fail' $g -Window; throw 'the dragged folder was not pasted' }
         $text = [IO.File]::ReadAllText($oracle)
         Write-E2eInfo "pasted: $text"
-        if ($text -notmatch '(?i)c/windows') { throw "the pasted text does not name the folder: $text" }
+        if ($text -notmatch '(?i)^c:\\windows$') { throw "the pasted text does not name the folder: $text" }
         [void](Get-Win $g)
     } finally {
         if (-not $g.Process.HasExited) {
