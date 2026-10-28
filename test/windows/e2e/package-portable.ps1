@@ -11,16 +11,35 @@ function Set-Motw([string]$Path) {
     Set-Content -LiteralPath $Path -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
 }
 
+# Every file (name, size, last write) and directory (name) under a folder.
 function Get-FolderFiles([string]$Dir) {
-    @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -File | ForEach-Object { $_.FullName.Substring($Dir.Length) } | Sort-Object)
+    @(Get-ChildItem -LiteralPath $Dir -Recurse -Force | ForEach-Object {
+        $rel = $_.FullName.Substring($Dir.Length)
+        if ($_.PSIsContainer) { "D|$rel" } else { "F|$rel|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
+    } | Sort-Object)
 }
 
 # A GUI-subsystem exe: run it to completion with stdout redirected to a file.
 function Invoke-Cli([string[]]$CliArgs) {
     $o = Join-Path $script:Sbx.Tmp ([guid]::NewGuid().ToString('N') + '.out')
-    $p = Start-Process -FilePath $script:Exe -ArgumentList $CliArgs -RedirectStandardOutput $o -WindowStyle Hidden -Wait -PassThru
-    if ($p.ExitCode -ne 0) { throw "ghostty $CliArgs exited $($p.ExitCode)" }
-    [IO.File]::ReadAllText($o)
+    # The scenario's own profile and no inherited resources dir: only the zip's share\ can answer.
+    $sbx = $script:Sbx
+    $vars = [ordered]@{
+        USERPROFILE = $sbx.Home; HOME = $sbx.Home; LOCALAPPDATA = $sbx.Local; APPDATA = $sbx.Roaming
+        TEMP = $sbx.Tmp; TMP = $sbx.Tmp; XDG_CONFIG_HOME = (Join-Path $sbx.Home '.config')
+        XDG_DATA_HOME = $null; XDG_STATE_HOME = $null; XDG_CACHE_HOME = $null; GHOSTTY_RESOURCES_DIR = $null
+    }
+    $saved = @{}
+    foreach ($n in $vars.Keys) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
+    try {
+        foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $vars[$n], 'Process') }
+        $p = Start-Process -FilePath $script:Exe -ArgumentList $CliArgs -RedirectStandardOutput $o -WindowStyle Hidden -Wait -PassThru
+    } finally {
+        foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
+    }
+    $text = [IO.File]::ReadAllText($o)
+    if ($p.ExitCode -ne 0) { throw "ghostty $CliArgs exited $($p.ExitCode): $text" }
+    $text
 }
 
 # Types one line into the cmd session; its output goes to a file (code page 65001).
@@ -36,8 +55,11 @@ function Get-CmdAnswer($G, [string]$Command, [string]$Tag) {
     ,@((Read-ShellFile $out).Utf8 -split "`r?`n" | ForEach-Object { $_.Trim([char]0xFEFF).Trim() } | Where-Object { $_ })
 }
 
-Invoke-E2eScenario 'package-portable' {
-    if (-not $env:GHOSTTY_E2E_PACKAGE) { throw 'E2E-SKIP: no package (set GHOSTTY_E2E_PACKAGE)' }
+function Assert-Foreground($G) {
+    if (-not (Set-ForegroundSafe -Hwnd $G.Hwnd)) { throw 'the ghostty window could not be brought to the foreground' }
+}
+
+function Invoke-PackageCase {
     $zipSrc = $env:GHOSTTY_E2E_PACKAGE
     if (-not (Test-Path -LiteralPath $zipSrc -PathType Leaf)) { throw "GHOSTTY_E2E_PACKAGE does not exist: $zipSrc" }
 
@@ -65,17 +87,24 @@ Invoke-E2eScenario 'package-portable' {
 
     # --- CLI ---
     $ver = Invoke-Cli '+version'
-    # A -Local package is named by hand and its exe carries the git version: set GHOSTTY_E2E_PACKAGE_VERSION=* to skip the match.
+    # GHOSTTY_E2E_PACKAGE_VERSION: the release version to expect (default: the zip's folder name);
+    # '*' skips the match, but only for a -Local package, whose exe is not stamped with that version.
+    $stamp = [Diagnostics.FileVersionInfo]::GetVersionInfo($script:Exe).ProductVersion
     $expect = if ($env:GHOSTTY_E2E_PACKAGE_VERSION) { $env:GHOSTTY_E2E_PACKAGE_VERSION } else { $version }
-    if ($expect -ne '*' -and $ver -notlike "*$expect*") { throw "+version does not print '$expect': $ver" }
+    if ($expect -eq '*') {
+        if ($stamp -eq $version) { throw "GHOSTTY_E2E_PACKAGE_VERSION=* is only for -Local packages; this exe is stamped '$stamp'" }
+    } elseif ($ver -notmatch "(?<![\w.+-])$([regex]::Escape($expect))(?![\w.+-])") {
+        throw "+version does not print '$expect': $ver"
+    }
+    Write-E2eInfo "expected version '$expect', exe stamp '$stamp'"
     $themes = @((Invoke-Cli '+list-themes', '--plain') -split "`r?`n" | Where-Object { $_ })
     if ($themes.Count -lt 100) { throw "+list-themes printed $($themes.Count) lines (<100): resources not found" }
     Write-E2eInfo "version=$version themes=$($themes.Count)"
 
     # --- session ---
     $cfg = "command = direct:cmd.exe /k`nconfirm-close-surface = false`n"
-    $g = Start-E2eGhostty -ConfigText $cfg -NoDump
-    [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+    $g = Start-E2eGhostty -ConfigText $cfg -NoDump -Env @{ GHOSTTY_RESOURCES_DIR = $null }
+    Assert-Foreground $g
     if (-not (Wait-ChildNamed $g @('cmd.exe') 20)) { throw 'cmd did not start' }
     Start-Sleep -Seconds 1
     [void](Get-CmdAnswer $g 'chcp 65001>nul' 'chcp')
@@ -105,17 +134,23 @@ Invoke-E2eScenario 'package-portable' {
     # --- moved share ---
     $share = Join-Path $dir 'share'
     Rename-Item -LiteralPath $share -NewName 'share.off'
+    $log = Join-Path $script:Sbx.Local 'ghostty\logs\ghostty.log'
+    $n0 = if (Test-Path -LiteralPath $log) { @(Select-String -LiteralPath $log -Pattern 'no resources dir set').Count } else { 0 }
     try {
-        $g = Start-E2eGhostty -ConfigText $cfg -NoDump
-        [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+        $g = Start-E2eGhostty -ConfigText $cfg -NoDump -Env @{ GHOSTTY_RESOURCES_DIR = $null }
+        Assert-Foreground $g
         if (-not (Wait-ChildNamed $g @('cmd.exe') 20)) { throw 'cmd did not start without share' }
         Start-Sleep -Seconds 1
         $t2 = (Get-CmdAnswer $g 'echo %TERM%' 'term2')[0]
         if ($t2 -ne 'xterm-256color') { throw "TERM without share is '$t2', expected xterm-256color" }
         $warn = @(Select-String -LiteralPath $g.Log -Pattern 'no resources dir set' -ErrorAction SilentlyContinue)
-        if ($warn.Count -ne 1) { throw "expected one 'no resources dir set' warning in the log, got $($warn.Count)" }
+        if ($warn.Count - $n0 -ne 1) { throw "expected one 'no resources dir set' warning in the log, got $($warn.Count - $n0)" }
         if (-not (Get-Process -Id $g.Pid -ErrorAction SilentlyContinue)) { throw 'ghostty crashed without share' }
-        Stop-OwnGhostty
+        $tree2 = @(Get-ProcessTree $g.Pid)
+        [void]$g.Process.CloseMainWindow()
+        $exit2 = Wait-ProcessExit $g 5
+        if (-not $exit2.Exited) { throw 'ghostty (no share) still running 5 s after the window was closed' }
+        Assert-NoSurvivors $tree2 $g.Pid 8
     } finally {
         Stop-OwnGhostty
         if (Test-Path -LiteralPath (Join-Path $dir 'share.off')) { Rename-Item -LiteralPath (Join-Path $dir 'share.off') -NewName 'share' }
@@ -125,4 +160,13 @@ Invoke-E2eScenario 'package-portable' {
     $after = Get-FolderFiles $dir
     $diff = @(Compare-Object $before $after)
     if ($diff.Count) { throw "the extracted folder changed: $(($diff | ForEach-Object { $_.SideIndicator + $_.InputObject }) -join ', ')" }
+}
+
+Invoke-E2eScenario 'package-portable' {
+    if (-not $env:GHOSTTY_E2E_PACKAGE) { throw 'E2E-SKIP: no package (set GHOSTTY_E2E_PACKAGE)' }
+    # The package is the lead's input: a harness SKIP from here on is a failure.
+    try { Invoke-PackageCase } catch {
+        if ($_.Exception.Message -like 'E2E-SKIP:*') { throw "input provided, cannot skip: $($_.Exception.Message.Substring(9).Trim())" }
+        throw
+    }
 }
