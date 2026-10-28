@@ -3,7 +3,8 @@
 ; (x64|arm64), Stage, OutDir, and optionally GhosttyTest and Sign.
 ; /DGhosttyTest builds the test variant (R-M6-4): its own AppId, a folder
 ; under %TEMP%, no uninstall key, no shortcuts, no tasks, no Restart Manager,
-; no [Code]. Only that variant ever runs on a development machine.
+; no Explorer step. It keeps the running-Ghostty guards (they write nothing).
+; Only that variant ever runs on a development machine.
 #ifndef AppVersion
   #error AppVersion is not defined
 #endif
@@ -107,8 +108,8 @@ Filename: "{app}\ghostty.exe"; Description: "Launch Ghostty"; WorkingDir: "{%USE
 ; portable copy's entries; --all also removes the AUMID key and toast icon.
 Filename: "{app}\ghostty.exe"; Parameters: "+uninstall-explorer-integration --all --only-this-exe"; Flags: runhidden waituntilterminated; RunOnceId: "ExplorerRevert"
 
-#ifndef GhosttyTest
 [Code]
+#ifndef GhosttyTest
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
@@ -125,6 +126,7 @@ begin
     end;
   end;
 end;
+#endif
 
 // Runs before Setup's own in-use check (Restart Manager), so the guard has to
 // wait here itself. Any Ghostty counts, a portable copy too.
@@ -162,4 +164,3 @@ begin
     end;
   end;
 end;
-#endif

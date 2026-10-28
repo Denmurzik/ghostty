@@ -13,8 +13,10 @@
 # registry and no shortcuts). Optional: GHOSTTY_E2E_STAGE_ZIP=<package zip>
 # for an exact file-list comparison.
 #
-# The [Code] guards (running Ghostty: Retry/Cancel) exist only in the release
-# setup, which never runs here; the test variant has no [Code] by design.
+# The running-Ghostty guards of the [Code] section are in the test variant too
+# (they write nothing): with a scenario-launched Ghostty running, a silent
+# setup and a silent uninstall must fail and change nothing. The interactive
+# Retry click is a manual check.
 . (Join-Path $PSScriptRoot '_common.ps1')
 
 if (-not ('GhosttyE2e.Hive' -as [type])) {
@@ -45,6 +47,13 @@ public static int SetString(IntPtr root, string sub, string name, string value) 
 }
 "@
 }
+
+if (-not ('GhosttyE2e.TrayFind' -as [type])) {
+    Add-Type -Namespace GhosttyE2e -Name TrayFind -MemberDefinition @"
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+"@
+}
+function Test-TrayWindow { [GhosttyE2e.TrayFind]::FindWindowW('GhosttyTray', [NullString]::Value) -ne [IntPtr]::Zero }
 
 $script:VerbKeys = @(
     'Software\Classes\Directory\shell\GhosttyOpenHere',
@@ -113,7 +122,7 @@ function Use-Hive([scriptblock]$Action) {
         $script:LoadRc = [GhosttyE2e.Hive]::Load($script:Hive, [ref]$script:LoadH)
         $script:LoadRc -eq 0
     }
-    if (-not $ok) { throw "E2E-SKIP: the application hive cannot be opened (RegLoadAppKeyW $($script:LoadRc))" }
+    if (-not $ok) { throw "the application hive cannot be opened (RegLoadAppKeyW $($script:LoadRc))" }
     $h = $script:LoadH
     try { & $Action $h } finally { [GhosttyE2e.Hive]::Close($h) }
 }
@@ -132,6 +141,9 @@ Invoke-E2eScenario 'installer-test' {
     if (-not $setup.EndsWith('-setup-test.exe', [StringComparison]::OrdinalIgnoreCase)) { throw 'E2E-SKIP: the setup name does not end in -setup-test.exe' }
     $desc = ([string][Diagnostics.FileVersionInfo]::GetVersionInfo($setup).FileDescription).Trim()  # Inno pads the string
     if ($desc -ne 'Ghostty test installer') { throw "E2E-SKIP: FileDescription is '$desc', not 'Ghostty test installer'" }
+
+    # The setup's guard looks for any GhosttyTray window: a Ghostty of the owner's would block this run.
+    if (Test-TrayWindow) { throw 'E2E-SKIP: a Ghostty tray window exists already (close Ghostty, then rerun)' }
 
     $sbx = $script:Sbx
     $script:Hive = Join-Path $sbx.Tmp 'hive.dat'
@@ -174,6 +186,26 @@ Invoke-E2eScenario 'installer-test' {
             if ($diff) { throw "$What : file list differs from the package: $(($diff | Select-Object -First 5 | ForEach-Object { $_.SideIndicator + ' ' + $_.InputObject }) -join '; ')" }
         }
     }
+
+    # A Ghostty of this run (own sandbox) with its tray window.
+    function Start-Blocker {
+        $script:Blocker = Start-E2eGhostty
+        if (-not (Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { Test-TrayWindow })) { $lg = if (Test-Path -LiteralPath $script:Blocker.Log) { (Get-Content -LiteralPath $script:Blocker.Log -Tail 12) -join "`n" } else { '(no log)' }; $cls = @([GhosttyE2e.Win]::TopLevel([uint32]$script:Blocker.Pid, $null) | ForEach-Object { [GhosttyE2e.Win]::ClassOf($_) }) -join ","; throw "the test Ghostty has no GhosttyTray window; its windows: $cls; exited=$($script:Blocker.Process.HasExited) hwnd=$($script:Blocker.Hwnd); log:`n$lg" }
+    }
+    function Stop-Blocker {
+        Stop-OwnGhostty
+        $pid_ = $script:Blocker.Pid
+        $null = Wait-Until -TimeoutSec 10 -PollMs 200 -Condition { -not (Get-Process -Id $pid_ -ErrorAction SilentlyContinue) }
+        if (-not (Wait-Until -TimeoutSec 10 -PollMs 200 -Condition { -not (Test-TrayWindow) })) { throw 'the GhosttyTray window did not go away' }
+    }
+
+    # ---- a running Ghostty blocks a silent install, which changes nothing ----
+    Start-Blocker
+    $r = Invoke-Sandboxed $setup $setupArgs 120 $sbx.Root
+    if ($r.Code -eq 0) { throw 'the silent setup succeeded while Ghostty was running' }
+    if (Test-Path -LiteralPath (Join-Path $inst 'ghostty.exe')) { throw 'the blocked setup installed files' }
+    Write-E2eInfo "blocked silent setup exit code $($r.Code)"
+    Stop-Blocker
 
     # ---- install ----
     Install-Once 'install'
@@ -218,9 +250,26 @@ Invoke-E2eScenario 'installer-test' {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $icon) | Out-Null
     Set-Content -LiteralPath $icon -Value 'png' -Encoding ASCII
 
-    # ---- uninstall ----
+    # ---- a running Ghostty blocks a silent uninstall, which changes nothing ----
     $unins = Join-Path $inst 'unins000.exe'
-    $r = Invoke-Sandboxed $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=`"$(Join-Path $sbx.Root 'unins.log')`"" 60 $inst
+    $uninsArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=`"$(Join-Path $sbx.Root 'unins.log')`""
+    Start-Blocker
+    $r = Invoke-Sandboxed $unins $uninsArgs 60 $inst
+    if ($r.Code -eq 0) { throw 'the silent uninstall succeeded while Ghostty was running' }
+    Start-Sleep -Seconds 2
+    if (-not (Test-Path -LiteralPath $unins)) { throw 'the blocked uninstall removed unins000.exe' }
+    Assert-Files 'after the blocked uninstall'
+    if (-not (Test-Path -LiteralPath $icon)) { throw 'the blocked uninstall removed the toast icon' }
+    Use-Hive {
+        param($h)
+        foreach ($k in $script:VerbKeys) { if (-not [GhosttyE2e.Hive]::Exists($h, $k)) { throw "the blocked uninstall removed $k" } }
+    }
+    Write-E2eInfo "blocked silent uninstall exit code $($r.Code)"
+    Stop-Blocker
+
+    # ---- uninstall ----
+    $r = Invoke-Sandboxed $unins $uninsArgs 60 $inst
+    if ($r.Code -ne 0) { $ul = Join-Path $sbx.Root "unins.log"; throw "uninstall exited $($r.Code): $($r.Stdout) $($r.Stderr) log: $(($t_ = (Get-Content -LiteralPath $ul -Tail 40 -ErrorAction SilentlyContinue) -join " | ").Substring([Math]::Max(0, $t_.Length - 1500)))" }
     # It re-launches itself from %TEMP%: wait until unins000.exe is gone.
     $gone = Wait-Until -TimeoutSec 60 -PollMs 500 -Condition { -not (Test-Path -LiteralPath $unins) }
     if (-not $gone) { throw 'unins000.exe is still there after 60 s' }
