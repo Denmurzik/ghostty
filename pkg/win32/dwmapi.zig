@@ -10,6 +10,8 @@ const gdi32 = @import("gdi32.zig");
 
 /// Blocks until DWM has composed the surface updates made so far.
 pub extern "dwmapi" fn DwmFlush() callconv(.winapi) HRESULT;
+/// Always TRUE since Windows 8; FALSE before that when DWM is off.
+pub extern "dwmapi" fn DwmIsCompositionEnabled(enabled: *BOOL) callconv(.winapi) HRESULT;
 
 pub extern "dwmapi" fn DwmSetWindowAttribute(HWND, attribute: u32, value: *const anyopaque, size: u32) callconv(.winapi) HRESULT;
 

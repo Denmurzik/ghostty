@@ -467,7 +467,9 @@ pub fn addTab(self: *Window, opts: Tab.CreateOptions) anyerror!*Tab {
         self.active_tab,
         self.tabs.items.len,
     );
+    const len = self.tabs.items.len;
     try self.tabs.insert(alloc, index, tab);
+    self.active_tab = activeAfterInsert(self.active_tab, index, len);
 
     self.selectTab(index);
     return tab;
@@ -509,15 +511,24 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     // Over glass, the first DWM frame after a tab container shows can show
     // its area empty, i.e. the backdrop (measured: one white frame in about
     // 30 new tabs over a white window, the new pane's stand-in and the old
-    // tab both gone). So the new tab shows first under the old one, which
-    // covers it for that frame, and only then comes to the top.
-    const glass = composition_mod.isTranslucent(self);
+    // tab both gone). So a tab's first show is under the old tab, which
+    // covers it for that frame, and only then it comes to the top.
     const swap = if (old) |o| o != new else false;
-    if (swap and glass) _ = win32.user32.SetWindowPos(new.hwnd, old.?.hwnd, 0, 0, 0, 0, z_only);
+    const flush = swap and waitUnderOld(.{
+        .glass = composition_mod.isTranslucent(self),
+        .first_show = !new.shown_before,
+        .visible = win32.user32.IsWindowVisible(self.hwnd) != 0,
+        .iconic = win32.user32.IsIconic(self.hwnd) != 0,
+        .parked = self.parked,
+        .remote = win32.user32.GetSystemMetrics(win32.user32.SM_REMOTESESSION) != 0,
+        .composing = dwmComposing(),
+    });
+    if (flush) _ = win32.user32.SetWindowPos(new.hwnd, old.?.hwnd, 0, 0, 0, 0, z_only);
     new.setVisible(true);
+    new.shown_before = true;
     if (swap) {
         const o = old.?;
-        if (glass) {
+        if (flush) {
             _ = win32.gdi32.GdiFlush();
             _ = win32.dwmapi.DwmFlush();
         }
@@ -539,6 +550,33 @@ fn raiseAbove(hwnd: win32.foundation.HWND, below: win32.foundation.HWND) void {
     const prev = win32.user32.GetWindow(below, win32.user32.GW_HWNDPREV);
     if (prev == hwnd) return;
     _ = win32.user32.SetWindowPos(hwnd, prev, 0, 0, 0, 0, z_only);
+}
+
+const UnderOld = struct {
+    glass: bool,
+    first_show: bool,
+    visible: bool,
+    iconic: bool,
+    parked: bool,
+    remote: bool,
+    composing: bool,
+};
+
+/// Whether `selectTabFocus` shows the new tab under the old one and waits a
+/// DWM frame (`DwmFlush`): only a tab's first show in a translucent window
+/// on screen. `DwmFlush` has no timeout, and DWM may not compose for a long
+/// time with the display off, the session locked or an RDP session
+/// disconnected; a hidden, minimised or parked window shows no flash anyway.
+fn waitUnderOld(s: UnderOld) bool {
+    if (!s.glass or !s.first_show) return false;
+    if (!s.visible or s.iconic or s.parked) return false;
+    return !s.remote and s.composing;
+}
+
+fn dwmComposing() bool {
+    var on: win32.foundation.BOOL = 0;
+    if (win32.dwmapi.DwmIsCompositionEnabled(&on) < 0) return false;
+    return on != 0;
 }
 
 /// `SetWindowPos` flags of a Z order change alone.
@@ -762,8 +800,18 @@ pub fn moveTabToNewWindow(self: *Window, tab: *Tab) !?*Window {
 /// The tab's `setWindow` has run; the caller reserved room with
 /// `tabs.ensureUnusedCapacity`.
 pub fn insertTab(self: *Window, tab: *Tab, index: usize) void {
-    self.tabs.insertAssumeCapacity(@min(index, self.tabs.items.len), tab);
+    const at = @min(index, self.tabs.items.len);
+    // `active_tab` keeps naming the tab on screen, which `selectTabFocus`
+    // hides: an insert before it would make that a hidden neighbour.
+    self.active_tab = activeAfterInsert(self.active_tab, at, self.tabs.items.len);
+    self.tabs.insertAssumeCapacity(at, tab);
     self.selectTabFocus(self.tabIndex(tab) orelse 0, false);
+}
+
+/// `active_tab` after a tab is inserted at `at` into `len` tabs.
+fn activeAfterInsert(active: usize, at: usize, len: usize) usize {
+    if (len == 0) return 0;
+    return if (at <= active) active + 1 else active;
 }
 
 /// A hidden window for a torn-off tab, `size` (outer, pixels at
@@ -1580,6 +1628,49 @@ fn wndProc(
     }
 
     return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+test "win32 window: a tab waits under the old one only on its first show over glass on screen" {
+    const on: UnderOld = .{
+        .glass = true,
+        .first_show = true,
+        .visible = true,
+        .iconic = false,
+        .parked = false,
+        .remote = false,
+        .composing = true,
+    };
+    try std.testing.expect(waitUnderOld(on));
+
+    var s = on;
+    s.glass = false;
+    try std.testing.expect(!waitUnderOld(s)); // opaque window
+    s = on;
+    s.first_show = false;
+    try std.testing.expect(!waitUnderOld(s)); // ctrl+tab to a shown tab
+    s = on;
+    s.visible = false;
+    try std.testing.expect(!waitUnderOld(s));
+    s = on;
+    s.iconic = true;
+    try std.testing.expect(!waitUnderOld(s));
+    s = on;
+    s.parked = true;
+    try std.testing.expect(!waitUnderOld(s));
+    s = on;
+    s.remote = true;
+    try std.testing.expect(!waitUnderOld(s));
+    s = on;
+    s.composing = false;
+    try std.testing.expect(!waitUnderOld(s));
+}
+
+test "win32 window: an insert keeps active_tab on the tab on screen" {
+    try std.testing.expectEqual(@as(usize, 0), activeAfterInsert(0, 0, 0)); // first tab
+    try std.testing.expectEqual(@as(usize, 3), activeAfterInsert(2, 0, 4)); // before
+    try std.testing.expectEqual(@as(usize, 3), activeAfterInsert(2, 2, 4)); // at
+    try std.testing.expectEqual(@as(usize, 2), activeAfterInsert(2, 3, 4)); // after
+    try std.testing.expectEqual(@as(usize, 2), activeAfterInsert(2, 4, 4)); // end
 }
 
 test "win32 window: cascade wraps inside the work area" {

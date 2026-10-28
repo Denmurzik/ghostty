@@ -844,6 +844,8 @@ pub const SM_CYCAPTION = 4;
 pub const SM_CXSIZEFRAME = 32;
 pub const SM_CYSIZEFRAME = 33;
 pub const SM_CXPADDEDBORDER = 92;
+/// Nonzero in a Remote Desktop session.
+pub const SM_REMOTESESSION = 0x1000;
 
 pub const SM_CXFRAME = 32;
 pub const SM_CYFRAME = 33;

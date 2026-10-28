@@ -72,6 +72,11 @@ hwnd_destroyed: bool = false,
 /// Closed by the user and kept by the close-undo (`Window.parked_tabs`).
 parked: bool = false,
 
+/// The container was selected since it was created, unparked or moved to
+/// another window: `Window.selectTabFocus` shows it again without waiting
+/// a DWM frame under the old tab.
+shown_before: bool = false,
+
 /// The divider being dragged, while the left button is held.
 drag: ?Drag = null,
 
@@ -290,6 +295,7 @@ pub fn park(self: *Tab) void {
 
 pub fn unpark(self: *Tab) void {
     self.parked = false;
+    self.shown_before = false;
     self.restoreProgress();
     var it = self.tree.iterator();
     while (it.next()) |entry| {
@@ -772,6 +778,7 @@ pub fn needsConfirmClose(self: *const Tab) bool {
 /// Move the tab to another top-level window.
 pub fn setWindow(self: *Tab, window: *Window) void {
     const from = self.window;
+    self.shown_before = false;
     // A parked split keeps the window it was parked in and nothing sweeps it
     // here: the undo entries of a tab that moves end.
     if (undo_actions.forgetTab(from.app, self) > 0) log.info("undo: the tab moved to another window, its undo entries ended", .{});
