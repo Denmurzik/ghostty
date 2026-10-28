@@ -25,6 +25,7 @@ Invoke-E2eScenario 'typing-ru-ctrl-shift-c' {
 
         $last = @{ Text = $null }
         $got = Wait-Until -TimeoutSec 8 -PollMs 200 -Condition {
+            Update-ClipboardMark
             $t = Invoke-ClipboardRetry { if ([System.Windows.Forms.Clipboard]::ContainsText()) { [System.Windows.Forms.Clipboard]::GetText() } }
             $last.Text = $t
             if ($t -and $t.Contains($marker)) { $t }

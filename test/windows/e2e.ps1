@@ -58,6 +58,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# An elevated Ghostty ignores the test hive (diagnosticEnv is off for an
+# elevated token), so the Explorer CLI scenarios would write and delete the
+# owner's real HKCU. Refuse before anything starts.
+if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'e2e.ps1 refuses to run elevated: an elevated Ghostty would use the real HKCU instead of the test hive. Start a normal (non-admin) PowerShell.'
+}
+
 Import-Module (Join-Path $PSScriptRoot 'lib\Harness.psm1') -Force
 
 # Discovery: the header sits in the leading comment block of each script.

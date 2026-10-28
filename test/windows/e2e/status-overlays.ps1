@@ -48,6 +48,7 @@ Invoke-E2eScenario 'status-overlays' {
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'select_all')
         $sw = [Diagnostics.Stopwatch]::StartNew()
         [void](Invoke-GhosttyAction -Class $g.Class -Action 'copy_to_clipboard')
+        Update-ClipboardMark
         if (-not (Wait-Labels 1 0.5)) { throw 'no copy toast within 500 ms' }
         Write-E2eInfo "toast after $($sw.ElapsedMilliseconds) ms"
         Save-Evidence 'toast' $g -Window

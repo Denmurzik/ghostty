@@ -318,6 +318,7 @@ Invoke-E2eScenario 'tmux-replay' {
     # --- load-buffer -w sets the clipboard ---
     if ($saved) {
         Expect-Ok (Tm @('load-buffer', '-w', '-') 'm4-clip') 'load-buffer -w' | Out-Null
+        Update-ClipboardMark
         $got = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
         if ($got -ne 'm4-clip') { throw "clipboard holds '$got', expected 'm4-clip'" }
     }
