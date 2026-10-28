@@ -119,7 +119,7 @@ Invoke-E2eScenario 'split-many' {
         $outP95 = Get-Percentile $outToPresent 95
         $build = @($samples)[0].Build
         Write-E2eInfo ("pacing build=$build keypress->present p95 {0:F1} ms, output->present p95 {1:F1} ms" -f $keyP95, $outP95)
-        if ($build -eq 'ReleaseFast') {
+        if ($build -in @('ReleaseFast', 'fast')) {
             if ($keyP95 -gt 33) { throw "keypress->present p95 $keyP95 ms with 4 streaming panes (limit 33 ms)" }
             if ($outP95 -gt 20) { throw "output->present p95 $outP95 ms of the typed pane (limit 20 ms)" }
         } else {
@@ -141,7 +141,7 @@ Invoke-E2eScenario 'split-many' {
 
     # 100 ms is the ReleaseFast gate; a Debug build measured 71-110 ms on the
     # same machine (M5 Task 19), so Debug gets headroom like the pacing gate.
-    $limit = if ($build -eq 'ReleaseFast') { 100 } else { 150 }
+    $limit = if ($build -in @('ReleaseFast', 'fast')) { 100 } else { 150 }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Invoke-SplitAction $g 'close_window' -Surface $streamers[0].Id
     $hiddenMs = -1
