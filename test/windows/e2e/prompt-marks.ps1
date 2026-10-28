@@ -74,15 +74,23 @@ Invoke-E2eScenario 'prompt-marks' {
     if ($n -ne '0') { throw "git bash: PATH has $n drive-fragment entries, expected 0: $([IO.File]::ReadAllText((Join-Path $g.Sandbox.Tmp 'path-full.txt')))" }
     Stop-OwnGhostty
 
-    # --- pwsh ---
-    if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {
-        $g = Start-E2eGhostty -ConfigText ("command = direct:pwsh.exe -NoLogo`nconfirm-close-surface = false`n" + $script:Notify)
-        if (-not (Wait-ChildNamed $g @('pwsh.exe') 20)) { throw 'pwsh did not start' }
+    # --- pwsh 7 and Windows PowerShell 5.1 (an older PSReadLine) ---
+    foreach ($exe in 'pwsh.exe', 'powershell.exe') {
+        if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+            Write-E2eInfo "$exe not found; case skipped"
+            continue
+        }
+        $g = Start-E2eGhostty -ConfigText ("command = direct:$exe -NoLogo`nconfirm-close-surface = false`n" + $script:Notify)
+        if (-not (Wait-ChildNamed $g @($exe) 20)) { throw "$exe did not start" }
         Start-Sleep -Seconds 3
-        Test-Marks $g 'pwsh' 'echo a' '1..150' 'cmd /c exit 3' $true
+        Test-Marks $g $exe 'echo a' '1..150' 'cmd /c exit 3' $true
+        # The same failing command again still reports its own code.
+        Send-Line $g.Hwnd 'cmd /c exit 3'
+        $two = Wait-Until -TimeoutSec 15 -PollMs 150 -Condition {
+            @(@((Get-GhosttyState -Class $g.Class).m3.notify.recorded) | Where-Object { $_.body -like '*exited with code 3*' }).Count -ge 2
+        }
+        if (-not $two) { throw "$exe : the repeated exit 3 was not reported" }
         Stop-OwnGhostty
-    } else {
-        Write-E2eInfo 'pwsh not found; pwsh case skipped'
     }
 
     # --- cmd (no exit code in D: no command_finished with a code) ---

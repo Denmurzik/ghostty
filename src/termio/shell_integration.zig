@@ -480,9 +480,13 @@ fn setupCmd(
     const end = "$e]133;B$e\\";
     const prefix = if (title) marks ++ title_prefix else marks;
     const current = env.get("PROMPT") orelse "$P$G";
-    // Both ends are checked: a half-marked prompt is not ours.
-    if (std.mem.startsWith(u8, current, prefix) and std.mem.endsWith(u8, current, end))
+    // Both ends are checked: a half-marked prompt is not ours. A prompt marked
+    // without the title part gets that part inserted after the marks.
+    if (std.mem.startsWith(u8, current, marks) and std.mem.endsWith(u8, current, end)) {
+        if (!title or std.mem.startsWith(u8, current, prefix)) return try command.clone(alloc);
+        try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current[marks.len..] }));
         return try command.clone(alloc);
+    }
     try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current, end }));
     return try command.clone(alloc);
 }
@@ -1405,6 +1409,27 @@ test "windows: cmd prompt marks" {
         try testing.expect(std.mem.startsWith(u8, p, "$e]133;D$e\\$e]133;A$e\\"));
         try testing.expect(std.mem.endsWith(u8, p, "$e]133;B$e\\"));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]133;D"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]133;B"));
+    }
+}
+
+test "windows: cmd marks gain the title part once" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("GHOSTTY_SHELL_FEATURES", "title");
+    try env.put("PROMPT", "$e]133;D$e\\$e]133;A$e\\$P$G$e]133;B$e\\");
+    const cmd: config.Command = .{ .direct = &.{"cmd.exe"} };
+    inline for (.{ 0, 1 }) |_| {
+        try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+        const p = env.get("PROMPT").?;
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]133;D"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]2;$P"));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]133;B"));
     }
 }

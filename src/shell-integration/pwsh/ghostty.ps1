@@ -16,7 +16,9 @@ $script:__ghostty_esc = [char]27
 $script:__ghostty_bel = [char]7
 # Set when a command was accepted and its end (D) is still to be reported.
 $script:__ghostty_pending = $false
-$script:__ghostty_last_exit = $null
+# $LASTEXITCODE as it was before the command: the wrapper clears it, so that a
+# value set afterwards tells that a native command ran.
+$script:__ghostty_saved_exit = $null
 
 function global:__ghostty_title([string]$text) {
     $text = $text -replace '[\x00-\x1f\x7f]', ' '
@@ -46,11 +48,12 @@ function global:prompt {
     if ($script:__ghostty_pending) {
         $script:__ghostty_pending = $false
         $code = if ($ok) { 0 }
-                elseif ($null -ne $exit -and $exit -ne 0 -and $exit -ne $script:__ghostty_last_exit) { $exit }
+                elseif ($null -ne $exit -and $exit -ne 0) { $exit }
                 else { 1 }
+        # No native command ran: the value from before stays visible.
+        if ($null -eq $exit) { $global:LASTEXITCODE = $script:__ghostty_saved_exit }
         [Console]::Out.Write("$script:__ghostty_esc]133;D;$code$script:__ghostty_bel")
     }
-    $script:__ghostty_last_exit = $exit
     $result = if ($script:__ghostty_prompt) {
         & $script:__ghostty_prompt
     } else {
@@ -71,14 +74,29 @@ function global:prompt {
 
 # C goes out after the line is accepted, so the wrapper writes it once
 # ReadLine returns (the Windows Terminal pattern). Without PSReadLine there is
-# no C and no D, only A and B.
+# no C and no D, only A and B. PSReadLine's own function is replaced by a call
+# of the overload this version has (3 arguments from PSReadLine 2.2, 2 before:
+# Windows PowerShell 5.1); a function of somebody else's is chained.
 if (Get-Module PSReadLine) {
+    $existing = Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue
+    $script:__ghostty_inner = if ($existing -and $existing.Source -ne 'PSReadLine') { $existing.ScriptBlock } else { $null }
+    $script:__ghostty_rl3 = $null -ne [Microsoft.PowerShell.PSConsoleReadLine].GetMethod('ReadLine',
+        [Type[]]@([System.Management.Automation.Runspaces.Runspace], [System.Management.Automation.EngineIntrinsics], [Nullable[bool]]))
     function global:PSConsoleHostReadLine {
         # As PSReadLine's own: the status of the last command comes first.
         $lastRunStatus = $?
-        $line = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext, $lastRunStatus)
+        Set-StrictMode -Off
+        $line = if ($script:__ghostty_inner) {
+            & $script:__ghostty_inner
+        } elseif ($script:__ghostty_rl3) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext, $lastRunStatus)
+        } else {
+            [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext)
+        }
         if ($line -and $line.Trim()) {
             $script:__ghostty_pending = $true
+            $script:__ghostty_saved_exit = $global:LASTEXITCODE
+            $global:LASTEXITCODE = $null
             [Console]::Out.Write("$([char]27)]133;C$([char]7)")
         }
         $line
