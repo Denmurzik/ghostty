@@ -189,16 +189,34 @@ fn claimUser(app: *App) void {
 /// handler. Messages of the other pipes are posted again. The generation in
 /// the wparam is the second line of defence (`routeIpc`).
 fn drainUserMessages(app: *App) void {
-    var keep: [8]win32.user32.MSG = undefined;
-    var kept: usize = 0;
+    const alloc = app.core_app.alloc;
+    var keep: std.ArrayList(win32.user32.MSG) = .empty;
+    defer keep.deinit(alloc);
     var msg: win32.user32.MSG = undefined;
     const m = messages.WM_GHOSTTY_IPC;
-    while (kept < keep.len and win32.user32.PeekMessageW(&msg, app.msg_hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
+    // Every message is taken out before any is posted again, so the loop ends.
+    while (win32.user32.PeekMessageW(&msg, app.msg_hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
         if (msg.wParam & 0xFF == post_tag_user) continue;
-        keep[kept] = msg;
-        kept += 1;
+        keep.append(alloc, msg) catch {
+            // No room to keep it: the client gets an answer instead of a silent loss.
+            failKept(msg.wParam, msg.lParam);
+            continue;
+        };
     }
-    for (keep[0..kept]) |k| _ = win32.user32.PostMessageW(app.msg_hwnd, k.message, k.wParam, k.lParam);
+    for (keep.items) |k| {
+        if (win32.user32.PostMessageW(app.msg_hwnd, k.message, k.wParam, k.lParam) == 0) failKept(k.wParam, k.lParam);
+    }
+}
+
+/// Answers the `Pending` of a message that could not be kept or posted again,
+/// so its client sees an error and not a timeout.
+fn failKept(wparam: usize, lparam: isize) void {
+    const pending: *ipc.Server.Pending = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    const response = if (wparam == post_tag)
+        reply(pending.alloc, .failed, "ghostty: busy\n") catch pending.alloc.dupe(u8, "") catch return
+    else
+        pending.alloc.dupe(u8, "") catch return;
+    ipc.Server.complete(pending, response);
 }
 
 fn stopUser(app: *App) void {
@@ -590,4 +608,22 @@ test "win32 tmux server: M2 pipe does not answer tmux" {
     // The M2 op table has no "tmux" op, so the per-user pipe answers
     // bad_request ("unknown op") without acting.
     try std.testing.expect(std.meta.stringToEnum(@import("../ipc/ops.zig").Op, "tmux") == null);
+}
+
+test "win32 tmux server: a message that cannot be kept gets an error answer" {
+    const alloc = std.testing.allocator;
+    const p = try alloc.create(ipc.Server.Pending);
+    p.* = .{
+        .request = try alloc.alloc(u8, 0),
+        .done = win32.kernel32.CreateEventW(null, 1, 0, null).?,
+        .alloc = alloc,
+    };
+    failKept(post_tag, @bitCast(@intFromPtr(p)));
+    try std.testing.expect(p.completed.load(.acquire));
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const resp = try protocol.parseResponse(arena.allocator(), p.response.?);
+    try std.testing.expectEqual(protocol.Code.failed, resp.code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.stderr, "busy") != null);
+    ipc.Server.release(p, alloc);
 }
