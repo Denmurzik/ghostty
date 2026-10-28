@@ -13,6 +13,7 @@ const overlay_host = @import("overlay.zig");
 const Window = @import("Window.zig");
 const util = @import("util.zig");
 const composition = @import("composition.zig");
+const menu_theme = @import("menu_theme.zig");
 
 const WPARAM = win32.foundation.WPARAM;
 const LPARAM = win32.foundation.LPARAM;
@@ -304,6 +305,8 @@ pub fn applyToWindow(window: *Window) void {
 
     const in: Inputs = applied orelse .from(&app.config);
     const dark = in.isDark(system_dark orelse false);
+
+    menu_theme.apply(dark, highContrast());
 
     const flag: win32.foundation.BOOL = @intFromBool(dark);
     _ = win32.dwmapi.DwmSetWindowAttribute(
