@@ -61,6 +61,7 @@ pub fn appStopping(app: *App) void {
     composition.appStopping(app);
     notify.deinit(app);
     tmux_Registry.appStopping(app);
+    tmux_pane_io.appStopping(app);
     drainDialogs(app.msg_hwnd);
 }
 

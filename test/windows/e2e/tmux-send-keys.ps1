@@ -24,7 +24,7 @@ Invoke-E2eScenario 'tmux-send-keys' {
         if ($pane -notmatch '^%\d+$') { throw "round ${i}: split-window printed '$pane'" }
 
         # No wait: the gate is what keeps the first byte.
-        $k = Invoke-Tmux $g @('send-keys', '-t', $pane, "echo tok-$i > `"`$TEMP/$file`"", 'Enter')
+        $k = Invoke-Tmux $g @('send-keys', '-t', $pane, "echo tok-$i > `"`$TEMP/$file`"; printf 'mark-%s\n' $i", 'Enter')
         if ($k.Code -ne 0) { throw "round ${i}: send-keys exit $($k.Code): $($k.Stderr.Trim())" }
 
         if (-not (Wait-File $path 20)) { throw "round ${i}: the pane never wrote $path (first byte lost?)" }
@@ -36,10 +36,10 @@ Invoke-E2eScenario 'tmux-send-keys' {
         for ($try = 0; $try -lt 20 -and -not $seen; $try++) {
             $cap = Invoke-Tmux $g @('capture-pane', '-p', '-t', $pane)
             if ($cap.Code -ne 0) { throw "round ${i}: capture-pane exit $($cap.Code): $($cap.Stderr.Trim())" }
-            $seen = $cap.Stdout.Contains("tok-$i")
+            $seen = $cap.Stdout.Contains("mark-$i")
             if (-not $seen) { Start-Sleep -Milliseconds 100 }
         }
-        if (-not $seen) { throw "round ${i}: capture-pane misses 'tok-$i':`n$($cap.Stdout)" }
+        if (-not $seen) { throw "round ${i}: capture-pane misses the output mark-${i}:`n$($cap.Stdout)" }
 
         $x = Invoke-Tmux $g @('kill-pane', '-t', $pane)
         if ($x.Code -ne 0) { throw "round ${i}: kill-pane exit $($x.Code): $($x.Stderr.Trim())" }

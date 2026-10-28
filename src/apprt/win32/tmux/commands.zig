@@ -639,9 +639,14 @@ fn Env(comptime Host: type) type {
         }
 
         fn capturePane(self: Self, cmd: *const cli.Command) Allocator.Error!void {
-            if (!try self.reject(cmd, "abCeEMPST")) return;
+            if (!try self.reject(cmd, "abCeMPT")) return;
             if (!try self.counts(cmd, 0, 0)) return;
             const pane = (try self.resolvePane(cmd.value('t'))) orelse return;
+            // Visible screen only (R-M4-7): a range is tolerated, like tmux's
+            // lenience, but not honoured.
+            if (cmd.has('S') or cmd.has('E')) {
+                try self.out.stderr.appendSlice(self.arena, "capture-pane: -S and -E are ignored, only the visible screen is captured\n");
+            }
             var aw: std.Io.Writer.Allocating = .init(self.arena);
             self.host.capture(pane, .{ .to_stdout = cmd.has('p') }, &aw.writer) catch |err| {
                 if (err == error.WriteFailed) return error.OutOfMemory;

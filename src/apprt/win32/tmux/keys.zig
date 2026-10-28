@@ -4,52 +4,108 @@ const Allocator = std.mem.Allocator;
 const configpkg = @import("../../../config.zig");
 
 const named = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "Enter", "\r" },
-    .{ "Escape", "\x1b" },
-    .{ "Tab", "\t" },
-    .{ "BTab", "\x1b[Z" },
-    .{ "BSpace", "\x7f" },
-    .{ "Space", " " },
-    .{ "Up", "\x1b[A" },
-    .{ "Down", "\x1b[B" },
-    .{ "Right", "\x1b[C" },
-    .{ "Left", "\x1b[D" },
-    .{ "Home", "\x1b[H" },
-    .{ "End", "\x1b[F" },
-    .{ "PageUp", "\x1b[5~" },
-    .{ "PPage", "\x1b[5~" },
-    .{ "PageDown", "\x1b[6~" },
-    .{ "NPage", "\x1b[6~" },
-    .{ "IC", "\x1b[2~" },
-    .{ "DC", "\x1b[3~" },
-    .{ "F1", "\x1bOP" },
-    .{ "F2", "\x1bOQ" },
-    .{ "F3", "\x1bOR" },
-    .{ "F4", "\x1bOS" },
-    .{ "F5", "\x1b[15~" },
-    .{ "F6", "\x1b[17~" },
-    .{ "F7", "\x1b[18~" },
-    .{ "F8", "\x1b[19~" },
-    .{ "F9", "\x1b[20~" },
-    .{ "F10", "\x1b[21~" },
-    .{ "F11", "\x1b[23~" },
-    .{ "F12", "\x1b[24~" },
+    .{ "enter", "\r" },
+    .{ "escape", "\x1b" },
+    .{ "tab", "\t" },
+    .{ "btab", "\x1b[Z" },
+    .{ "bspace", "\x7f" },
+    .{ "space", " " },
+    .{ "up", "\x1b[A" },
+    .{ "down", "\x1b[B" },
+    .{ "right", "\x1b[C" },
+    .{ "left", "\x1b[D" },
+    .{ "home", "\x1b[H" },
+    .{ "end", "\x1b[F" },
+    .{ "pageup", "\x1b[5~" },
+    .{ "ppage", "\x1b[5~" },
+    .{ "pgup", "\x1b[5~" },
+    .{ "pgdn", "\x1b[6~" },
+    .{ "pagedown", "\x1b[6~" },
+    .{ "npage", "\x1b[6~" },
+    .{ "ic", "\x1b[2~" },
+    .{ "dc", "\x1b[3~" },
+    .{ "f1", "\x1bOP" },
+    .{ "f2", "\x1bOQ" },
+    .{ "f3", "\x1bOR" },
+    .{ "f4", "\x1bOS" },
+    .{ "f5", "\x1b[15~" },
+    .{ "f6", "\x1b[17~" },
+    .{ "f7", "\x1b[18~" },
+    .{ "f8", "\x1b[19~" },
+    .{ "f9", "\x1b[20~" },
+    .{ "f10", "\x1b[21~" },
+    .{ "f11", "\x1b[23~" },
+    .{ "f12", "\x1b[24~" },
 });
 
 /// The bytes of one non-literal key token. An unknown token is the text itself.
 fn token(arena: Allocator, tok: []const u8, out: *std.ArrayList(u8)) Allocator.Error!void {
-    if (named.get(tok)) |bytes| return out.appendSlice(arena, bytes);
+    if (!try recognized(arena, tok, out)) try out.appendSlice(arena, tok);
+}
+
+fn lookup(tok: []const u8) ?[]const u8 {
+    var buf: [16]u8 = undefined;
+    if (tok.len > buf.len) return null;
+    return named.get(std.ascii.lowerString(&buf, tok));
+}
+
+/// Appends the bytes of a known key and returns true; an unknown token
+/// appends nothing and returns false.
+fn recognized(arena: Allocator, tok: []const u8, out: *std.ArrayList(u8)) Allocator.Error!bool {
+    if (lookup(tok)) |bytes| {
+        try out.appendSlice(arena, bytes);
+        return true;
+    }
+    if (try modified(arena, tok, out)) return true;
     if (tok.len > 2 and tok[0] == 'M' and tok[1] == '-') {
+        // Only a known remainder; tmux sends `M-hello` as the text itself.
+        var rest: std.ArrayList(u8) = .empty;
+        if (tok.len == 3) {
+            try rest.append(arena, tok[2]);
+        } else if (!try recognized(arena, tok[2..], &rest)) return false;
         try out.append(arena, 0x1b);
-        return token(arena, tok[2..], out);
+        try out.appendSlice(arena, rest.items);
+        return true;
     }
     if (tok.len == 3 and tok[0] == 'C' and tok[1] == '-') {
-        if (ctrl(tok[2])) |b| return out.append(arena, b);
+        if (ctrl(tok[2])) |b| {
+            try out.append(arena, b);
+            return true;
+        }
     }
     if (tok.len == 2 and tok[0] == '^') {
-        if (ctrl(tok[1])) |b| return out.append(arena, b);
+        if (ctrl(tok[1])) |b| {
+            try out.append(arena, b);
+            return true;
+        }
     }
-    try out.appendSlice(arena, tok);
+    return false;
+}
+
+/// `C-Up`, `S-Left`, `C-S-PageUp`: xterm modifier encoding (`CSI 1;m A`,
+/// `CSI n;m ~`), m = 1 + shift(1) + alt(2) + ctrl(4).
+fn modified(arena: Allocator, tok: []const u8, out: *std.ArrayList(u8)) Allocator.Error!bool {
+    var mods: u8 = 0;
+    var rest = tok;
+    while (rest.len > 2 and rest[1] == '-') {
+        mods |= switch (rest[0]) {
+            'S' => 1,
+            'M' => 2,
+            'C' => 4,
+            else => return false,
+        };
+        rest = rest[2..];
+    }
+    if (mods == 0) return false;
+    const base = lookup(rest) orelse return false;
+    // Only the CSI keys: `ESC [ <final>` or `ESC [ n ~`.
+    if (base.len < 3 or base[0] != 0x1b or base[1] != '[' or base[2] == 'Z') return false;
+    if (base[base.len - 1] == '~') {
+        try out.print(arena, "\x1b[{s};{d}~", .{ base[2 .. base.len - 1], 1 + mods });
+    } else {
+        try out.print(arena, "\x1b[1;{d}{c}", .{ 1 + mods, base[base.len - 1] });
+    }
+    return true;
 }
 
 fn ctrl(c: u8) ?u8 {
@@ -88,7 +144,8 @@ pub fn encode(
             try token(arena, arg, &once);
         }
     }
-    if (repeat <= 1) return once.items;
+    if (repeat == 0) return arena.alloc(u8, 0);
+    if (repeat == 1) return once.items;
     const total = std.math.mul(usize, once.items.len, repeat) catch return error.OutOfMemory;
     if (total > 16 * 1024 * 1024) return error.OutOfMemory;
     const out = try arena.alloc(u8, total);
@@ -153,4 +210,16 @@ test "win32 tmux keys: text action escapes round-trip" {
         const back = try configpkg.string.parse(buf, esc);
         try testing.expectEqualSlices(u8, bytes, back);
     }
+}
+
+test "win32 tmux keys: case, aliases, modifiers, M- literal, -N 0" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("\r\x1b", try enc(a, &.{ "enter", "ESCAPE" }));
+    try testing.expectEqualStrings("\x1b[5~\x1b[6~", try enc(a, &.{ "PgUp", "pgdn" }));
+    try testing.expectEqualStrings("M-hello", try enc(a, &.{"M-hello"}));
+    try testing.expectEqualStrings("\x1b\x03", try enc(a, &.{"M-C-c"}));
+    try testing.expectEqualStrings("\x1b[1;5A\x1b[1;2D\x1b[5;6~", try enc(a, &.{ "C-Up", "S-Left", "C-S-PageUp" }));
+    try testing.expectEqualStrings("", try encode(a, &.{"Enter"}, false, false, 0));
 }

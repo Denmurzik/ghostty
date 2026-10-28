@@ -113,6 +113,7 @@ fn write(app: *App, surface: *Surface, bytes: []const u8) void {
 pub fn onTimer(app: *App) void {
     const st = &app.tmux_keys;
     flush(st, app.core_app.alloc, nowMs(), app, write);
+    pruneTabs(st, nowMs());
     if (st.queue.items.len == 0 and st.timer_armed) {
         _ = win32.user32.KillTimer(app.msg_hwnd, messages.timers.msg_window.tmux_keys);
         st.timer_armed = false;
@@ -127,6 +128,7 @@ pub fn layoutChanged(tab: *Tab) void {
     const st = &app.tmux_keys;
     const now = nowMs();
     st.tab_changed_ms.put(alloc, tab.id, now) catch return;
+    pruneTabs(st, now);
     var it = tab.tree.iterator();
     while (it.next()) |entry| {
         st.pane_seen_ms.putNoClobber(alloc, entry.view.pane_id, now) catch return;
@@ -148,6 +150,36 @@ fn dropPane(st: *State, alloc: Allocator, pane_id: u32) void {
     _ = st.pane_seen_ms.remove(pane_id);
 }
 
+/// Drops the tabs whose layout has been quiet long enough: no entry means
+/// quiet, so this only bounds the map. A few entries per call.
+fn pruneTabs(st: *State, now_ms: u64) void {
+    var stale: [16]u32 = undefined;
+    var n: usize = 0;
+    var it = st.tab_changed_ms.iterator();
+    while (it.next()) |e| {
+        if (now_ms -| e.value_ptr.* < gate_settle_ms) continue;
+        stale[n] = e.key_ptr.*;
+        n += 1;
+        if (n == stale.len) break;
+    }
+    for (stale[0..n]) |k| _ = st.tab_changed_ms.remove(k);
+}
+
+fn releaseAll(st: *State, alloc: Allocator) void {
+    for (st.queue.items) |i| alloc.free(i.bytes);
+    st.queue.deinit(alloc);
+    st.tab_changed_ms.deinit(alloc);
+    st.pane_seen_ms.deinit(alloc);
+    st.* = .{};
+}
+
+/// The start of `App.terminate`.
+pub fn appStopping(app: *App) void {
+    const st = &app.tmux_keys;
+    if (st.timer_armed) _ = win32.user32.KillTimer(app.msg_hwnd, messages.timers.msg_window.tmux_keys);
+    releaseAll(st, app.core_app.alloc);
+}
+
 /// The visible rows, LF after each, trailing blanks trimmed per line.
 pub fn capture(surface: *Surface, req: commands.CaptureRequest, w: *std.Io.Writer) !void {
     _ = req;
@@ -163,8 +195,8 @@ fn dumpViewport(alloc: Allocator, t: *terminal.Terminal, w: *std.Io.Writer) !voi
     var raw: std.Io.Writer.Allocating = .init(alloc);
     defer raw.deinit();
     try screen.dumpString(&raw.writer, .{
-        .tl = screen.pages.getTopLeft(.viewport),
-        .br = screen.pages.getBottomRight(.viewport),
+        .tl = screen.pages.getTopLeft(.active),
+        .br = screen.pages.getBottomRight(.active),
         .unwrap = false,
     });
     var rows: usize = 0;
@@ -266,4 +298,32 @@ test "win32 tmux pane_io: capture visible screen" {
     defer aw.deinit();
     try dumpViewport(alloc, &t, &aw.writer);
     try testing.expectEqualStrings("hello\ntok-1\n\n\n", aw.written());
+}
+
+test "win32 tmux pane_io: quiet tabs are pruned" {
+    var st: State = .{};
+    defer deinitState(&st);
+    for (0..40) |i| try st.tab_changed_ms.put(testing.allocator, @intCast(i), 1000);
+    try st.tab_changed_ms.put(testing.allocator, 100, 1900);
+    // Not yet quiet: nothing goes.
+    pruneTabs(&st, 1100);
+    try testing.expectEqual(@as(u32, 41), st.tab_changed_ms.count());
+    // Three calls clear the old ones (16 per call); the fresh tab stays.
+    pruneTabs(&st, 1200);
+    pruneTabs(&st, 1200);
+    pruneTabs(&st, 1200);
+    try testing.expectEqual(@as(u32, 1), st.tab_changed_ms.count());
+    try testing.expect(st.tab_changed_ms.get(100) != null);
+}
+
+test "win32 tmux pane_io: releaseAll frees everything" {
+    var st: State = .{};
+    try enqueue(&st, 1, 7, "a");
+    try st.pane_seen_ms.put(testing.allocator, 1, 0);
+    try st.tab_changed_ms.put(testing.allocator, 7, 0);
+    st.timer_armed = true;
+    releaseAll(&st, testing.allocator);
+    try testing.expectEqual(@as(usize, 0), st.queue.items.len);
+    try testing.expect(!st.timer_armed);
+    try testing.expectEqual(@as(u32, 0), st.pane_seen_ms.count());
 }
