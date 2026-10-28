@@ -29,7 +29,8 @@ fn toUtf16(out: *[max_name_u16:0]u16, name: []const u8) ?usize {
 
 /// `deadline_ms` is an absolute `GetTickCount64` value; it bounds the whole
 /// exchange. `expected_pid` (from `protocol.tmuxPipePid`) must equal the
-/// pipe server's pid. Caller owns the returned response payload.
+/// pipe server's pid; 0 (the external-mode user pipe) asks for a server of
+/// the same user, elevation and integrity level instead. Caller owns the returned response payload.
 pub fn request(
     alloc: Allocator,
     name: []const u8,
@@ -52,7 +53,14 @@ pub fn request(
     if (win.GetFileType(pipe) != win.FILE_TYPE_PIPE) return error.NotOurServer;
 
     var pid: u32 = 0;
-    if (win.GetNamedPipeServerProcessId(pipe, &pid) == 0 or pid != expected_pid) return error.NotOurServer;
+    if (win.GetNamedPipeServerProcessId(pipe, &pid) == 0) return error.NotOurServer;
+    if (expected_pid == 0) {
+        // The user pipe has no pid in its name: the server must be a process
+        // of this user at our elevation and integrity level.
+        const own = win.identityOf(win.GetCurrentProcess()) orelse return error.NotOurServer;
+        const peer = win.identityOfPid(pid) orelse return error.NotOurServer;
+        if (!own.sameAs(&peer)) return error.NotOurServer;
+    } else if (pid != expected_pid) return error.NotOurServer;
 
     const event = win.CreateEventW(null, 1, 0, null) orelse return error.BrokenPipe;
     defer _ = win.CloseHandle(event);
@@ -310,6 +318,28 @@ test "tmux shim pipe: roundtrip with matching pid" {
     const reply = try request(alloc, name, win.GetCurrentProcessId(), "{\"v\":1}", win.GetTickCount64() + 5000);
     defer alloc.free(reply);
     try std.testing.expect(std.mem.indexOf(u8, reply, "\"stdout\":\"ok\"") != null);
+}
+
+test "tmux shim external: a server of the same user passes the identity check" {
+    const alloc = std.testing.allocator;
+    var nb: [200]u8 = undefined;
+    const name = try testName(&nb, "user");
+    var server: TestServer = .{};
+    try server.start(name);
+    defer server.join();
+
+    const reply = try request(alloc, name, 0, "{\"v\":1}", win.GetTickCount64() + 5000);
+    defer alloc.free(reply);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "\"stdout\":\"ok\"") != null);
+
+    const own = win.identityOf(win.GetCurrentProcess()).?;
+    try std.testing.expect(own.sameAs(&win.identityOfPid(win.GetCurrentProcessId()).?));
+    var other = own;
+    other.elevated = !own.elevated;
+    try std.testing.expect(!own.sameAs(&other));
+    other = own;
+    other.sid_buf[other.sid_len - 1] ^= 1;
+    try std.testing.expect(!own.sameAs(&other));
 }
 
 test "tmux shim pipe: server pid mismatch is NotOurServer" {

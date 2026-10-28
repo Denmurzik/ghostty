@@ -462,6 +462,51 @@ pub const Host = struct {
 
 const layout_mod = layout;
 
+/// Runs one request of the external (user) pipe, R-M5-14. Until the session
+/// commands exist (Task 18) no namespace has a session: `has-session` says so
+/// and every other command is unknown, so a same-user process can not drive
+/// the inside-mode panes through this pipe.
+pub fn runExternal(req: protocol.Request, arena: Allocator) Allocator.Error!Reply {
+    const name: []const u8 = if (req.args.len > 0) req.args[0] else "";
+    if (std.mem.eql(u8, name, "has-session") or std.mem.eql(u8, name, "has")) {
+        var target: []const u8 = "";
+        var i: usize = 1;
+        while (i < req.args.len) : (i += 1) {
+            const a = req.args[i];
+            if (std.mem.eql(u8, a, "-t") and i + 1 < req.args.len) {
+                target = req.args[i + 1];
+                break;
+            }
+            if (std.mem.startsWith(u8, a, "-t") and a.len > 2) {
+                target = a[2..];
+                break;
+            }
+        }
+        const session = target[0 .. std.mem.indexOfScalar(u8, target, ':') orelse target.len];
+        return .{
+            .code = .failed,
+            .stdout = "",
+            .stderr = try std.fmt.allocPrint(arena, "can't find session: {s}\n", .{session}),
+        };
+    }
+    return .{
+        .code = .failed,
+        .stdout = "",
+        .stderr = try std.fmt.allocPrint(arena, "unknown command: {s}\n", .{name}),
+    };
+}
+
+test "win32 tmux external: interim answers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const has = try runExternal(.{ .v = 1, .op = "tmux", .args = &.{ "has-session", "-t", "claude-swarm:main" }, .namespace = "w" }, a);
+    try std.testing.expectEqual(protocol.Code.failed, has.code);
+    try std.testing.expectEqualStrings("can't find session: claude-swarm\n", has.stderr);
+    const other = try runExternal(.{ .v = 1, .op = "tmux", .args = &.{ "kill-pane", "-t", "%1" }, .namespace = "w" }, a);
+    try std.testing.expectEqualStrings("unknown command: kill-pane\n", other.stderr);
+}
+
 /// Runs one request of the tmux pipe on the UI thread. All allocations of the
 /// reply come from `arena`.
 pub fn run(app: *App, req: protocol.Request, arena: Allocator) Reply {
@@ -478,6 +523,7 @@ pub fn run(app: *App, req: protocol.Request, arena: Allocator) Reply {
         .stdin = req.stdin,
         .now_ms = win32.kernel32.GetTickCount64(),
         .deadline_ms = if (req.deadline_ms == 0) std.math.maxInt(u64) else req.deadline_ms,
+        .namespace = req.namespace,
     }, &out) catch {
         return .{ .code = .failed, .stdout = "", .stderr = "ghostty: out of memory\n" };
     };

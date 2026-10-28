@@ -92,3 +92,97 @@ pub extern "kernel32" fn GetSystemTimeAsFileTime(ft: *u64) callconv(.winapi) voi
 pub extern "kernel32" fn GetFileType(h: HANDLE) callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetTempPathW(len: DWORD, buf: [*]u16) callconv(.winapi) DWORD;
 pub extern "kernel32" fn DeleteFileW(name: [*:0]const u16) callconv(.winapi) BOOL;
+
+// ---- the current user, for the external-mode (user) pipe ---------------------
+
+pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+pub const TOKEN_QUERY: DWORD = 0x0008;
+pub const TokenUser: DWORD = 1;
+pub const TokenElevation: DWORD = 20;
+pub const TokenIntegrityLevel: DWORD = 25;
+
+pub const SID_AND_ATTRIBUTES = extern struct {
+    Sid: ?*anyopaque,
+    Attributes: DWORD,
+};
+
+pub extern "kernel32" fn OpenProcess(access: DWORD, inherit: BOOL, pid: DWORD) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn ProcessIdToSessionId(pid: DWORD, session: *DWORD) callconv(.winapi) BOOL;
+pub extern "kernel32" fn LocalFree(mem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+pub extern "advapi32" fn OpenProcessToken(process: HANDLE, access: DWORD, token: *HANDLE) callconv(.winapi) BOOL;
+pub extern "advapi32" fn GetTokenInformation(token: HANDLE, class: DWORD, info: ?*anyopaque, len: DWORD, ret_len: *DWORD) callconv(.winapi) BOOL;
+pub extern "advapi32" fn ConvertSidToStringSidW(sid: *anyopaque, out: *?[*:0]u16) callconv(.winapi) BOOL;
+pub extern "advapi32" fn GetSidSubAuthorityCount(sid: *anyopaque) callconv(.winapi) *u8;
+pub extern "advapi32" fn GetSidSubAuthority(sid: *anyopaque, n: DWORD) callconv(.winapi) *DWORD;
+
+/// Who a process is, as far as the pipe check cares: the user SID as text
+/// ("S-1-5-21-..."), whether the token is elevated and its integrity level.
+pub const Identity = struct {
+    sid_buf: [184]u8 = undefined,
+    sid_len: usize = 0,
+    elevated: bool = false,
+    integrity: u32 = 0,
+
+    pub fn sid(self: *const Identity) []const u8 {
+        return self.sid_buf[0..self.sid_len];
+    }
+
+    /// Same user, same elevation, same integrity level.
+    pub fn sameAs(self: *const Identity, other: *const Identity) bool {
+        return self.sid_len > 0 and
+            std.mem.eql(u8, self.sid(), other.sid()) and
+            self.elevated == other.elevated and
+            self.integrity == other.integrity;
+    }
+};
+
+/// The identity of `process` (a handle with at least
+/// `PROCESS_QUERY_LIMITED_INFORMATION`); null when its token cannot be read.
+pub fn identityOf(process: HANDLE) ?Identity {
+    var token: HANDLE = undefined;
+    if (OpenProcessToken(process, TOKEN_QUERY, &token) == 0) return null;
+    defer _ = CloseHandle(token);
+
+    var id: Identity = .{};
+    var buf: [256]u8 align(8) = undefined;
+    var len: DWORD = 0;
+
+    if (GetTokenInformation(token, TokenUser, &buf, buf.len, &len) == 0) return null;
+    const user: *const SID_AND_ATTRIBUTES = @ptrCast(&buf);
+    var wide: ?[*:0]u16 = null;
+    if (ConvertSidToStringSidW(user.Sid orelse return null, &wide) == 0) return null;
+    defer _ = LocalFree(wide);
+    const text = std.mem.span(wide.?);
+    if (text.len == 0 or text.len > id.sid_buf.len) return null;
+    for (text, id.sid_buf[0..text.len]) |c, *out| {
+        if (c > 0x7f) return null;
+        out.* = @intCast(c);
+    }
+    id.sid_len = text.len;
+
+    var elevation: DWORD = 0;
+    if (GetTokenInformation(token, TokenElevation, &elevation, @sizeOf(DWORD), &len) == 0) return null;
+    id.elevated = elevation != 0;
+
+    // The label SID's last sub-authority is the integrity level.
+    if (GetTokenInformation(token, TokenIntegrityLevel, &buf, buf.len, &len) == 0) return null;
+    const label: *const SID_AND_ATTRIBUTES = @ptrCast(&buf);
+    const label_sid = label.Sid orelse return null;
+    const count = GetSidSubAuthorityCount(label_sid).*;
+    if (count == 0) return null;
+    id.integrity = GetSidSubAuthority(label_sid, count - 1).*;
+    return id;
+}
+
+/// The identity of the pid; null when it cannot be opened or read.
+pub fn identityOfPid(pid: DWORD) ?Identity {
+    const proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) orelse return null;
+    defer _ = CloseHandle(proc);
+    return identityOf(proc);
+}
+
+pub fn currentSession() ?DWORD {
+    var session: DWORD = 0;
+    if (ProcessIdToSessionId(GetCurrentProcessId(), &session) == 0) return null;
+    return session;
+}

@@ -89,7 +89,7 @@ function Get-PeImports([string]$Path) {
 
 # Import names that are not on the allowlist.
 function Get-ImportsOutsideAllowlist([string[]]$Imports) {
-    $allowed = 'kernel32.dll', 'ntdll.dll'
+    $allowed = 'kernel32.dll', 'ntdll.dll', 'advapi32.dll'   # advapi32: the user identity of the external pipe (R-M5-14)
     @($Imports | Where-Object { $allowed -notcontains $_ })
 }
 
@@ -102,10 +102,11 @@ Invoke-E2eScenario 'tmux-cli' {
     if ($r.Code -ne 0) { throw "-V exited with $($r.Code)" }
     if ($text -cne "tmux 3.5a`n") { throw "-V printed '$($text -replace "`n", '\n')'" }
 
-    # No TMUX and no -S: no server.
-    $r = Invoke-Tmux @('display-message', '-p', 'x')
+    # No TMUX and no -S: the external (user) pipe of an instance class that does
+    # not exist, so no server (R-M5-14; the class keeps the owner's Ghostty out of it).
+    $r = Invoke-Tmux @('display-message', '-p', 'x') @{ GHOSTTY_TMUX_CLASS = 'ghostty-e2e-no-such-class' }
     if ($r.Code -ne 1) { throw "no server: exit $($r.Code), expected 1" }
-    if ($r.Stderr -ne "no server running on default`n") { throw "no server: stderr '$($r.Stderr)'" }
+    if ($r.Stderr -notlike "no server running on \\.\pipe\ghostty-tmux-S-1-*-ghostty-e2e-no-such-class`n") { throw "no server: stderr '$($r.Stderr)'" }
 
     # A pipe that does not exist is "no server" too, quickly.
     $ghost = '\\.\pipe\ghostty-tmux-1-0000000000000000'
@@ -141,12 +142,12 @@ Invoke-E2eScenario 'tmux-cli' {
     if ($peak -ge 5120) { throw "peak private $peak KB is not under 5 MB" }
     if ($mode -ne 'debug' -and $p95 -ge 50) { throw ('spawn wall p95 {0:N1} ms is not under 50 ms ({1})' -f $p95, $mode) }
 
-    # Import table: an allowlist, exactly a subset of kernel32 and ntdll.
+    # Import table: an allowlist, exactly a subset of kernel32, ntdll and advapi32.
     $imports = @((Get-PeImports $script:TmuxExe) -split ',' | Where-Object { $_ })
     if ($imports -notcontains 'kernel32.dll') { throw "import parser found no kernel32 in: $($imports -join ' ')" }
     Write-E2eInfo ('tmux.exe imports: ' + ($imports -join ', '))
     $extra = @(Get-ImportsOutsideAllowlist $imports)
-    if ($extra.Count -gt 0) { throw "tmux.exe imports outside {kernel32.dll, ntdll.dll}: $($extra -join ', ')" }
+    if ($extra.Count -gt 0) { throw "tmux.exe imports outside {kernel32.dll, ntdll.dll, advapi32.dll}: $($extra -join ', ')" }
 
     # Trace: one whole JSON line per invocation, also under parallel runs.
     $trace = Join-Path $script:Sbx.Tmp 'trace.jsonl'

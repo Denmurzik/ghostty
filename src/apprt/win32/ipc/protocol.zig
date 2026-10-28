@@ -56,7 +56,23 @@ pub const Request = struct {
     env: []const []const u8 = &.{},
     stdin: ?[]const u8 = null,
     pane: []const u8 = "",
+    /// `tmux` op, external mode (R-M5-14): the `-L` name (`default` without
+    /// one). Set by `tmux.exe` on the user pipe only; the per-process pipe
+    /// refuses a request that has one.
+    namespace: ?[]const u8 = null,
 };
+
+/// Longest external-mode namespace the server accepts.
+pub const max_namespace_len = 64;
+
+/// Whether `ns` is a usable external-mode namespace: 1 to
+/// `max_namespace_len` bytes of valid UTF-8 without control characters.
+pub fn validNamespace(ns: []const u8) bool {
+    if (ns.len == 0 or ns.len > max_namespace_len) return false;
+    if (!std.unicode.utf8ValidateSlice(ns)) return false;
+    for (ns) |c| if (c < 0x20 or c == 0x7f) return false;
+    return true;
+}
 
 /// What the tmux pipe accepts (stdin and environment included).
 pub const max_request_tmux: u32 = 4 << 20;
@@ -206,6 +222,26 @@ pub fn pipeName(
         session,
         @as(u8, if (elevated) 'a' else 'u'),
         sanitizeClass(&class_buf, class),
+    });
+}
+
+/// `\\.\pipe\ghostty-tmux-<user SID>-<session>-<class>[-admin]`: the opt-in
+/// external-mode pipe (R-M5-14). `-admin` marks an elevated server. The SID
+/// starts with a letter, so the name can never read as a per-process tmux
+/// pipe (`tmuxPipePid` wants digits there).
+pub fn tmuxUserPipeName(
+    buf: []u8,
+    sid: []const u8,
+    session: u32,
+    class: []const u8,
+    admin: bool,
+) ![]const u8 {
+    var class_buf: [max_class_len]u8 = undefined;
+    return std.fmt.bufPrint(buf, tmux_pipe_prefix ++ "{s}-{d}-{s}{s}", .{
+        sid,
+        session,
+        sanitizeClass(&class_buf, class),
+        if (admin) "-admin" else "",
     });
 }
 

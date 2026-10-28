@@ -17,6 +17,9 @@ pub const Context = struct {
     stdin: ?[]const u8,
     now_ms: u64,
     deadline_ms: u64,
+    /// External mode (R-M5-14): the `-L` namespace of the request; null for
+    /// the per-process pipe.
+    namespace: ?[]const u8 = null,
 };
 
 /// The most a request may leave in stdout, and the longest error line. A

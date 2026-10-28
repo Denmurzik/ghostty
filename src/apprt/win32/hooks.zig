@@ -105,6 +105,7 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     jumplist.configChanged(app, config);
     Updater.configChanged(app, config);
     secure_input.configChanged(app, config);
+    tmux_Server.configChanged(app, config);
     if (reloaded) app_toast.configReloaded(app);
 }
 

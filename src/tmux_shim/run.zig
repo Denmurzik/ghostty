@@ -16,7 +16,23 @@ pub const deadline_margin_ms = 250;
 
 pub const version_text = "tmux 3.5a\n";
 
+/// The instance class of the external pipe unless `GHOSTTY_TMUX_CLASS` names
+/// another (the same default as the app's `instance.defaultClass`).
+pub const default_class = if (@import("builtin").mode == .debug)
+    "com.mitchellh.ghostty-debug"
+else
+    "com.mitchellh.ghostty";
+
+/// The caller's identity as the user pipe name needs it.
+pub const UserInfo = struct {
+    sid: []const u8,
+    session: u32,
+    elevated: bool,
+};
+
 pub const Env = struct {
+    /// `GHOSTTY_TMUX_CLASS`: the instance class of the external pipe.
+    class: ?[]const u8 = null,
     tmux: ?[]const u8,
     tmux_pane: ?[]const u8,
     trace: ?[]const u8,
@@ -68,21 +84,33 @@ pub fn run(
     };
     if (g.version) return .{ .code = 0, .stdout = version_text, .stderr = "" };
 
-    // External-server mode (-L) is not available.
-    if (g.socket_name != null and g.socket_path == null) {
-        return fail(arena, "no server running on {s}\n", .{g.socket_name.?});
-    }
+    // Which pipe: -S beats everything; then `-L` (even when TMUX is set) and
+    // an unset TMUX pick the opt-in external pipe of the user (R-M5-14), with
+    // the `-L` name (or `default`) as the namespace; otherwise TMUX.
+    var namespace: ?[]const u8 = null;
     const pipe: []const u8 = pipe: {
         if (g.socket_path) |p| break :pipe p;
-        if (env.tmux) |t| {
-            const first = t[0 .. std.mem.indexOfScalar(u8, t, ',') orelse t.len];
-            if (first.len > 0) break :pipe first;
+        if (g.socket_name == null) {
+            if (env.tmux) |t| {
+                const first = t[0 .. std.mem.indexOfScalar(u8, t, ',') orelse t.len];
+                if (first.len > 0) break :pipe first;
+                return fail(arena, "no server running on default\n", .{});
+            }
         }
-        return fail(arena, "no server running on default\n", .{});
+        const ns = g.socket_name orelse "default";
+        const user = transport.userInfo(arena) orelse
+            return fail(arena, "no server running on {s}\n", .{ns});
+        var buf: [512]u8 = undefined;
+        const name = protocol.tmuxUserPipeName(&buf, user.sid, user.session, env.class orelse default_class, user.elevated) catch
+            return fail(arena, "no server running on {s}\n", .{ns});
+        namespace = ns;
+        break :pipe try arena.dupe(u8, name);
     };
     // Only a Ghostty tmux pipe is ever opened: no file, UNC or foreign pipe
-    // path gets the request (it carries the environment).
-    const expected_pid = protocol.tmuxPipePid(pipe) orelse
+    // path gets the request (it carries the environment). The user pipe is
+    // named by this process, and its server is checked by identity instead
+    // of by pid (expected pid 0).
+    const expected_pid: u32 = if (namespace != null) 0 else protocol.tmuxPipePid(pipe) orelse
         return fail(arena, "not a Ghostty tmux socket\n", .{});
 
     for (g.rest) |a| {
@@ -110,6 +138,7 @@ pub fn run(
         .env = env.block,
         .stdin = stdin_text,
         .pane = env.tmux_pane orelse "",
+        .namespace = namespace,
         .deadline_ms = start + client_timeout_ms - deadline_margin_ms,
     });
     if (payload.len > protocol.max_request_tmux) return fail(arena, "ghostty: request too large\n", .{});
@@ -164,9 +193,14 @@ const FakeTransport = struct {
     expected_pid: u32 = 0,
     payload: []const u8 = "",
     deadline: u64 = 0,
+    user: ?UserInfo = null,
 
     pub fn nowMs(self: *FakeTransport) u64 {
         return self.now;
+    }
+
+    pub fn userInfo(self: *FakeTransport, _: Allocator) ?UserInfo {
+        return self.user;
     }
 
     pub fn request(self: *FakeTransport, alloc: Allocator, pipe: []const u8, expected_pid: u32, payload: []const u8, deadline_ms: u64) TransportError![]u8 {
@@ -220,14 +254,74 @@ test "tmux shim run: no TMUX and no -S" {
     try std.testing.expectEqual(@as(usize, 0), tr.calls);
 }
 
-test "tmux shim run: -L without -S is not a server" {
+const test_user: UserInfo = .{ .sid = "S-1-5-21-1-2-3-1001", .session = 1, .elevated = false };
+
+test "tmux shim external: pipe name" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-com.mitchellh.ghostty",
+        try protocol.tmuxUserPipeName(&buf, "S-1-5-21-1-2-3-1001", 1, "com.mitchellh.ghostty", false),
+    );
+    // The class is sanitised like the M2 name's; an elevated server gets -admin.
+    try std.testing.expectEqualStrings(
+        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-2-a_b_c-admin",
+        try protocol.tmuxUserPipeName(&buf, "S-1-5-21-1-2-3-1001", 2, "a b/c", true),
+    );
+    // Never the shape of a per-process pipe.
+    try std.testing.expectEqual(@as(?u32, null), protocol.tmuxPipePid(try protocol.tmuxUserPipeName(&buf, "S-1-5-18", 0, "x", false)));
+}
+
+test "tmux shim external: -L sets the namespace, no -L is default" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    var tr: FakeTransport = .{};
-    const out = try run(arena_state.allocator(), &.{ "-L", "work", "list-panes" }, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-1-ab,1,0" }), "C:\\", &tr, NoStdin{});
-    try std.testing.expectEqual(@as(u8, 1), out.code);
-    try std.testing.expectEqualStrings("no server running on work\n", out.stderr);
-    try std.testing.expectEqual(@as(usize, 0), tr.calls);
+    const a = arena_state.allocator();
+
+    var tr: FakeTransport = .{ .reply = ok_reply, .user = test_user };
+    var env = testEnv(.{});
+    env.class = "cls";
+    const out = try run(a, &.{ "has-session", "-t", "x" }, env, "C:\\", &tr, NoStdin{});
+    try std.testing.expectEqual(@as(u8, 0), out.code);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-cls", tr.pipe);
+    try std.testing.expectEqual(@as(u32, 0), tr.expected_pid);
+    try std.testing.expectEqualStrings("default", (try protocol.parseRequest(a, tr.payload)).namespace.?);
+
+    _ = try run(a, &.{ "-L", "claude-swarm-1", "has-session" }, env, "C:\\", &tr, NoStdin{});
+    try std.testing.expectEqualStrings("claude-swarm-1", (try protocol.parseRequest(a, tr.payload)).namespace.?);
+
+    // Elevated: the -admin pipe.
+    tr.user.?.elevated = true;
+    _ = try run(a, &.{"has-session"}, env, "C:\\", &tr, NoStdin{});
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-cls-admin", tr.pipe);
+
+    // Without an identity there is no pipe to try.
+    var none: FakeTransport = .{};
+    const out2 = try run(a, &.{ "-L", "w", "list-panes" }, env, "C:\\", &none, NoStdin{});
+    try std.testing.expectEqual(@as(u8, 1), out2.code);
+    try std.testing.expectEqualStrings("no server running on w\n", out2.stderr);
+    try std.testing.expectEqual(@as(usize, 0), none.calls);
+}
+
+test "tmux shim external: -L wins over TMUX" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const inside = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0";
+
+    var tr: FakeTransport = .{ .reply = ok_reply, .user = test_user };
+    _ = try run(a, &.{ "-L", "work", "list-panes" }, testEnv(.{ .tmux = inside }), "C:\\", &tr, NoStdin{});
+    try std.testing.expect(std.mem.startsWith(u8, tr.pipe, "\\\\.\\pipe\\ghostty-tmux-S-1-5-"));
+    try std.testing.expectEqual(@as(u32, 0), tr.expected_pid);
+    try std.testing.expectEqualStrings("work", (try protocol.parseRequest(a, tr.payload)).namespace.?);
+
+    // -S still beats -L; TMUX without -L is the inside mode, no namespace.
+    var s: FakeTransport = .{ .reply = ok_reply, .user = test_user };
+    _ = try run(a, &.{ "-L", "work", "-S", "\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff", "list-panes" }, testEnv(.{}), "C:\\", &s, NoStdin{});
+    try std.testing.expectEqual(@as(u32, 42), s.expected_pid);
+    try std.testing.expect((try protocol.parseRequest(a, s.payload)).namespace == null);
+    var i: FakeTransport = .{ .reply = ok_reply, .user = test_user };
+    _ = try run(a, &.{"list-panes"}, testEnv(.{ .tmux = inside }), "C:\\", &i, NoStdin{});
+    try std.testing.expectEqual(@as(u32, 7), i.expected_pid);
+    try std.testing.expect((try protocol.parseRequest(a, i.payload)).namespace == null);
 }
 
 test "tmux shim run: -S beats TMUX" {

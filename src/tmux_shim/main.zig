@@ -15,6 +15,17 @@ const Transport = struct {
         return win.GetTickCount64();
     }
 
+    /// Only asked for when the external pipe is the target.
+    pub fn userInfo(_: Transport, arena: Allocator) ?run_mod.UserInfo {
+        const id = win.identityOf(win.GetCurrentProcess()) orelse return null;
+        const session = win.currentSession() orelse return null;
+        return .{
+            .sid = arena.dupe(u8, id.sid()) catch return null,
+            .session = session,
+            .elevated = id.elevated,
+        };
+    }
+
     pub fn request(_: Transport, alloc: Allocator, name: []const u8, expected_pid: u32, payload: []const u8, deadline_ms: u64) run_mod.TransportError![]u8 {
         return pipe.request(alloc, name, expected_pid, payload, deadline_ms);
     }
@@ -109,6 +120,8 @@ fn readEnv(arena: Allocator, dropped: *usize) !run_mod.Env {
             env.tmux_pane = value;
         } else if (std.ascii.eqlIgnoreCase(name, "GHOSTTY_TMUX_TRACE")) {
             if (value.len > 0) env.trace = value;
+        } else if (std.ascii.eqlIgnoreCase(name, "GHOSTTY_TMUX_CLASS")) {
+            if (value.len > 0) env.class = value;
         } else if (std.ascii.eqlIgnoreCase(name, "GHOSTTY_TMUX_STATS")) {
             env.stats = std.mem.eql(u8, value, "1");
         }

@@ -16,6 +16,8 @@ const labels = @import("labels.zig");
 const global = @import("../../../global.zig");
 const util = @import("../util.zig");
 const protocol = @import("../ipc/protocol.zig");
+const instance = @import("../instance.zig");
+const Config = @import("../../../config.zig").Config;
 const ipc = struct {
     const Server = @import("../ipc/Server.zig");
 };
@@ -24,6 +26,8 @@ const log = std.log.scoped(.win32_tmux_server);
 
 /// `WM_GHOSTTY_IPC` wparam of this pipe.
 pub const post_tag: usize = 1;
+/// `WM_GHOSTTY_IPC` wparam of the opt-in external (user) pipe.
+pub const post_tag_user: usize = 2;
 
 /// A silent client must not hold the queue: 500 ms to send its request and
 /// 200 ms to read the answer.
@@ -37,16 +41,23 @@ pub const State = struct {
     pipe: ?[]u8 = null,
     /// Directory of `tmux.exe` (the directory of this exe).
     exe_dir: ?[]u8 = null,
+    /// `start` ran (the app is the primary instance).
+    started: bool = false,
+    /// The external pipe (`windows-tmux-external`, R-M5-14); null while the
+    /// key is false or the claim failed.
+    user_server: ?*ipc.Server = null,
+    user_pipe: ?[]u8 = null,
 };
 
 /// Where a `WM_GHOSTTY_IPC` goes.
-pub const Route = enum { main, tmux, drop };
+pub const Route = enum { main, tmux, tmux_user, drop };
 
 /// Routing on wparam first. A tmux request is answered even when the main
 /// pipe is not ours (standalone process); a request of a stopped server is
 /// dropped, its `Pending` belongs to the server again.
-pub fn routeIpc(wparam: usize, main_server: ?*ipc.Server, tmux_server: ?*ipc.Server) Route {
+pub fn routeIpc(wparam: usize, main_server: ?*ipc.Server, tmux_server: ?*ipc.Server, user_server: ?*ipc.Server) Route {
     if (wparam == post_tag) return if (tmux_server == null) .drop else .tmux;
+    if (wparam == post_tag_user) return if (user_server == null) .drop else .tmux_user;
     if (wparam == 0) return if (main_server == null) .drop else .main;
     return .drop;
 }
@@ -56,6 +67,9 @@ pub fn routeIpc(wparam: usize, main_server: ?*ipc.Server, tmux_server: ?*ipc.Ser
 pub fn start(app: *App) void {
     const alloc = app.core_app.alloc;
     const st = &app.tmux_server;
+    st.started = true;
+    // The external pipe does not depend on the per-process one either.
+    defer syncExternal(app, &app.config);
 
     // The exe dir does not depend on the claim: a failed claim still puts
     // the shim dir on PATH (the shim then answers "no server running").
@@ -95,10 +109,80 @@ pub fn start(app: *App) void {
     st.pipe = alloc.dupe(u8, name) catch null;
 }
 
+/// `windows-tmux-external` changed (a reload): claims or releases the user
+/// pipe. Only the primary instance (after `start`) ever claims it.
+pub fn configChanged(app: *App, config: *const Config) void {
+    syncExternal(app, config);
+}
+
+fn syncExternal(app: *App, config: *const Config) void {
+    const st = &app.tmux_server;
+    if (!st.started) return;
+    if (config.@"windows-tmux-external") {
+        if (st.user_server == null) claimUser(app);
+    } else {
+        stopUser(app);
+    }
+}
+
+fn claimUser(app: *App) void {
+    const alloc = app.core_app.alloc;
+    const st = &app.tmux_server;
+
+    const sid = instance.currentUserSid(alloc) catch |err| {
+        log.warn("no user SID for the external tmux pipe err={}", .{err});
+        return;
+    };
+    defer alloc.free(sid);
+    var session: u32 = 0;
+    if (win32.kernel32.ProcessIdToSessionId(win32.kernel32.GetCurrentProcessId(), &session) == 0) {
+        log.warn("ProcessIdToSessionId failed err={}", .{win32.kernel32.GetLastError()});
+    }
+    var name_buf: [512]u8 = undefined;
+    const name = protocol.tmuxUserPipeName(&name_buf, sid, session, app.config.class orelse instance.defaultClass(), instance.isElevated()) catch return;
+    const name_w = util.utf16z(alloc, name) catch return;
+    defer alloc.free(name_w);
+
+    // `claim` is the M2 claim: first instance only, current-user ACL (plus
+    // the integrity label when elevated), no remote clients; and every
+    // client is checked (same user, elevation and integrity) before a byte
+    // of its request is read.
+    const server = ipc.Server.claim(alloc, name_w) catch |err| {
+        log.warn("unable to claim the external tmux pipe err={}", .{err});
+        return;
+    };
+    server.post_tag = post_tag_user;
+    server.max_request = protocol.max_request_tmux;
+    server.io_timeout_ms = io_timeout_ms;
+    server.close_wait_ms = close_wait_ms;
+    server.start(app.msg_hwnd) catch |err| {
+        log.warn("unable to start the external tmux server err={}", .{err});
+        server.stop();
+        return;
+    };
+    st.user_server = server;
+    st.user_pipe = alloc.dupe(u8, name) catch null;
+    log.info("external tmux pipe open", .{});
+}
+
+fn stopUser(app: *App) void {
+    const alloc = app.core_app.alloc;
+    const st = &app.tmux_server;
+    if (st.user_server) |server| {
+        st.user_server = null;
+        server.stop();
+        log.info("external tmux pipe closed", .{});
+    }
+    if (st.user_pipe) |p| alloc.free(p);
+    st.user_pipe = null;
+}
+
 /// After the message loop, like `App.stopServer`.
 pub fn stop(app: *App) void {
     const alloc = app.core_app.alloc;
     const st = &app.tmux_server;
+    stopUser(app);
+    st.started = false;
     if (st.server) |server| {
         st.server = null;
         server.stop();
@@ -109,11 +193,14 @@ pub fn stop(app: *App) void {
     st.exe_dir = null;
 }
 
-/// UI thread: one request from the tmux pipe.
-pub fn handle(app: *App, pending: *ipc.Server.Pending) void {
+/// UI thread: one request from the tmux pipe (`external`: from the user pipe).
+pub fn handle(app: *App, pending: *ipc.Server.Pending, external: bool) void {
     const Runner = struct {
         app: *App,
+        external: bool,
         pub fn run(self: @This(), arena: Allocator, req: protocol.Request) Registry.Reply {
+            if (self.external) return Registry.runExternal(req, arena) catch
+                .{ .code = .failed, .stdout = "", .stderr = "ghostty: out of memory\n" };
             return Registry.run(self.app, req, arena);
         }
     };
@@ -121,7 +208,8 @@ pub fn handle(app: *App, pending: *ipc.Server.Pending) void {
         pending.alloc,
         pending.request,
         win32.kernel32.GetTickCount64(),
-        Runner{ .app = app },
+        Runner{ .app = app, .external = external },
+        external,
     ) catch {
         // Out of memory: the empty answer is the "no response" fallback.
         ipc.Server.complete(pending, pending.alloc.dupe(u8, "") catch return);
@@ -132,7 +220,9 @@ pub fn handle(app: *App, pending: *ipc.Server.Pending) void {
 
 /// Parses and answers one request; `runner.run(arena, req) Registry.Reply`
 /// does the work for a well-formed `tmux` request. Caller owns the result.
-pub fn respond(alloc: Allocator, request: []const u8, now_ms: u64, runner: anytype) ![]u8 {
+/// `external`: the request came over the user pipe, which serves only
+/// requests with a valid namespace; the per-process pipe refuses one.
+pub fn respond(alloc: Allocator, request: []const u8, now_ms: u64, runner: anytype, external: bool) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
@@ -144,6 +234,12 @@ pub fn respond(alloc: Allocator, request: []const u8, now_ms: u64, runner: anyty
     if (req.v != protocol.version) return reply(alloc, .version_mismatch, "protocol version mismatch\n");
     if (protocol.expired(req, now_ms)) return reply(alloc, .failed, "expired");
     if (!std.mem.eql(u8, req.op, "tmux")) return reply(alloc, .bad_request, "unknown op");
+    if (external) {
+        const ns = req.namespace orelse return reply(alloc, .bad_request, "namespace required");
+        if (!protocol.validNamespace(ns)) return reply(alloc, .bad_request, "bad namespace");
+    } else if (req.namespace != null) {
+        return reply(alloc, .bad_request, "namespace not accepted");
+    }
     // A hostile client does not run tmux.exe, so its caps are checked here.
     if (req.stdin) |s| {
         if (s.len > protocol.max_stdin_tmux) return reply(alloc, .failed, "ghostty: request too large\n");
@@ -163,6 +259,8 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.beginObject();
     try jw.objectField("pipe");
     if (app.tmux_server.pipe) |p| try jw.write(p) else try jw.write(null);
+    try jw.objectField("user_pipe");
+    if (app.tmux_server.user_pipe) |p| try jw.write(p) else try jw.write(null);
     try jw.objectField("panes");
     try jw.beginArray();
     for (app.windows.items) |window| {
@@ -217,7 +315,37 @@ fn expectCode(bytes: []const u8, code: protocol.Code) !protocol.Response {
 }
 
 fn respondTo(alloc: Allocator, json: []const u8, calls: *u32) ![]u8 {
-    return respond(alloc, json, 1000, TestRunner{ .calls = calls });
+    return respond(alloc, json, 1000, TestRunner{ .calls = calls }, false);
+}
+
+test "win32 tmux: per-process pipe refuses a namespace" {
+    const alloc = std.testing.allocator;
+    var calls: u32 = 0;
+
+    const with_ns = try respondTo(alloc, "{\"v\":1,\"op\":\"tmux\",\"args\":[\"list-panes\"],\"namespace\":\"work\"}", &calls);
+    defer alloc.free(with_ns);
+    const r = try expectCode(with_ns, .bad_request);
+    alloc.free(r.stdout);
+    alloc.free(r.stderr);
+    try std.testing.expectEqual(@as(u32, 0), calls);
+
+    // The user pipe is the other way round: it needs a valid namespace.
+    for ([_]struct { []const u8, protocol.Code, u32 }{
+        .{ "{\"v\":1,\"op\":\"tmux\",\"args\":[\"has-session\"],\"namespace\":\"work\"}", .ok, 1 },
+        .{ "{\"v\":1,\"op\":\"tmux\",\"args\":[\"has-session\"]}", .bad_request, 1 },
+        .{ "{\"v\":1,\"op\":\"tmux\",\"args\":[\"has-session\"],\"namespace\":\"\"}", .bad_request, 1 },
+        .{ "{\"v\":1,\"op\":\"tmux\",\"args\":[\"has-session\"],\"namespace\":\"a\\nb\"}", .bad_request, 1 },
+    }) |case| {
+        const bytes = try respond(alloc, case[0], 1000, TestRunner{ .calls = &calls }, true);
+        defer alloc.free(bytes);
+        const rr = try expectCode(bytes, case[1]);
+        alloc.free(rr.stdout);
+        alloc.free(rr.stderr);
+    }
+    try std.testing.expectEqual(@as(u32, 1), calls);
+    const long: [protocol.max_namespace_len + 1]u8 = @splat('x');
+    try std.testing.expect(!protocol.validNamespace(&long));
+    try std.testing.expect(protocol.validNamespace(long[0..protocol.max_namespace_len]));
 }
 
 test "win32 tmux server: respond maps requests" {
@@ -277,16 +405,19 @@ test "win32 tmux server: stdin cap" {
 test "win32 tmux server: routing is by wparam before the server check" {
     const fake: *ipc.Server = @ptrFromInt(0x1000);
     // Standalone process: no main server, but the tmux pipe answers.
-    try std.testing.expectEqual(Route.tmux, routeIpc(1, null, fake));
-    try std.testing.expectEqual(Route.drop, routeIpc(0, null, fake));
-    try std.testing.expectEqual(Route.main, routeIpc(0, fake, null));
-    try std.testing.expectEqual(Route.drop, routeIpc(1, fake, null));
-    try std.testing.expectEqual(Route.drop, routeIpc(2, fake, fake));
+    try std.testing.expectEqual(Route.tmux, routeIpc(1, null, fake, null));
+    try std.testing.expectEqual(Route.drop, routeIpc(0, null, fake, null));
+    try std.testing.expectEqual(Route.main, routeIpc(0, fake, null, null));
+    try std.testing.expectEqual(Route.drop, routeIpc(1, fake, null, fake));
+    // The user pipe has its own tag; released, its requests are dropped.
+    try std.testing.expectEqual(Route.tmux_user, routeIpc(2, null, null, fake));
+    try std.testing.expectEqual(Route.drop, routeIpc(2, fake, fake, null));
+    try std.testing.expectEqual(Route.drop, routeIpc(3, fake, fake, fake));
 }
 
 fn testUiHandler(ctx: ?*anyopaque, pending: *ipc.Server.Pending) void {
     const calls: *u32 = @ptrCast(@alignCast(ctx.?));
-    const bytes = respond(pending.alloc, pending.request, win32.kernel32.GetTickCount64(), TestRunner{ .calls = calls }) catch
+    const bytes = respond(pending.alloc, pending.request, win32.kernel32.GetTickCount64(), TestRunner{ .calls = calls }, false) catch
         (pending.alloc.dupe(u8, "") catch return);
     ipc.Server.complete(pending, bytes);
 }
