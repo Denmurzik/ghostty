@@ -305,6 +305,7 @@ test "win32 hooks: testState writes an m3 object" {
     app.quick = .{};
     app.shell_open = .{};
     app.tmux_server = .{};
+    app.tmux_labels = .{};
     try testState(&app, &jw);
     try jw.endObject();
 
