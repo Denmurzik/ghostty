@@ -904,7 +904,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     rewrites OSC 8 and moves OSC 7/52/9. Resize works, and its key-echo p95 is below 1 ms (inbox: 0.6 to 15 ms).
     - **Decision:** `windows-conpty = bundled` is the default. Every win32 build installs the pair for x64/arm64 from
       `vendor/conpty` (committed: `zig fetch` cannot unpack a `.nupkg`; `-Dconpty-dir` overrides) next to
-      `ghostty.exe`, with `THIRD_PARTY_NOTICES.md`.
+      `ghostty.exe`, with `THIRD_PARTY_NOTICES.txt`.
     - **Loading:** `LoadLibraryExW("conpty.dll", APPLICATION_DIR | SYSTEM32)` once both files are found in the exe
       directory. Missing files or a failed load mean one log line and the inbox console; `windows-conpty = inbox` forces
       it. A pty keeps the ConPTY it was created with.

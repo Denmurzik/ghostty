@@ -49,8 +49,6 @@ pub fn install(b: *std.Build, cfg: *const Config) void {
     for (files) |f| {
         b.getInstallStep().dependOn(&b.addInstallBinFile(root.path(b, f[0]), f[1]).step);
     }
-    b.getInstallStep().dependOn(&b.addInstallBinFile(
-        b.path("dist/windows/THIRD_PARTY_NOTICES.md"),
-        "THIRD_PARTY_NOTICES.md",
-    ).step);
+    // The notice text ships as THIRD_PARTY_NOTICES.txt, staged by
+    // dist/windows/package.ps1.
 }

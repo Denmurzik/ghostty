@@ -86,7 +86,7 @@ try {
         $Prefix = (Resolve-Path -LiteralPath $Prefix).Path
         $bin = Join-Path $Prefix 'bin'
         $binFiles = @('ghostty.exe', 'tmux.exe')
-        if (-not $NoConpty) { $binFiles += @('conpty.dll', 'OpenConsole.exe', 'THIRD_PARTY_NOTICES.md') }
+        if (-not $NoConpty) { $binFiles += @('conpty.dll', 'OpenConsole.exe') }
         foreach ($f in $binFiles) {
             $src = Join-Path $bin $f
             if (Test-Path -LiteralPath $src -PathType Leaf) { Copy-Item -LiteralPath $src -Destination (Join-Path $stage $f) }
@@ -156,10 +156,10 @@ try {
     Require-File 'tmux.exe'
     Require-File 'LICENSE'
     Require-File 'README-windows.txt'
+    Require-File 'THIRD_PARTY_NOTICES.txt'
     if (-not $NoConpty) {
         Require-File 'conpty.dll'
         Require-File 'OpenConsole.exe'
-        Require-File 'THIRD_PARTY_NOTICES.md'
     }
     Require-Dir 'share\ghostty\themes' -NonEmpty
     Require-Dir 'share\ghostty\shell-integration'
@@ -275,6 +275,16 @@ try {
         if (-not $m.Success) { Fail 'TrayClass not found in installer\ghostty.iss' }
         if ($m.Groups[1].Value -ne $trayClass) { Fail "installer TrayClass '$($m.Groups[1].Value)' <> app '$trayClass'" }
     }
+
+    # Third-party notices cover every dependency and this arch's toolchain (R-M6-10).
+    $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $saved = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $tpc = @(& $ps51 -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'third-party-check.ps1') `
+            -RepoRoot $repoRoot -Arch $Arch -Notices (Join-Path $stage 'THIRD_PARTY_NOTICES.txt') 2>&1)
+    $tpcRc = $LASTEXITCODE
+    $ErrorActionPreference = $saved
+    foreach ($l in $tpc) { Write-Host ([string]$l) }
+    if ($tpcRc -ne 0) { Fail "third-party-check (exit $tpcRc)" }
 
     # ---- 3. privacy ------------------------------------------------------
     function Assert-Private([string]$path, [string]$label) {
