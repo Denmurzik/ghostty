@@ -259,8 +259,8 @@ try {
         $m = [regex]::Match($zigAum, '(?s)pub const aumid = if \(builtin\.mode == \.debug\)\s*"[^"]+"\s*else\s*"([^"]+)";')
         if (-not $m.Success) { Fail 'aumid literal not found in src\os\windows_explorer.zig' }
         $aumid = $m.Groups[1].Value
-        $m = [regex]::Match($issText, 'AppUserModelID:\s*"([^"]+)"')
-        if (-not $m.Success) { Fail 'AppUserModelID not found in installer\ghostty.iss' }
+        $m = [regex]::Match($issText, '#define\s+AppAumid\s+"([^"]+)"')
+        if (-not $m.Success) { Fail 'AppAumid define not found in installer\ghostty.iss' }
         if ($m.Groups[1].Value -ne $aumid) { Fail "installer AUMID '$($m.Groups[1].Value)' <> app '$aumid'" }
         $zigTray = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src\apprt\win32\tray.zig')
         $m = [regex]::Match($zigTray, 'const class_name = std\.unicode\.utf8ToUtf16LeStringLiteral\("([^"]+)"\)')
