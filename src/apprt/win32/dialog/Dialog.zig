@@ -601,11 +601,17 @@ fn createChildren(self: *Dialog) !void {
         const alloc = std.heap.page_allocator;
         if (alloc.alloc(u16, self.spec.title.len + self.body.len + 2)) |buf| {
             defer alloc.free(buf);
-            @memcpy(buf[0..self.spec.title.len], self.spec.title);
-            var n = self.spec.title.len;
+            // The window text is the headline already when they are the same:
+            // a screen reader would say it twice.
+            const same = std.mem.eql(u16, self.spec.title, self.spec.window_title);
+            const head = if (same) 0 else self.spec.title.len;
+            @memcpy(buf[0..head], self.spec.title[0..head]);
+            var n = head;
             if (self.body.len > 0) {
-                buf[n] = '\n';
-                n += 1;
+                if (head > 0) {
+                    buf[n] = '\n';
+                    n += 1;
+                }
                 @memcpy(buf[n..][0..self.body.len], self.body);
                 n += self.body.len;
             }

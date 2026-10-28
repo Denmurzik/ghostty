@@ -134,7 +134,7 @@ pub fn taskDialogList(
     var box_body: [16384]u16 = undefined;
     _ = win32.user32.MessageBoxW(
         owner,
-        dtext.toWide(&box_body, body, .paragraphs),
+        dtext.toWideFit(&box_body, body, .paragraphs),
         dtext.toWide(&box_title, title, .single_line),
         win32.user32.MB_OK | win32.user32.MB_ICONWARNING,
     );
@@ -170,8 +170,8 @@ fn show(
         .owner = owner,
         .window_title = dtext.toWide(&window_buf, window_title, .single_line),
         .title = dtext.toWide(&title_buf, title, .single_line),
-        .body = dtext.toWide(&body_buf, body, .paragraphs),
-        .list = dtext.toWide(&list_buf, list, .paragraphs),
+        .body = dtext.toWideFit(&body_buf, body, .paragraphs),
+        .list = dtext.toWideFit(&list_buf, list, .paragraphs),
         .buttons = wide_buttons[0..count],
         .default_index = default_index,
     });
@@ -184,7 +184,7 @@ fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8
     var body_buf: [2048]u16 = undefined;
     const result = win32.user32.MessageBoxW(
         owner,
-        dtext.toWide(&body_buf, body, .paragraphs),
+        dtext.toWideFit(&body_buf, body, .paragraphs),
         dtext.toWide(&title_buf, title, .single_line),
         win32.user32.MB_YESNO | win32.user32.MB_ICONQUESTION | MB_DEFBUTTON2,
     );

@@ -106,9 +106,23 @@ pub const Mode = enum {
 /// bytes show as U+FFFD. Control characters and invisible or bidi
 /// formatting characters never reach the output as themselves.
 pub fn toWide(buf: []u16, text: []const u8, mode: Mode) [:0]u16 {
+    const done = convert(buf, text, mode);
+    buf[done.n] = 0;
+    return buf[0..done.n :0];
+}
+
+const Converted = struct {
+    /// UTF-16 units written.
+    n: usize,
+    /// Bytes of the source consumed.
+    used: usize,
+};
+
+fn convert(buf: []u16, text: []const u8, mode: Mode) Converted {
     var sink: Sink = .{ .buf = buf };
     var i: usize = 0;
     while (i < text.len) {
+        const start = i;
         const cp = nextCodepoint(text, &i);
         const para = mode == .paragraphs;
         const ok = switch (cp) {
@@ -120,12 +134,89 @@ pub fn toWide(buf: []u16, text: []const u8, mode: Mode) [:0]u16 {
             0x80...0x9F => sink.escape(cp),
             else => if (isInvisible(cp)) sink.escape(cp) else sink.codepoint(cp),
         };
-        if (!ok) break;
+        if (!ok) return .{ .n = sink.n, .used = start };
     }
-    buf[sink.n] = 0;
-    return buf[0..sink.n :0];
+    return .{ .n = sink.n, .used = text.len };
 }
 
+/// `toWide` for text that is shown to be judged (a URL, pasted text): text
+/// that does not fit is never cut off silently. The middle is left out
+/// instead, with a visible `… [N characters not shown] …`, and the end of
+/// the text (at most 1024 bytes, a sixteenth of the buffer) is kept, so the
+/// last line of a question is always there.
+pub fn toWideFit(buf: []u16, text: []const u8, mode: Mode) [:0]u16 {
+    const whole = convert(buf, text, mode);
+    if (whole.used == text.len or buf.len < 128) {
+        buf[whole.n] = 0;
+        return buf[0..whole.n :0];
+    }
+
+    var tail_start = text.len - @min(text.len, @min(buf.len / 16, 1024));
+    while (tail_start < text.len and text[tail_start] & 0xC0 == 0x80) tail_start += 1;
+    var tail_buf: [4200]u16 = undefined;
+    const tail = convert(&tail_buf, text[tail_start..], mode);
+
+    const marker_cap = 48;
+    const head_cap = buf.len - 1 - tail.n - marker_cap;
+    const head = convert(buf[0 .. head_cap + 1], text[0..tail_start], mode);
+
+    var omitted: usize = 0;
+    var i = head.used;
+    while (i < tail_start) : (omitted += 1) _ = nextCodepoint(text[0..tail_start], &i);
+
+    var marker8: [marker_cap]u8 = undefined;
+    const marker = std.fmt.bufPrint(&marker8, "\u{2026} [{d} characters not shown] \u{2026}", .{omitted}) catch unreachable;
+    var n = head.n;
+    var j: usize = 0;
+    while (j < marker.len) {
+        const cp = nextCodepoint(marker, &j);
+        buf[n] = @intCast(cp);
+        n += 1;
+    }
+    @memcpy(buf[n..][0..tail.n], tail_buf[0..tail.n]);
+    n += tail.n;
+    buf[n] = 0;
+    return buf[0..n :0];
+}
+
+test "win32 dialog text: a body that does not fit is elided visibly, its end kept" {
+    var buf: [2048]u16 = undefined;
+    var big: [3000]u8 = undefined;
+    @memset(&big, 'A');
+    const tail = "\nOnly continue if you trust it.";
+    var src: [big.len + tail.len]u8 = undefined;
+    @memcpy(src[0..big.len], &big);
+    @memcpy(src[big.len..], tail);
+
+    const out = toWideFit(&buf, &src, .paragraphs);
+    try std.testing.expect(out.len < buf.len);
+    var expect: [64]u16 = undefined;
+    const want = try std.unicode.utf8ToUtf16Le(&expect, "Only continue if you trust it.");
+    try std.testing.expect(std.mem.endsWith(u16, out, expect[0..want]));
+    var marker: [64]u16 = undefined;
+    const m = try std.unicode.utf8ToUtf16Le(&marker, "characters not shown");
+    try std.testing.expect(std.mem.indexOf(u16, out, marker[0..m]) != null);
+}
+
+test "win32 dialog text: padding cannot push the end of a URL out of sight" {
+    var buf: [256]u16 = undefined;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(std.testing.allocator);
+    try src.appendSlice(std.testing.allocator, "https://a.example/");
+    for (0..200) |_| try src.appendSlice(std.testing.allocator, "\u{AD}");
+    try src.appendSlice(std.testing.allocator, "evil.exe");
+
+    const out = toWideFit(&buf, src.items, .paragraphs);
+    var expect: [16]u16 = undefined;
+    const want = try std.unicode.utf8ToUtf16Le(&expect, "evil.exe");
+    try std.testing.expect(std.mem.endsWith(u16, out, expect[0..want]));
+    var marker: [32]u16 = undefined;
+    const m = try std.unicode.utf8ToUtf16Le(&marker, "characters not shown");
+    try std.testing.expect(std.mem.indexOf(u16, out, marker[0..m]) != null);
+    // Text that fits is untouched.
+    var small: [128]u16 = undefined;
+    try std.testing.expectEqualSlices(u16, &.{ 'o', 'k' }, toWideFit(&small, "ok", .paragraphs));
+}
 pub const Stripped = struct { len: usize, accel: u16 };
 
 /// `&Close` to `Close` with its accelerator: `&&` is a literal `&`.
