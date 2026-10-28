@@ -49,7 +49,7 @@ const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
 
 /// What `WM_GHOSTTY_POSTED_DIALOG` (wparam) asks for.
-pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done };
+pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done, secure_input };
 
 /// Set by the crash handler (M5 Task 12): looks for a crash dump of the last run.
 pub var crash_recheck: ?*const fn () void = null;
@@ -104,6 +104,7 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     config_errors.configChanged(app, config, reloaded);
     jumplist.configChanged(app, config);
     Updater.configChanged(app, config);
+    secure_input.configChanged(app, config);
     if (reloaded) app_toast.configReloaded(app);
 }
 
@@ -149,6 +150,7 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
             switch (std.enums.fromInt(DialogKind, wparam) orelse .export_io) {
                 .config_errors => config_errors.postedApp(app, lparam),
                 .url_confirm => link.postedApp(app, lparam),
+                .secure_input => {},
                 .export_io => discardDialog(wparam, lparam),
                 .export_done => export_io.doneApp(app, lparam),
             }
@@ -167,6 +169,7 @@ pub fn discardDialog(wparam: WPARAM, lparam: LPARAM) void {
         .export_done => export_io.discardDone(lparam),
         .config_errors => config_errors.discard(lparam),
         .url_confirm => link.discard(lparam),
+        .secure_input => {},
     }
 }
 
@@ -194,6 +197,7 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 .export_done => export_io.discardDone(lparam),
                 .config_errors => config_errors.postedDialog(window, lparam),
                 .url_confirm => link.postedDialog(window, lparam),
+                .secure_input => secure_input.postedDialog(window),
             }
             return 0;
         },
@@ -267,6 +271,7 @@ pub fn surfaceFocus(surface: *Surface, focused: bool) void {
 /// active surface.
 pub fn tabLayoutChanged(tab: *Tab) void {
     decor.tabLayoutChanged(tab);
+    secure_input.tabLayoutChanged(tab);
     tmux_pane_io.layoutChanged(tab);
     tmux_labels.tabLayoutChanged(tab);
 }

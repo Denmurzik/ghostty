@@ -11,6 +11,7 @@ const cimgui = @import("dcimgui");
 const geom = @import("../geom.zig");
 const messages = @import("../messages.zig");
 const util = @import("../util.zig");
+const secure_input = @import("../secure_input.zig");
 const Inspector = @import("Inspector.zig").Inspector;
 
 const log = std.log.scoped(.win32_inspector);
@@ -85,6 +86,7 @@ pub fn create(alloc: Allocator, opts: Options) !*Window {
         return error.CreateWindowFailed;
     };
     self.hwnd = hwnd;
+    secure_input.apply(hwnd);
 
     // CW_USEDEFAULT may have put the window on another monitor than the
     // surface's, which gives no WM_DPICHANGED at creation.

@@ -19,6 +19,7 @@ const messages = @import("messages.zig");
 const scrollbar = @import("scrollbar.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
+const secure_input = @import("secure_input.zig");
 
 const gdi32 = win32.gdi32;
 const user32 = win32.user32;
@@ -323,6 +324,7 @@ fn ensureWindow(p: *Popup) !void {
     try addToWindow(p);
     util.setUserData(hwnd, p);
     p.hwnd = hwnd;
+    secure_input.apply(hwnd);
 
     if (p.kind == .panel) {
         const pref: i32 = win32.dwmapi.DWMWCP_ROUND;

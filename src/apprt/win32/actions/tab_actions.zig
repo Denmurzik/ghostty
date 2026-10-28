@@ -6,6 +6,7 @@ const App = @import("../App.zig");
 const Window = @import("../Window.zig");
 const clipboard = @import("../clipboard.zig");
 const messages = @import("../messages.zig");
+const secure_input = @import("../secure_input.zig");
 
 const log = std.log.scoped(.win32_actions);
 
@@ -113,7 +114,7 @@ pub fn copy_title_to_clipboard(app: *App, target: apprt.Target, value: apprt.Act
     const surface = app.surfaceFor(core) orelse return false;
     const title = surface.getTitle() orelse return false;
     if (title.len == 0) return false;
-    clipboard.write(surface.hwnd, title) catch |err| {
+    clipboard.write(surface.hwnd, title, secure_input.copying(surface.app)) catch |err| {
         log.warn("unable to copy the title err={}", .{err});
         return false;
     };

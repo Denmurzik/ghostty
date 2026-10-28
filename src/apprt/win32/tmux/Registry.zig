@@ -12,6 +12,7 @@ const Surface = @import("../Surface.zig");
 const Tab = @import("../Tab.zig");
 const SplitLayout = @import("../SplitLayout.zig");
 const clipboard = @import("../clipboard.zig");
+const secure_input = @import("../secure_input.zig");
 const geom = @import("../geom.zig");
 const protocol = @import("../ipc/protocol.zig");
 const commands = @import("commands.zig");
@@ -437,7 +438,7 @@ pub const Host = struct {
     }
 
     pub fn setClipboard(self: *Host, data: []const u8) !void {
-        try clipboard.write(self.app.msg_hwnd, data);
+        try clipboard.write(self.app.msg_hwnd, data, secure_input.copying(self.app));
     }
 
     pub fn sendKeys(

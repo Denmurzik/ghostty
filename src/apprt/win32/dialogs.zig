@@ -180,6 +180,28 @@ fn show(
     });
 }
 
+/// A one-button information dialog. Like every dialog here it runs a message
+/// loop: only from posted-message handlers.
+pub fn inform(
+    owner: win32.foundation.HWND,
+    window_title: []const u8,
+    title: []const u8,
+    body: []const u8,
+) void {
+    const buttons = [_]ListButton{.{ .id = button_accept, .text = "OK" }};
+    if (show(owner, window_title, title, body, "", &buttons, button_accept) == null) {
+        log.warn("the dialog could not be built, using a message box", .{});
+        var title_buf: [128]u16 = undefined;
+        var body_buf: [2048]u16 = undefined;
+        _ = win32.user32.MessageBoxW(
+            owner,
+            dtext.toWideFit(&body_buf, body, .paragraphs),
+            dtext.toWide(&title_buf, window_title, .single_line),
+            0,
+        );
+    }
+}
+
 /// The M1 message box, for when the dialog cannot be built.
 fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8) bool {
     log.warn("the dialog could not be built, using a message box", .{});

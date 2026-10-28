@@ -23,6 +23,7 @@ const dialogs = @import("dialogs.zig");
 const hooks_mod = @import("hooks.zig");
 const messages = @import("messages.zig");
 const util = @import("util.zig");
+const secure_input = @import("secure_input.zig");
 
 const log = std.log.scoped(.win32_clipboard);
 
@@ -157,7 +158,7 @@ pub fn setClipboard(
     } else return error.NoTextContent;
 
     if (!confirm) {
-        try write(surface.hwnd, text);
+        try write(surface.hwnd, text, secure_input.copying(surface.app));
         if (t == .standard) hooks_mod.clipboardWritten(surface, text.len == 0);
         return;
     }
@@ -372,7 +373,7 @@ fn confirmWith(
 /// line feeds turned into the CRLF other Windows programs expect. `hwnd`
 /// must be a real window: it becomes the clipboard owner, and a clipboard
 /// opened without one cannot be given data.
-pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8) !void {
+pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8, secure: bool) !void {
     const alloc = global.alloc();
     const clean = try sanitize(alloc, text_utf8);
     defer alloc.free(clean);
@@ -416,6 +417,52 @@ pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8) !void {
     if (win32.user32.SetClipboardData(win32.user32.CF_UNICODETEXT, mem) == null)
         return error.SetClipboardFailed;
     owned = true;
+    for (extraFormats(secure)) |extra| setExtraFormat(extra);
+}
+
+/// A DWORD-valued clipboard format registered by name. Clipboard monitors
+/// (Windows clipboard history, cloud clipboard, third-party managers) read
+/// these by convention; nothing enforces them, any program can still read
+/// the data itself.
+pub const ExtraFormat = struct {
+    name: [:0]const u16,
+    value: u32,
+};
+
+const secure_formats = [_]ExtraFormat{
+    .{ .name = std.unicode.utf8ToUtf16LeStringLiteral("ExcludeClipboardContentFromMonitorProcessing"), .value = 1 },
+    .{ .name = std.unicode.utf8ToUtf16LeStringLiteral("CanIncludeInClipboardHistory"), .value = 0 },
+    .{ .name = std.unicode.utf8ToUtf16LeStringLiteral("CanUploadToCloudClipboard"), .value = 0 },
+};
+
+/// The formats a copy adds next to its text: the three exclusion markers
+/// while secure input is on, none otherwise.
+pub fn extraFormats(secure: bool) []const ExtraFormat {
+    return if (secure) &secure_formats else &.{};
+}
+
+/// Adds `extra` to the open clipboard. Best effort: the copy itself has
+/// succeeded and a missing marker must not undo it.
+fn setExtraFormat(extra: ExtraFormat) void {
+    const format = win32.user32.RegisterClipboardFormatW(extra.name.ptr);
+    if (format == 0) {
+        log.warn("unable to register a clipboard format err={}", .{win32.kernel32.GetLastError()});
+        return;
+    }
+    const mem = win32.kernel32.GlobalAlloc(win32.kernel32.GMEM_MOVEABLE, @sizeOf(u32)) orelse return;
+    {
+        const ptr = win32.kernel32.GlobalLock(mem) orelse {
+            _ = win32.kernel32.GlobalFree(mem);
+            return;
+        };
+        defer _ = win32.kernel32.GlobalUnlock(mem);
+        const dst: *align(1) u32 = @ptrCast(ptr);
+        dst.* = extra.value;
+    }
+    if (win32.user32.SetClipboardData(format, mem) == null) {
+        log.warn("unable to set a clipboard marker err={}", .{win32.kernel32.GetLastError()});
+        _ = win32.kernel32.GlobalFree(mem);
+    }
 }
 
 /// What an OSC 52 payload may carry that the clipboard cannot: invalid
@@ -624,7 +671,7 @@ const SavedClipboard = struct {
 
     fn restore(self: SavedClipboard, hwnd: win32.foundation.HWND) void {
         if (self.text) |t| {
-            write(hwnd, t) catch |err| std.debug.print("restoring the clipboard failed: {}\n", .{err});
+            write(hwnd, t, false) catch |err| std.debug.print("restoring the clipboard failed: {}\n", .{err});
             std.testing.allocator.free(t);
         } else if (win32.user32.OpenClipboard(hwnd) != 0) {
             _ = win32.user32.EmptyClipboard();
@@ -641,7 +688,7 @@ test "win32 clipboard: write then read roundtrip with non-ASCII" {
     defer saved.restore(hwnd);
 
     const text = "copy Ж😀\nline2";
-    try write(hwnd, text);
+    try write(hwnd, text, false);
 
     const got = (try read(alloc, hwnd)).?;
     defer alloc.free(got);
@@ -660,7 +707,7 @@ test "win32 clipboard: write then read roundtrip with non-ASCII" {
     }
 
     // An empty string is a valid, empty clipboard text.
-    try write(hwnd, "");
+    try write(hwnd, "", false);
     const empty = (try read(alloc, hwnd)).?;
     defer alloc.free(empty);
     try std.testing.expectEqualStrings("", empty);
@@ -718,7 +765,7 @@ test "win32 clipboard: write succeeds while another thread holds the clipboard b
     if (!holder.opened) return error.SkipZigTest;
 
     // The holder has it open now: the first attempts fail and are retried.
-    try write(hwnd, "held ж");
+    try write(hwnd, "held ж", false);
     const got = (try read(alloc, hwnd)).?;
     defer alloc.free(got);
     try std.testing.expectEqualStrings("held ж", got);
@@ -852,4 +899,22 @@ test "win32 clipboard: pasteText asks for unsafe text" {
     var failing: FakeFlow = .{ .unsafe = true, .answer = .yes, .fail_confirmed = true };
     try std.testing.expect(runRequest(&failing, "a\nb"));
     try std.testing.expectEqual(@as(usize, 1), failing.denied);
+}
+
+test "win32 clipboard: secure copy adds exclusion formats" {
+    try std.testing.expectEqual(@as(usize, 0), extraFormats(false).len);
+
+    const extras = extraFormats(true);
+    try std.testing.expectEqual(@as(usize, 3), extras.len);
+    const expected = [_]struct { name: []const u8, value: u32 }{
+        .{ .name = "ExcludeClipboardContentFromMonitorProcessing", .value = 1 },
+        .{ .name = "CanIncludeInClipboardHistory", .value = 0 },
+        .{ .name = "CanUploadToCloudClipboard", .value = 0 },
+    };
+    for (extras, expected) |extra, want| {
+        var buf: [64]u8 = undefined;
+        const n = try std.unicode.utf16LeToUtf8(&buf, extra.name);
+        try std.testing.expectEqualStrings(want.name, buf[0..n]);
+        try std.testing.expectEqual(want.value, extra.value);
+    }
 }

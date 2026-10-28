@@ -10,6 +10,7 @@ const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const overlay = @import("overlay.zig");
+const secure_input = @import("secure_input.zig");
 const theme = @import("theme.zig");
 
 const log = std.log.scoped(.win32_badges);
@@ -41,6 +42,19 @@ const badge_ink: theme.Color = .{ .r = 204, .g = 151, .b = 102 };
 /// `Color.orange`.
 const orange: theme.Color = .{ .r = 255, .g = 149, .b = 0 };
 
+/// The macOS `SecureInputOverlay`: a 25 pt glyph with 5 pt padding all round,
+/// 10 pt from the top and trailing edges of the surface, a 12 pt corner and
+/// a 1 pt grey outline. The animated gradient is not reproduced.
+pub const secure_glyph = 25;
+pub const secure_pad = 5;
+pub const secure_inset = 10;
+pub const secure_radius = 12;
+/// Logical (96 dpi) side of the square badge.
+pub const secure_side = secure_glyph + 2 * secure_pad;
+/// `Color.gray`.
+const secure_gray: theme.Color = .{ .r = 142, .g = 142, .b = 147 };
+const secure_font: Chrome.Font = .{ .icons = true, .size_pt = secure_glyph * 72.0 / 96.0 };
+
 /// The macOS `ChildExitedMessageBar`: full width, 8 x 4 pt padding, the
 /// message in the primary colour on a half-opaque tint.
 const bar_line = 16;
@@ -57,6 +71,8 @@ pub const State = struct {
     /// it): the renderer reports `unhealthy` again once it is on the new
     /// device, and that report must not replace it with the default text.
     health_reason: ?[]const u8 = null,
+    /// The secure input lock (`secure_input.zig`).
+    secure: ?*TextLabel = null,
 };
 
 /// A label popup and the text it paints.
@@ -68,6 +84,8 @@ pub const TextLabel = struct {
         readonly,
         /// The full-width warning bar.
         health,
+        /// The secure input lock badge: a square that takes clicks.
+        secure,
     };
 
     popup: overlay.Popup,
@@ -112,6 +130,7 @@ pub const TextLabel = struct {
             .readonly => .{ .w = logical(readonlyWidth(label.text[0..n], dpi), dpi), .h = 2 * badge_pad_y + badge_line },
             // The host stretches it to the surface.
             .health => .{ .w = 0, .h = 2 * badge_pad_y + bar_line },
+            .secure => .{ .w = secure_side, .h = secure_side },
         };
     }
 
@@ -132,6 +151,7 @@ pub const TextLabel = struct {
             },
             .readonly => paintReadonly(label, ctx),
             .health => paintBar(label, ctx),
+            .secure => paintSecure(ctx),
         }
     }
 };
@@ -207,6 +227,25 @@ fn paintReadonly(label: *const TextLabel, ctx: overlay.PaintContext) void {
     };
 }
 
+fn paintSecure(ctx: overlay.PaintContext) void {
+    const dpi = ctx.dpi;
+    const r = ctx.rect;
+    const radius = geom.scale(secure_radius, dpi);
+    const items = [_]Chrome.Item{
+        .{ .box = .{ .rect = r, .radius = radius, .fill = materialFill(ctx.palette.dark) } },
+        .{ .stroke = .{
+            .rect = r,
+            .radius = radius,
+            .width = @as(f32, @floatFromInt(dpi)) / 96.0,
+            .color = secure_gray,
+        } },
+        .{ .text = .{ .rect = r, .text = glyph_lock, .font = secure_font, .color = primaryInk(ctx.palette.dark) } },
+    };
+    Chrome.paintItems(ctx.hdc, r, &items, ctx.palette, dpi, null) catch |err| {
+        log.warn("unable to paint the secure input badge err={}", .{err});
+    };
+}
+
 fn paintBar(label: *const TextLabel, ctx: overlay.PaintContext) void {
     // The tint of the warning: orange at half opacity over the window colour.
     const base = materialFill(ctx.palette.dark);
@@ -232,7 +271,7 @@ fn width(text: []const u16, dpi: u32) i32 {
 pub fn surfaceDestroying(surface: *Surface) void {
     const alloc = surface.app.core_app.alloc;
     const state = &surface.badges;
-    inline for (.{ &state.readonly, &state.health, &state.toast }) |slot| {
+    inline for (.{ &state.readonly, &state.health, &state.toast, &state.secure }) |slot| {
         if (slot.*) |label| label.destroy(alloc);
         slot.* = null;
     }
@@ -267,6 +306,30 @@ pub fn setHealthText(surface: *Surface, text: []const u8) void {
         break :blk l;
     };
     label.set(text);
+    label.show();
+}
+
+/// Shows or hides the secure input badge of `surface`; creates it on first
+/// use. Idempotent.
+pub fn secureBadge(surface: *Surface, shown: bool) void {
+    const state = &surface.badges;
+    if (!shown) {
+        if (state.secure) |label| label.popup.hide();
+        return;
+    }
+    const label = state.secure orelse blk: {
+        const l = TextLabel.create(surface.app.core_app.alloc, surface, .surface_top_right, secure_inset, .secure) catch |err| {
+            log.warn("unable to make the secure input badge err={}", .{err});
+            return;
+        };
+        l.popup.click_through = false;
+        l.popup.on_message = secure_input.badgeMessage;
+        l.set("");
+        state.secure = l;
+        break :blk l;
+    };
+    if (label.popup.visible and label.popup.hwnd != null) return;
+    label.popup.tab_hidden = if (surface.window.activeTab()) |t| t != surface.tab else false;
     label.show();
 }
 

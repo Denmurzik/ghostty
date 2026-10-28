@@ -307,6 +307,15 @@ pub extern "user32" fn SystemParametersInfoForDpi(action: u32, param: u32, pv: ?
 pub extern "user32" fn ChildWindowFromPointEx(HWND, POINT, flags: u32) callconv(.winapi) ?HWND;
 pub extern "user32" fn ChangeWindowMessageFilterEx(HWND, msg: u32, action: u32, ?*CHANGEFILTERSTRUCT) callconv(.winapi) BOOL;
 pub extern "user32" fn EnumWindows(WNDENUMPROC, LPARAM) callconv(.winapi) BOOL;
+pub extern "user32" fn EnumThreadWindows(thread_id: u32, WNDENUMPROC, LPARAM) callconv(.winapi) BOOL;
+pub extern "user32" fn SetWindowDisplayAffinity(HWND, affinity: u32) callconv(.winapi) BOOL;
+pub extern "user32" fn GetWindowDisplayAffinity(HWND, affinity: *u32) callconv(.winapi) BOOL;
+pub extern "user32" fn RegisterClipboardFormatW([*:0]const u16) callconv(.winapi) u32;
+
+/// `SetWindowDisplayAffinity` values (Windows 10 2004 and later for the last).
+pub const WDA_NONE = 0x0;
+pub const WDA_MONITOR = 0x1;
+pub const WDA_EXCLUDEFROMCAPTURE = 0x11;
 pub extern "user32" fn GetWindowThreadProcessId(HWND, process_id: ?*u32) callconv(.winapi) u32;
 pub extern "user32" fn UpdateLayeredWindow(
     HWND,

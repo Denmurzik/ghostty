@@ -20,6 +20,7 @@ const Chrome = @import("../Chrome.zig");
 const geom = @import("../geom.zig");
 const theme = @import("../theme.zig");
 const util = @import("../util.zig");
+const secure_input = @import("../secure_input.zig");
 const colors = @import("colors.zig");
 const keys = @import("keys.zig");
 const layout = @import("layout.zig");
@@ -521,6 +522,7 @@ fn create(self: *Dialog) !void {
         log.warn("CreateWindowExW failed err={}", .{win32.kernel32.GetLastError()});
         return error.CreateWindowFailed;
     };
+    secure_input.apply(hwnd);
     errdefer _ = user32.DestroyWindow(hwnd);
     self.hwnd = hwnd;
 

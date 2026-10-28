@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const Window = @import("Window.zig");
 const clipboard = @import("clipboard.zig");
+const secure_input = @import("secure_input.zig");
 const link_policy = @import("link_policy.zig");
 const shell_open = @import("shell_open.zig");
 const TabStrip = @import("TabStrip.zig");
@@ -379,7 +380,7 @@ pub fn showMenu(window: *Window, screen_x: i32, screen_y: i32) void {
     if (cmd <= 0 or util.fromUserData(Window, hwnd) != window) return;
     const chosen: usize = @intCast(cmd);
     if (chosen == copy_command) {
-        clipboard.write(window.hwnd, path) catch |err| {
+        clipboard.write(window.hwnd, path, secure_input.copying(window.app)) catch |err| {
             log.warn("unable to copy the path err={}", .{err});
         };
     } else if (chosen <= folders.len) {

@@ -10,6 +10,7 @@ const geom = @import("geom.zig");
 const theme = @import("theme.zig");
 const tab_drag = @import("tab_drag.zig");
 const util = @import("util.zig");
+const secure_input = @import("secure_input.zig");
 
 const gdi32 = win32.gdi32;
 const user32 = win32.user32;
@@ -65,6 +66,7 @@ pub fn show(app: *App, source: *const Window, title: []const u8, size: geom.Rect
         log.warn("unable to create the drag ghost err={}", .{win32.kernel32.GetLastError()});
         return;
     };
+    secure_input.apply(hwnd);
 
     var s: State = .{ .hwnd = hwnd, .size = size, .dpi = dpi, .pos = at, .palette = theme.palette(source) };
     s.title_len = @min(title.len, s.title_buf.len);
