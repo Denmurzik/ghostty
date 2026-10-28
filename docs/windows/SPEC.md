@@ -392,10 +392,23 @@ Spawn failure of a resolved shell is reported by core's abnormal-exit message; n
 - ConPTY flags stay `0` in M1; passthrough/INHERIT_CURSOR evaluated in M5.
 
 ### 8.5 Later core changes
-M4: DCS `tmux;` passthrough is already unwrapped by the core stream (tests only; the ConPTY gap is documented, R-M4-10, §12.4); `SplitTree.replace`. M5: OSC 7 path translation
-(`/c/x`, `/C:/x` → `C:\x`) in `stream_handler.zig`, case-insensitive hostname compare, `.exe`-stripping shell detection,
-pwsh integration, forward-slash env paths for MSYS shells, compiled terminfo emitted by the build (then `TERM`
-default back to `xterm-ghostty`), `+edit-config` on Windows.
+M4: DCS `tmux;` passthrough is already unwrapped by the core stream (tests only; the ConPTY gap is documented, R-M4-10, §12.4); `SplitTree.replace`. M5 (as built):
+- OSC 7 path translation (`/c/x`, `/C:/x` → `C:\x`) in `stream_handler.zig` (pulled into M3), case-insensitive hostname compare,
+  `.exe`-stripping shell detection.
+- Shell integration (R-M5-6): pwsh (7 and 5.1) and cmd get OSC 133 A/B/C/D marks independent of the `title` feature; Git Bash keeps
+  the upstream bash marks. `setupBash` rewrites `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR` and `TERMINFO` to the mixed `C:/a/b`
+  form (TERMINFO as `/c/...`, §10) and the bash `path` feature is skipped under MSYS (R-M5-8).
+- Terminfo (R-M5-7): the build compiles `ghostty.terminfo` with `tic -x` on Windows targets (`-Dtic=<path>`, else `tic` on PATH,
+  else Git for Windows' `%ProgramFiles%\Git\usr\bin\tic.exe`) into `share/terminfo/78/{xterm-ghostty,ghostty}`; no `tic` → source
+  only and one build warning. The Windows `term` default is `xterm-ghostty` again; Exec sets it only when the compiled entry exists.
+- `+edit-config` on Windows (R-M5-8b), `+install-explorer-integration` / `+uninstall-explorer-integration` (R-M5-5,
+  `src/os/windows_explorer.zig`), `--profile=<id>` as a launch/IPC argument (R-M5-2, `Overrides.zig`), `windows_shell.profiles` (R-M5-1).
+- Windows-only config keys and defaults in `Config.zig`: `windows-jump-list`, `windows-tmux-external`, `auto-update` default `check`,
+  `undo-timeout` 5 s with the default binds `ctrl+shift+z` = `undo` / `ctrl+shift+y` = `redo` (R-M5-12a), `right-click-action` default
+  `copy-or-paste`. `main_ghostty.zig` turns Zig's segfault handler off on Windows (§11).
+- Apprt-only features (no core change): jump list (`jumplist.zig`), profile menu, update check (`update/`), `secure_input.zig`
+  (R-M5-11), undo (`undo.zig` and the park/restore code in `Window.zig`/`Tab.zig`, R-M5-12), `osk.zig` (R-M5-13), popup menu theme
+  (`menu_theme.zig`), the right-click context menu (`context_menu.zig`).
 
 ## 9. Fonts
 Fonts M1: `freetype_windows` discovery gets a one-time index (family, style name, weight, italic, ttc index per file,
@@ -410,8 +423,12 @@ FreeType + HarfBuzz.
 
 ## 10. Child environment
 - Base: `global.environMap()` (Ghostty's own env) minus nothing Windows-specific in M1.
-- `TERM`: Windows default `xterm-256color` (config default changed on Windows only) until the compiled terminfo ships
-  (M5); `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`, `TERM_PROGRAM_VERSION`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`
+- `TERM` (M5, R-M5-7): Windows default `xterm-ghostty` (upstream's), set only when the compiled entry exists next to the exe
+  (`share\terminfo\78\xterm-ghostty`), else `xterm-256color` with one warning. A command whose argv0 basename is `wsl`/`wsl.exe`
+  (any directory) or whose argv0 is System32 `bash.exe` always gets `xterm-256color`. `TERMINFO` points at the compiled directory
+  in the `/c/...` form for every shell (MSYS ncurses splits `C:/...` at the colon). Known gaps: Cygwin needs `/cygdrive/c/...`; ssh to a
+  host without the entry forwards a `TERM` the remote may not know (Windows OpenSSH from pwsh in particular).
+  `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`, `TERM_PROGRAM_VERSION`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`
   unchanged from core.
 - PATH: core appends the exe dir. Windows (M4, `windows-tmux-shim = true`, the default, R-M4-11): the exe dir is **moved
   to the front** of PATH (shim dir = exe dir, DECISIONS; a login shell such as Git Bash may reorder PATH in its profile: check
@@ -421,7 +438,15 @@ FreeType + HarfBuzz.
   `TMUX_PANE`, PATH, then the command's own `env K=V`. The nonce is 64 random bits per process, so a stale `TMUX` never
   meets a later Ghostty with the same pid. With `windows-tmux-shim = false` neither is set or removed (an inherited `TMUX`
   stays) and PATH is not changed; the key is app-wide and read when a surface starts.
-- Git Bash: `CHERE_INVOKING=1` (§8.3). MSYS-facing path vars use forward slashes from M5.
+- Git Bash: `CHERE_INVOKING=1` (§8.3). MSYS-facing path vars (`GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`) use the mixed `C:/a/b` form
+  when bash integration applies; `TERMINFO` uses `/c/a/b` (R-M5-8). Under MSYS the exe dir is already first on PATH (M4), so the bash
+  `path` feature is skipped.
+- Profiles (M5, R-M5-1): `windows_shell.profiles(alloc, env, probe, default_argv)` returns, in order, `default` (the config `command` or
+  §8.3), `git-bash` (`bash --login -i`), `pwsh` (`pwsh -NoLogo`), `powershell` (System32 Windows PowerShell, `-NoLogo`), `cmd` and one
+  `wsl:<distro>` per distro (`wsl.exe -d <distro> --cd ~`). Distros are read from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss\{GUID}\DistributionName`
+  (read-only; the `DefaultDistribution` first, `docker-desktop*` skipped, names matching `[A-Za-z0-9._-]{1,64}` only) — `wsl.exe -l -q`
+  is not used, so listing starts no distro. The list is cached on the App and rebuilt whenever a profile menu opens. No config key for
+  custom profiles.
 
 ## 11. Logging and console (D10)
 - `GHOSTTY_LOG` packed-struct flags gain `file` (default true on Windows) and `debugger` (default true on Windows Debug).
@@ -436,7 +461,22 @@ FreeType + HarfBuzz.
   aborting (a GUI exe has no valid stderr).
 - Known limitation: a GUI-subsystem `ghostty.exe +version` started from interactive `cmd` returns the prompt before the
   output appears; use `ghostty.exe +version | more`, `start /wait`, or a pipe (Git Bash).
-- Crash (M5): `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` into `%LOCALAPPDATA%\ghostty\crash\`.
+- Crash (M5, R-M5-10; `src/os/windows_crash.zig`): Zig's own handler is off on Windows (`std_options.enable_segfault_handler = builtin.os.tag != .windows`
+  in `main_ghostty.zig`; its vectored handler would print and abort before any unhandled-exception filter runs).
+  `SetUnhandledExceptionFilter` is installed first thing in `main` on both the GUI and CLI paths. At install a dump thread
+  (64 KiB stack) loads `dbghelp.dll` at runtime (so `ghostty.exe` has no `dbghelp.dll` import) and resolves `MiniDumpWriteDump`,
+  then waits on an event; the path prefix `%LOCALAPPDATA%\ghostty\crash\ghostty-<pid>-` is precomputed. The filter takes a one-shot
+  gate (`InterlockedCompareExchange`; a second crashing thread waits on the done event), hands over the exception pointers, waits
+  at most 10 s and returns `EXCEPTION_EXECUTE_HANDLER` (no WER dialog). The thread writes `<prefix><GetTickCount64>.dmp` with
+  `MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | MiniDumpFilterMemory`: no heap and no indirect memory, so
+  the pty reader's buffer and other terminal text do not reach the dump. As built, the thread then scrubs the written file
+  (`scrubStacks`: every 8-byte word of every thread stack that is non-zero and not shaped like a user-mode pointer is zeroed;
+  an unparsable dump is left as written). One log line (code, address, path) is written by the dump thread through
+  `windows_log.logFmt` (file and debugger sinks only, no stderr lock; the filter itself has little stack after a stack overflow).
+  At `appStarted` the filter is re-checked and re-installed (logged once) if another module replaced it. The panic path
+  (`src/main.zig`) requests a dump with no exception record before aborting. The 10 newest dumps are kept (pruned on the dump thread
+  at start); `+crash-report` lists the `.dmp` files; nothing is ever uploaded. Known limit: a crash under the process heap lock times
+  out with no dump.
 
 ## 12. Built-in tmux shim (M4)
 
@@ -445,7 +485,7 @@ FreeType + HarfBuzz.
   private 0.6 MB). Steps: parse global flags (`-S <path>`, `-L <name>`, `-V`); `-V` → print `tmux 3.5a\n`, exit 0 (no IPC);
   resolve the pipe: `-S` value, else the first field of `TMUX`, else `no server running on default` (exit 1). Only
   `\\.\pipe\ghostty-tmux-<pid>-<16 hex>` is accepted (anything else: `not a Ghostty tmux socket`; a file or UNC path never gets the
-  request); `-L` without `-S` and every external-mode form is M5. `load-buffer … -` reads stdin (≤ 512 KiB, valid UTF-8, else
+  request); `-L` without `-S` and `TMUX` unset use the external pipe of §12.4 (M5, opt-in; this replaces M4's `-L without -S is not a server` answer, and with the key off no such pipe exists, so the answer is `no server running`). `load-buffer … -` reads stdin (≤ 512 KiB, valid UTF-8, else
   `ghostty: request too large` / `invalid UTF-8 on stdin`). Connect: `CreateFileW` with `SECURITY_SQOS_PRESENT |
   SECURITY_IDENTIFICATION`; `ERROR_PIPE_BUSY` → `WaitNamedPipeW` with a 50…1000 ms backoff until the deadline (10 s client
   timeout, request deadline 250 ms earlier); `ERROR_FILE_NOT_FOUND` → `no server running on <pipe>`; the handle must be a pipe and
@@ -508,7 +548,17 @@ FreeType + HarfBuzz.
   terminator arrives as a bare OSC 9, an OSC 777 with an ST terminator is **dropped**. Documented gap: ST-terminated
   inner sequences (Claude notifications that use them) are lost while `TMUX` is set; no `dcs-tmux` e2e.
 - XTVERSION is not spoofed (images stay disabled under TMUX; accepted).
-- External mode (`TMUX` unset, `-L`), `new-session`/`attach` and the `claude-swarm` session namespace: M5.
+- External mode (M5, R-M5-14; opt-in `windows-tmux-external = false` by default, which relaxes M2 revision 2: a same-user process may
+  then ask Ghostty to run a command). When `true`, the primary instance claims a third pipe
+  `\\.\pipe\ghostty-tmux-<user SID>-<session>-<class>[-admin]` with the M2 per-user pipe's security; it serves only `op: "tmux"` with a
+  non-null `namespace`. `tmux.exe` connects there with `-L <name>` (even when `TMUX` is set, as tmux does) or with `TMUX` unset;
+  namespace = `<name>`, or `default` without `-L`. No Ghostty running → `no server running on <path>`, exit 1 (Ghostty is never
+  auto-launched). Each namespace maps to one Ghostty window created by `new-session -d` and shown with `SW_SHOWNOACTIVATE`; its tabs
+  are the tmux windows, named by `-n` (the first tab of such a window starts the tmux plan directly, with no throwaway shell).
+  Commands added in external mode: `has-session`, `new-session`, `new-window`, `kill-session`, `kill-server` (closes the namespace's
+  windows without confirmation; not undoable), `list-windows -F '#{window_name}'` and the `session:window-name` target form (recon §5).
+  A duplicate-named tab stays owned; dead namespaces are swept when a new session is created (cap of 8 namespaces). Inside mode is unchanged.
+  `tmux.exe` is on PATH only inside Ghostty sessions; outside, the user adds the Ghostty directory to PATH (documented gap).
 - Pane border labels (§12.2, Task 13): a click-through overlay pill in the pane's top-right or bottom-right corner while the
   window option `pane-border-status` is `top`/`bottom`, showing the expanded `pane-border-format` (`#[…]` runs stripped, the first
   `fg=` of the template or of `pane-border-style` colours it, the text is sanitised); hidden when the pane is narrower than the
@@ -528,14 +578,26 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
   terminfo source), `share\terminfo\…`, `LICENSE`, `README-windows.txt`. Resources found via existing `resourcesdir.zig`.
 - Inno Setup (`dist/windows/installer/ghostty.iss`): per-user install default (`{localappdata}\Programs\Ghostty`), Start
   Menu shortcut with AUMID `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut,
-  Explorer "Open Ghostty here" (HKCU `Directory\shell` + `Directory\Background\shell`, `ghostty.exe --working-directory="%V"`),
-  uninstaller removes both. No PATH change.
+  Explorer "Open Ghostty here" (as built in M5, R-M5-5, written by `+install-explorer-integration`; the installer writes the same
+  keys): HKCU `Software\Classes\{Directory,Directory\Background,Drive}\shell\GhosttyOpenHere` with `(default)` = `Open Ghostty here`,
+  `Icon` = `"<exe>",0` and `command\(default)` = `"<exe>" "--working-directory=%V\."` (the `\.` keeps a drive root's backslash
+  away from the closing quote; `Overrides.parse` normalises it with `GetFullPathNameW`). The uninstaller removes exactly these three keys
+  (what `+uninstall-explorer-integration` does: only keys whose command starts with `"` and names `ghostty.exe`). Windows 11 shows the
+  entry under "Show more options" only; the top-level menu needs package identity (out of scope). No PATH change.
+- The Start Menu shortcut must carry `PKEY_AppUserModel_ID` = `com.mitchellh.ghostty.windows-unofficial` (the Debug build uses
+  `...windows-unofficial-debug`; `src/os/windows_explorer.zig` defines it once). Without it the jump list (R-M5-4) shows only on a
+  pin made from a running window, and toasts do not group under the shortcut.
+- Release scheme (R-M5-9a, amended in M5): releases may be **pre-releases**. `build.zig.zon` keeps upstream's version; fork releases build
+  with `-Dversion-string=<zon>-win.<N>` (for example `1.3.2-dev-win.3`) and are tagged `win-<zon>-<N>` (for example `win-1.3.2-dev-3`),
+  `N` a fork-wide counter that never resets. The update check (R-M5-9) compares only `N`, read from the `-win.<N>` suffix of
+  `build_config.version`. M6 hand-over: the tag check in `src/build/Config.zig` (the `vX.Y.Z format matching build.zig` panic for a
+  git-detected tag) must accept `win-` tags, or the release workflow must always pass `-Dversion-string`.
 - Toasts (ruling): Ghostty itself registers the AUMID under `HKCU\Software\Classes\AppUserModelId\<AUMID>`
   (`DisplayName`, `IconUri`) on first notification and calls `SetCurrentProcessExplicitAppUserModelID`, so the portable
   zip gets toasts too; the uninstaller removes the key.
 - Version resource fields from `build_config.version` (generated `.rc` include), product name "Ghostty — Unofficial Windows port".
 - CI (GitHub Actions): `windows-latest` x64 build + tests; ARM64 cross-build on x64 and tests on `windows-11-arm`;
-  release workflow on tag `v*` uploads zip + installer for both arches as a GitHub pre-release.
+  release workflow on tag `win-<zon>-<N>` (R-M5-9a; not `v*`) uploads zip + installer for both arches as a GitHub pre-release.
 
 ## 14. RAM budget
 Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CONFIG_HOME` pointing at a temp config
@@ -698,8 +760,8 @@ pane border labels, DCS `tmux;` verified in core (the ConPTY gap is documented, 
   clipboard (owner-run); DCS `tmux;` with an ST-terminated inner sequence is dropped by the inbox ConPTY (§12.4);
   external mode, `new-session`/`attach` and the other known gaps are listed in the CHANGELOG. Plan: `docs/windows/plans/M4-tmux-shim.md`.
 
-**M5 — Windows extras.** Jump lists (new window/tab, profiles), shell-profiles dropdown (Git Bash, pwsh, cmd, WSL distros
-from `wsl.exe -l -q`), Explorer "Open Ghostty here" (`+install-explorer-integration` + installer), pwsh integration
+**M5 — Windows extras (in progress; acceptance pending Task 19/20 measurements: RAM and latency rows, import check, ARM64 cross-build, `E2E -Milestone M5` and the owner manual checklist; plan `docs/windows/plans/M5-windows-extras.md`, rulings §18.36).** Jump lists (new window/tab, profiles as tasks), shell-profiles menu (Git Bash, pwsh, Windows PowerShell, cmd, WSL distros
+from the Lxss registry; right-click `+`, palette, tray), Explorer "Open Ghostty here" (`+install-explorer-integration` + installer), pwsh integration
 (OSC 133/7/title), Git Bash integration fixes, OSC 7 translation, compiled terminfo + `TERM=xterm-ghostty`, `+edit-config`,
 update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), crash minidumps, external tmux mode,
 Windows analogs of macOS-only actions (`secure_input`, `undo`/`redo`), on-screen keyboard.
@@ -991,3 +1053,85 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       false sets/removes neither `TMUX` nor `TMUX_PANE` and does not change PATH.
     - Acceptance (M4 Task 15): the budgets and the real runs are in §17; the RAM rows are tagged `m4-*` in
       `docs/windows/ram-baseline.csv`, the latency rows `m4-tmux`/`m4-a`/`m4-base` in `latency-baseline.csv`.
+36. Rulings of M5 (plan-m5, lead 2026-10-28; owner may overturn; plan `docs/windows/plans/M5-windows-extras.md`). Owner answers on the
+    ledger: `auto-update` defaults to `check`; external tmux mode is opt-in; the profile menu opens on right-click of `+` (plus palette
+    and tray); `+edit-config` opens a new Ghostty with the editor, else Notepad; AUMID self-registration stays, `--all` reverts it; WSL distros
+    come from the Lxss registry and terminfo is compiled by Git for Windows' `tic.exe`.
+    - R-M5-1, profiles are detected, not configured: `windows_shell.profiles` returns `default`, `git-bash`, `pwsh`, `powershell`, `cmd`,
+      `wsl:<distro>` (§10). Distros from `HKCU\...\Lxss` read-only (default first, `docker-desktop*` skipped, names `[A-Za-z0-9._-]{1,64}`).
+      Ids are stable ASCII; the list is cached on the App and rebuilt when a profile menu opens. No config key for custom profiles.
+    - R-M5-2, `--profile=<id>`: a launch/IPC argument parsed by `Overrides`, forwardable (it names a profile, never a command, so M2
+      revision 2 holds). The receiving process resolves the id; unknown gives IPC code 1 `unknown profile: <id>` (standalone: one warning and
+      `Default`). With `-e`/`--command=`, `-e` wins and a warning is logged. `--working-directory=` values ending in `\.` are normalised.
+    - R-M5-3, where profiles are offered: right-click on `+` (New Tab items, separator, "New Window" submenu; `SetForegroundWindow` before
+      `TrackPopupMenuEx`, `WM_NULL` after; left click unchanged), palette items `New Tab: <profile>` / `New Window: <profile>`
+      (`Run.profile`, reachable with one tab), tray "New Window" submenu, jump list. Menus are native, themed like `tab_menu.zig`.
+    - R-M5-4, jump list (`ICustomDestinationList`, AUMID of §13): tasks only (no custom category): New Window, New Tab
+      (`+new-tab --working-directory=home`), a separator, one task per profile except `Default` (`--profile=<id>`); working directory
+      `%USERPROFILE%`, icon = the profile's exe. The UI thread builds the items and hands them to an STA worker that never reads App state;
+      built 2 s after start, on profile-list change and config reload, primary instance only, `windows-jump-list = true` (default); off
+      calls `DeleteList` once. `stop` waits at most 2 s for the worker, else leaks it with a log line. `+new-tab` with no instance starts the
+      own exe (`jumplist.newTabFallback`, from `performIpc`'s `.no_server` arm, `.new_tab` only).
+    - R-M5-5, Explorer keys: see §13. CLI: `+uninstall-explorer-integration` deletes exactly the three keys (foreign keys reported and kept),
+      `--all` also deletes the AUMID key and the toast icon file, `--dry-run` prints every key and value and opens no key. The jump list is
+      cleared by Ghostty itself on its next start with `windows-jump-list = false`. M6: the installer writes the same keys, and its
+      shortcut carries the AUMID (§13).
+    - R-M5-6, prompt marks (independent of the `title` feature): pwsh `prompt` returns `133;A` + text + `133;B`; `133;C` after
+      `AcceptLine` by wrapping `PSConsoleHostReadLine` (a foreign wrapper is chained); `133;D;<code>` at the start of `prompt`, never before
+      the first prompt or after an empty Enter, with the exit code from `$?`/`$LASTEXITCODE`; without PSReadLine only A/B. cmd: `PROMPT` =
+      `$e]133;D$e\$e]133;A$e\` + (title/OSC 7 part when `title` is on) + the user's prompt + `$e]133;B$e\`, idempotent at both ends; the D has
+      no exit code, so there is no `command_finished` for cmd (documented gap), but `jump_to_prompt` and output boundaries work. Git Bash keeps
+      the upstream marks. As built: the PowerShell 5.1 and 7.x overloads are chosen by reflection.
+    - R-M5-7, terminfo and `TERM`: see §8.5 and §10. Cost if wrong: one default.
+    - R-M5-8, MSYS: see §10 (mixed-form env paths, `/c/...` TERMINFO, bash `path` feature skipped under MSYS).
+    - R-M5-8b, `+edit-config`: `VISUAL`, else `EDITOR`, tokenised with the Windows rules (`windows_cmdline.zig`), exe resolved on
+      PATH/PATHEXT. A PE subsystem of `IMAGE_SUBSYSTEM_WINDOWS_GUI` is spawned directly with the path; otherwise a separate Ghostty runs
+      `--class=<config class> -e <tokens> <config path>`, detached (a GUI-subsystem `ghostty.exe` cannot share the caller's console with a
+      terminal editor, §11). No editor: `%SystemRoot%\System32\notepad.exe <path>`, detached (upstream errors here). The CLI exits 0 after
+      spawning. `.cmd`/`.bat` editors run detached without a window.
+    - R-M5-9, update check (`src/apprt/win32/update/`): `auto-update` unset means `check` on Windows, `download` means `check` with one
+      warning, `off` means never automatic; no automatic check in Debug, in test mode or in a build without `-win.<N>`. Endpoint (constant)
+      `https://api.github.com/repos/Denmurzik/ghostty/releases?per_page=20`, `Accept: application/vnd.github+json`,
+      `User-Agent: Ghostty/<version> (Windows)`, no other header, cookie or identifier. WinHTTP with automatic proxy, TLS only (plain `http`
+      only for the loopback test override `GHOSTTY_WIN32_UPDATE_URL`, test mode only), body cap 1 MiB, 10 s per phase and a 10 s wall-clock
+      deadline enforced by closing the request handle from the UI thread's timer; `stop` closes it and joins (at most 2 s); `winhttp.dll` is
+      loaded at runtime and waited on (at most 2 s, `WINHTTP_OPTION_UNLOAD_NOTIFY_EVENT`) before `FreeLibrary`. First check 60 s after start,
+      then every 24 h, skipped when `%LOCALAPPDATA%\ghostty\update.json` (`{"last_check":<unix s>,"notified":<N>}`) says under 24 h. A redirect
+      is not followed. `check_for_updates` always answers with a Windows 11 dialog (up to date / available with "Open release page" / local
+      build / could not check). `ghostty.exe` imports neither `winhttp.dll` nor `dbghelp.dll` (checked by Task 20 Step 3).
+    - R-M5-9a, version and tag scheme: see §13. A newer non-draft release (pre-releases included) whose `tag_name` is a valid
+      `win-<zon>-<N>` gives one toast per `N` (`Ghostty <zon>-win.<N> is available`, "Open the release page"); the click opens `html_url`
+      only if it starts with `https://github.com/Denmurzik/ghostty/releases/tag/win-`. Cost if wrong: re-tag before M6.
+    - R-M5-10, crash dumps: see §11 (Zig's segfault handler off on Windows, unhandled-exception filter, dump thread, `MiniDumpFilterMemory`,
+      10 kept, local only; as built, a stack scrub after the write).
+    - R-M5-11, `secure_input` analog: Windows has no API that hides keystrokes from other same-user processes, so it means (1)
+      `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` on every top-level window of the UI thread (windows, palette/search/labels/badges
+      popups, dialogs, inspector windows, the tab drag ghost; a sweep on every toggle and `secure_input.apply(hwnd)` at each creation site);
+      (2) text copied while on carries `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory = 0` and
+      `CanUploadToCloudClipboard = 0`; (3) the lock badge when `macos-secure-input-indication = true` (25 DIP `lock.shield` glyph, Segoe Fluent
+      Icons `0xE72E`, 10 DIP from the top-right of each surface; a click opens a Windows 11 explainer dialog). App-wide like macOS
+      (`on`/`off`/`toggle`). No automatic secure input at password prompts (ConPTY has no termios): documented gap.
+    - R-M5-12, undo/redo (macOS `BaseTerminalController`/`TerminalController` semantics, apprt only): entries are registered only in
+      `Window.zig`'s request handlers (`handleCloseTab`, `handleClose`, `handleCloseSurface` except for `child_exited`) after any
+      confirmation answered yes; `close_all_windows` and the tab-menu `others`/`right` closes push one grouped entry; `removeSurface`/`removeTab`
+      stay the non-undoable primitive used by tmux, IPC and expiry. A closed tab, window or split is **parked** (HWNDs hidden,
+      `focusCallback(false)`, surfaces and child processes alive) and really closes after `undo-timeout` with the §18.14 semantics; a parked
+      surface whose child exits closes for real. Parked items are invisible to tmux, the tray, `goto_window`, the IPC lookups
+      (`Surface.parked()`) and the last-window rule, but still get config, theme, colour-scheme and device-loss sweeps through
+      `App.forEachWindow(include_parked = true)`; `quit` closes parked items before its confirmation. With
+      `quit-after-last-window-closed = true`, closing the last window quits and is not undoable. A tmux `kill-*` close is final. Task 15a:
+      tabs and windows; Task 15b: splits via tree snapshots (restored only if the tab's tree is node for node the tree the close
+      produced, else the entry is dropped with a log line), undo of create (new tab, window, split) and `redo`; every entry flips between two
+      states, undo and redo are the same flip, and a flip gives a fresh expiry.
+    - R-M5-12a, undo default and keys: Windows `undo-timeout = 5s` like macOS, Windows-only default binds `ctrl+shift+z` = `undo` and
+      `ctrl+shift+y` = `redo` (`performable`); `ctrl+shift+t` is `new_tab`, `ctrl+z` belongs to the shell. Cost: for 5 s after a close the
+      tab's programs keep running (a dev server keeps its port), a departure from the Windows Terminal close semantics. Alternative:
+      `undo-timeout = 0` on Windows with no keys. The CHANGELOG states the choice.
+    - R-M5-13, `show_on_screen_keyboard`: if `IFrameworkInputPane::Location` reports an empty rect, `ITipInvocation::Toggle(GetDesktopWindow())`;
+      never hide it. If `CoCreateInstance(CLSID_UIHostNoLaunch)` fails with `REGDB_E_CLASSNOTREG` (TabTip not running), `ShellExecuteW`
+      `%CommonProgramFiles%\microsoft shared\ink\TabTip.exe` and retry once. Test mode only records.
+    - R-M5-14, external tmux mode is opt-in (`windows-tmux-external = false`): see §12.4. It relaxes M2 revision 2.
+    - Other M5 rulings: right-click default `right-click-action = copy-or-paste` on Windows (Windows Terminal/conhost convention), with a
+      native context menu for `context-menu`; drag-and-drop pastes Windows paths (`C:\x`, quoted) in Git Bash/Cygwin and `/mnt/c` for WSL;
+      popup menus follow the app theme (undocumented uxtheme ordinals 135/136 loaded from System32 only, build 18362 or later, high contrast
+      uses the system theme, silent fallback); no network at all in test mode unless the loopback override is set.

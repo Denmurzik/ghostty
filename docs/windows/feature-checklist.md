@@ -85,7 +85,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Shell: exit closes the window, tree killed on close | M1 | e2e/shell-exit, e2e/close-tree | done |
 | Shell: Ctrl+C | M1 | e2e/ctrl-c | done |
 | Shell: vim and less usable | M1 | e2e/vim-less | done |
-| Shell integration (OSC 133 / OSC 7) | M3 / M5 | OSC 7 (pwd, Git Bash, pwsh, cmd): e2e/pwd-osc7 done in M3; OSC 133 prompt marks and pwsh integration: M5 | pending -> M5 |
+| Shell integration (OSC 133 / OSC 7) | M3 / M5 | OSC 7 (pwd, Git Bash, pwsh, cmd): e2e/pwd-osc7; OSC 133 A/B/C/D marks for pwsh (7 and 5.1) and cmd, Git Bash upstream marks with the MSYS path fixes: e2e/prompt-marks; unit: shell-integration and Exec tests. cmd's D carries no exit code (gap, see notes) | done (cmd exit code: gap) |
 | Live resize and close while streaming | M1 | e2e/resize, e2e/resize-while-streaming | done |
 | Input and output latency gates | M2 | e2e/input-latency, e2e/output-latency, e2e/tui-latency | done |
 | RAM budget (one surface, per tab / split / window) | M2 | `docs/windows/ram-baseline.csv`, measure-ram.ps1 | done |
@@ -102,6 +102,23 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Pane border labels (`pane-border-status/format/style`) | M4 | e2e/tmux-labels (screenshots); unit: tmux/labels.zig | done |
 | Claude Code agent teams through the shim (2 teammates, titles, labels, clean exit) | M4 | test/windows/claude-team.ps1: 2 of 2 runs passed (Claude Code 2.1.312, ReleaseFast); G1 report | done (owner manual check pending) |
 | DCS `tmux;` passthrough | M4 | unit: stream tests in src/terminal/stream.zig; ConPTY drops ST-terminated inner sequences (Task 2) | gap (partial) |
+| Shell profiles detected (Default, Git Bash, PowerShell, Windows PowerShell, Command Prompt, WSL distros from the Lxss registry) and `--profile=<id>` (launch and IPC) | M5 | e2e/profiles-menu (state `m5.profiles`); unit: windows_shell.zig, profiles.zig, Overrides.zig. No WSL distro is ever started by a test | done |
+| Profile menu: right-click on `+`, palette `New Tab: <profile>` / `New Window: <profile>`, tray "New Window" submenu | M5 | e2e/profiles-menu; unit: profiles_menu.zig, CommandPalette.zig | done |
+| Taskbar jump list (New Window, New Tab, profile tasks) and `+new-tab` starting Ghostty when none runs; `windows-jump-list` | M5 | e2e/jumplist; unit: jumplist.zig. The real taskbar with the pinned icon is the owner's check | done (owner check pending) |
+| Explorer "Open Ghostty here" (`+install-explorer-integration`, `+uninstall-explorer-integration [--all] [--dry-run]`) | M5 | e2e/explorer-cli (private hive, owner's HKCU never written); unit: windows_explorer.zig. Classic context menu only (gap) | done (classic menu only) |
+| OSC 133 prompt marks for pwsh and cmd, Git Bash marks under MSYS | M5 | e2e/prompt-marks | done (cmd: no exit code, gap) |
+| Compiled terminfo in the Windows build and `TERM=xterm-ghostty` (WSL launchers keep `xterm-256color`) | M5 | e2e/term-terminfo; unit: Exec tests | done (ssh to hosts without the entry: gap) |
+| `+edit-config` (VISUAL / EDITOR, console editor in a new Ghostty, notepad fallback) | M5 | e2e/edit-config; unit: windows_cmdline.zig, cli edit tests | done (GUI editor detected by PE subsystem only: gap) |
+| Update check (`auto-update = check\|off`, GitHub releases through WinHTTP, one toast per release, `check_for_updates` dialog) | M5 | e2e/update-check (fake release server on 127.0.0.1); unit: update/release.zig, update/state.zig. A real toast against a real `win-` release is the owner's check | done (real toast: manual) |
+| Crash minidumps (`%LOCALAPPDATA%\ghostty\crash\`, stacks scrubbed, 10 kept, never uploaded) and `+crash-report` | M5 | e2e/crash-dump (access violation and stack overflow, marker string absent); unit: windows_crash.zig | done (heap-lock crash: no dump, gap) |
+| `secure_input` analog (capture exclusion of every window, clipboard-history exclusion, lock badge) | M5 | e2e/secure-input; unit: secure_input.zig. No automatic secure input at password prompts (gap); capture by OBS / Snipping Tool is the owner's check | done (owner check pending) |
+| Undo / redo of closed tabs, windows and splits, and undo of created tabs / windows / splits (`undo-timeout`, `ctrl+shift+z` / `ctrl+shift+y`) | M5 | e2e/undo-close; unit: undo.zig, window and app undo tests. Not offered for tmux, IPC and child-exit closes (gap) | done |
+| `show_on_screen_keyboard` (touch keyboard) | M5 | e2e/osk (records the request in test mode); unit: osk.zig. The real keyboard is the owner's check on a touch machine | done (owner check pending) |
+| External tmux mode (`windows-tmux-external`): `-L <name>` / `TMUX` unset, `new-session`, `new-window -n`, `has-session`, `kill-session`, `kill-server` | M5 | e2e/tmux-external; unit: tmux/commands.zig, Registry.zig, src/tmux_shim. Needs the Ghostty dir on PATH (gap) | done (PATH: gap) |
+| Right-click paste (`right-click-action = copy-or-paste` on Windows) and the native context menu for `context-menu` | M5 | e2e/right-click | done |
+| File drop pastes Windows paths in Git Bash / Cygwin (WSL keeps `/mnt/c`) | M5 | e2e/drop-files (SKIPped on a locked session when written; re-run in the next GUI batch); unit: drop.zig | done |
+| Dialogs in the Windows 11 look (re-check after M5 additions: update dialog, secure-input explainer) | M5 | e2e/dialogs, e2e/secure-input, e2e/update-check | done |
+| Dark and light popup menus (tab menu, context menu, profile menu) | M5 | e2e/menu-dark (luminance 44 dark / 249 light) | done |
 
 ## Notes
 
@@ -122,3 +139,14 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
   write after a grid change, only once the pseudo console has requested `?9001h`. Evidence: `e2e/resize-input`
   (Git Bash 36/36 checks, cmd.exe and pwsh unchanged; 9/20 lost without the fix), `background-focus` 0 retries in 5
   runs. Heavy CPU load (12 burners): 36/36 since the window starts at conhost's first output (26.4.1). Follow-up: msys2-runtime report.
+
+### M5 notes
+
+- **Gaps listed in the CHANGELOG (M5):** Explorer entry only in the classic menu ("Show more options"); no automatic secure
+  input; cmd's OSC 133 `D` carries no exit code (no `command_finished` for cmd, `jump_to_prompt` works); `TERM=xterm-ghostty`
+  over ssh to hosts without the entry (Windows OpenSSH from pwsh in particular); external tmux needs the Ghostty dir on PATH;
+  undo is not offered for tmux, IPC and child-exit closes; a crash under the process heap lock leaves no dump; `+edit-config`
+  tells a GUI editor by its PE subsystem only.
+- **Owner manual checks (M5 exit checklist item 8):** pinned jump list and WSL profile, Explorer entry on a folder, folder
+  background and drive root, a real update toast, OBS / Snipping Tool against secure input and Win+V history, the touch
+  keyboard, `vim` / `less` / `htop` with `TERM=xterm-ghostty`, Claude Code from Windows Terminal against external mode.

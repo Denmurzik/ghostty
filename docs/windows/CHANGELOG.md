@@ -208,3 +208,98 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
 | `tmux.exe` peak private: `display-message` / `load-buffer` 512 KiB / `__idle` | 0.6 MB / 3.9 MB / 0.5 MB |
 | `tmux.exe` process wall p95: display-message / split-window / respawn-pane | 32.2 ms (goal 30) / 35.5 ms / 114.6 ms |
 | Key-echo (Ghostty-owned p95, 6 interleaved runs each) | 2.14 ms median against 1.63 ms for the M3 acceptance build (+0.5 ms; single runs 1.3-11.6 ms under 7-13 % background load) |
+
+
+## M5 — Windows extras
+
+### What works
+
+- **Profiles.** Ghostty detects Git Bash, PowerShell 7, Windows PowerShell, Command Prompt and your WSL distros (read from the
+  registry, no distro is started to list them). Right-click the `+` of the tab row for a menu of "New Tab" and "New Window"
+  items; the command palette has `New Tab: <profile>` / `New Window: <profile>` (also with one tab) and the tray has a
+  "New Window" submenu. `ghostty.exe --profile=<id>` opens one (`git-bash`, `pwsh`, `powershell`, `cmd`, `wsl:<distro>`). Your
+  `command` is the `Default` profile; there is no key for custom profiles.
+- **Jump list.** Right-click the taskbar icon: New Window, New Tab and one task per profile. `+new-tab` starts Ghostty when
+  none is running. Key `windows-jump-list = true|false` (default `true`); `false` clears the list at the next start.
+- **Explorer.** `ghostty.exe +install-explorer-integration` adds "Open Ghostty here" for folders, folder backgrounds and drives
+  (HKCU only). `+uninstall-explorer-integration` removes it; `--all` also removes the toast registration and its icon file;
+  `--dry-run` prints what would change.
+- **Shell integration.** OSC 133 prompt marks for pwsh (7 and Windows PowerShell 5.1) and cmd, so `jump_to_prompt`, the output
+  boundaries and (pwsh, Git Bash) `command_finished` work. Git Bash path fixes for MSYS.
+- **Terminfo and `TERM`.** The build compiles `xterm-ghostty` with Git for Windows' `tic.exe` (`-Dtic=<path>` overrides); `TERM`
+  defaults to `xterm-ghostty` when the compiled entry ships, `xterm-256color` otherwise (and always for `wsl.exe`).
+- **`+edit-config`.** Opens the config in `VISUAL` / `EDITOR` (a console editor runs in a new Ghostty window, a GUI editor
+  directly), else in Notepad. Upstream errors without an editor; Windows does not.
+- **Update check.** `auto-update` defaults to `check` on Windows: one anonymous GET of the GitHub releases list 60 s after
+  start and then daily, one toast per new release, never an install or a download. `off` disables it; `download` is treated as
+  `check` with a warning. No automatic check in Debug builds or in a local build without a `-win.<N>` version. The
+  `check_for_updates` action always answers with a dialog. Release tags are `win-<zon>-<N>` (pre-releases included).
+- **Crash dumps.** An unhandled exception or panic writes a minidump to `%LOCALAPPDATA%\ghostty\crash\` (10 newest kept) with
+  stack contents reduced to the pointers a stack walk needs, so terminal text does not reach the file. `+crash-report` lists
+  them. Nothing is uploaded.
+- **Secure input analog.** `toggle_secure_input` (and `macos-secure-input-indication`) excludes every Ghostty window from screen
+  capture, keeps copied text out of Win+V history and cloud clipboard, and shows the lock badge.
+- **Undo / redo.** Closing a tab, a window or a split, and creating one, can be undone: the item is hidden, not closed, and
+  its programs keep running until `undo-timeout`. Details below.
+- **On-screen keyboard.** `show_on_screen_keyboard` opens the touch keyboard (never hides it).
+- **External tmux mode.** With `windows-tmux-external = true`, `tmux.exe` outside Ghostty (`TMUX` unset, or `-L <name>`)
+  drives a Ghostty window per tmux server name: `new-session -d`, `new-window -n`, `has-session`, `kill-session`,
+  `kill-server`, `list-windows -F '#{window_name}'` and `session:window-name` targets. Claude Code started in Windows
+  Terminal then opens its teammates in Ghostty.
+- **Also in this milestone.** Right-click pastes by default (`right-click-action = copy-or-paste`, like Windows Terminal; a
+  selection is copied instead), with a native context menu for `context-menu`. File drops paste Windows paths in Git Bash and
+  Cygwin (WSL keeps `/mnt/c/...`). Popup menus follow the dark and light theme. All dialogs, including the update and
+  secure-input ones, use the Windows 11 look.
+
+### Config
+
+- `windows-jump-list = true|false` (default `true`, Windows only).
+- `windows-tmux-external = true|false` (default `false`, Windows only, needs a restart). It opens a second private pipe that
+  any process of your user can ask to run tmux commands, which relaxes the M2 rule that nothing but Ghostty's own CLI may do
+  so; enable it only for a tool that needs it. Put the Ghostty folder on `PATH` so `tmux.exe` is found outside Ghostty.
+- `undo-timeout`: default `5s` on Windows, like macOS. The default binds are `ctrl+shift+z` = `undo` and `ctrl+shift+y` =
+  `redo` (`ctrl+shift+t` is already `new_tab` and `ctrl+z` belongs to the shell). The cost: for 5 s after a close, the
+  closed tab's programs keep running (a dev server keeps its port), unlike Windows Terminal where they end at once. Set
+  `undo-timeout = 0` to turn undo off.
+- `auto-update = check|off` (Windows default `check`).
+- `right-click-action` default on Windows is `copy-or-paste`.
+
+### Known limitations (gaps)
+
+- The Explorer entry is in the classic context menu only ("Show more options"); the top-level Windows 11 menu needs package
+  identity, which is out of scope.
+- No automatic secure input at password prompts (ConPTY has no termios); toggle it yourself.
+- cmd's prompt marks have no exit code: no `command_finished` for cmd. `jump_to_prompt` and the output boundaries work.
+- `TERM=xterm-ghostty` over ssh to a host without the entry (Windows OpenSSH from pwsh in particular) breaks full-screen
+  programs; set `TERM=xterm-256color` there. Cygwin would need `/cygdrive/c/...` for `TERMINFO` (not done).
+- External tmux mode needs the Ghostty directory on `PATH`; `tmux.exe` is on `PATH` automatically only inside Ghostty
+  sessions.
+- Undo is not offered for closes caused by tmux, IPC or a child exiting by itself, nor for closing the last window with
+  `quit-after-last-window-closed = true`.
+- A crash while the process heap lock is held leaves no dump (the dump thread times out after 10 s).
+- `+edit-config` tells a GUI editor from a console editor by the PE subsystem of its exe only; a console-subsystem editor
+  that opens its own window still runs inside a new Ghostty window.
+- Crash dump stack scrubbing: `MiniDumpFilterMemory` alone is not enough, so after the dump is written Ghostty zeroes every
+  8-byte word of every thread stack that is not zero and does not look like a user-mode pointer (a dump that cannot be
+  parsed is kept as written and logged). A pointer-shaped value is kept by design, and module names, thread ids and register values stay in the file. Check a dump before sending
+  it to anyone.
+
+#### Undo: known limits (Task 15b)
+
+- A parked split misses device-loss and colour-scheme refreshes for up to `undo-timeout`.
+- Redo of a close gives the item a fresh timeout, so a closed tab can live up to twice `undo-timeout` in total.
+- Undo of `new_window` for the only window of an app that is quitting is refused (the entry is dropped).
+- A split close is restored only if the tab's tree is node for node the tree the close produced; otherwise the entry is
+  dropped with a log line.
+- Unit tests do not drive a live window for the flip itself; `e2e/undo-close` does.
+
+### Core changes outside Windows-only code
+
+- Windows arms only: `src/os/windows_*.zig`, `src/apprt/win32`, `src/tmux_shim`, `src/config/Config.zig` (the keys above, comptime
+  defaults for Windows), `src/termio/Exec.zig` (TERM, MSYS paths), `src/shell-integration` (pwsh, cmd), `src/main_ghostty.zig`
+  (crash filter; Zig's segfault handler is off on Windows), `src/build` (tic).
+
+### Acceptance
+
+See `docs/windows/plans/M5-windows-extras.md` ("M5 exit checklist"). RAM and latency rows, the import check and the ARM64
+cross-build are recorded by the M5 acceptance commit.

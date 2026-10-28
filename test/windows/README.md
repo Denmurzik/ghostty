@@ -374,3 +374,55 @@ or `GHOSTTY_LAT_EXTRA_CONFIG` / `GHOSTTY_LAT_SPLITS` under the runner. Name such
 runs with `GHOSTTY_LAT_BUILD_VARIANT` so they never read as baseline rows.
 
 `GHOSTTY_E2E_VARIANT=opacity` selects the `opacity` variant of `device-recover.ps1` (scenarios take no parameters).
+
+## M5 scenarios and safety rules
+
+`e2e.ps1 -Milestone M5` runs these scenarios (header `milestone=M5`, with their orders): `right-click` (116), `menu-dark` (640),
+`prompt-marks` (700), `secure-input` (870), `undo-close` (880), `osk` (900), `jumplist` (910), `explorer-cli` (965),
+`term-terminfo` (966), `edit-config` (966), `update-check` (968), `profiles-menu` (970), `tmux-external` (975) and `crash-dump`
+(Task 12). `drop-files` (M2) also covers the Windows-path paste of M5. Helpers and self-tests: `e2e/_m5_fakeserver.ps1` (the
+loopback release server), `e2e/_selftest-clipboard.ps1` (clipboard save and restore, no scenario) and
+`e2e/_selftest-capture.ps1` (the capture guard's pure part, no GUI).
+
+- `profiles-menu`: right-click on `+` opens the profile menu, the accelerator of "Command Prompt" opens a tab, the palette
+  entry `New Tab: Windows PowerShell` opens another; `state.m5.profiles` lists the ids. No WSL profile is ever chosen, so no
+  distro starts.
+- `jumplist`: the list is built with New Window, New Tab, a separator and the profile tasks (HRESULTs 0); quitting deletes the
+  list of the test AUMID; `+new-tab --class=<c>` with no instance starts one.
+- `explorer-cli`: `--dry-run` prints the writes and opens no key; install and uninstall run against a private application hive
+  (`GHOSTTY_WIN32_TEST_HIVE`); a read-only `reg query` of the owner's real keys gives the same answer before and after.
+- `prompt-marks`: OSC 133 from Git Bash, pwsh and cmd; `jump_to_prompt`; exit codes (cmd has none).
+- `term-terminfo`: `TERM`, `tput`, `infocmp` and `vim` from Git Bash, pwsh and cmd with the compiled entry.
+- `edit-config`: a fake GUI-style editor runs detached with the config path; a console editor runs in a new Ghostty window;
+  no editor opens Notepad (never started: the scenario only checks the command).
+- `update-check`: a fake release server on `127.0.0.1` (`GHOSTTY_WIN32_UPDATE_URL`, honoured in test mode only); newer,
+  same, HTML body, HTTP 403, a redirect (not followed), a server that never answers, a toast count of one per release.
+- `crash-dump`: an access violation and a stack overflow produce a dump, no WerFault dialog, a log line, `+crash-report`
+  lists it, and the marker string typed into the pty is absent from the file.
+- `secure-input`: every top-level window of the UI thread reports `WDA_EXCLUDEFROMCAPTURE`; the clipboard exclusion formats
+  are read as a format list, never as content.
+- `undo-close`: close, undo and expiry of tabs, windows and splits, undo and redo of created tabs and splits, with `ping`
+  as the witness that the child lives; `undo-timeout` is 12 s in the scenario.
+- `osk`: `show_on_screen_keyboard` is only recorded in test mode (`state.osk.requests`); TabTip is never started.
+- `tmux-external`: `windows-tmux-external = true`, `tmux.exe -L <name>` with `TMUX` removed and `GHOSTTY_TMUX_CLASS` naming the
+  sandbox instance; `has-session`, `new-session`, `new-window -n`, `kill-session`, `kill-server`.
+- `right-click`: the three `right-click-action` behaviours in Git Bash, with the owner's clipboard saved and restored.
+- `menu-dark`: median background luminance of the tab menu under the simulated dark and light scheme.
+
+### Safety rules (binding for every M5 scenario)
+
+- **Desktop lock.** Every GUI run holds `%TEMP%\gui-e2e.lock` (see "The desktop lock" above); `e2e.ps1` takes it for the whole
+  run. A busy or locked desktop is a SKIP, never a FAIL. Builds and unit tests run under the team's `test-lock` (two slots);
+  GUI runs are not wrapped in it.
+- **Clipboard.** A scenario that touches the clipboard first saves every format (`lib/Clipboard.psm1`, DPAPI-protected
+  backup) and restores it in a `finally`; the restore is all-or-nothing and guarded by the clipboard sequence
+  number. Secure-input checks read the list of formats only.
+- **No HKCU.** No scenario writes the owner's real registry. Registry writes go through the opt-in `+install-explorer-integration`
+  against the private hive (`GHOSTTY_WIN32_TEST_HIVE`); `explorer-cli` asserts the real keys are unchanged. The jump list
+  and toast registration use a test AUMID.
+- **No network except loopback.** In test mode Ghostty does no network I/O unless `GHOSTTY_WIN32_UPDATE_URL` points at
+  `127.0.0.1`. No scenario log may name `api.github.com`, and every `update: fetching` line names `127.0.0.1`.
+- **Screenshots only of Ghostty windows.** All captures go through `Get-ScreenShot` / `Save-WindowShot`, which refuse (SKIP
+  "desktop busy") when a foreign window overlaps. Delete any image that shows anything else.
+- **No distro, no touch keyboard.** No WSL distro is started; `osk` never starts TabTip; dumps are checked for the pty
+  marker string; processes are killed only if the run started them.
