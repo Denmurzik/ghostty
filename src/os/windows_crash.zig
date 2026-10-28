@@ -14,7 +14,9 @@
 //! `MiniDumpFilterMemory` reduces stack contents to the pointer values a
 //! stack walk needs, and no heap is included, so the pty reader's buffer and
 //! the screen are not in a dump. Register contents of every thread are kept
-//! and can hold small fragments of recent text. Dumps stay local and are never
+//! and can hold small fragments of recent text, as can stack words that look
+//! like pointers (short ASCII or UTF-16 tails of up to 6 bytes survive the
+//! scrub of non-pointer-looking words). Dumps stay local and are never
 //! uploaded; the 10 newest are kept. A dump is written as `.dmp.tmp` and
 //! renamed when complete, so a timeout never leaves a truncated `.dmp`.
 //!
@@ -277,9 +279,9 @@ fn request(exception_pointers: ?*anyopaque) void {
         .client_pointers = .FALSE,
     };
     _ = Exp.SetEvent(state.trigger orelse return);
-    if (Exp.WaitForSingleObject(done, filter_wait_ms) != 0) {
-        logCrash("crash dump timed out after {d} s, no dump", .{filter_wait_ms / 1000});
-    }
+    // No logging here: on a timeout the crashing thread may be out of stack,
+    // and a log call would inline a multi-KB frame into the filter.
+    _ = Exp.WaitForSingleObject(done, filter_wait_ms);
 }
 
 fn filter(exception_pointers: ?*anyopaque) callconv(.winapi) c_long {
@@ -357,12 +359,14 @@ fn writeDump() void {
     const write_err = Exp.GetLastError();
     if (ok == .FALSE) {
         _ = Exp.CloseHandle(h);
+        _ = Exp.DeleteFileW(tmp.ptr);
         logCrash("crash happened ({s}), no dump: MiniDumpWriteDump err={d}", .{ what, write_err });
         return;
     }
 
     // FilterMemory leaves some live stack frames intact, so zero every
-    // non-pointer word of every thread stack ourselves. A dump we cannot
+    // non-pointer-looking word of every thread stack ourselves (short ASCII
+    // fragments up to 6 bytes can look like pointers and survive). A dump we cannot
     // scrub is deleted, never kept.
     const scrubbed = scrubFile(h);
     _ = Exp.CloseHandle(h);
@@ -374,7 +378,9 @@ fn writeDump() void {
 
     const MOVEFILE_REPLACE_EXISTING: DWORD = 1;
     if (Exp.MoveFileExW(tmp.ptr, path.ptr, MOVEFILE_REPLACE_EXISTING) == .FALSE) {
-        logCrash("crash happened ({s}), no dump: rename failed err={d}", .{ what, Exp.GetLastError() });
+        const rename_err = Exp.GetLastError();
+        _ = Exp.DeleteFileW(tmp.ptr);
+        logCrash("crash happened ({s}), no dump: rename failed err={d}", .{ what, rename_err });
         return;
     }
 

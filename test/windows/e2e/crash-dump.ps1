@@ -27,7 +27,7 @@ function Test-HasBytes([byte[]]$Haystack, [byte[]]$Needle) {
 }
 
 function Invoke-CrashCase([string]$Kind) {
-    $g = Start-E2eGhostty
+    $g = Start-E2eGhostty -Env @{ XDG_STATE_HOME = $null }
     Wait-BashReady $g
     $crashDir = Join-Path $g.Sandbox.Local 'ghostty\crash'
     $before = @(Get-ChildItem -LiteralPath $crashDir -Filter *.dmp -ErrorAction SilentlyContinue)
@@ -80,6 +80,7 @@ function Invoke-CrashCase([string]$Kind) {
     $psi.EnvironmentVariables['APPDATA'] = $g.Sandbox.Roaming
     $psi.EnvironmentVariables['USERPROFILE'] = $g.Sandbox.Home
     [void]$psi.EnvironmentVariables.Remove('GHOSTTY_WIN32_TEST_IPC')
+    [void]$psi.EnvironmentVariables.Remove('XDG_STATE_HOME')
     $p = [Diagnostics.Process]::Start($psi)
     $out = $p.StandardOutput.ReadToEndAsync()
     [void]$p.StandardError.ReadToEndAsync()
