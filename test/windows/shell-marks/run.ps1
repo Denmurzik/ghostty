@@ -25,7 +25,13 @@ prompt for `confirm-close-surface = true` (Terminal.cursorIsAtPrompt).
   zsh-backslash    zsh with ZDOTDIR=C:\...\shell-integration\zsh
   zsh-path         the path feature adds no `C:/...` dir to PATH under MSYS
   pwsh             pwsh -NoProfile with the ghostty.ps1 -Command
-  cmd              cmd.exe with the marked PROMPT
+  pwsh-exit        the 133;D codes: a native exit 3 twice (both 3), a cmdlet
+                   failure (1), success (0); $LASTEXITCODE stays the user's
+  pwsh-strict      Set-StrictMode before any native command: no prompt error
+  pwsh-noreadline  no PSReadLine: A..B, no D, $LASTEXITCODE untouched
+  pwsh-userprompt  a user prompt running a native command is chained
+  powershell-*     the pwsh cases on Windows PowerShell 5.1 (PSReadLine 2.0)
+  cmd             cmd.exe with the marked PROMPT
   cmd-busy         cmd running `ping -t`: the ping is the shell's only child,
                    the idle prompt has none (what Exec.shellBusy counts)
 
@@ -135,6 +141,7 @@ $bash = Join-Path $GitDir 'bin\bash.exe'
 $zsh = Join-Path $GitDir 'usr\bin\zsh.exe'
 $pwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not $pwsh) { $pwsh = 'pwsh.exe' }
+$winps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
 # The PROMPT setupCmd builds with the title feature.
 $cmdPrompt = '$e]133;D$e\$e]133;A$e\$e]2;$P$e\$e]7;kitty-shell-cwd:///$P$e\$P$G$e]133;B$e\'
@@ -273,10 +280,6 @@ $cases = @(
         }
     },
     @{
-        Name = 'pwsh'; Exe = $pwsh; Input = "'ps-' + (40+2)`r"; Home = @{}; Env = @{}; Expect = 'ps-42'
-        Args = "-NoLogo -NoProfile -NoExit -Command `". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))`""
-    },
-    @{
         Name = 'cmd'; Exe = $cmd; Args = ''; Input = "echo cmd-%OS%`r"; Home = @{}; Expect = 'cmd-Windows_NT'
         Env = @{ PROMPT = $cmdPrompt }
     },
@@ -287,6 +290,48 @@ $cases = @(
         Env = @{ PROMPT = $cmdPrompt }; Children = '|ping.exe'
     }
 )
+
+# PowerShell: `Marks` is the exit code of every 133;D in order. The quotes
+# keep the typed lines from matching the expected output.
+foreach ($ps in @(@{ Prefix = 'pwsh'; Exe = $pwsh }, @{ Prefix = 'powershell'; Exe = $winps })) {
+    $integrate = ". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))"
+    $psArgs = "-NoLogo -NoProfile -NoExit -Command `"$integrate`""
+    $cases += @(
+        @{
+            Name = $ps.Prefix; Exe = $ps.Exe; Args = $psArgs; Input = "'ps-' + (40+2)`r"; Home = @{}; Env = @{}
+            Expect = 'ps-42'; Marks = '0'
+        },
+        @{
+            # The same native exit code twice is reported twice, the user's
+            # $LASTEXITCODE is the last native code, a cmdlet failure is 1.
+            Name = "$($ps.Prefix)-exit"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Env = @{}
+            Input = (@(
+                    'cmd /c exit 3', 'cmd /c exit 3', '"le$()c-$LASTEXITCODE"', 'Get-Item nope-missing-item',
+                    'cmd /c exit 0', 'cmd /c exit 5', 'cmd /c exit 5', '$LASTEXITCODE = 7', '"le$()c-$LASTEXITCODE"'
+                ) -join "`r") + "`r"
+            Expect = 'lec-3'; Expect2 = 'lec-7'; Marks = '3,3,0,1,0,5,5,0,0'
+        },
+        @{
+            # StrictMode before any native command: no $LASTEXITCODE yet.
+            Name = "$($ps.Prefix)-strict"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Env = @{}
+            Input = "Set-StrictMode -Version Latest`rGet-Item nope-missing-item`rcmd /c exit 3`rcmd /c exit 3`r'st' + 'rict-ok'`r"
+            Expect = 'strict-ok'; Marks = '0,1,3,3,0'; NoError = 'has not been set'
+        },
+        @{
+            # Without PSReadLine there is no C and no D.
+            Name = "$($ps.Prefix)-noreadline"; Exe = $ps.Exe; Home = @{}; Env = @{}
+            Args = "-NoLogo -NoProfile -NoExit -Command `"Remove-Module PSReadLine; $integrate`""
+            Input = "cmd /c exit 3`r`"le`$()c-`$LASTEXITCODE`"`r"; Expect = 'lec-3'; Marks = ''
+        },
+        @{
+            # A user prompt that runs a native command and puts $LASTEXITCODE
+            # back (as starship and oh-my-posh do) is chained.
+            Name = "$($ps.Prefix)-userprompt"; Exe = $ps.Exe; Home = @{}; Env = @{}
+            Args = "-NoLogo -NoProfile -NoExit -Command `"function global:prompt { `$c = `$global:LASTEXITCODE; cmd /c exit 9; `$global:LASTEXITCODE = `$c; 'my> ' }; $integrate`""
+            Input = "cmd /c exit 3`rcmd /c exit 3`r`"le`$()c-`$LASTEXITCODE`"`r"; Expect = 'lec-3'; Expect2 = 'my> '; Marks = '3,3,0'
+        }
+    )
+}
 
 $failed = 0
 try {
@@ -306,6 +351,12 @@ try {
             $problems += "shell children (prompt|command) are '$([ShellMarksPty]::Probed)', expected '$($c.Children)'"
         }
         if ($text.IndexOf($c.Expect) -lt 0) { $problems += "no '$($c.Expect)' in the output" }
+        if ($c.Expect2 -and $text.IndexOf($c.Expect2) -lt 0) { $problems += "no '$($c.Expect2)' in the output" }
+        if ($c.NoError -and $text.IndexOf($c.NoError) -ge 0) { $problems += "'$($c.NoError)' in the output" }
+        if ($c.ContainsKey('Marks')) {
+            $marks = @([regex]::Matches($text, "`e]133;D;(\d+)") | ForEach-Object { $_.Groups[1].Value }) -join ','
+            if ($marks -ne $c.Marks) { $problems += "133;D codes are '$marks', expected '$($c.Marks)'" }
+        }
         if ($text -match "command not found") { $problems += "'command not found' in the output" }
         if (-not (Test-PromptMarked $text)) { $problems += 'the last prompt has no OSC 133 A..B' }
         if ($problems.Count) {

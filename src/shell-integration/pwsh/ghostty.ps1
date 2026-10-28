@@ -16,9 +16,10 @@ $script:__ghostty_esc = [char]27
 $script:__ghostty_bel = [char]7
 # Set when a command was accepted and its end (D) is still to be reported.
 $script:__ghostty_pending = $false
-# $LASTEXITCODE as it was before the command (the Windows Terminal pattern):
-# the variable itself is never touched, `prompt` compares against this copy to
-# tell that a native command changed it.
+# $LASTEXITCODE as it was before the command. The variable itself is never
+# touched: every native command (and `exit`) stores a newly boxed int in it, so
+# `prompt` tells that one ran by reference, which also catches the same code
+# twice in a row.
 $script:__ghostty_saved_exit = $null
 
 function global:__ghostty_title([string]$text) {
@@ -51,7 +52,8 @@ function global:prompt {
     if ($script:__ghostty_pending) {
         $script:__ghostty_pending = $false
         $code = if ($ok) { 0 }
-                elseif ($exit -is [int] -and $exit -ne 0 -and $exit -ne $script:__ghostty_saved_exit) { $exit }
+                elseif ($exit -is [int] -and $exit -ne 0 -and
+                        -not [object]::ReferenceEquals($exit, $script:__ghostty_saved_exit)) { $exit }
                 else { 1 }
         [Console]::Out.Write("$script:__ghostty_esc]133;D;$code$script:__ghostty_bel")
     }

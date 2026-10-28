@@ -431,7 +431,9 @@ loopback release server), `e2e/_selftest-clipboard.ps1` (clipboard save and rest
 No window and no desktop: each case runs a shell in a pseudoconsole with Ghostty's integration environment and a sandbox
 `HOME`, and reads the raw output. A prompt is marked when a `133;B` follows the last `133;A`. Cases: Git Bash, `ZDOTDIR`
 handling around `exec zsh` (environment, rc file, leak, trap removed, chained user trap, `$_`), zsh from a drive path and a
-backslash path, the zsh `path` feature, and cmd while a command runs (`cmd-busy`). 15 cases pass. It never reads the owner's
+backslash path, the zsh `path` feature, cmd while a command runs (`cmd-busy`), and pwsh 7 and Windows PowerShell 5.1:
+the `133;D` exit codes (a native exit code twice in a row, a cmdlet failure, `$LASTEXITCODE` left as the user's, StrictMode,
+no PSReadLine, a chained user prompt). Run it with `pwsh` (it uses `` `e ``). 24 cases pass. It never reads the owner's
 rc files.
 
 ### Safety rules (binding for every M5 scenario)
