@@ -43,6 +43,17 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
     builtin unset GHOSTTY_BASH_UNEXPORT_HISTFILE
   fi
 
+  # Git Bash cannot switch to zsh with chsh, so a startup file often ends in
+  # `exec zsh`. While they run, ZDOTDIR points at our zsh integration, which
+  # such a zsh then loads as if Ghostty had started it (and which restores
+  # the ZDOTDIR saved here).
+  if [[ ("$OSTYPE" == msys* || "$OSTYPE" == cygwin*) &&
+    -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/.zshenv" ]]; then
+    if [[ -n "${ZDOTDIR+X}" ]]; then builtin export GHOSTTY_ZSH_ZDOTDIR="$ZDOTDIR"; fi
+    builtin declare __ghostty_zdotdir="$GHOSTTY_RESOURCES_DIR/shell-integration/zsh"
+    builtin export ZDOTDIR="$__ghostty_zdotdir"
+  fi
+
   # Manually source the startup files. See INVOCATION in bash(1) and
   # run_startup_files() in shell.c in the Bash source code.
   if builtin shopt -q login_shell; then
@@ -72,6 +83,18 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
       if [[ -z "$GHOSTTY_BASH_RCFILE" ]]; then GHOSTTY_BASH_RCFILE="$HOME/.bashrc"; fi
       [ -r "$GHOSTTY_BASH_RCFILE" ] && builtin source "$GHOSTTY_BASH_RCFILE"
     fi
+  fi
+
+  # No zsh took over: put ZDOTDIR back unless a startup file changed it.
+  if [[ -n "${__ghostty_zdotdir-}" ]]; then
+    if [[ "${ZDOTDIR-}" == "$__ghostty_zdotdir" ]]; then
+      if [[ -n "${GHOSTTY_ZSH_ZDOTDIR+X}" ]]; then
+        builtin export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+      else
+        builtin unset ZDOTDIR
+      fi
+    fi
+    builtin unset GHOSTTY_ZSH_ZDOTDIR __ghostty_zdotdir
   fi
 
   builtin unset __ghostty_rcfile

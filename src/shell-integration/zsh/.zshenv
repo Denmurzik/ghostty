@@ -49,12 +49,21 @@ fi
 } always {
     if [[ -o 'interactive' ]]; then
         # ${(%):-%x} is the path to the current file.
-        # On top of it we add :A:h to get the directory.
-        'builtin' 'typeset' _ghostty_file="${${(%):-%x}:A:h}"/ghostty-integration
-        if [[ -r "$_ghostty_file" ]]; then
-            'builtin' 'autoload' '-Uz' '--' "$_ghostty_file"
-            "${_ghostty_file:t}"
-            'builtin' 'unfunction' '--' "${_ghostty_file:t}"
+        # On top of it we add :A:h to get the directory (but see below).
+        'builtin' 'typeset' _ghostty_file="${(%):-%x}"
+        if [[ "$_ghostty_file" == [A-Za-z]:[/\\]* ]]; then
+            # A Windows zsh (MSYS2, Cygwin) takes a drive path (C:/...) for
+            # a relative one: :A would prefix it with the working directory
+            # and autoload would search fpath for it. Source it instead.
+            _ghostty_file="${_ghostty_file:h}"/ghostty-integration
+            [[ ! -r "$_ghostty_file" ]] || 'builtin' 'source' '--' "$_ghostty_file"
+        else
+            _ghostty_file="${${_ghostty_file:A}:h}"/ghostty-integration
+            if [[ -r "$_ghostty_file" ]]; then
+                'builtin' 'autoload' '-Uz' '--' "$_ghostty_file"
+                "${_ghostty_file:t}"
+                'builtin' 'unfunction' '--' "${_ghostty_file:t}"
+            fi
         fi
     fi
     'builtin' 'unset' '_ghostty_file'

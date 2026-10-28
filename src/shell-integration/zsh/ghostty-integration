@@ -295,8 +295,10 @@ _ghostty_deferred_init() {
         fi
     "${functions[_ghostty_zle_line_init]}
 
-    # Add Ghostty binary to PATH if the path feature is enabled
-    if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* ]] && [[ -n "$GHOSTTY_BIN_DIR" ]]; then
+    # Add Ghostty binary to PATH if the path feature is enabled. Skipped under
+    # MSYS, as in bash: a `C:/...` dir would split at the colon.
+    if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* ]] && [[ -n "$GHOSTTY_BIN_DIR" ]] &&
+      [[ "$OSTYPE" != msys* && "$OSTYPE" != cygwin* ]]; then
       if [[ ":$PATH:" != *":$GHOSTTY_BIN_DIR:"* ]]; then
         builtin export PATH="$PATH:$GHOSTTY_BIN_DIR"
       fi

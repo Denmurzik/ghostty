@@ -16262,6 +16262,104 @@ test "Terminal: cursorIsAtPrompt alternate screen" {
     try testing.expect(!t.cursorIsAtPrompt());
 }
 
+/// Feeds a prompt as the Windows inbox ConPTY delivers it, a typed command
+/// with its output (`running`) and the next prompt: the cursor is at a prompt
+/// after each prompt, not while the command runs. The streams are recorded
+/// with test/windows/shell-marks/run.ps1 -Keep, long paths cut short.
+fn testConptyPrompt(prompt: []const u8, next_prompt: []const u8, running: []const u8) !void {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    s.nextSlice(prompt);
+    try testing.expect(t.cursorIsAtPrompt());
+    s.nextSlice(running);
+    try testing.expect(!t.cursorIsAtPrompt());
+    s.nextSlice(next_prompt);
+    try testing.expect(t.cursorIsAtPrompt());
+}
+
+/// `s` repeated `n` times, for the long runs of a ConPTY repaint.
+fn conptyRepeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
+}
+
+test "Terminal: cursorIsAtPrompt through ConPTY: Git Bash" {
+    try testConptyPrompt(
+        "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\Program Files\\Git\\bin\\bash.exe\x07\x1b[?25h" ++
+            "\x1b]133;A;redraw=last;cl=line;aid=919458\x07\x1b]7;kitty-shell-cwd://HOME/C:/Users/u/bash\x07" ++
+            "\x1b[?2004h\x1b]133;P;k=i\x07bash$ \x1b]133;B\x07\x1b[5 q\x1b]0;~\x07",
+        "\x1b]133;D;0;aid=919458\x07\x1b]133;A;redraw=last;cl=line;aid=919458\x07\x1b[?2004h" ++
+            "\x1b]133;P;k=i\x07bash$ \x1b]133;B\x07\x1b[5 q\x1b]0;~\x07",
+        "echo sum-$((40+2))\x1b[?2004l\r\n\x1b[0 q\x1b]0;echo sum-$((40+2))\x07\x1b]133;C;\x07sum-42\r\n",
+    );
+}
+
+test "Terminal: cursorIsAtPrompt through ConPTY: zsh from a bashrc exec" {
+    const sp80 = comptime conptyRepeat(" ", 80);
+    const sp75 = comptime conptyRepeat(" ", 75);
+    // ConPTY repaints the screen around each zsh prompt.
+    const repaint = "\x1b[?25l" ++ sp80 ++ "\r\n" ++ comptime conptyRepeat("\x1b[K\r\n", 21) ++ "\x1b[K";
+    try testConptyPrompt(
+        "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[1m\x1b[7m\x1b[H%\x1b]0;C:\\Program Files\\Git\\bin\\bash.exe\x07" ++
+            "\x1b[?25h\x1b]7;kitty-shell-cwd://HOME/tmp/z\x07\x1b[?25l\x1b[22m\x1b[27m\x1b[H" ++ repaint ++
+            "\x1b[H\x1b]0;~\x07\x1b[?25h\x1b]133;A;cl=line\x07zsh% \x1b]133;B\x07\x1b[5 q\x1b[?2004h" ++
+            sp75 ++ "\x1b[1;6H",
+        sp80 ++ "\x1b[3;1H\x1b]0;echo in-$ZSH_NAME\x07\x1b]133;D;0\x07\x1b]7;kitty-shell-cwd://HOME/tmp/z\x07" ++
+            repaint ++ "\x1b[3;1H\x1b]0;~\x07\x1b[?25h\x1b]133;A;cl=line\x07zsh% \x1b]133;B\x07\x1b[5 q\x1b[?2004h" ++
+            sp75 ++ "\x1b[3;6H",
+        "e\x1b[5 q\x1b[?2004l\x08echo in-$ZSH_NAME\r\n\x1b]133;C\x07\x1b[0 qin-zsh\r\n",
+    );
+}
+
+test "Terminal: cursorIsAtPrompt through ConPTY: pwsh" {
+    try testConptyPrompt(
+        "\x1b[?9001h\x1b[?1004h\x1b]7;file:///C:/Users/u/pwsh\x07\x1b[?25l\x1b[2J\x1b[m\x1b[H" ++
+            "\x1b]0;C:\\Program Files\\PowerShell\\7\\pwsh.exe\x07\x1b[?25h\x1b]0;~\\pwsh\x07" ++
+            "\x1b]133;A\x07PS C:\\Users\\u\\pwsh> \x1b]133;B\x07",
+        "\x1b]133;D;0\x07\x1b]7;file:///C:/Users/u/pwsh\x07\x1b]0;~\\pwsh\x07\x1b]133;A\x07PS C:\\Users\\u\\pwsh> \x1b]133;B\x07",
+        "\x1b[?25l\x1b[36m'ps-' \x1b[90m+ \x1b[37m(\x1b[97m40\x1b[90m+\x1b[97m2\x1b[37m)\x1b[?25h\x1b[m\r\n" ++
+            "\x1b]0;'ps-' + (40+2)\x07\x1b]133;C\x07ps-42\r\n",
+    );
+}
+
+test "Terminal: cursorIsAtPrompt through ConPTY: cmd" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    s.nextSlice("\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[HMicrosoft Windows [Version 10.0.26300.9606]" ++
+        "\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07\x1b[?25h\x1b[?25l\r\n(c) Microsoft Corporation. All rights reserved." ++
+        "\x1b[4;1H\x1b[?25h\x1b]133;D\x1b\\\x1b]133;A\x1b\\\x1b]7;kitty-shell-cwd:///C:\\Users\\u\\cmd\x1b\\" ++
+        "C:\\Users\\u\\cmd>\x1b]0;C:\\Users\\u\\cmd\x07\x1b]133;B\x1b\\");
+    try testing.expect(t.cursorIsAtPrompt());
+    // cmd marks no command start (there is no C), so a running command is
+    // not told apart from the prompt; only the prompts are checked here.
+    s.nextSlice("echo cmd-%OS%\x1b[6;1H\x1b[?25lcmd-Windows_NT");
+    s.nextSlice("\x1b[8;1H\x1b[?25h\x1b]133;D\x1b\\\x1b]133;A\x1b\\\x1b]7;kitty-shell-cwd:///C:\\Users\\u\\cmd\x1b\\" ++
+        "C:\\Users\\u\\cmd>\x1b]133;B\x1b\\");
+    try testing.expect(t.cursorIsAtPrompt());
+}
+
+test "Terminal: cursorIsAtPrompt through ConPTY: zsh without the integration" {
+    // A bashrc `exec zsh` before the bash integration handed zsh its own: no
+    // marks, so every close asked for confirmation.
+    var t = try init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\Program Files\\Git\\bin\\bash.exe\x07" ++
+        "\x1b[?25h\x1b]0;..cap\x07\x1b]7;file://HOME/tmp/cap\x1b\\\x1b[?2004h\x1b[32m\x1b[1m\r\n\xe2\x9d\xaf \x1b[36m.../cap\x1b[m ");
+    try testing.expect(!t.cursorIsAtPrompt());
+}
+
 test "Terminal: cursor defaults update current default cursor" {
     var t = try init(testing.io, testing.allocator, .{
         .cols = 10,
