@@ -1,6 +1,7 @@
 const GhosttyResources = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Config = @import("Config.zig");
 const RunStep = std.Build.Step.Run;
@@ -53,8 +54,25 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             try steps.append(b.allocator, &source_install.step);
         }
 
-        // Windows doesn't have the binaries below.
-        if (os_tag == .windows) break :terminfo;
+        // Windows has no infotocap and no system tic. Compile with a tic
+        // found on a Windows host (Git for Windows ships one); otherwise
+        // only the source is installed.
+        if (os_tag == .windows) {
+            const tic = findWindowsTic(b, cfg) orelse break :terminfo;
+            const run_step = RunStep.create(b, "tic");
+            run_step.addArgs(&.{ tic, "-x", "-o" });
+            const path = run_step.addOutputFileArg(terminfo_share_dir);
+            run_step.addFileArg(source);
+            _ = run_step.captureStdErr(.{});
+
+            const install_step = b.addInstallDirectory(.{
+                .source_dir = path,
+                .install_dir = .{ .custom = "share" },
+                .install_subdir = terminfo_share_dir,
+            });
+            try steps.append(b.allocator, &install_step.step);
+            break :terminfo;
+        }
 
         // Convert to termcap source format if thats helpful to people and
         // install it. The resulting value here is the termcap source in case
@@ -432,4 +450,29 @@ pub fn addStepDependencies(
     other_step: *std.Build.Step,
 ) void {
     for (self.steps) |step| other_step.dependOn(step);
+}
+
+/// Resolve `tic` for a Windows target: -Dtic, then PATH, then Git for
+/// Windows. Only a Windows host can run it; anything else (or no tic)
+/// yields null after one warning, and no compiled entry is installed.
+fn findWindowsTic(b: *std.Build, cfg: *const Config) ?[]const u8 {
+    if (builtin.os.tag != .windows) return null;
+
+    if (cfg.tic) |path| {
+        if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
+            return path;
+        } else |_| {}
+    } else {
+        if (b.findProgram(.{ .names = &.{"tic"} })) |path| return path;
+
+        if (b.graph.environ_map.get("ProgramFiles")) |pf| {
+            const path = b.pathJoin(&.{ pf, "Git", "usr", "bin", "tic.exe" });
+            if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
+                return path;
+            } else |_| {}
+        }
+    }
+
+    std.log.warn("tic not found (-Dtic, PATH, Git for Windows); installing the terminfo source only", .{});
+    return null;
 }

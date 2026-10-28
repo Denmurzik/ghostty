@@ -61,6 +61,10 @@ emit_lib_vt: bool = false,
 emit_macos_app: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
+
+/// Path to the `tic` binary used to compile terminfo for Windows targets.
+/// Null means: look it up on PATH, then in Git for Windows.
+tic: ?[]const u8 = null,
 emit_test_exe: bool = false,
 emit_themes: bool = false,
 emit_xcframework: bool = false,
@@ -557,6 +561,12 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         .debug => true,
         .safe, .fast, .small => false,
     };
+
+    config.tic = b.option(
+        []const u8,
+        "tic",
+        "Path to tic, used to compile terminfo when building for Windows.",
+    );
 
     config.emit_themes = b.option(
         bool,
