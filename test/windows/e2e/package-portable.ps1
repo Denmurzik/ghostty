@@ -15,14 +15,25 @@ function Get-FolderFiles([string]$Dir) {
     @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -File | ForEach-Object { $_.FullName.Substring($Dir.Length) } | Sort-Object)
 }
 
+# A GUI-subsystem exe: run it to completion with stdout redirected to a file.
+function Invoke-Cli([string[]]$CliArgs) {
+    $o = Join-Path $script:Sbx.Tmp ([guid]::NewGuid().ToString('N') + '.out')
+    $p = Start-Process -FilePath $script:Exe -ArgumentList $CliArgs -RedirectStandardOutput $o -WindowStyle Hidden -Wait -PassThru
+    if ($p.ExitCode -ne 0) { throw "ghostty $CliArgs exited $($p.ExitCode)" }
+    [IO.File]::ReadAllText($o)
+}
+
 # Types one line into the cmd session; its output goes to a file (code page 65001).
 function Get-CmdAnswer($G, [string]$Command, [string]$Tag) {
     $out = Join-Path $script:Sbx.Tmp "$Tag.txt"
     Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
     Send-Line $G.Hwnd "$Command > `"$out`" 2>&1"
-    if (-not (Wait-File $out 20)) { throw "cmd never answered '$Command'" }
-    Start-Sleep -Milliseconds 300
-    @((Read-ShellFile $out).Utf8 -split "`r?`n" | ForEach-Object { $_.Trim([char]0xFEFF).Trim() } | Where-Object { $_ })
+    # Complete once the last byte is a newline (cmd opens the file before it writes).
+    $done = Wait-Until -TimeoutSec 20 -PollMs 100 -Condition {
+        try { $b = [IO.File]::ReadAllBytes($out); $b.Length -gt 0 -and $b[$b.Length - 1] -eq 10 } catch { $false }
+    }
+    if (-not $done) { throw "cmd never answered '$Command'" }
+    ,@((Read-ShellFile $out).Utf8 -split "`r?`n" | ForEach-Object { $_.Trim([char]0xFEFF).Trim() } | Where-Object { $_ })
 }
 
 Invoke-E2eScenario 'package-portable' {
@@ -53,9 +64,11 @@ Invoke-E2eScenario 'package-portable' {
     $before = Get-FolderFiles $dir
 
     # --- CLI ---
-    $ver = (& $script:Exe '+version' 2>$null | Out-String)
-    if ($ver -notlike "*$version*") { throw "+version does not print '$version': $ver" }
-    $themes = @(& $script:Exe '+list-themes' '--plain' 2>$null)
+    $ver = Invoke-Cli '+version'
+    # A -Local package is named by hand and its exe carries the git version: set GHOSTTY_E2E_PACKAGE_VERSION=* to skip the match.
+    $expect = if ($env:GHOSTTY_E2E_PACKAGE_VERSION) { $env:GHOSTTY_E2E_PACKAGE_VERSION } else { $version }
+    if ($expect -ne '*' -and $ver -notlike "*$expect*") { throw "+version does not print '$expect': $ver" }
+    $themes = @((Invoke-Cli '+list-themes', '--plain') -split "`r?`n" | Where-Object { $_ })
     if ($themes.Count -lt 100) { throw "+list-themes printed $($themes.Count) lines (<100): resources not found" }
     Write-E2eInfo "version=$version themes=$($themes.Count)"
 
@@ -66,7 +79,9 @@ Invoke-E2eScenario 'package-portable' {
     if (-not (Wait-ChildNamed $g @('cmd.exe') 20)) { throw 'cmd did not start' }
     Start-Sleep -Seconds 1
     [void](Get-CmdAnswer $g 'chcp 65001>nul' 'chcp')
-    $res = (Get-CmdAnswer $g 'echo %GHOSTTY_RESOURCES_DIR%' 'res')[0]
+    $resAll = (Get-CmdAnswer $g 'echo %GHOSTTY_RESOURCES_DIR%' 'res')
+    Write-E2eInfo "resources answer: $($resAll -join ' | ')"
+    $res = $resAll[0]
     if ($res -notlike "$dir*") { throw "GHOSTTY_RESOURCES_DIR '$res' is not under '$dir'" }
     $term = (Get-CmdAnswer $g 'echo %TERM%' 'term')[0]
     if ($term -ne 'xterm-ghostty') { throw "TERM is '$term'" }
@@ -97,8 +112,8 @@ Invoke-E2eScenario 'package-portable' {
         Start-Sleep -Seconds 1
         $t2 = (Get-CmdAnswer $g 'echo %TERM%' 'term2')[0]
         if ($t2 -ne 'xterm-256color') { throw "TERM without share is '$t2', expected xterm-256color" }
-        $warn = @(Select-String -LiteralPath $g.Log -Pattern 'terminfo not found' -ErrorAction SilentlyContinue)
-        if ($warn.Count -ne 1) { throw "expected one terminfo warning in the log, got $($warn.Count)" }
+        $warn = @(Select-String -LiteralPath $g.Log -Pattern 'no resources dir set' -ErrorAction SilentlyContinue)
+        if ($warn.Count -ne 1) { throw "expected one 'no resources dir set' warning in the log, got $($warn.Count)" }
         if (-not (Get-Process -Id $g.Pid -ErrorAction SilentlyContinue)) { throw 'ghostty crashed without share' }
         Stop-OwnGhostty
     } finally {
