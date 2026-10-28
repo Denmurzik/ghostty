@@ -12,7 +12,7 @@ Invoke-E2eScenario 'osk' {
     function Get-Requests {
         $r = Get-GhosttyState -Class $g.Class
         $d = if ($r.PSObject.Properties['data']) { $r.data } else { $r }
-        [int]$d.osk.requests
+        [int]$d.m5.osk.requests
     }
     $before = @(Get-Process -Name TabTip -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 
