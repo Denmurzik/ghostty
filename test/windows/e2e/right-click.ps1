@@ -55,10 +55,11 @@ Invoke-E2eScenario 'right-click' {
             Send-Line $g.Hwnd "echo $Word"
             Start-Sleep -Milliseconds 800
             if (-not (Invoke-GhosttyAction -Class $g.Class -Action 'select_all')) { throw 'select_all was not performed' }
+            Update-ClipboardMark
             Start-Sleep -Milliseconds 300
         }
         # Whether the surface has a selection: copy_to_clipboard performs only with one.
-        function Test-Selection($g) { Invoke-GhosttyAction -Class $g.Class -Action 'copy_to_clipboard' }
+        function Test-Selection($g) { $r = Invoke-GhosttyAction -Class $g.Class -Action 'copy_to_clipboard'; Update-ClipboardMark; $r }
         function Get-Popups($g) {
             @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, '#32768') | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) })
         }
@@ -88,6 +89,7 @@ Invoke-E2eScenario 'right-click' {
         Set-ClipboardText 'echo SENTINEL > "$TEMP/gt-rc-cop-sel.txt"'
         Click-Right $g
         Start-Sleep -Milliseconds 600
+        Update-ClipboardMark
         $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
         if ($clip -notmatch 'SELECTME-cop') { throw "the right click did not copy the selection; clipboard: '$clip'" }
         if (Test-Selection $g) { throw 'the selection is still there after the right click' }
@@ -112,6 +114,7 @@ Invoke-E2eScenario 'right-click' {
         Set-ClipboardText 'sentinel-before'
         Click-Right $g
         Start-Sleep -Milliseconds 600
+        Update-ClipboardMark
         $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
         if ($clip -notmatch 'SELECTME-copy') { throw "copy: the selection was not copied; clipboard: '$clip'" }
         if (Test-Selection $g) { throw 'copy: the selection is still there' }
@@ -143,6 +146,7 @@ Invoke-E2eScenario 'right-click' {
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'down', 'enter' -Panel
         Wait-Popup $g $false 'Enter on Copy'
         Start-Sleep -Milliseconds 500
+        Update-ClipboardMark
         $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
         if ($clip -notmatch 'SELECTME-menu') { throw "menu Copy did not copy; clipboard: '$clip'" }
         Stop-Case $g

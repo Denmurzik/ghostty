@@ -4,7 +4,7 @@
 # copied the test SKIPs. Run: powershell -NoProfile -STA -File _selftest-clipboard.ps1
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
-Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\Clipboard.psm1') -Force
+. (Join-Path $PSScriptRoot '_common.ps1')
 
 if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { throw 'run with powershell -STA' }
 try { $owner = Get-ClipboardSnapshot } catch { Write-Output "SKIP clipboard selftest: $($_.Exception.Message)"; exit 2 }
@@ -39,6 +39,32 @@ try {
     Set-ClipboardSnapshot $b2
     $b = Get-ClipboardSnapshot
     if (-not (Test-ClipboardSnapshotEqual $a $b)) { throw 'restored clipboard differs from the saved one' }
+    # The harness flow: Save, own writes, and the owner copying mid-test.
+    function Get-Text { [System.Windows.Forms.Clipboard]::GetText() }
+    $before = Get-ClipboardSnapshot
+    # (a) nothing else wrote: Restore puts the original back.
+    $s = Save-ClipboardText
+    Set-ClipboardText 'own write 1'
+    [System.Windows.Forms.Clipboard]::SetText('app copy'); Update-ClipboardMark
+    Restore-ClipboardText $s
+    if (-not (Test-ClipboardSnapshotEqual $before (Get-ClipboardSnapshot))) { throw 'flow (a): the clipboard was not restored' }
+    if (Test-Path (Get-ClipboardBackupPath)) { throw 'flow (a): the backup file is still there' }
+    # (b) the owner copies in the middle: their text stays, backup dropped.
+    $s = Save-ClipboardText
+    Set-ClipboardText 'own write 2'
+    [System.Windows.Forms.Clipboard]::SetText('OWNER COPIED THIS')
+    Set-ClipboardText 'own write 3'
+    [System.Windows.Forms.Clipboard]::SetText('OWNER COPIED THIS')
+    Restore-ClipboardText $s
+    if ((Get-Text) -ne 'OWNER COPIED THIS') { throw "flow (b): the owner's copy was overwritten: '$(Get-Text)'" }
+    if (Test-Path (Get-ClipboardBackupPath)) { throw 'flow (b): the backup file is still there' }
+    # (c) a left-over backup is never overwritten by a new Save.
+    $s = Save-ClipboardText
+    Set-ClipboardText 'killed scenario text'
+    $keep = Get-ClipboardSnapshot
+    $s2 = Save-ClipboardText   # restores the first backup (mark still matches), then saves again
+    if (-not (Test-ClipboardSnapshotEqual $s (Get-ClipboardSnapshot))) { throw 'flow (c): the earlier backup was not restored first' }
+    Restore-ClipboardText $s2
     Write-Output "PASS clipboard selftest ($(@($a.Items).Count) formats, $(($a.Items | ForEach-Object { $_[1].Length } | Measure-Object -Sum).Sum) bytes)"
 } finally {
     Set-ClipboardSnapshot $owner

@@ -78,23 +78,38 @@ public static object[] Snapshot(out string problem) {
 }
 
 // Replaces the clipboard by `items` (as returned by Snapshot), in order.
+// All memory blocks are built before the clipboard is touched.
 public static void Restore(object[] items) {
-    if (!OpenRetry()) throw new System.InvalidOperationException("the clipboard is busy");
+    var ids = new System.Collections.Generic.List<uint>();
+    var mems = new System.Collections.Generic.List<IntPtr>();
     try {
-        EmptyClipboard();
         foreach (object o in items) {
             object[] pair = (object[])o;
-            uint f = (uint)pair[0];
             byte[] data = (byte[])pair[1];
             IntPtr mem = GlobalAlloc(2, new UIntPtr((ulong)data.Length));
             if (mem == IntPtr.Zero) throw new System.OutOfMemoryException();
+            mems.Add(mem);
+            ids.Add((uint)pair[0]);
             IntPtr p = GlobalLock(mem);
-            System.Runtime.InteropServices.Marshal.Copy(data, 0, p, data.Length);
-            GlobalUnlock(mem);
-            if (SetClipboardData(f, mem) == IntPtr.Zero) { GlobalFree(mem); throw new System.InvalidOperationException("SetClipboardData failed for " + NameOf(f)); }
+            if (p == IntPtr.Zero) throw new System.InvalidOperationException("GlobalLock failed");
+            try { System.Runtime.InteropServices.Marshal.Copy(data, 0, p, data.Length); }
+            finally { GlobalUnlock(mem); }
         }
-    } finally { CloseClipboard(); }
+        if (!OpenRetry()) throw new System.InvalidOperationException("the clipboard is busy");
+        try {
+            EmptyClipboard();
+            for (int i = 0; i < mems.Count; i++) {
+                if (SetClipboardData(ids[i], mems[i]) == IntPtr.Zero) throw new System.InvalidOperationException("SetClipboardData failed for " + NameOf(ids[i]));
+                mems[i] = IntPtr.Zero; // the system owns it now
+            }
+        } finally { CloseClipboard(); }
+    } finally {
+        foreach (IntPtr m in mems) if (m != IntPtr.Zero) GlobalFree(m);
+    }
 }
+
+[DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+public static uint Sequence() { return GetClipboardSequenceNumber(); }
 
 public static void Clear() {
     if (!OpenRetry()) throw new System.InvalidOperationException("the clipboard is busy");
@@ -159,4 +174,29 @@ function Import-ClipboardSnapshot([string]$Path) {
     [pscustomobject]@{ Items = $items }
 }
 
-Export-ModuleMember -Function Get-ClipboardSnapshot, Set-ClipboardSnapshot, Test-ClipboardSnapshotEqual, Export-ClipboardSnapshot, Import-ClipboardSnapshot
+function Get-ClipboardSequence { [GhosttyClip.Api]::Sequence() }
+
+# The own-write mark: the clipboard sequence number right after the last
+# write the scenario made itself (kept in a file so the runner sees it).
+# Restoring is only allowed while the clipboard still has that number;
+# otherwise someone else (the owner) copied something and wins.
+function Set-ClipboardMark([string]$MarkPath) {
+    [IO.File]::WriteAllText($MarkPath, [string](Get-ClipboardSequence))
+}
+
+# 'restored' | 'changed' (the owner copied since: nothing touched, backup
+# dropped) | 'failed' (backup kept). Both files are removed unless failed.
+function Restore-ClipboardBackupFile([string]$BackupPath, [string]$MarkPath) {
+    if (-not (Test-Path -LiteralPath $BackupPath)) { return 'none' }
+    $mark = $null
+    if (Test-Path -LiteralPath $MarkPath) { $mark = [uint32](Get-Content -LiteralPath $MarkPath -Raw).Trim() }
+    if ($null -eq $mark -or [uint32](Get-ClipboardSequence) -ne $mark) {
+        Remove-Item -LiteralPath $BackupPath, $MarkPath -ErrorAction SilentlyContinue
+        return 'changed'
+    }
+    try { Set-ClipboardSnapshot (Import-ClipboardSnapshot $BackupPath) } catch { return 'failed' }
+    Remove-Item -LiteralPath $BackupPath, $MarkPath -ErrorAction SilentlyContinue
+    'restored'
+}
+
+Export-ModuleMember -Function Get-ClipboardSnapshot, Set-ClipboardSnapshot, Test-ClipboardSnapshotEqual, Export-ClipboardSnapshot, Import-ClipboardSnapshot, Get-ClipboardSequence, Set-ClipboardMark, Restore-ClipboardBackupFile

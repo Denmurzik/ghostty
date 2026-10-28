@@ -798,26 +798,55 @@ function Invoke-ClipboardRetry([scriptblock]$Action) {
 # Remembers the whole clipboard (every format that can be copied: text,
 # HTML, RTF, images ...); SKIPs when it holds anything that could not be
 # put back. Memory first; the on-disk copy (DPAPI, current user) is for the
-# runner, which puts it back if this scenario is killed before
-# Restore-ClipboardText.
+# runner, which puts it back if this scenario is killed. A "mark" file holds
+# the clipboard sequence number after the scenario's own last write: the
+# clipboard is restored only while it still has that number, so what the
+# owner copies meanwhile is never overwritten.
+function Get-ClipboardBackupPath { Join-Path (Get-E2eTempRoot) 'clipboard-backup.bin' }
+function Get-ClipboardMarkPath { Join-Path (Get-E2eTempRoot) 'clipboard-backup.seq' }
+
 function Save-ClipboardText {
     if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { throw 'E2E-SKIP: clipboard needs an STA thread (run with powershell -STA)' }
+    # A backup left by an earlier run is never overwritten: put it back first.
+    $bin = Get-ClipboardBackupPath; $mark = Get-ClipboardMarkPath
+    if (Test-Path -LiteralPath $bin) {
+        $r = Restore-ClipboardBackupFile $bin $mark
+        Write-Host "INFO an earlier clipboard backup: $r"
+        if (Test-Path -LiteralPath $bin) { throw "E2E-SKIP: an earlier clipboard backup could not be restored and is kept in $bin" }
+    }
     $snap = Get-ClipboardSnapshot
-    Export-ClipboardSnapshot $snap (Join-Path (Get-E2eTempRoot) 'clipboard-backup.bin')
+    Export-ClipboardSnapshot $snap $bin
+    Set-ClipboardMark $mark
     $snap
+}
+
+# After a write the scenario did not make itself (the app copied): the
+# clipboard is ours again as of now.
+function Update-ClipboardMark {
+    if (Test-Path -LiteralPath (Get-ClipboardBackupPath)) { Set-ClipboardMark (Get-ClipboardMarkPath) }
 }
 
 function Restore-ClipboardText($Saved) {
     if ($null -eq $Saved) { return }
-    try { Set-ClipboardSnapshot $Saved } catch {
-        Write-Host "WARN could not restore the clipboard: $($_.Exception.Message)"
-        return
+    $bin = Get-ClipboardBackupPath; $mark = Get-ClipboardMarkPath
+    $own = $null
+    if (Test-Path -LiteralPath $mark) { $own = [uint32](Get-Content -LiteralPath $mark -Raw).Trim() }
+    if ($null -eq $own -or [uint32](Get-ClipboardSequence) -ne $own) {
+        Write-Host 'INFO the clipboard changed during the scenario (the owner copied?): left alone'
+    } else {
+        try { Set-ClipboardSnapshot $Saved } catch {
+            Write-Host "WARN could not restore the clipboard: $($_.Exception.Message); the backup is kept"
+            return
+        }
     }
-    Remove-Item -LiteralPath (Join-Path (Get-E2eTempRoot) 'clipboard-backup.bin') -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $bin, $mark -ErrorAction SilentlyContinue
 }
-
 function Set-ClipboardText([string]$Text) {
+    # The mark follows our own write only if nobody else wrote before it.
+    $mark = Get-ClipboardMarkPath
+    $clean = (Test-Path -LiteralPath $mark) -and ([uint32](Get-Content -LiteralPath $mark -Raw).Trim() -eq [uint32](Get-ClipboardSequence))
     Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($Text) }
+    if ($clean) { Set-ClipboardMark $mark }
 }
 
 # --- typing scenarios -----------------------------------------------------------------
