@@ -77,6 +77,9 @@ pub const Vars = struct {
 
 pub const Map = std.StringArrayHashMapUnmanaged([]const u8);
 
+/// Longest option value (the client controls it, and `set-option -a` grows it).
+pub const max_option_value = 8192;
+
 /// tmux options, owned by the host (`Registry.State` in production).
 pub const Options = struct {
     global: Map = .empty,
@@ -580,9 +583,15 @@ fn Env(comptime Host: type) type {
                 opts.unset(gpa, scope, name);
             } else if (cmd.has('a')) {
                 const old = opts.get(scope, name) orelse "";
+                if (old.len + value.len > max_option_value) {
+                    return self.fail("ghostty: option value too long (at most {d} bytes)", .{max_option_value});
+                }
                 const joined = try std.mem.concat(self.arena, u8, &.{ old, value });
                 try opts.set(gpa, scope, name, joined);
             } else {
+                if (value.len > max_option_value) {
+                    return self.fail("ghostty: option value too long (at most {d} bytes)", .{max_option_value});
+                }
                 try opts.set(gpa, scope, name, value);
             }
             if (window_id) |w| self.host.optionsChanged(w);
@@ -1255,4 +1264,20 @@ test "win32 tmux commands: display-message, buffers, keys, capture" {
     try testing.expectEqualStrings("", try rig.ok(&.{ "capture-pane", "-t", "%1" }));
     try testing.expectEqualStrings("screen of %1\n", rig.host.opts.buffer.?);
     try rig.bad(&.{ "kill-pane", "extra" }, "too many arguments (need at most 0)");
+}
+
+test "win32 tmux commands: option values are capped, also when appended" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const big = try testing.allocator.alloc(u8, max_option_value);
+    defer testing.allocator.free(big);
+    @memset(big, 'v');
+    _ = try rig.ok(&.{ "set-option", "-g", "status-left", big });
+    try rig.bad(&.{ "set-option", "-g", "-a", "status-left", "x" }, "option value too long");
+    try testing.expectEqual(@as(usize, max_option_value), rig.host.opts.global.get("status-left").?.len);
+    const over = try testing.allocator.alloc(u8, max_option_value + 1);
+    defer testing.allocator.free(over);
+    @memset(over, 'v');
+    try rig.bad(&.{ "set-option", "-g", "other", over }, "option value too long");
+    try testing.expect(rig.host.opts.global.get("other") == null);
 }

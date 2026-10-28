@@ -28,8 +28,12 @@ Invoke-E2eScenario 'tmux-replay' {
     $sbxMsys = ConvertTo-MsysPath $sbx
 
     $fixtureDir = Join-Path $script:Root 'src\apprt\win32\tmux\testdata'
+    # The live recording (argv only) by default; GHOSTTY_E2E_TMUX_FIXTURE=static
+    # picks the static one, which also carries the expected stdout.
     $fixture = Join-Path $fixtureDir 'claude-spawn.jsonl'
-    if (-not (Test-Path -LiteralPath $fixture)) { $fixture = Join-Path $fixtureDir 'claude-spawn.static.jsonl' }
+    if ($env:GHOSTTY_E2E_TMUX_FIXTURE -eq 'static' -or -not (Test-Path -LiteralPath $fixture)) {
+        $fixture = Join-Path $fixtureDir 'claude-spawn.static.jsonl'
+    }
     $calls = @(Get-Content -LiteralPath $fixture -Encoding UTF8 | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
     if ($calls.Count -lt 10) { throw "fixture $fixture has only $($calls.Count) calls" }
     Write-E2eInfo "replaying $($calls.Count) calls from $(Split-Path -Leaf $fixture)"
@@ -41,7 +45,14 @@ Invoke-E2eScenario 'tmux-replay' {
     $pipe = Get-TmuxPipe $g
     $leader = [string]@(Get-TmuxPanes $g)[0].pane
     $win = "@$(@(Get-TmuxPanes $g)[0].tab)"
-    $saved = Save-ClipboardText
+    # The owner's clipboard is saved and put back; when it holds something
+    # that cannot be put back (a browser's HTML), nothing here touches it.
+    $saved = $null
+    try { $saved = Save-ClipboardText } catch {
+        if ($_.Exception.Message -notlike 'E2E-SKIP:*') { throw }
+        Write-E2eInfo ("clipboard steps skipped: " + $_.Exception.Message)
+    }
+    try {
 
     function Get-Window { @((Get-GhosttyState -Class $g.Class).windows)[0] }
     function Get-Panes { @(Get-TmuxPanes $g) }
@@ -72,8 +83,12 @@ Invoke-E2eScenario 'tmux-replay' {
     }
 
     # --- the replay ---
-    # Fixture ids -> live ids. %1 is the leader, @1 its window.
-    $map = @{ '%1' = $leader; "@1" = $win }
+    # Fixture ids -> live ids. %1 is the leader, @1 its window. A recording
+    # without stdout (the live one) learns a split's id from the reply: tmux
+    # numbers panes in order, so the new fixture pane is one past the highest
+    # pane id the fixture has named so far. The static recording says so.
+    $map = @{ '%1' = $leader; '@1' = $win }
+    $fixMax = 1
     function Convert-Ids([string]$S) {
         [regex]::Replace($S, '(?<![#\w])([%@])(\d+)\b', {
             param($m)
@@ -81,7 +96,25 @@ Invoke-E2eScenario 'tmux-replay' {
             if ($map.ContainsKey($k)) { $map[$k] } else { $k }
         })
     }
+    function Get-PaneIds([string]$S) {
+        @([regex]::Matches($S, '(?<![#\w])%(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value })
+    }
+    # What a call must print when the recording has no stdout: $null = unchecked.
+    function Get-DerivedStdout([string[]]$A) {
+        switch ($A[0]) {
+            { $_ -in 'set-option', 'select-pane', 'select-layout', 'resize-pane', 'respawn-pane', 'kill-pane', 'load-buffer' } { return '' }
+            'display-message' {
+                $fmt = $A[$A.Count - 1]
+                if ($fmt -ceq '#{window_id}') { return "$win`n" }
+                if ($fmt -ceq '#{session_name}:#{window_id}.#{pane_id}') { return "0:$win.$leader`n" }
+                if ($fmt.StartsWith('#{client_termtype}')) { return "xterm-ghostty`toff`t0`t0`t0`ton`tbottom`t0`n" }
+                return $null
+            }
+            default { return $null }
+        }
+    }
     $teammates = 0
+    $markerPane = [ordered]@{}
     $layoutChanges = 0
     $leaderLines = New-Object System.Collections.Generic.List[string]
     function Type-Leader([string]$Tag) {
@@ -103,6 +136,7 @@ Invoke-E2eScenario 'tmux-replay' {
         $argv = @($c.argv)
         # The pipe is the scenario's own.
         if ($argv.Count -ge 2 -and $argv[0] -eq '-S') { $argv = $argv[2..($argv.Count - 1)] }
+        foreach ($id in (Get-PaneIds ($argv -join ' '))) { if ($id -gt $fixMax) { $fixMax = $id } }
         $argv = @($argv | ForEach-Object { Convert-Ids ([string]$_) })
 
         $stdin = $null
@@ -115,32 +149,47 @@ Invoke-E2eScenario 'tmux-replay' {
         # Pane commands become fake teammates.
         $verb = if ($argv.Count) { $argv[0] } else { '' }
         $marker = $null
+        $markerTarget = $null
         if ($verb -in 'respawn-pane', 'split-window') {
             $dd = [array]::IndexOf($argv, '--')
             if ($dd -ge 0 -and $dd -lt $argv.Count - 1 -and $argv[$dd + 1] -ne 'cat') {
                 $teammates++
                 $marker = "mate$teammates"
+                if ($verb -eq 'respawn-pane') { $markerTarget = $argv[[array]::IndexOf($argv, '-t') + 1] }
                 $argv = @($argv[0..$dd]) + @(Get-FakeCommand $marker)
             }
         }
+        if ($verb -eq 'load-buffer' -and $argv -contains '-w' -and -not $saved) { continue }
         $isLayout = $verb -in 'split-window', 'respawn-pane', 'select-layout', 'resize-pane', 'kill-pane'
 
         $r = Tm $argv $stdin
-        $want = Convert-Ids ([string]$c.stdout)
-        $exp = [string]$c.stdout
+        $hasStdout = $null -ne $c.PSObject.Properties['stdout']
+        $exp = if ($hasStdout) { [string]$c.stdout } else { '' }
         if ($r.Code -ne 0) { throw "call $n ($($argv -join ' ')): exit $($r.Code), stderr '$($r.Stderr.Trim())'" }
         if ($r.Stdout.Contains("`r")) { throw "call $n ($verb): stdout has a CR: $($r.Stdout | ConvertTo-Json -Compress)" }
-        if ($verb -eq 'split-window' -and $exp -match '^(%\d+)\n$') {
-            # The fixture's new pane id is learned from the live answer.
-            if ($r.Stdout -notmatch '^%\d+\n$') { throw "call $n : split-window printed '$($r.Stdout)'" }
-            $map[$Matches[0].Trim()] = $r.Stdout.Trim()
-            $map[$exp.Trim()] = $r.Stdout.Trim()
-        } elseif ($exp -ne '') {
-            if ($r.Stdout -ne $want) { throw "call $n ($($argv -join ' ')): stdout '$($r.Stdout | ConvertTo-Json -Compress)', expected '$($want | ConvertTo-Json -Compress)'" }
+
+        if ($verb -eq 'split-window' -and $argv -contains '-P') {
+            if ($r.Stdout -notmatch '^%\d+\n$') { throw "call $n : split-window printed '$($r.Stdout | ConvertTo-Json -Compress)'" }
+            $live = $r.Stdout.Trim()
+            $fixNew = if ($hasStdout -and $exp -match '^%\d+\n$') { $exp.Trim() } else { '%' + ($fixMax + 1) }
+            $map[$fixNew] = $live
+            $fixMax = [Math]::Max($fixMax, [int]$fixNew.Substring(1))
+            $markerTarget = $live
+        } elseif ($verb -eq 'list-panes') {
+            $got = @($r.Stdout -split "`n" | Where-Object { $_ } | Sort-Object)
+            $state = @(Get-Panes | ForEach-Object { [string]$_.pane } | Sort-Object)
+            if (($got -join ',') -ne ($state -join ',')) { throw "call $n : list-panes printed [$($got -join ',')], the state has [$($state -join ',')]" }
+            if ($hasStdout -and $r.Stdout -ne (Convert-Ids $exp)) { throw "call $n : list-panes order '$($r.Stdout | ConvertTo-Json -Compress)', recorded '$((Convert-Ids $exp) | ConvertTo-Json -Compress)'" }
+        } else {
+            $want = if ($hasStdout) { Convert-Ids $exp } else { Get-DerivedStdout $argv }
+            if ($null -ne $want -and $r.Stdout -ne $want) {
+                throw "call $n ($($argv -join ' ')): stdout $($r.Stdout | ConvertTo-Json -Compress), expected $($want | ConvertTo-Json -Compress)"
+            }
         }
         if ($marker) {
             $m = Read-Marker $marker
-            if ($m -notmatch '^%\d+$') { throw "marker $marker holds '$m'" }
+            if ($m -ne $markerTarget) { throw "marker $marker holds '$m', its pane is '$markerTarget'" }
+            $markerPane[$marker] = $markerTarget
         }
         if ($isLayout) {
             $layoutChanges++
@@ -169,9 +218,10 @@ Invoke-E2eScenario 'tmux-replay' {
     if ($others.Count -ne 2) { throw "expected 2 teammate surfaces, found $($others.Count)" }
     $h0 = [int]($others[0].rect[3] - $others[0].rect[1]); $h1 = [int]($others[1].rect[3] - $others[1].rect[1])
     if ([Math]::Abs($h0 - $h1) -gt 1) { throw "teammate boxes differ in height: $h0 vs $h1" }
-    foreach ($i in 1..$teammates) {
-        $m = Read-Marker "mate$i"
-        if (@($panes | Where-Object { $_.pane -eq $m }).Count -ne 1) { throw "mate$i reports TMUX_PANE '$m', not a live pane" }
+    if ($markerPane.Count -ne $teammates) { throw "$teammates fake teammates, $($markerPane.Count) markers checked" }
+    foreach ($k in $markerPane.Keys) {
+        $m = Read-Marker $k
+        if ($m -ne $markerPane[$k]) { throw "$k reports TMUX_PANE '$m', expected its own pane '$($markerPane[$k])'" }
     }
     Save-Evidence -Tag 'tmux-replay-spawned' -G $g -Window
 
@@ -207,6 +257,12 @@ Invoke-E2eScenario 'tmux-replay' {
         $d.Code -eq 0 -and $d.Stdout.Trim() -eq '1'
     }
     if (-not $dead) { throw "pane $pb (exit 3, remain-on-exit failed) did not stay dead" }
+    # Core's message about the failed command is on the kept pane's screen.
+    $shown = Wait-Until -TimeoutSec 8 -PollMs 250 -Condition {
+        $cap = Tm @('capture-pane', '-p', '-t', $pb)
+        $cap.Code -eq 0 -and $cap.Stdout -match 'failed to launch'
+    }
+    if (-not $shown) { throw "pane $pb does not show core's exit message: $((Tm @('capture-pane', '-p', '-t', $pb)).Stdout | ConvertTo-Json -Compress)" }
     Save-Evidence -Tag 'tmux-replay-exit' -G $g -Window
 
     # --- kill-pane while a close dialog is up ---
@@ -219,8 +275,15 @@ Invoke-E2eScenario 'tmux-replay' {
     $victim = $minPane
     $r = Tm @('kill-pane', '-t', $victim)
     if ($r.Code -ne 0) { throw "kill-pane behind the dialog: exit $($r.Code), stderr '$($r.Stderr.Trim())'" }
+    # Gone while the dialog is still up, and the leader (the dialog's pane) is not.
+    if (-not [GhosttyE2e.Win]::IsWindow($dlg)) { throw 'the dialog vanished by itself' }
+    if (-not (Wait-Until -TimeoutSec 4 -PollMs 150 -Condition { @(Get-Panes | Where-Object { $_.pane -eq $victim }).Count -eq 0 })) {
+        throw "pane $victim is still there after kill-pane behind the dialog"
+    }
+    if (@(Get-Panes | Where-Object { $_.pane -eq $leader }).Count -ne 1) { throw 'the leader is gone after kill-pane behind the dialog' }
     [void][GhosttyE2e.Win]::PostMessageW($dlg, $script:TDM_CLICK_BUTTON, [IntPtr]$script:IdCancel, [IntPtr]::Zero)
     if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { -not [GhosttyE2e.Win]::IsWindow($dlg) })) { throw 'the dialog did not go away after Cancel' }
+    if (@(Get-Panes | Where-Object { $_.pane -eq $leader }).Count -ne 1) { throw 'Cancel closed the leader' }
     # The leader's ping goes away again.
     foreach ($p in @(Get-ProcessTree $g.Pid | Where-Object { $_.Name -ieq 'ping.exe' })) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
 
@@ -251,9 +314,11 @@ Invoke-E2eScenario 'tmux-replay' {
     [void][GhosttyE2e.Replay]::ShowWindow($g.Hwnd, 9)
 
     # --- load-buffer -w sets the clipboard ---
-    Expect-Ok (Tm @('load-buffer', '-w', '-') 'm4-clip') 'load-buffer -w' | Out-Null
-    $got = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
-    if ($got -ne 'm4-clip') { throw "clipboard holds '$got', expected 'm4-clip'" }
+    if ($saved) {
+        Expect-Ok (Tm @('load-buffer', '-w', '-') 'm4-clip') 'load-buffer -w' | Out-Null
+        $got = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+        if ($got -ne 'm4-clip') { throw "clipboard holds '$got', expected 'm4-clip'" }
+    }
 
     # --- the leader's typing ---
     $lp = Join-Path $sbx 'leader.txt'
@@ -270,7 +335,7 @@ Invoke-E2eScenario 'tmux-replay' {
     [void](Read-Marker 'c1'); [void](Read-Marker 'c2')
     $snapshot = @(Get-ProcessTree $g.Pid)
     if (@($snapshot | Where-Object { $_.Name -ieq 'tmux.exe' }).Count -lt 1) { throw 'no __idle tmux.exe in the process tree' }
-    Restore-ClipboardText $saved
+    if ($saved) { Restore-ClipboardText $saved }
     $oldPid = $g.Pid
     Stop-Process -Id $oldPid -Force
     Assert-NoSurvivors $snapshot $oldPid 10 -HostsMayLinger
@@ -278,4 +343,8 @@ Invoke-E2eScenario 'tmux-replay' {
     $r = Invoke-Tmux $g @('list-panes') $null 15000 '' $pipe
     if ($r.Code -ne 1 -or $r.Stderr -notmatch 'no server running') { throw "after the crash: exit $($r.Code), stderr '$($r.Stderr.Trim())'" }
     if ($t.ElapsedMilliseconds -gt 2000) { throw "tmux.exe took $($t.ElapsedMilliseconds) ms to notice that Ghostty is gone" }
+    } finally {
+        # The owner's clipboard comes back whatever happened above.
+        if ($saved) { Restore-ClipboardText $saved }
+    }
 }

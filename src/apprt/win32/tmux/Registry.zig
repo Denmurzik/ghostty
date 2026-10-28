@@ -39,9 +39,10 @@ pub const Reply = struct {
     stderr: []const u8,
 };
 
-/// Global options are never evicted by tmux commands; this bounds them
-/// (the client controls names and values).
-pub const max_global_options = 256;
+/// Options are never evicted by tmux commands; this bounds every map (the
+/// client controls names and values; the leader pane and its window live as
+/// long as Ghostty). Values are capped by `commands.max_option_value`.
+pub const max_options_per_map = 256;
 
 // ---- pure decisions --------------------------------------------------
 
@@ -71,13 +72,22 @@ pub fn paneGone(opts: *commands.Options, gpa: Allocator, pane_id: u32, other_ali
     opts.dropPane(gpa, pane_id);
 }
 
-/// Drops the oldest global options beyond `max_global_options`.
-pub fn capOptions(opts: *commands.Options, gpa: Allocator) void {
-    while (opts.global.count() > max_global_options) {
-        const kv = opts.global.fetchOrderedRemove(opts.global.keys()[0]) orelse return;
+fn capMap(map: *commands.Map, gpa: Allocator) void {
+    while (map.count() > max_options_per_map) {
+        const kv = map.fetchOrderedRemove(map.keys()[0]) orelse return;
         gpa.free(kv.key);
         gpa.free(kv.value);
     }
+}
+
+/// Drops the oldest options beyond `max_options_per_map` in the global, every
+/// window and every pane map.
+pub fn capOptions(opts: *commands.Options, gpa: Allocator) void {
+    capMap(&opts.global, gpa);
+    var wit = opts.windows.valueIterator();
+    while (wit.next()) |m| capMap(m, gpa);
+    var pit = opts.panes.valueIterator();
+    while (pit.next()) |m| capMap(m, gpa);
 }
 
 pub const Cells = struct { top: u32, left: u32, width: u32, height: u32 };
@@ -247,6 +257,8 @@ pub const Host = struct {
             .pane_left = cells.left,
             .pane_width = cells.width,
             .pane_height = cells.height,
+            // Not exposed by the pty yet; Claude Code never reads #{pane_pid}
+            // (its lifecycle is not polled through tmux).
             .pane_pid = 0,
             .pane_dead = self.exited(pane),
             .pane_current_path = s.pwd orelse "",
@@ -485,9 +497,11 @@ pub fn surfaceDestroying(surface: *Surface) void {
             }
         }
     }
-    _ = st.exited.remove(pane_id);
     paneGone(&st.options, alloc, pane_id, other_alive);
-    if (!other_alive) _ = st.shim_panes.remove(pane_id);
+    if (!other_alive) {
+        _ = st.exited.remove(pane_id);
+        _ = st.shim_panes.remove(pane_id);
+    }
     if (!tab_has_others) st.options.dropWindow(alloc, surface.tab.id);
 }
 
@@ -559,18 +573,24 @@ test "win32 tmux registry: options survive respawn and drop on kill" {
     try std.testing.expect(opts.windows.get(1) != null);
 }
 
-test "win32 tmux registry: global options are capped" {
+test "win32 tmux registry: option maps are capped" {
     const gpa = std.testing.allocator;
     var opts: commands.Options = .{};
     defer opts.deinit(gpa);
     var buf: [16]u8 = undefined;
-    for (0..max_global_options + 10) |i| {
-        try opts.set(gpa, .global, try std.fmt.bufPrint(&buf, "opt{d}", .{i}), "v");
+    for (0..max_options_per_map + 10) |i| {
+        const name = try std.fmt.bufPrint(&buf, "opt{d}", .{i});
+        try opts.set(gpa, .global, name, "v");
+        try opts.set(gpa, .{ .pane = 1 }, name, "v");
+        try opts.set(gpa, .{ .window = 1 }, name, "v");
     }
     capOptions(&opts, gpa);
-    try std.testing.expectEqual(@as(usize, max_global_options), opts.global.count());
+    try std.testing.expectEqual(@as(usize, max_options_per_map), opts.global.count());
+    try std.testing.expectEqual(@as(usize, max_options_per_map), opts.panes.get(1).?.count());
+    try std.testing.expectEqual(@as(usize, max_options_per_map), opts.windows.get(1).?.count());
     // The oldest went.
     try std.testing.expect(opts.global.get("opt0") == null);
+    try std.testing.expect(opts.panes.get(1).?.get("opt0") == null);
     try std.testing.expect(opts.global.get("opt265") != null);
 }
 
@@ -585,7 +605,7 @@ test "win32 tmux registry: caller pane from request" {
     try std.testing.expectEqual(@as(?u32, null), parseCaller("%1 "));
 }
 
-test "win32 tmux registry: geometry while minimized" {
+test "win32 tmux registry: cells and split ratio from a leaf rectangle" {
     // The rectangle comes from leafRects over the stored content area, so a
     // minimized window still has non-zero cells.
     const rect: geom.Rect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
