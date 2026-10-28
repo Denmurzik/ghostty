@@ -41,6 +41,14 @@ pub const Options = struct {
 /// This command prefers the `$VISUAL` environment variable over `$EDITOR`,
 /// if both are set. If neither are set, it will print an error
 /// and exit.
+///
+/// On Windows the editor runs detached and this command exits 0 at once.
+/// The editor is the `$VISUAL` or `$EDITOR` command line (Windows quoting
+/// rules). A GUI program (VS Code, Notepad++) is started directly. A console
+/// program is run by a separate Ghostty window of the configured `class`,
+/// because a terminal editor cannot share the calling console. Unlike on
+/// other systems, with neither variable set Notepad opens the file instead of
+/// printing an error.
 pub fn run(alloc: Allocator) !u8 {
     // Implementation note (by @mitchellh): I do proper memory cleanup
     // throughout this command, even though we plan on doing `exec`.
@@ -83,17 +91,9 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
     const path = try configpkg.preferredDefaultFilePath(alloc);
     defer alloc.free(path);
 
-    // We don't currently support Windows because we use the exec syscall.
+    // There is no exec on Windows: spawn the editor and leave.
     if (comptime builtin.target.os.tag == .windows) {
-        try stderr.print(
-            \\The `ghostty +edit-config` command is not supported on Windows.
-            \\Please edit the configuration file manually at the following path:
-            \\
-            \\
-        ,
-            .{},
-        );
-        return 1;
+        return runWindows(alloc, stderr, path, config.class);
     }
 
     const command = internal_os.getConfigEditCommand(alloc, path, .{ .default_editor = .failure }) catch |err| {
@@ -159,4 +159,256 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
         .{ path, path },
     );
     return 1;
+}
+
+// ---- Windows ----------------------------------------------------------
+
+/// Nothing to search with when `isGuiResolved` is called by the tests.
+var gui_env: ?*const std.process.Environ.Map = null;
+
+fn runWindows(alloc: Allocator, stderr: *std.Io.Writer, path: []const u8, class: ?[]const u8) !u8 {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try global.environMap();
+    defer env.deinit();
+    gui_env = &env;
+    defer gui_env = null;
+
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe_len = std.process.executablePath(global.io(), &exe_buf) catch |err| {
+        try stderr.print("Unable to find the Ghostty executable ({t}).\n", .{err});
+        return 1;
+    };
+
+    const argv = try windowsEditorArgv(
+        a,
+        exe_buf[0..exe_len],
+        class,
+        nonEmpty(env.get("VISUAL")),
+        nonEmpty(env.get("EDITOR")),
+        path,
+        nonEmpty(env.get("SystemRoot")) orelse "C:\\Windows",
+        isGuiResolved,
+    );
+
+    // A GUI editor is started by its resolved path.
+    var spawn_argv = argv;
+    if (!std.mem.eql(u8, argv[0], exe_buf[0..exe_len])) {
+        if (resolveExe(a, &env, argv[0])) |resolved| {
+            const copy = try a.dupe([]const u8, argv);
+            copy[0] = resolved;
+            spawn_argv = copy;
+        }
+    }
+
+    _ = std.process.spawn(global.io(), .{
+        .argv = spawn_argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        try stderr.print("Failed to start the editor ({t}).\n\nCommand: {s}\n", .{ err, argv[0] });
+        try stderr.print("Path: {s}\n", .{path});
+        return 1;
+    };
+
+    try stderr.print("Opening {s}\n", .{path});
+    return 0;
+}
+
+fn nonEmpty(value: ?[]const u8) ?[]const u8 {
+    const v = value orelse return null;
+    return if (v.len == 0) null else v;
+}
+
+/// The command to run for the editor. `{editor_exe, tokens[1..]..., path}`
+/// for a GUI editor, `{exe, "--class=<c>", "-e", tokens..., path}` for a
+/// console one (a separate Ghostty runs it), Notepad without an editor.
+/// `VISUAL` wins over `EDITOR`; an empty value counts as unset. Everything
+/// is allocated with `alloc` (pass an arena).
+fn windowsEditorArgv(
+    alloc: Allocator,
+    exe: []const u8,
+    class: ?[]const u8,
+    visual: ?[]const u8,
+    editor: ?[]const u8,
+    path: []const u8,
+    system_root: []const u8,
+    isGui: *const fn ([]const u8) bool,
+) ![]const []const u8 {
+    const spec = nonEmpty(visual) orelse nonEmpty(editor);
+    const tokens: []const []const u8 = if (spec) |s|
+        @ptrCast(try internal_os.windows_cmdline.tokenizeWindows(alloc, s))
+    else
+        &.{};
+
+    var out: std.ArrayList([]const u8) = .empty;
+    if (tokens.len == 0) {
+        try out.append(alloc, try std.fs.path.join(alloc, &.{ system_root, "System32", "notepad.exe" }));
+        try out.append(alloc, path);
+        return out.items;
+    }
+
+    if (isGui(tokens[0])) {
+        try out.appendSlice(alloc, tokens);
+    } else {
+        try out.append(alloc, exe);
+        if (class) |c| try out.append(alloc, try std.fmt.allocPrint(alloc, "--class={s}", .{c}));
+        try out.append(alloc, "-e");
+        try out.appendSlice(alloc, tokens);
+    }
+    try out.append(alloc, path);
+    return out.items;
+}
+
+fn isGuiResolved(token: []const u8) bool {
+    const env = gui_env orelse return false;
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const resolved = resolveExe(arena.allocator(), env, token) orelse return false;
+    return peIsGui(resolved);
+}
+
+/// `token` as an existing file: as it is when it names a path, else
+/// searched in PATH, each time with the PATHEXT extensions when it has none.
+fn resolveExe(alloc: Allocator, env: *const std.process.Environ.Map, token: []const u8) ?[]const u8 {
+    const has_dir = std.mem.indexOfAny(u8, token, "\\/:") != null;
+    if (has_dir) return withExtensions(alloc, env, "", token);
+
+    var it = std.mem.splitScalar(u8, env.get("PATH") orelse "", ';');
+    while (it.next()) |raw| {
+        const dir = std.mem.trimEnd(u8, std.mem.trim(u8, raw, " \t\""), "\\/");
+        if (dir.len == 0) continue;
+        if (withExtensions(alloc, env, dir, token)) |found| return found;
+    }
+    return null;
+}
+
+fn withExtensions(alloc: Allocator, env: *const std.process.Environ.Map, dir: []const u8, name: []const u8) ?[]const u8 {
+    const base = if (dir.len == 0)
+        alloc.dupe(u8, name) catch return null
+    else
+        std.fs.path.join(alloc, &.{ dir, name }) catch return null;
+    if (std.fs.path.extension(name).len > 0 and fileExists(base)) return base;
+
+    var exts = std.mem.splitScalar(u8, env.get("PATHEXT") orelse ".COM;.EXE;.BAT;.CMD", ';');
+    while (exts.next()) |ext| {
+        if (ext.len == 0) continue;
+        const candidate = std.mem.concat(alloc, u8, &.{ base, ext }) catch return null;
+        if (fileExists(candidate)) return candidate;
+    }
+    return null;
+}
+
+fn fileExists(path: []const u8) bool {
+    const file = std.Io.Dir.cwd().openFile(global.io(), path, .{}) catch return false;
+    file.close(global.io());
+    return true;
+}
+
+/// Whether the executable at `path` has the Windows GUI subsystem (reads
+/// the Subsystem field of the PE optional header). False for anything that
+/// is not a readable PE file.
+fn peIsGui(path: []const u8) bool {
+    const io = global.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+
+    var dos: [0x40]u8 = undefined;
+    if ((file.readPositionalAll(io, &dos, 0) catch return false) != dos.len) return false;
+    if (dos[0] != 'M' or dos[1] != 'Z') return false;
+    const pe_offset = std.mem.readInt(u32, dos[0x3c..][0..4], .little);
+
+    // "PE\0\0", the COFF header (20 bytes), then the optional header, whose
+    // Subsystem field is at offset 68 for both PE32 and PE32+.
+    var hdr: [24 + 70]u8 = undefined;
+    if ((file.readPositionalAll(io, &hdr, pe_offset) catch return false) != hdr.len) return false;
+    if (!std.mem.eql(u8, hdr[0..4], "PE\x00\x00")) return false;
+    const subsystem = std.mem.readInt(u16, hdr[24 + 68 ..][0..2], .little);
+    return subsystem == 2; // IMAGE_SUBSYSTEM_WINDOWS_GUI
+}
+
+fn alwaysGui(_: []const u8) bool {
+    return true;
+}
+
+fn neverGui(_: []const u8) bool {
+    return false;
+}
+
+test "windows edit-config: VISUAL beats EDITOR" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try windowsEditorArgv(arena.allocator(), "C:\\g\\ghostty.exe", null, "vis", "ed", "C:\\c\\config.ghostty", "C:\\Windows", neverGui);
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("C:\\g\\ghostty.exe", argv[0]);
+    try std.testing.expectEqualStrings("-e", argv[1]);
+    try std.testing.expectEqualStrings("vis", argv[2]);
+    try std.testing.expectEqualStrings("C:\\c\\config.ghostty", argv[3]);
+}
+
+test "windows edit-config: quoted editor path" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try windowsEditorArgv(
+        arena.allocator(),
+        "C:\\g\\ghostty.exe",
+        "edit",
+        "\"C:\\Program Files\\Vim\\vim.exe\" -u NONE",
+        null,
+        "C:\\c\\config.ghostty",
+        "C:\\Windows",
+        neverGui,
+    );
+    const want = [_][]const u8{
+        "C:\\g\\ghostty.exe",              "--class=edit", "-e",
+        "C:\\Program Files\\Vim\\vim.exe", "-u",           "NONE",
+        "C:\\c\\config.ghostty",
+    };
+    try std.testing.expectEqual(want.len, argv.len);
+    for (want, argv) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "windows edit-config: GUI editor is spawned directly" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try windowsEditorArgv(arena.allocator(), "C:\\g\\ghostty.exe", "edit", null, "code.exe --wait", "p", "C:\\Windows", alwaysGui);
+    try std.testing.expectEqual(@as(usize, 3), argv.len);
+    try std.testing.expectEqualStrings("code.exe", argv[0]);
+    try std.testing.expectEqualStrings("--wait", argv[1]);
+    try std.testing.expectEqualStrings("p", argv[2]);
+    for (argv) |arg| try std.testing.expect(!std.mem.endsWith(u8, arg, "ghostty.exe"));
+}
+
+test "windows edit-config: no editor uses notepad" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try windowsEditorArgv(arena.allocator(), "C:\\g\\ghostty.exe", "edit", null, null, "p", "D:\\Win", neverGui);
+    try std.testing.expectEqual(@as(usize, 2), argv.len);
+    try std.testing.expectEqualStrings("D:\\Win\\System32\\notepad.exe", argv[0]);
+    try std.testing.expectEqualStrings("p", argv[1]);
+}
+
+test "windows edit-config: empty EDITOR counts as unset" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // An empty VISUAL falls back to EDITOR, and two empty ones to Notepad.
+    const one = try windowsEditorArgv(a, "g.exe", null, "", "vim", "p", "C:\\Windows", neverGui);
+    try std.testing.expectEqualStrings("vim", one[2]);
+    const none = try windowsEditorArgv(a, "g.exe", null, "", "", "p", "C:\\Windows", neverGui);
+    try std.testing.expectEqualStrings("C:\\Windows\\System32\\notepad.exe", none[0]);
+    // Blank (only spaces) tokenises to nothing: Notepad too.
+    const blank = try windowsEditorArgv(a, "g.exe", null, "   ", null, "p", "C:\\Windows", neverGui);
+    try std.testing.expectEqualStrings("C:\\Windows\\System32\\notepad.exe", blank[0]);
+}
+
+test "windows edit-config: peIsGui" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(peIsGui("C:\\Windows\\System32\\notepad.exe") or
+        peIsGui("C:\\Windows\\notepad.exe"));
+    try std.testing.expect(!peIsGui("C:\\Windows\\System32\\cmd.exe"));
+    try std.testing.expect(!peIsGui("C:\\Windows\\System32\\no-such-file.exe"));
 }
