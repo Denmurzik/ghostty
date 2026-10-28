@@ -623,7 +623,7 @@ removed (macOS has none); the native always-visible scrollbar stays an interim, 
 look polish is an M3 task; full recovery after a GPU device loss is M3 (§18.19); the Git Bash cwd inheritance waits for M5 OSC 7 translation; tab
 context menu and tab tooltips are M3; the +80 MB after a 16-pane open/close cycle is accepted as pre-existing and flagged for M3 RAM work.
 
-**M3 (done, accepted with concerns: `docs/windows/m3/acceptance.md`; acceptance commit `docs(windows): M3 acceptance — RAM, latency, screenshots, feature checklist`; final review `docs/windows/m3/final-review.md`; closing commit: TBD-by-lead) — feature parity.**
+**M3 (done, accepted with concerns: `docs/windows/m3/acceptance.md`; acceptance commit `docs(windows): M3 acceptance — RAM, latency, screenshots, feature checklist`; final review `docs/windows/m3/final-review.md`; closing commit: 7a47ed93c) — feature parity.**
 Quick terminal (`RegisterHotKey`, slide, owned tool window), global keybinds, command palette, search bar,
 notifications (WinRT toasts, AUMID self-registered under HKCU, R-M3-5), URL hover/open with untrusted-URL validation
 (R-M3-8), inspector (imgui win32 + dx11), config-errors dialog, export-terminal-io save dialog, custom shaders (GLSL to
