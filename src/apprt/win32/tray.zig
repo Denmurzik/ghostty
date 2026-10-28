@@ -9,6 +9,7 @@ const App = @import("App.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const Window = @import("Window.zig");
 const dpi_mod = @import("dpi.zig");
+const profiles_menu = @import("profiles_menu.zig");
 const messages = @import("messages.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
@@ -275,6 +276,7 @@ fn showMenu(app: *App, x: i32, y: i32) void {
     };
     defer _ = user32.DestroyMenu(menu);
     _ = user32.AppendMenuW(menu, user32.MF_STRING, menu_new_window, std.unicode.utf8ToUtf16LeStringLiteral("&New Window"));
+    _ = profiles_menu.appendTrayItems(app, menu, profiles_menu.tray_first_id);
     _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
     _ = user32.AppendMenuW(menu, user32.MF_STRING, menu_quit, std.unicode.utf8ToUtf16LeStringLiteral("&Quit"));
 
@@ -307,7 +309,7 @@ fn runCommand(app: *App, id: u32) void {
         menu_quit => if (user32.PostMessageW(app.msg_hwnd, App.WM_GHOSTTY_QUIT, 0, 0) == 0) {
             log.warn("unable to post quit request", .{});
         },
-        else => {},
+        else => _ = profiles_menu.trayCommand(app, id),
     }
 }
 
@@ -320,4 +322,13 @@ test "win32 tray: click action" {
 test "win32 tray: menu ids and message" {
     try std.testing.expect(menu_new_window != menu_quit);
     try std.testing.expectEqual(user32.WM_APP + 9, WM_GHOSTTY_TRAY);
+}
+
+test "win32 tray: profile submenu ids do not collide" {
+    const pm = profiles_menu;
+    try std.testing.expect(menu_new_window < pm.tray_first_id and menu_quit < pm.tray_first_id);
+    // The strip menu range ends before the tray range starts.
+    try std.testing.expect(pm.first_id + 2 * pm.max_profiles <= pm.tray_first_id);
+    try std.testing.expect(pm.tray_first_id + pm.max_profiles < 0x10000);
+    try std.testing.expect(!pm.isTrayId(menu_quit));
 }

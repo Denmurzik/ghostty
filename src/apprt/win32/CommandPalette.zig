@@ -22,6 +22,8 @@ const filter = @import("palette_filter.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const overlay = @import("overlay.zig");
+const profiles = @import("profiles.zig");
+const profiles_menu = @import("profiles_menu.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
 const global = @import("../../global.zig");
@@ -86,6 +88,8 @@ const Run = union(enum) {
     action: input.Binding.Action,
     /// Focus the surface with this id.
     jump: u32,
+    /// Start a shell profile in a new tab (or window).
+    profile: struct { id: []const u8, window: bool },
 };
 
 /// What the heap block of an open palette holds; `popup` is its first field.
@@ -152,6 +156,8 @@ pub const Command = struct {
         execute: struct { serial: u32, target_id: u32, action: input.Binding.Action },
         /// Closes the palette and brings the surface `surface_id` forward.
         jump: struct { serial: u32, surface_id: u32 },
+        /// Closes the palette and starts the shell profile `id`.
+        profile: struct { serial: u32, id: []const u8, window: bool },
     };
 
     /// `kind` is copied: the action gets its own memory.
@@ -166,6 +172,11 @@ pub const Command = struct {
                 .serial = e.serial,
                 .target_id = e.target_id,
                 .action = try e.action.clone(cmd.arena.allocator()),
+            } },
+            .profile => |p| .{ .profile = .{
+                .serial = p.serial,
+                .id = try cmd.arena.allocator().dupe(u8, p.id),
+                .window = p.window,
             } },
             else => kind,
         };
@@ -465,6 +476,7 @@ fn begin(
     target_id: u32,
     commands: []const input.Command,
     jumps: []const Jump,
+    shells: []const profiles.Profile,
     home: []const u8,
     keybinds: ?*const input.Binding.Set,
 ) !*Panel {
@@ -517,6 +529,16 @@ fn begin(
             .shortcut = "",
             .run = .{ .jump = j.id },
         });
+    }
+    for (shells) |p| {
+        for ([_]bool{ false, true }) |as_window| {
+            try items.append(a, .{
+                .title = try std.fmt.allocPrint(a, "{s}: {s}", .{ if (as_window) "New Window" else "New Tab", p.name }),
+                .description = "",
+                .shortcut = "",
+                .run = .{ .profile = .{ .id = try a.dupe(u8, p.id), .window = as_window } },
+            });
+        }
     }
     std.mem.sort(Item, items.items, {}, itemLess);
     panel.items = items.items;
@@ -630,7 +652,7 @@ pub fn toggle(app: *App, target: apprt.Target) !bool {
     defer if (home) |h| app.core_app.alloc.free(h);
 
     const config = &app.config;
-    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, home orelse "", &config.keybind.set);
+    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, profiles.get(app), home orelse "", &config.keybind.set);
     errdefer close(window);
     try show(panel);
     return true;
@@ -861,6 +883,7 @@ fn postExecute(panel: *Panel, row: usize) void {
     const kind: Command.Kind = switch (item.run) {
         .action => |a| .{ .execute = .{ .serial = panel.serial, .target_id = target, .action = a } },
         .jump => |id| .{ .jump = .{ .serial = panel.serial, .surface_id = id } },
+        .profile => |p| .{ .profile = .{ .serial = panel.serial, .id = p.id, .window = p.window } },
     };
     const cmd = Command.create(window.app.core_app.alloc, kind) catch |err| {
         log.warn("unable to copy a palette action err={}", .{err});
@@ -915,6 +938,10 @@ pub fn command(window: *Window, lparam: LPARAM) bool {
             _ = surface.core_surface.performBindingAction(e.action) catch |err| {
                 log.warn("unable to perform a palette action err={}", .{err});
             };
+        },
+        .profile => |p| {
+            closeIfSerial(window, p.serial);
+            profiles_menu.launch(window.app, window, p.id, p.window);
         },
         .jump => |j| {
             closeIfSerial(window, j.serial);
@@ -1420,7 +1447,7 @@ test "win32 palette: target closed while open" {
         .{ .action = .undo, .title = "Undo", .description = "" },
     };
 
-    const panel = try begin(window, 42, &cmds, &.{}, "", null);
+    const panel = try begin(window, 42, &cmds, &.{}, &.{}, "", null);
     try panel.popup.show();
     const hwnd = panel.popup.hwnd.?;
     try std.testing.expect(window.palette.popup != null);
@@ -1458,10 +1485,10 @@ test "win32 palette: a posted close of an older palette keeps the new one" {
     const cmds = [_]input.Command{
         .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
     };
-    const first = try begin(window, 1, &cmds, &.{}, "", null);
+    const first = try begin(window, 1, &cmds, &.{}, &.{}, "", null);
     const old_serial = first.serial;
     close(window);
-    const second = try begin(window, 1, &cmds, &.{}, "", null);
+    const second = try begin(window, 1, &cmds, &.{}, &.{}, "", null);
     defer close(window);
     try std.testing.expect(second.serial != old_serial);
 
@@ -1501,7 +1528,7 @@ test "win32 palette: nothing selected until a query, jump entries" {
         .{ .id = 6, .title = "vim C:/work/a.txt", .pwd = "C:/work" },
         .{ .id = 7, .title = "", .pwd = "" },
     };
-    const panel = try begin(window, 5, &cmds, &jumps, "C:/Users/me", null);
+    const panel = try begin(window, 5, &cmds, &jumps, &.{}, "C:/Users/me", null);
     defer close(window);
     const state = &window.palette;
 
@@ -1555,4 +1582,41 @@ test "win32 palette: only the palette's own command block is taken" {
     try std.testing.expect(!command(&owner.window, @bitCast(@intFromPtr(&foreign))));
     try std.testing.expect(Command.fromLparam(@bitCast(@intFromPtr(&foreign))) == null);
     try std.testing.expect(!command(&owner.window, -1));
+}
+
+test "win32 palette: profile entries are listed and run their profile" {
+    const owner = try TestOwner.create();
+    defer owner.destroy();
+    const window = &owner.window;
+    const cmds = [_]input.Command{
+        .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
+    };
+    const shells = [_]profiles.Profile{
+        .{ .id = "cmd", .name = "Command Prompt", .kind = .cmd, .argv = &.{}, .icon = "" },
+        .{ .id = "powershell", .name = "Windows PowerShell", .kind = .powershell, .argv = &.{}, .icon = "" },
+    };
+    const panel = try begin(window, 1, &cmds, &.{}, &shells, "", null);
+    defer close(window);
+    const state = &window.palette;
+
+    try std.testing.expectEqual(@as(usize, 5), state.rows.len);
+    var tab: ?Run = null;
+    var win: ?Run = null;
+    for (state.rows) |r| {
+        const item = panel.items[r];
+        if (std.mem.eql(u8, item.title, "New Tab: Windows PowerShell")) tab = item.run;
+        if (std.mem.eql(u8, item.title, "New Window: Command Prompt")) win = item.run;
+    }
+    try std.testing.expectEqualStrings("powershell", tab.?.profile.id);
+    try std.testing.expect(!tab.?.profile.window);
+    try std.testing.expectEqualStrings("cmd", win.?.profile.id);
+    try std.testing.expect(win.?.profile.window);
+
+    // The queued command owns its copy of the id.
+    const id = try std.testing.allocator.dupe(u8, "powershell");
+    const cmd = try Command.create(std.testing.allocator, .{ .profile = .{ .serial = 1, .id = id, .window = false } });
+    @memset(id, 0xAA);
+    std.testing.allocator.free(id);
+    try std.testing.expectEqualStrings("powershell", cmd.kind.profile.id);
+    cmd.destroy();
 }

@@ -11,6 +11,7 @@ const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const proxy_icon = @import("proxy_icon.zig");
+const profiles_menu = @import("profiles_menu.zig");
 const secure_input = @import("secure_input.zig");
 const title_edit = @import("title_edit.zig");
 const App = @import("App.zig");
@@ -165,6 +166,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
             switch (part) {
                 .tab, .tab_close => |index| tab_menu.show(window, index, at.x, at.y),
                 .proxy_icon => proxy_icon.showMenu(window, at.x, at.y),
+                .new_tab => profiles_menu.showForStrip(window, at.x, at.y),
                 else => return null,
             }
             return 0;

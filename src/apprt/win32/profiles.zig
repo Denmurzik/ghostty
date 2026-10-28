@@ -88,5 +88,9 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.beginObject();
     try jw.objectField("loaded");
     try jw.write(app.profiles.list != null);
+    try jw.objectField("ids");
+    try jw.beginArray();
+    for (app.profiles.list orelse &.{}) |p| try jw.write(p.id);
+    try jw.endArray();
     try jw.endObject();
 }
