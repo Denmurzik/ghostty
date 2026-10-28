@@ -3900,7 +3900,14 @@ else
 
 /// Which pseudo console (ConPTY) runs the programs in a terminal.
 ///
-///   * `bundled` (the default) - the `conpty.dll` and `OpenConsole.exe`
+///   * `auto` (the default) - `bundled`, except `inbox` for programs built
+///     on MSYS2 or Cygwin (Git Bash and the other shells from MSYS2, Cygwin
+///     programs). On the bundled console their runtime loses the first key
+///     typed after the terminal is resized (a split, a new tab, a window
+///     resize), so Kitty graphics and underline colours are given up there.
+///     Set `bundled` to have them in Git Bash anyway.
+///
+///   * `bundled` - the `conpty.dll` and `OpenConsole.exe`
 ///     shipped next to `ghostty.exe`, the newer console from Microsoft that
 ///     Windows Terminal uses. It passes Kitty graphics, underline colours
 ///     (SGR 58) and other sequences through to Ghostty unchanged. When the
@@ -3914,7 +3921,7 @@ else
 /// surfaces only.
 ///
 /// This only applies to Windows.
-@"windows-conpty": WindowsConpty = .bundled,
+@"windows-conpty": WindowsConpty = .auto,
 
 /// When enabled, the full GTK titlebar is displayed instead of your window
 /// manager's simple titlebar. The behavior of this option will vary with your
@@ -9515,6 +9522,7 @@ pub const WindowsSingleInstance = enum {
 
 /// See windows-conpty
 pub const WindowsConpty = enum {
+    auto,
     bundled,
     inbox,
 };
@@ -11633,7 +11641,7 @@ test "windows config: windows-conpty" {
     const alloc = testing.allocator;
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    try testing.expectEqual(WindowsConpty.bundled, cfg.@"windows-conpty");
+    try testing.expectEqual(WindowsConpty.auto, cfg.@"windows-conpty");
 
     var it: TestIterator = .{ .data = &.{"--windows-conpty=inbox"} };
     try cfg.loadIter(alloc, &it);

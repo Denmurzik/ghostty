@@ -133,7 +133,8 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
   bundled `conpty.dll` + `OpenConsole.exe` (`Microsoft.Windows.Console.ConPTY` 1.25.260930003, MIT) forwards both
   byte for byte, as the headless probe shows (`test/windows/conpty-probe/RESULT.md`, "Bundled ConPTY"). Every Windows
   build installs both files from `vendor/conpty` next to `ghostty.exe`, and Ghostty uses them by default
-  (`windows-conpty = bundled`; inbox only as an override or when the files are missing). Kitty graphics settings keep
+  (`windows-conpty = auto`: bundled, but inbox for MSYS2/Cygwin programs such as Git Bash, whose runtime loses the
+  first key after a resize on the bundled console; `bundled` forces it there too). Kitty graphics settings keep
   the upstream defaults. Open item: the `kitty-image` and `underline-colors` references (GUI run).
 - **OSC 8 arrives** through ConPTY (the `osc8-link` case shows the text intact and no stray bytes); hover underline
   and opening are covered by `e2e/link-hover-open`.

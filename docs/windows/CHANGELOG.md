@@ -248,7 +248,8 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   Terminal then opens its teammates in Ghostty.
 - **Bundled ConPTY.** Ghostty now ships Microsoft's `conpty.dll` + `OpenConsole.exe` (package
   `Microsoft.Windows.Console.ConPTY` 1.25.260930003, MIT, signed by Microsoft) next to `ghostty.exe` and uses them by default
-  (`windows-conpty = bundled`). The inbox console drops the Kitty graphics sequences and turns SGR 58 (underline colour) into
+  (`windows-conpty = auto`: bundled, except the inbox console for MSYS2/Cygwin programs such as Git Bash, see the known
+  limitations). The inbox console drops the Kitty graphics sequences and turns SGR 58 (underline colour) into
   blink; the bundled one forwards both unchanged (headless probe), so both are expected to work out of the box with upstream
   defaults. GUI verification (references `kitty-image`, `underline-colors`) is pending. If the pair is missing, fails to load
   or `OpenConsole.exe` cannot start (policy, antivirus), Ghostty logs one warning and uses the inbox console for the rest of the
@@ -289,7 +290,7 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   closed tab's programs keep running (a dev server keeps its port), unlike Windows Terminal where they end at once. Set
   `undo-timeout = 0` to turn undo off.
 - `auto-update = check|off` (Windows default `check`); `auto-update-channel = stable|tip` filters the update check.
-- `windows-conpty = bundled|inbox` (default `bundled`, Windows only, read when a surface starts, so a reload affects new
+- `windows-conpty = auto|bundled|inbox` (default `auto`, Windows only, read when a surface starts, so a reload affects new
   surfaces only).
 - `window-step-resize`, `initial-window`, `window-subtitle`, `bell-audio-volume` now take effect on Windows. `bell-audio-path`
   stays WAV only. `font-thicken` is macOS only upstream (no effect here); `mouse-hide-while-typing` and
@@ -301,6 +302,12 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
 - The Explorer entry is in the classic context menu only ("Show more options"); the top-level Windows 11 menu needs package
   identity, which is out of scope.
 - No automatic secure input at password prompts (ConPTY has no termios); toggle it yourself.
+- `windows-conpty = auto` (the default) runs MSYS2 and Cygwin programs (Git Bash, the default shell) on the inbox
+  ConPTY, so Kitty graphics and underline colours (SGR 58) do not reach Git Bash; PowerShell, cmd, WSL and other native
+  programs get the bundled console and have them. On the bundled console the MSYS2 runtime loses the first key typed
+  after a resize (a split, a new tab, a window resize): reading the console size makes OpenConsole query the cursor
+  through the terminal, and the key read around that query is dropped. `windows-conpty = bundled` brings the graphics
+  to Git Bash with that loss; `inbox` forces the old console everywhere. Detection is by the program path only.
 - cmd's prompt marks have no exit code: no `command_finished` for cmd. `jump_to_prompt` and the output boundaries work.
 - `TERM=xterm-ghostty` over ssh to a host without the entry (Windows OpenSSH from pwsh in particular) breaks full-screen
   programs; set `TERM=xterm-256color` there. Cygwin would need `/cygdrive/c/...` for `TERMINFO` (not done).

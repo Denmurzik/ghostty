@@ -1,7 +1,7 @@
 #!/bin/bash
-# vts: requires=L1 extra-config=
+# vts: requires=L1 extra-config=windows-conpty=bundled
 # kitty-image: Kitty graphics, file transmission of the 16x16 fixture. The inbox ConPTY drops APC; the bundled one
-# (`windows-conpty = bundled`, installed by every build) forwards it (conpty-probe/RESULT.md). GUI check PENDING:
+# (`windows-conpty = bundled`, forced here: `auto` gives Git Bash the inbox one) forwards it (conpty-probe/RESULT.md). GUI check PENDING:
 # SKIPs until its reference is generated with `-Only kitty-image -Update`.
 printf '\e[2J\e[H\e[?25l'
 printf 'kitty-image\n\n'

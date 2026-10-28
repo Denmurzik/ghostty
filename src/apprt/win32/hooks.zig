@@ -112,7 +112,11 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     secure_input.configChanged(app, config);
     tmux_Server.configChanged(app, config);
     // Before any surface of the new config opens its pty.
-    @import("../../os/main.zig").windows.setConptyBundled(config.@"windows-conpty" == .bundled);
+    @import("../../os/main.zig").windows.setConptyMode(switch (config.@"windows-conpty") {
+        .auto => .auto,
+        .bundled => .bundled,
+        .inbox => .inbox,
+    });
     if (reloaded) app_toast.configReloaded(app);
 }
 

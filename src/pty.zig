@@ -423,12 +423,22 @@ const WindowsPty = struct {
 
     /// Open a new PTY with the given initial size.
     pub fn open(size: winsize) OpenError!Pty {
-        return openWith(size, null);
+        return openImpl(size, null, null);
     }
 
-    /// `open` on the ConPTY `api` (no fallback), or on `windows.conpty()`
-    /// when null. Tests use it to run a specific console.
-    pub fn openWith(size: winsize, api: ?*const windows.ConPty) OpenError!Pty {
+    /// `open` on the console `windows-conpty` picks for `program` (the
+    /// path of what the pty runs; `auto` keeps MSYS2 programs on inbox).
+    pub fn openFor(size: winsize, program: ?[]const u8) OpenError!Pty {
+        return openImpl(size, null, program);
+    }
+
+    /// `open` on the ConPTY `api` (no fallback). Tests use it to run a
+    /// specific console.
+    pub fn openWith(size: winsize, api: *const windows.ConPty) OpenError!Pty {
+        return openImpl(size, api, null);
+    }
+
+    fn openImpl(size: winsize, api: ?*const windows.ConPty, program: ?[]const u8) OpenError!Pty {
         var pty: Pty = undefined;
 
         var pipe_path_buf_w: [128]u16 = undefined;
@@ -515,7 +525,7 @@ const WindowsPty = struct {
         // A bundled console that fails to start (a policy or an antivirus
         // refusing OpenConsole.exe) falls back to inbox for this pty and,
         // through `conptyBundledFailed`, for every later one.
-        const conpty = api orelse windows.conpty();
+        const conpty = api orelse windows.conptyFor(program);
         const created = windows.createPseudoConsole(
             conpty,
             if (api == null) windows.conptyFallback(conpty) else null,

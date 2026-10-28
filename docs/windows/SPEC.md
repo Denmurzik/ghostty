@@ -983,7 +983,11 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     ran `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (`conpty.dll` + `OpenConsole.exe`, MIT, signed by Microsoft).
     It forwards Kitty APC, SGR 58 and OSC 133/7/8/52/9 byte-identical and in place, unlike the inbox console, which
     rewrites OSC 8 and moves OSC 7/52/9. Resize works, and its key-echo p95 is below 1 ms (inbox: 0.6 to 15 ms).
-    - **Decision:** `windows-conpty = bundled` is the default. Every win32 build installs the pair for x64/arm64 from
+    - **Decision:** `windows-conpty = auto` is the default: bundled, except inbox for MSYS2/Cygwin programs (Git
+      Bash). On the bundled console their runtime loses the first key read after a resize: reading the console size
+      makes OpenConsole query the cursor (`CSI 6 n`) through the terminal, and the key read around it is dropped
+      (e2e `resize-input`: 4-12 of 36 lines on bundled, 0 on inbox; the resize prime does not help). `bundled` and
+      `inbox` force. Every win32 build installs the pair for x64/arm64 from
       `vendor/conpty` (committed: `zig fetch` cannot unpack a `.nupkg`; `-Dconpty-dir` overrides) next to
       `ghostty.exe`, with `THIRD_PARTY_NOTICES.txt`.
     - **Loading:** `LoadLibraryExW("conpty.dll", APPLICATION_DIR | SYSTEM32)` once both files are found in the exe

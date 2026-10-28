@@ -1026,12 +1026,14 @@ const Subprocess = struct {
         var in_child: bool = false;
 
         // Create our pty
-        var pty = try Pty.open(.{
+        const size: ptypkg.winsize = .{
             .ws_row = @intCast(self.grid_size.rows),
             .ws_col = @intCast(self.grid_size.columns),
             .ws_xpixel = @intCast(self.screen_size.width),
             .ws_ypixel = @intCast(self.screen_size.height),
-        });
+        };
+        // Windows: the console depends on the program (`windows-conpty`).
+        var pty = if (comptime is_windows) try Pty.openFor(size, self.args[0]) else try Pty.open(size);
         self.pty = pty;
         errdefer if (!in_child) {
             if (comptime builtin.target.os.tag != .windows) {

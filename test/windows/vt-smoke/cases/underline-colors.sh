@@ -1,5 +1,5 @@
 #!/bin/bash
-# vts: requires=L1 extra-config=
+# vts: requires=L1 extra-config=windows-conpty=bundled
 # underline-colors: underline colour (SGR 58, semicolon and 256 forms) with every underline style. The inbox ConPTY
 # drops or mangles SGR 58; the bundled one (`windows-conpty = bundled`, installed by every build) forwards it
 # unchanged (conpty-probe/RESULT.md). GUI check PENDING: SKIPs until its reference is generated with

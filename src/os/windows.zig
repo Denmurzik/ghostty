@@ -629,7 +629,7 @@ test "windows diag env: ignored when elevated" {
 }
 
 /// The ConPTY entry points a pty uses, plus the flags `CreatePseudoConsole`
-/// gets. Two sources, picked by `windows-conpty` (`setConptyBundled`):
+/// gets. Two sources, picked by `windows-conpty` (`setConptyMode`, `conptyFor`):
 ///
 /// - inbox: kernel32, the system's conhost.
 /// - bundled: `conpty.dll` next to `ghostty.exe`, which starts the
@@ -702,22 +702,67 @@ var conpty_bundled: ConPty = undefined;
 var conpty_inbox_ready = false;
 var conpty_dll_override = false;
 var conpty_bundled_state: enum { untried, loaded, unavailable } = .untried;
-var conpty_bundled_wanted: std.atomic.Value(bool) = .init(true);
+var conpty_mode: std.atomic.Value(ConptyMode) = .init(.auto);
 var conpty_mutex: std.Io.Mutex = .init;
 /// `OpenConsole.exe` next to the loaded `conpty.dll`: conpty.dll quietly
-/// starts the system conhost when it is gone, so `conpty` checks it.
+/// starts the system conhost when it is gone, so `conptyFor` checks it.
 var conpty_console_path: [std.fs.max_path_bytes:0]u16 = undefined;
+
+/// `windows-conpty`, mirrored here so `os` does not import the config.
+pub const ConptyMode = enum(u8) { auto, bundled, inbox };
 
 /// `windows-conpty`: the apprt sets it from the config. Takes effect for
 /// ptys opened afterwards; the bundled DLL is loaded the first time a pty
 /// wants it and stays loaded.
-pub fn setConptyBundled(wanted: bool) void {
-    conpty_bundled_wanted.store(wanted, .release);
+pub fn setConptyMode(mode: ConptyMode) void {
+    conpty_mode.store(mode, .release);
 }
 
-/// The ConPTY for a new pty. The pty keeps the pointer: its resize and
-/// close must go to the same DLL as its create.
-pub fn conpty() *const ConPty {
+/// Whether `program` (the path or name a pty runs) is linked against the
+/// MSYS2 or Cygwin runtime: Git Bash and the other POSIX shells outside
+/// System32 (where `bash.exe` is the WSL launcher), and anything under a
+/// `usr\bin` or a Cygwin tree.
+pub fn isMsysProgram(program: []const u8) bool {
+    const base_start = if (std.mem.lastIndexOfAny(u8, program, "/\\")) |i| i + 1 else 0;
+    var base = program[base_start..];
+    if (base.len > 4 and std.ascii.eqlIgnoreCase(base[base.len - 4 ..], ".exe")) base = base[0 .. base.len - 4];
+    if (std.ascii.findIgnoreCase(program, "\\windows\\system32\\") != null or
+        std.ascii.findIgnoreCase(program, "\\windows\\sysnative\\") != null) return false;
+    if (std.ascii.findIgnoreCase(program, "\\usr\\bin\\") != null or
+        std.ascii.findIgnoreCase(program, "/usr/bin/") != null or
+        std.ascii.findIgnoreCase(program, "\\cygwin") != null) return true;
+    // busybox-w32 is a native build, not MSYS2.
+    const shells = [_][]const u8{ "bash", "sh", "zsh", "fish", "dash", "ksh", "mksh" };
+    for (shells) |name| if (std.ascii.eqlIgnoreCase(base, name)) return true;
+    return false;
+}
+
+/// Whether a pty running `program` asks for the bundled console. `auto` is
+/// bundled except for MSYS2/Cygwin programs: on the bundled console their
+/// runtime loses the first key typed after a resize (it reads the console
+/// size, which the bundled console answers with a `CSI 6 n` round trip
+/// through the terminal), so they get the inbox console.
+pub fn conptyWantsBundled(mode: ConptyMode, program: ?[]const u8) bool {
+    return switch (mode) {
+        .bundled => true,
+        .inbox => false,
+        .auto => if (program) |p| !isMsysProgram(p) else true,
+    };
+}
+
+/// The ConPTY for a new pty running `program`. The pty keeps the pointer:
+/// its resize and close must go to the same DLL as its create.
+pub fn conptyFor(program: ?[]const u8) *const ConPty {
+    const mode = conpty_mode.load(.acquire);
+    const wanted = conptyWantsBundled(mode, program);
+    if (mode == .auto and !wanted) std.log.scoped(.conpty).info(
+        "windows-conpty = auto: inbox ConPTY for the MSYS2/Cygwin program {s} (the bundled one loses its first key after a resize)",
+        .{program.?},
+    );
+    return conptyWanted(wanted);
+}
+
+fn conptyWanted(wanted: bool) *const ConPty {
     const global = @import("../global.zig");
     const io = global.io();
     conpty_mutex.lockUncancelable(io);
@@ -727,7 +772,6 @@ pub fn conpty() *const ConPty {
         resolveInbox(&conpty_inbox);
         conpty_inbox_ready = true;
     }
-    const wanted = conpty_bundled_wanted.load(.acquire);
     if (wanted and !conpty_dll_override and conpty_bundled_state == .untried) {
         conpty_bundled = conpty_inbox;
         conpty_bundled.flags = 0;
@@ -921,6 +965,45 @@ test "windows conpty: source" {
     // The diagnostic DLL wins over everything.
     try testing.expectEqual(ConptySource.dll_override, conptySource(.{ .dll_override = true, .bundled_wanted = true, .bundled_loaded = true }));
     try testing.expectEqual(ConptySource.dll_override, conptySource(.{ .dll_override = true, .bundled_wanted = false, .bundled_loaded = false }));
+}
+
+test "windows conpty: MSYS2 and Cygwin programs" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+        "C:\\msys64\\usr\\bin\\zsh.exe",
+        "C:\\msys64\\usr\\bin\\vim.exe",
+        "C:\\cygwin64\\bin\\bash.exe",
+        "C:\\cygwin64\\bin\\ls.exe",
+        "/usr/bin/fish",
+        "bash",
+        "SH.EXE",
+    }) |p| try testing.expect(isMsysProgram(p));
+    for ([_][]const u8{
+        "C:\\Windows\\System32\\bash.exe",
+        "C:\\WINDOWS\\Sysnative\\bash.exe",
+        "C:\\Windows\\System32\\wsl.exe",
+        "C:\\Windows\\System32\\cmd.exe",
+        "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "C:\\tools\\busybox.exe",
+        "C:\\tools\\bashful.exe",
+        "nu.exe",
+        "",
+    }) |p| try testing.expect(!isMsysProgram(p));
+}
+
+test "windows conpty: auto picks inbox for MSYS2 programs only" {
+    const testing = std.testing;
+    const git_bash = "C:\\Program Files\\Git\\bin\\bash.exe";
+    const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+    try testing.expect(!conptyWantsBundled(.auto, git_bash));
+    try testing.expect(conptyWantsBundled(.auto, pwsh));
+    try testing.expect(conptyWantsBundled(.auto, null));
+    // `bundled` and `inbox` force.
+    try testing.expect(conptyWantsBundled(.bundled, git_bash));
+    try testing.expect(!conptyWantsBundled(.inbox, pwsh));
+    try testing.expect(!conptyWantsBundled(.inbox, null));
 }
 
 test "windows conpty: bundled files" {
