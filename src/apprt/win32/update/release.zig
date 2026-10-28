@@ -6,6 +6,7 @@
 //! would silence all later announcements; only the repo owner can create it.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const windows_version = @import("../../../build/windows_version.zig");
 
 pub const release_prefix = "https://github.com/Denmurzik/ghostty/releases/tag/win-";
 pub const endpoint = "https://api.github.com/repos/Denmurzik/ghostty/releases?per_page=20";
@@ -62,8 +63,7 @@ fn canonicalN(s: []const u8) bool {
 
 /// `<zon>-win.<N>` -> N. Null means a local build without a release number.
 pub fn currentN(version: []const u8) ?u32 {
-    const i = std.mem.lastIndexOf(u8, version, "-win.") orelse return null;
-    return std.fmt.parseUnsigned(u32, version[i + "-win.".len ..], 10) catch null;
+    return windows_version.winN(version);
 }
 
 /// The non-draft release with a valid tag and url and the highest N.
@@ -189,6 +189,11 @@ test "win32 update: html body is not json" {
     defer arena.deinit();
     try std.testing.expectError(error.NotJson, load(arena.allocator(), "html"));
     try std.testing.expectError(error.NotJson, newest(arena.allocator(), "{}", false));
+}
+
+test "win32 update: currentN delegates" {
+    _ = windows_version;
+    try std.testing.expectEqual(@as(?u32, null), currentN("1.3.2-dev-win.07"));
 }
 
 test "win32 update: parseTag and currentN" {

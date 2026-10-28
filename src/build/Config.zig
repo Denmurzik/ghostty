@@ -15,6 +15,7 @@ const expandPath = @import("../os/path.zig").expand;
 
 const gtk = @import("gtk.zig");
 const GitVersion = @import("GitVersion.zig");
+const windows_version = @import("windows_version.zig");
 
 /// Standard build configuration options.
 optimize: std.lang.Optimize,
@@ -304,10 +305,17 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             "If not specified, git will be used. This must be a semantic version.",
     );
 
-    config.version = if (version_string) |v|
+    config.version = if (version_string) |v| explicit: {
         // If an explicit version is given, we always use it.
-        try std.SemanticVersion.parse(v)
-    else version: {
+        windows_version.checkVersionString(v) catch |err| {
+            std.debug.print(
+                "invalid -Dversion-string=\"{s}\": {s}\n",
+                .{ v, @errorName(err) },
+            );
+            return err;
+        };
+        break :explicit try std.SemanticVersion.parse(v);
+    } else version: {
         const app_version = try std.SemanticVersion.parse(appVersion);
 
         // Is ghostty a dependency? If so, skip git detection.
@@ -333,8 +341,9 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             else => return err,
         };
         if (vsn.tag) |tag| {
-            // Tip releases behave just like any other pre-release so we skip.
-            if (!std.mem.eql(u8, tag, "tip")) {
+            // Tip and fork (`win-`) tags behave just like any other
+            // pre-release so we skip.
+            if (windows_version.tagKind(tag) == .upstream) {
                 const expected = b.fmt("v{d}.{d}.{d}", .{
                     app_version.major,
                     app_version.minor,
