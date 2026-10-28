@@ -102,7 +102,9 @@ $all = @($all | Sort-Object Order, Name)
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $exe = Join-Path $root 'zig-out\bin\ghostty.exe'
-if (-not (Test-Path $exe)) { throw "missing $exe (run zig build first)" }
+if ($env:GHOSTTY_E2E_EXE) {
+    if (-not (Test-Path -LiteralPath $env:GHOSTTY_E2E_EXE)) { throw "missing GHOSTTY_E2E_EXE=$env:GHOSTTY_E2E_EXE" }
+} elseif (-not (Test-Path $exe)) { throw "missing $exe (run zig build first)" }
 
 $temp = Join-Path $env:TEMP 'ghostty-e2e'
 New-Item -ItemType Directory -Force -Path $temp | Out-Null
@@ -131,7 +133,7 @@ foreach ($c in "$env:ProgramFiles\Git\bin\bash.exe", "$env:ProgramFiles\Git\usr\
     if (Test-Path -LiteralPath $c) { $bashExe = $c; break }
 }
 $exeUnderTest = if ($env:GHOSTTY_E2E_EXE) { $env:GHOSTTY_E2E_EXE } else { $exe }
-$isDebugExe = $exeUnderTest -notmatch 'zig-out-rf|ReleaseFast|ReleaseSafe|ReleaseSmall'
+$isDebugExe = $exeUnderTest -notmatch 'zig-out-rf|zig-out\\rfs|ReleaseFast|ReleaseSafe|ReleaseSmall'
 $failed = 0
 $lines = @()
 

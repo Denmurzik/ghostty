@@ -92,7 +92,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Window chrome: custom frame, Mica, snap layouts, macOS-style title and tab rows, proxy icon | M2 / M3 | e2e/frame-hittest, e2e/chrome-paint, e2e/chrome-macos, e2e/chrome-proxy-icon | done |
 | Owned popups follow the window (overlay host) | M3 | e2e/overlay-follow | done |
 | Export terminal IO (`export_terminal_io`) | M3 | e2e/export-io; the real save dialog is the owner's check | done |
-| tmux shim: `tmux.exe` (kernel32/ntdll only) and its pipe (`-V`, no server, trace, stats, limits) | M4 | e2e/tmux-cli; unit: src/tmux_shim/run.zig, pipe.zig, protocol.zig | done |
+| tmux shim: `tmux.exe` (kernel32/ntdll/advapi32 only) and its pipe (`-V`, no server, trace, stats, limits) | M4 | e2e/tmux-cli; unit: src/tmux_shim/run.zig, pipe.zig, protocol.zig | done |
 | tmux commands on Ghostty splits/tabs: split-window, respawn-pane, kill-pane, select-layout (main-vertical, tiled), resize-pane, select-pane -T, set-option, show-options, display-message, list-panes/windows, show-environment | M4 | e2e/tmux-replay (live and static recording); unit: tmux/commands.zig, layout.zig, Registry.zig | done |
 | tmux send-keys (post-resize gate) and capture-pane (visible screen) | M4 | e2e/tmux-send-keys; unit: tmux/keys.zig, pane_io.zig | done |
 | tmux `load-buffer -w` sets the Windows clipboard | M4 | unit: tmux/commands.zig; e2e/tmux-replay step needs a text clipboard | manual (owner-run: needs a text clipboard) |

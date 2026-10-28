@@ -33,10 +33,10 @@ param(
     [switch]$SelfTest,
     [string]$Zig = '',
     [string]$Lock = '',
-    # Free physical memory required before each heavy step. G1 (the measured
-    # peak of the -Dstrip=false build, plus 1 GB, at least 3 GB) sets the
-    # final value; 6 GB is the conservative default until then.
-    [double]$MinFreeGB = 6
+    # Free physical memory required before each heavy step. G1 measured a
+    # 4.9 GB peak for the -Dstrip=false x64 build (-j4); 7 GB is that peak
+    # plus 2 GB, rounded up.
+    [double]$MinFreeGB = 7
 )
 
 Set-StrictMode -Version Latest

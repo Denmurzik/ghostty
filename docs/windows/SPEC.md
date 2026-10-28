@@ -755,7 +755,7 @@ latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the nu
 Bash input-loss workaround (Task 26.4) are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
 
 **M4 (done, accepted with pending: `E2E -Milestone all` (next quiet-desktop batch), owner manual checks (`load-buffer -w` with a text clipboard); record `docs/windows/m4/acceptance.md`, final review `docs/windows/m4/final-review.md`, CHANGELOG "M4"; acceptance commit `docs(windows): M4 acceptance — tmux shim RAM, latency, Claude Code agent-team runs`; closing commit 5b8243768) — tmux shim + IPC + Claude Code e2e.**
-`tmux.exe` (console exe, imports kernel32/ntdll only), a second IPC server on `\\.\pipe\ghostty-tmux-<pid>-<nonce>` (§12.1, R-M4-1), the
+`tmux.exe` (console exe, imports kernel32/ntdll/advapi32 only — advapi32 since M5 Task 17), a second IPC server on `\\.\pipe\ghostty-tmux-<pid>-<nonce>` (§12.1, R-M4-1), the
 registry/host over Ghostty tabs and surfaces with the §12.2 command set (`split-window`, `respawn-pane`, `kill-pane`,
 `select-layout`, `resize-pane`, `select-pane`, `set-option`, `show-options`, `display-message`, `list-panes/windows`,
 `show-environment`, `load-buffer`, plus `send-keys` with a post-resize gate and `capture-pane`), `SplitTree.replace`,

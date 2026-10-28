@@ -338,7 +338,7 @@ palette, composition, hotkeys, health, opened, inspector, export_io, config_erro
 `GHOSTTY_E2E_EXE`) and the pipe of the scenario's own Ghostty:
 
 - `tmux-cli` (700, no window): `-V`, "no server", 50 x `-V` with `GHOSTTY_TMUX_STATS=1` (own wall p95 and peak
-  private), the import table is exactly a subset of kernel32/ntdll, `GHOSTTY_TMUX_TRACE` lines are whole under 8
+  private), the import table is exactly a subset of kernel32/ntdll/advapi32 (advapi32 since M5 Task 17), `GHOSTTY_TMUX_TRACE` lines are whole under 8
   parallel runs.
 - `tmux-replay` (720): the recorded Claude Code calls (`src/apprt/win32/tmux/testdata/claude-spawn.jsonl`, the live
   recording; `GHOSTTY_E2E_TMUX_FIXTURE=static` picks `claude-spawn.static.jsonl`, which also carries the expected

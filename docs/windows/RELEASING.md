@@ -28,7 +28,7 @@ Then:
 PS> dist/windows/release.ps1 -N <N> -ConptyPackage <path to .nupkg> [-V1] [-Arm64TestExe]
 ```
 
-- It takes about 1 to 2 hours. Run no other builds meanwhile: the script waits when free memory is below its gate (`-MinFreeGB`, default 6) and stops after 15 minutes.
+- It takes about 1 to 2 hours. Run no other builds meanwhile: the script waits when free memory is below its gate (`-MinFreeGB`, default 7: the G1 build peak of 4.9 GB plus 2 GB) and stops after 15 minutes.
 - `-DryRun` runs the preflight only and prints every later command line. Try it first.
 - `-Rehearsal -N 0` builds into `zig-out\release\rehearsal-<zon>\` and marks the printed commands `REHEARSAL - do not run`.
 - `-SignCommand '<command with {file}>'` signs `ghostty.exe`, `tmux.exe`, `setup.exe` and the uninstaller (never the Microsoft ConPTY files).
