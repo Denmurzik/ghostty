@@ -67,8 +67,9 @@ pub fn currentN(version: []const u8) ?u32 {
 }
 
 /// The non-draft release with a valid tag and url and the highest N.
-/// Pre-releases count.
-pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
+/// With `stable_only` (`auto-update-channel = stable`) GitHub pre-releases are
+/// skipped; the `tip` channel counts them.
+pub fn newest(arena: Allocator, body: []const u8, stable_only: bool) ParseError!Release {
     if (nestingDepth(body) > max_depth) return error.NotJson;
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -81,6 +82,11 @@ pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
         if (item != .object) continue;
         if (item.object.get("draft")) |d| {
             if (d != .bool or d.bool) continue;
+        }
+        if (stable_only) {
+            if (item.object.get("prerelease")) |p| {
+                if (p != .bool or p.bool) continue;
+            }
         }
         const tag = str(item.object.get("tag_name")) orelse continue;
         const url = str(item.object.get("html_url")) orelse continue;
@@ -133,7 +139,7 @@ fn str(v: ?std.json.Value) ?[]const u8 {
 }
 
 fn load(arena: Allocator, comptime name: []const u8) ParseError!Release {
-    return newest(arena, @embedFile("testdata/" ++ name ++ ".json"));
+    return newest(arena, @embedFile("testdata/" ++ name ++ ".json"), false);
 }
 
 test "win32 update: newer picks the highest N" {
@@ -182,7 +188,7 @@ test "win32 update: html body is not json" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.NotJson, load(arena.allocator(), "html"));
-    try std.testing.expectError(error.NotJson, newest(arena.allocator(), "{}"));
+    try std.testing.expectError(error.NotJson, newest(arena.allocator(), "{}", false));
 }
 
 test "win32 update: parseTag and currentN" {
@@ -212,22 +218,22 @@ test "win32 update: odd json types, duplicates, url mismatch, depth" {
     const a = arena.allocator();
     const p = release_prefix;
     // Odd types are skipped, not fatal.
-    try std.testing.expectError(error.NoRelease, newest(a, "[]"));
-    try std.testing.expectError(error.NoRelease, newest(a, "[1,null,\"x\",[],{\"tag_name\":5,\"html_url\":[]}]"));
-    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-3\",\"html_url\":\"" ++ p ++ "1.0-3\",\"draft\":\"no\"}]"));
+    try std.testing.expectError(error.NoRelease, newest(a, "[]", false));
+    try std.testing.expectError(error.NoRelease, newest(a, "[1,null,\"x\",[],{\"tag_name\":5,\"html_url\":[]}]", false));
+    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-3\",\"html_url\":\"" ++ p ++ "1.0-3\",\"draft\":\"no\"}]", false));
     // Numeric, not lexicographic.
     const ten = "[{\"tag_name\":\"win-1.0-9\",\"html_url\":\"" ++ p ++ "1.0-9\"},{\"tag_name\":\"win-1.0-10\",\"html_url\":\"" ++ p ++ "1.0-10\"}]";
-    try std.testing.expectEqual(@as(u32, 10), (try newest(a, ten)).n);
+    try std.testing.expectEqual(@as(u32, 10), (try newest(a, ten, false)).n);
     // Duplicate N: the first entry in feed order wins.
     const dup = "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-5\"},{\"tag_name\":\"win-1.1-5\",\"html_url\":\"" ++ p ++ "1.1-5\"}]";
-    try std.testing.expectEqualStrings("win-1.0-5", (try newest(a, dup)).tag);
+    try std.testing.expectEqualStrings("win-1.0-5", (try newest(a, dup, false)).tag);
     // url must match the tag.
-    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-6\"}]"));
+    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-6\"}]", false));
     // Deep nesting is refused; brackets inside strings do not count.
     const deep = comptime brackets(100, "[") ++ brackets(100, "]");
-    try std.testing.expectError(error.NotJson, newest(a, deep));
+    try std.testing.expectError(error.NotJson, newest(a, deep, false));
     const quoted = "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-5\",\"body\":\"" ++ comptime brackets(100, "[") ++ "\\\"[\"}]";
-    try std.testing.expectEqual(@as(u32, 5), (try newest(a, quoted)).n);
+    try std.testing.expectEqual(@as(u32, 5), (try newest(a, quoted, false)).n);
 }
 
 fn brackets(comptime n: usize, comptime c: []const u8) *const [n]u8 {
@@ -251,4 +257,12 @@ test "win32 update: release url tail is restricted" {
     try std.testing.expect(!isReleaseUrl("https://evil.example/" ++ "1.3.2-dev-4"));
     try std.testing.expect(parseTag("win-x/../y-1") == null);
     try std.testing.expect(parseTag("win-1.0?a-1") == null);
+}
+
+test "win32 update: stable channel skips pre-releases, tip counts them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const body = @embedFile("testdata/prerelease-newer.json");
+    try std.testing.expectEqual(@as(u32, 7), (try newest(arena.allocator(), body, false)).n);
+    try std.testing.expectEqual(@as(u32, 6), (try newest(arena.allocator(), body, true)).n);
 }

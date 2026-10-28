@@ -336,7 +336,7 @@ fn unloadWhenSafe(api: winhttp.Api, event: ?win32.foundation.HANDLE, notify_set:
 
 // -- Worker ----------------------------------------------------------------------
 
-fn workerMain(shared: *Shared, hwnd: HWND, url: []u8, current_n: ?u32) void {
+fn workerMain(shared: *Shared, hwnd: HWND, url: []u8, current_n: ?u32, stable_only: bool) void {
     // Last: after `done` and the release the worker owns nothing any more.
     defer shared.release();
     defer shared.done.store(true, .seq_cst);
@@ -347,12 +347,12 @@ fn workerMain(shared: *Shared, hwnd: HWND, url: []u8, current_n: ?u32) void {
     const arena = result.arena.?.allocator();
 
     log.info("update: fetching {s}", .{url});
-    result.outcome = check(arena, shared, url, current_n);
+    result.outcome = check(arena, shared, url, current_n, stable_only);
     result.manual = shared.manual.load(.seq_cst);
     post(hwnd, result);
 }
 
-fn check(arena: Allocator, shared: *Shared, url: []const u8, current_n: ?u32) Outcome {
+fn check(arena: Allocator, shared: *Shared, url: []const u8, current_n: ?u32, stable_only: bool) Outcome {
     const body = fetch(arena, url, max_body, &shared.request, &shared.stopping) catch |err| {
         const text = switch (err) {
             error.BadUrl => "the update address is invalid",
@@ -367,7 +367,7 @@ fn check(arena: Allocator, shared: *Shared, url: []const u8, current_n: ?u32) Ou
         };
         return .{ .failed = text };
     };
-    const newest = release.newest(arena, body) catch |err| return .{ .failed = switch (err) {
+    const newest = release.newest(arena, body, stable_only) catch |err| return .{ .failed = switch (err) {
         error.NotJson => "the server's answer is not a release list",
         error.NoRelease => "no Windows release was found",
         error.OutOfMemory => "out of memory",
@@ -534,7 +534,7 @@ fn startCheck(app: *App, manual: bool) void {
     };
     st.deadline_ms = win32.kernel32.GetTickCount64() + deadline_ms;
     st.fetches += 1;
-    const thread = std.Thread.spawn(.{}, workerMain, .{ shared, app.msg_hwnd, copy, st.current_n }) catch |err| {
+    const thread = std.Thread.spawn(.{}, workerMain, .{ shared, app.msg_hwnd, copy, st.current_n, app.config.@"auto-update-channel" == .stable }) catch |err| {
         log.warn("unable to start the update worker err={}", .{err});
         std.heap.smp_allocator.free(copy);
         std.heap.smp_allocator.destroy(shared);
