@@ -136,3 +136,25 @@ test "win32 title rules: cmd running title drops the working directory" {
     try std.testing.expectEqualStrings("C:\\other - x", programTitleAfter(cwd, "C:\\other - x").?);
     try std.testing.expectEqualStrings(cwd, programTitleAfter(cwd, cwd).?);
 }
+
+/// The title row text with `window-subtitle = working-directory`: the title,
+/// then the directory after an em dash. The caption (taskbar) keeps the title
+/// alone. A directory the title already shows adds nothing.
+pub fn withSubtitle(alloc: std.mem.Allocator, title: []const u8, pwd: ?[]const u8) std.mem.Allocator.Error![:0]u8 {
+    const dir = pwd orelse "";
+    if (dir.len == 0 or std.mem.indexOf(u8, title, dir) != null) return alloc.dupeSentinel(u8, title, 0);
+    return std.fmt.allocPrintSentinel(alloc, "{s} \u{2014} {s}", .{ title, dir }, 0);
+}
+
+test "win32 title rules: subtitle" {
+    const a = std.testing.allocator;
+    const s = try withSubtitle(a, "bash", "C:/work");
+    defer a.free(s);
+    try std.testing.expectEqualStrings("bash \u{2014} C:/work", s);
+    const t = try withSubtitle(a, "vim C:/work/a", "C:/work");
+    defer a.free(t);
+    try std.testing.expectEqualStrings("vim C:/work/a", t);
+    const u = try withSubtitle(a, "x", null);
+    defer a.free(u);
+    try std.testing.expectEqualStrings("x", u);
+}

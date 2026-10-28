@@ -8,6 +8,7 @@ const win32 = @import("win32");
 const Window = @import("Window.zig");
 const Tab = @import("Tab.zig");
 const messages = @import("messages.zig");
+const about = @import("about.zig");
 const title_edit = @import("title_edit.zig");
 const strip_input = @import("strip_input.zig");
 
@@ -23,6 +24,7 @@ pub const Command = enum(u32) {
     close_tabs_to_right,
     move_to_new_window,
     rename_tab,
+    about,
 };
 
 /// What a command runs, as the actions of the same names.
@@ -30,6 +32,7 @@ pub const Action = union(enum) {
     close_tab: Window.CloseTabMode,
     move_tab_to_new_window,
     prompt_title,
+    about,
 };
 
 const entries = [_]struct { command: Command, label: [:0]const u16 }{
@@ -38,12 +41,13 @@ const entries = [_]struct { command: Command, label: [:0]const u16 }{
     .{ .command = .close_tabs_to_right, .label = std.unicode.utf8ToUtf16LeStringLiteral("Close Tabs to the Right") },
     .{ .command = .move_to_new_window, .label = std.unicode.utf8ToUtf16LeStringLiteral("Move Tab to New Window") },
     .{ .command = .rename_tab, .label = std.unicode.utf8ToUtf16LeStringLiteral("Rename Tab...") },
+    .{ .command = .about, .label = std.unicode.utf8ToUtf16LeStringLiteral("About Ghostty") },
 };
 
 /// Whether `command` does anything for the tab at `index` of `count` tabs.
 pub fn enabled(command: Command, count: usize, index: usize) bool {
     return switch (command) {
-        .close_tab, .rename_tab => true,
+        .close_tab, .rename_tab, .about => true,
         .close_other_tabs, .move_to_new_window => count > 1,
         .close_tabs_to_right => index + 1 < count,
     };
@@ -56,6 +60,7 @@ pub fn actionFor(command: Command) Action {
         .close_tabs_to_right => .{ .close_tab = .right },
         .move_to_new_window => .move_tab_to_new_window,
         .rename_tab => .prompt_title,
+        .about => .about,
     };
 }
 
@@ -73,7 +78,7 @@ pub fn show(window: *Window, tab_index: usize, screen_x: i32, screen_y: i32) voi
     defer _ = user32.DestroyMenu(menu);
     for (entries) |e| {
         // The rename item is set apart from the close and move items.
-        if (e.command == .rename_tab) _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
+        if (e.command == .rename_tab or e.command == .about) _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
         const flags: u32 = user32.MF_STRING | if (enabled(e.command, count, tab_index)) @as(u32, 0) else MF_GRAYED;
         _ = user32.AppendMenuW(menu, flags, @backingInt(e.command), e.label.ptr);
     }
@@ -118,6 +123,7 @@ fn run(window: *Window, tab: *Tab, action: Action) void {
             title_edit.beginFor(window, .tab, tab.id, rect, tab.title());
             return;
         },
+        .about => about.request(window.app),
     }
     if (window.activeTab()) |active| active.focus();
 }

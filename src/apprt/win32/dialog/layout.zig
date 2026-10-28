@@ -124,11 +124,14 @@ pub const Input = struct {
     /// Height of the list card; 0 for none. A list makes the dialog as wide
     /// as it gets.
     list_h: i32 = 0,
+    /// Height of an app icon above the text; 0 for none.
+    icon_h: i32 = 0,
 };
 
 pub const Plan = struct {
     width: i32,
     height: i32,
+    icon: Rect = .{},
     title: Rect,
     body: Rect,
     list: Rect,
@@ -159,6 +162,10 @@ pub fn plan(in: Input) Plan {
     };
 
     var y = p;
+    if (in.icon_h > 0) {
+        out.icon = .{ .x = p, .y = y, .w = in.icon_h, .h = in.icon_h };
+        y += in.icon_h + g;
+    }
     if (in.title_h > 0) {
         out.title = .{ .x = p, .y = y, .w = content_w, .h = in.title_h };
         y += in.title_h;

@@ -105,6 +105,23 @@ pub fn confirm(
     return answer == button_accept;
 }
 
+/// Set by `taskDialogIcon` for the next `show` (UI thread, dialogs are modal).
+var take_icon: bool = false;
+
+/// `taskDialogList` with the app icon above the text.
+pub fn taskDialogIcon(
+    owner: ?win32.foundation.HWND,
+    title: []const u8,
+    instruction: []const u8,
+    body: []const u8,
+    buttons: []const ListButton,
+    default_id: i32,
+) ?i32 {
+    take_icon = true;
+    defer take_icon = false;
+    return taskDialogList(owner, title, instruction, body, buttons, default_id);
+}
+
 /// One button of `taskDialogList`.
 pub const ListButton = struct {
     id: i32,
@@ -177,6 +194,7 @@ fn show(
         .list = dtext.toWideFit(&list_buf, list, .paragraphs),
         .buttons = wide_buttons[0..count],
         .default_index = default_index,
+        .icon = take_icon,
     });
 }
 

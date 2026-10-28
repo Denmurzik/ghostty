@@ -956,7 +956,12 @@ pub fn refreshTitle(self: *Window) void {
 
     // The title row shows the same text as the caption.
     const shown_text = decorated orelse text;
-    if (alloc.dupeSentinel(u8, shown_text, 0)) |copy| {
+    // `window-subtitle = working-directory` adds the directory to the row only.
+    const row_text = if (self.app.config.@"window-subtitle" == .@"working-directory")
+        title_rules.withSubtitle(alloc, shown_text, self.focusedPwd())
+    else
+        alloc.dupeSentinel(u8, shown_text, 0);
+    if (row_text) |copy| {
         if (self.chrome_title) |old| alloc.free(old);
         self.chrome_title = copy;
         self.placeTitle();

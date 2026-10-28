@@ -78,11 +78,14 @@ pub const Spec = struct {
     default_index: usize,
     /// What closing the dialog (Esc, Alt+F4) answers.
     cancel_id: i32 = cancel_id,
+    /// Show the app icon (resource 1) above the text.
+    icon: bool = false,
 };
 
 // -- Win32 odds and ends the bindings do not have ----------------------------------
 
 const ext = struct {
+    extern "user32" fn DrawIconEx(user32.HDC, i32, i32, win32.user32.HICON, i32, i32, u32, ?*anyopaque, u32) callconv(.winapi) BOOL;
     extern "user32" fn EnableWindow(HWND, BOOL) callconv(.winapi) BOOL;
     extern "user32" fn IsChild(HWND, ?HWND) callconv(.winapi) BOOL;
     extern "user32" fn GetDpiForSystem() callconv(.winapi) u32;
@@ -484,6 +487,7 @@ fn buildPlan(self: *Dialog) !layout.Plan {
         .title_h = title.h,
         .body_h = body.h,
         .list_h = list_h,
+        .icon_h = if (self.spec.icon) layout.px(48, dpi) else 0,
     };
     return layout.plan(self.plan_input);
 }
@@ -1037,6 +1041,15 @@ fn drawParent(self: *Dialog, pen: Pen, _: void) void {
     pen.fill(.{ .x = p.footer.x, .y = p.footer.y, .w = p.footer.w, .h = 1 }, pal.divider);
 }
 
+fn drawIcon(self: *Dialog, hdc: user32.HDC) void {
+    if (!self.spec.icon or self.plan.icon.w <= 0) return;
+    const hinstance = win32.kernel32.GetModuleHandleW(null);
+    const id: *const anyopaque = @ptrFromInt(1);
+    const icon = user32.LoadImageW(hinstance, id, user32.IMAGE_ICON, self.plan.icon.w, self.plan.icon.h, user32.LR_DEFAULTCOLOR) orelse return;
+    defer _ = user32.DestroyIcon(@ptrCast(icon));
+    _ = ext.DrawIconEx(hdc, self.plan.icon.x, self.plan.icon.y, @ptrCast(icon), self.plan.icon.w, self.plan.icon.h, 0, null, 3);
+}
+
 fn paint(self: *Dialog, hwnd: HWND) void {
     var ps: user32.PAINTSTRUCT = undefined;
     const hdc = user32.BeginPaint(hwnd, &ps) orelse return;
@@ -1045,6 +1058,7 @@ fn paint(self: *Dialog, hwnd: HWND) void {
     var rc: RECT = undefined;
     _ = user32.GetClientRect(hwnd, &rc);
     self.drawBuffered(hdc, rc, {}, drawParent);
+    self.drawIcon(hdc);
 }
 
 const ButtonPaint = struct {

@@ -345,7 +345,8 @@ language: ?[:0]const u8 = null,
 @"clipboard-codepoint-map": RepeatableClipboardCodepointMap = .{},
 
 /// Draw fonts with a thicker stroke, if supported.
-/// This is currently only supported on macOS.
+/// This is currently only supported on macOS (CoreText); it has no effect on
+/// Windows (FreeType/DirectWrite).
 @"font-thicken": bool = false,
 
 /// Strength of thickening when `font-thicken` is enabled.
@@ -2188,7 +2189,8 @@ keybind: Keybinds = .{},
 ///   * `working-directory` - Set the subtitle to the working directory of the
 ///      surface.
 ///
-/// This feature is only supported on GTK.
+/// This feature is supported on GTK and Windows (the directory follows the title
+/// in the title row after an em dash; the taskbar caption stays the title).
 ///
 /// Available since: 1.1.0
 @"window-subtitle": WindowSubtitle = .false,

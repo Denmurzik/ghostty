@@ -68,7 +68,7 @@ fn show(app: *App, owner: ?win32.foundation.HWND) void {
         .{ .id = button_project, .text = "&GitHub" },
         .{ .id = button_close, .text = "Close" },
     };
-    const answer = dialogs.taskDialogList(owner, "About Ghostty", "Ghostty", w.buffered(), &buttons, button_close) orelse return;
+    const answer = dialogs.taskDialogIcon(owner, "About Ghostty", "Ghostty", w.buffered(), &buttons, button_close) orelse return;
     switch (answer) {
         button_docs => shell_open.submit(app, 0, .unknown, docs_url),
         button_project => shell_open.submit(app, 0, .unknown, project_url),
