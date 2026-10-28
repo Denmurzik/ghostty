@@ -3837,6 +3837,22 @@ else
 /// This only applies to Windows.
 @"windows-single-instance": WindowsSingleInstance = .detect,
 
+/// Whether Ghostty answers `tmux` commands on Windows. Programs that drive
+/// tmux (Claude Code's agent teams, for one) run `tmux.exe`, which ships next
+/// to `ghostty.exe`; it talks to this Ghostty over a private named pipe and
+/// opens panes as Ghostty splits, tabs and windows.
+///
+/// When enabled (the default), every pane gets `TMUX` and `TMUX_PANE`, and the
+/// directory of `tmux.exe` is put first on its `PATH`.
+///
+/// When disabled, `TMUX` and `TMUX_PANE` are neither set nor removed (an
+/// inherited `TMUX` stays as it is), `PATH` is not changed, and `tmux.exe`
+/// is only found if Ghostty's own directory is on `PATH`. The setting is read
+/// when a surface starts, so a reload affects new surfaces only.
+///
+/// This only applies to Windows.
+@"windows-tmux-shim": bool = true,
+
 /// When enabled, the full GTK titlebar is displayed instead of your window
 /// manager's simple titlebar. The behavior of this option will vary with your
 /// window manager.

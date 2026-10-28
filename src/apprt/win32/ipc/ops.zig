@@ -105,7 +105,7 @@ pub fn handleEarly(app: *App, alloc: Allocator, request: []const u8, early: ?*Se
     };
 }
 
-const Op = enum {
+pub const Op = enum {
     @"new-window",
     @"new-tab",
     @"toggle-quick-terminal",

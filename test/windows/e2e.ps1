@@ -50,7 +50,7 @@ powershell -NoProfile -File test/windows/e2e.ps1 -Milestone M1
 powershell -NoProfile -File test/windows/e2e.ps1 -Only startup,render -EvidenceDir C:\tmp\evidence
 #>
 param(
-    [ValidateSet('M1', 'M2', 'M3', 'all')][string]$Milestone = 'all',
+    [ValidateSet('M1', 'M2', 'M3', 'M4', 'all')][string]$Milestone = 'all',
     [string[]]$Only,
     [string]$EvidenceDir
 )

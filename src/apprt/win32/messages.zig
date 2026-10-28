@@ -56,6 +56,8 @@ pub const timers = struct {
         pub const recovery: usize = 2;
         /// Gives memory back once surfaces stopped closing (`App.scheduleMemoryRelease`).
         pub const release_memory: usize = 3;
+        /// tmux `send-keys` gate and pane input timing (`tmux/pane_io.zig`).
+        pub const tmux_keys: usize = 4;
     };
     pub const tab = struct {
         /// Throttled relayout while a split divider is dragged.
@@ -147,7 +149,7 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
     // A timer id is only meaningful to the window that owns it, so ids
     // must differ within one class; the top-level window has several.
     const classes = .{
-        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory },
+        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory, timers.msg_window.tmux_keys },
         [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace },
         [_]usize{ timers.overlay.hide, timers.overlay.search_debounce, timers.overlay.scroller_hold, timers.overlay.scroller_fade },
         [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce, timers.window.tab_tooltip, timers.window.tab_anim },
@@ -156,5 +158,13 @@ test "win32 skeleton: timer ids are unique per class incl. M3" {
         for (ids, 0..) |id, i| {
             for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
         }
+    }
+}
+
+test "win32 skeleton: M4 timer id unique" {
+    try std.testing.expectEqual(@as(usize, 4), timers.msg_window.tmux_keys);
+    const ids = [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory, timers.msg_window.tmux_keys };
+    for (ids, 0..) |id, i| {
+        for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
     }
 }

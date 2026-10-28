@@ -28,10 +28,6 @@ const advapi32 = win32.advapi32;
 const HANDLE = win32.foundation.HANDLE;
 const HWND = win32.foundation.HWND;
 
-/// Upper bound for reading a request and for writing a response.
-const io_timeout_ms = 2000;
-/// How long a finished client gets to read the response and close.
-const close_wait_ms = 1000;
 const pipe_buffer = 64 << 10;
 const thread_stack = 64 << 10;
 
@@ -64,6 +60,15 @@ msg_hwnd: ?HWND = null,
 elevated: bool,
 /// The request the thread was still waiting on when it saw `quit`.
 outstanding: ?*Pending = null,
+/// wparam of the `WM_GHOSTTY_IPC` this server posts: 0 is the per-user M2
+/// pipe, 1 the tmux pipe. Set before `start`.
+post_tag: usize = 0,
+/// Largest request frame accepted; a bigger header is answered `bad_request`.
+max_request: u32 = protocol.max_request_m2,
+/// Upper bound for reading a request and for writing a response.
+io_timeout_ms: u32 = 2000,
+/// How long a finished client gets to read the response and close.
+close_wait_ms: u32 = 1000,
 /// Test hook: behave as if `PostMessageW` failed.
 test_fail_post: std.atomic.Value(bool) = .init(false),
 
@@ -284,11 +289,11 @@ fn serve(self: *Server, io: client.Io) void {
         return;
     }
 
-    const read_deadline = kernel32.GetTickCount64() + io_timeout_ms;
+    const read_deadline = kernel32.GetTickCount64() + self.io_timeout_ms;
     var hdr: [4]u8 = undefined;
     io.readExact(&hdr, read_deadline) catch return;
     const len = std.mem.readInt(u32, &hdr, .little);
-    if (len > protocol.max_request_m2) {
+    if (len > self.max_request) {
         self.reply(io, .bad_request, "request too large");
         return;
     }
@@ -319,7 +324,7 @@ fn serve(self: *Server, io: client.Io) void {
     if (self.test_fail_post.load(.acquire) or win32.user32.PostMessageW(
         self.msg_hwnd,
         messages.WM_GHOSTTY_IPC,
-        0,
+        self.post_tag,
         @bitCast(@intFromPtr(pending)),
     ) == 0) {
         release(pending, self.alloc);
@@ -353,7 +358,7 @@ fn reply(self: *Server, io: client.Io, code: protocol.Code, message: []const u8)
 }
 
 fn send(self: *Server, io: client.Io, payload: []const u8) void {
-    io.writeFrame(self.alloc, payload, kernel32.GetTickCount64() + io_timeout_ms) catch |err| {
+    io.writeFrame(self.alloc, payload, kernel32.GetTickCount64() + self.io_timeout_ms) catch |err| {
         log.debug("response not delivered: {}", .{err});
     };
 }
@@ -361,9 +366,8 @@ fn send(self: *Server, io: client.Io, payload: []const u8) void {
 /// Disconnecting discards what the client has not read yet, so wait for
 /// it to read the response and close its end (or for the timeout).
 fn waitClosed(self: *Server, io: client.Io) void {
-    _ = self;
     var scratch: [256]u8 = undefined;
-    const deadline = kernel32.GetTickCount64() + close_wait_ms;
+    const deadline = kernel32.GetTickCount64() + self.close_wait_ms;
     while (true) _ = io.readSome(&scratch, deadline) catch return;
 }
 
@@ -389,6 +393,9 @@ pub const TestUi = struct {
     hwnd: HWND,
     handled: std.atomic.Value(u32) = .init(0),
     expired: std.atomic.Value(u32) = .init(0),
+    /// Replaces the echo handler (the tmux server tests install theirs).
+    custom: ?*const fn (ctx: ?*anyopaque, pending: *Pending) void = null,
+    custom_ctx: ?*anyopaque = null,
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyIpcTestUi");
 
@@ -428,7 +435,8 @@ pub const TestUi = struct {
     fn wndProc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) callconv(.winapi) isize {
         if (msg == messages.WM_GHOSTTY_IPC) {
             if (util.fromUserData(TestUi, hwnd)) |ui| {
-                ui.handle(@ptrFromInt(@as(usize, @bitCast(lparam))));
+                const pending: *Pending = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                if (ui.custom) |c| c(ui.custom_ctx, pending) else ui.handle(pending);
             }
             return 0;
         }

@@ -29,6 +29,10 @@ const notify = @import("notify.zig");
 const overlay = @import("overlay.zig");
 const recovery = @import("recovery.zig");
 const shell_open = @import("shell_open.zig");
+const tmux_Registry = @import("tmux/Registry.zig");
+const tmux_Server = @import("tmux/Server.zig");
+const tmux_pane_io = @import("tmux/pane_io.zig");
+const tmux_labels = @import("tmux/labels.zig");
 
 const Config = configpkg.Config;
 
@@ -56,6 +60,7 @@ pub fn appStopping(app: *App) void {
     Inspector.appStopping(app);
     composition.appStopping(app);
     notify.deinit(app);
+    tmux_Registry.appStopping(app);
     drainDialogs(app.msg_hwnd);
 }
 
@@ -93,7 +98,14 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
             Inspector.wakeup(app);
             return null;
         },
-        win32.user32.WM_TIMER => return recovery.timer(app, wparam),
+        win32.user32.WM_TIMER => {
+            if (recovery.timer(app, wparam)) |r| return r;
+            if (wparam == messages.timers.msg_window.tmux_keys) {
+                tmux_pane_io.onTimer(app);
+                return 0;
+            }
+            return null;
+        },
         messages.WM_GHOSTTY_POSTED_DIALOG => {
             // Posted before any window existed (start-up config errors).
             if (std.enums.fromInt(DialogKind, wparam) == .config_errors) {
@@ -160,17 +172,20 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
     if (change == .destroying) link.windowDestroying(window);
     if (change == .destroying) CommandPalette.windowDestroying(window);
     QuickTerminal.windowChanged(window, change);
+    tmux_labels.windowChanged(window, change);
 }
 
 /// The tab became the window's visible one (or stopped being it).
 pub fn tabShown(tab: *Tab, shown: bool) void {
     overlay.tabShown(tab, shown);
+    tmux_labels.tabShown(tab, shown);
 }
 
 /// Called at the point where `Tab.setWindow` has moved the tab.
 pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     overlay.tabReparented(tab, from, to);
     composition.tabReparented(tab, from, to);
+    tmux_labels.tabReparented(tab, from, to);
 }
 
 pub fn surfaceCreated(surface: *Surface) void {
@@ -188,6 +203,9 @@ pub fn surfaceDestroying(surface: *Surface) void {
     key_state.surfaceDestroying(surface);
     Inspector.surfaceDestroying(surface);
     composition.surfaceDestroying(surface);
+    tmux_pane_io.surfaceDestroying(surface);
+    tmux_labels.surfaceDestroying(surface);
+    tmux_Registry.surfaceDestroying(surface);
 }
 
 /// WM_SETFOCUS / WM_KILLFOCUS of the surface child.
@@ -200,6 +218,8 @@ pub fn surfaceFocus(surface: *Surface, focused: bool) void {
 /// active surface.
 pub fn tabLayoutChanged(tab: *Tab) void {
     decor.tabLayoutChanged(tab);
+    tmux_pane_io.layoutChanged(tab);
+    tmux_labels.tabLayoutChanged(tab);
 }
 
 /// WM_WINDOWPOSCHANGED of the surface child.
@@ -264,6 +284,7 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.objectField("config_errors");
     try config_errors.testState(app, jw);
     try jw.endObject();
+    try tmux_Server.testState(app, jw);
 }
 
 test "win32 hooks: testState writes an m3 object" {
@@ -276,6 +297,7 @@ test "win32 hooks: testState writes an m3 object" {
     app.windows = .empty;
     app.quick = .{};
     app.shell_open = .{};
+    app.tmux_server = .{};
     try testState(&app, &jw);
     try jw.endObject();
 
@@ -283,6 +305,8 @@ test "win32 hooks: testState writes an m3 object" {
     defer parsed.deinit();
     const m3 = parsed.value.object.get("m3") orelse return error.TestUnexpectedResult;
     try std.testing.expect(m3 == .object);
+    const tmux = parsed.value.object.get("tmux") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tmux.object.get("panes") != null);
     inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io", "config_errors" }) |key| {
         try std.testing.expect(m3.object.get(key) != null);
     }

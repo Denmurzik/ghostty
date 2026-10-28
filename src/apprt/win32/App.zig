@@ -32,6 +32,10 @@ const notify_mod = @import("notify.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const recovery_mod = @import("recovery.zig");
 const shell_open_mod = @import("shell_open.zig");
+const tmux_Server = @import("tmux/Server.zig");
+const tmux_Registry_mod = @import("tmux/Registry.zig");
+const tmux_pane_io_mod = @import("tmux/pane_io.zig");
+const tmux_labels_mod = @import("tmux/labels.zig");
 const tray_mod = @import("tray.zig");
 const util = @import("util.zig");
 const visibility_mod = @import("visibility.zig");
@@ -89,6 +93,13 @@ recovery: recovery_mod.State = .{},
 visibility: visibility_mod.State = .{},
 shell_open: shell_open_mod.State = .{},
 composition: composition_mod.AppState = .{},
+
+/// M4 tmux state: the tmux pipe, the pane registry, pane input timing and
+/// the pane labels.
+tmux_server: tmux_Server.State = .{},
+tmux: tmux_Registry_mod.State = .{},
+tmux_keys: tmux_pane_io_mod.State = .{},
+tmux_labels: tmux_labels_mod.State = .{},
 
 /// Set while a hard config reload runs, so that the `config_change` it
 /// produces is told apart from a soft apply.
@@ -149,6 +160,10 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     errdefer self.stopServer();
     if (self.forwarded) return;
 
+    // Before the first window, so that its first pane already gets `TMUX`.
+    tmux_Server.start(self);
+    errdefer tmux_Server.stop(self);
+
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
 
@@ -185,6 +200,7 @@ pub fn terminate(self: *App) void {
     tray_mod.deinit(self);
 
     // The message loop is over: no WM_GHOSTTY_IPC can touch a freed request.
+    tmux_Server.stop(self);
     self.stopServer();
 
     // Popped before they are destroyed: a window whose DestroyWindow fails
@@ -483,9 +499,15 @@ fn msgWndProc(
         },
 
         WM_GHOSTTY_IPC => {
-            // After `stopServer` the request belongs to the server again.
-            if (self.server == null) return 0;
-            self.handleIpc(@ptrFromInt(@as(usize, @bitCast(lparam))));
+            // Routed on wparam first: the tmux pipe also answers in a process
+            // that does not own the main pipe. After a server stopped, its
+            // requests belong to it again.
+            const pending: *ipc.Server.Pending = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            switch (tmux_Server.routeIpc(wparam, self.server, self.tmux_server.server)) {
+                .tmux => tmux_Server.handle(self, pending),
+                .main => self.handleIpc(pending),
+                .drop => {},
+            }
             return 0;
         },
 

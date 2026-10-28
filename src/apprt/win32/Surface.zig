@@ -32,6 +32,7 @@ const dialogs = @import("dialogs.zig");
 const dpi = @import("dpi.zig");
 const drop = @import("drop.zig");
 const hooks_mod = @import("hooks.zig");
+const tmux_env = @import("tmux/env.zig");
 const ime = @import("ime.zig");
 const key_state_mod = @import("key_state.zig");
 const keyboard = @import("keyboard.zig");
@@ -56,6 +57,8 @@ pub const CreateOptions = struct {
     parent: ?*CoreSurface = null,
     overrides: Overrides = .none,
     context: apprt.surface.NewSurfaceContext,
+    /// The tmux pane number (`%N`) this surface answers to; null: its `id`.
+    pane_id: ?u32 = null,
 };
 
 /// Sent to a child window after its parent's DPI changed (winuser.h).
@@ -96,6 +99,10 @@ shell_kind: drop.ShellKind,
 /// down. Window messages arriving outside that span never reach core.
 initialized: bool,
 id: u32,
+/// The tmux pane number (`%N`): `id` unless `CreateOptions.pane_id` says otherwise.
+pane_id: u32,
+/// What `defaultTermioEnv` put into TMUX_PANE (test state only).
+env_tmux_pane: ?u32 = null,
 
 /// Physical client size packed with `renderer.D3D11.packSize`. Written on
 /// the UI thread, read by the renderer thread through the present target.
@@ -176,6 +183,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
 
     const self = try alloc.create(Surface);
     errdefer alloc.destroy(self);
+    const id = next_id.fetchAdd(1, .monotonic);
     self.* = .{
         .hwnd = undefined,
         .window = window,
@@ -185,7 +193,8 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
         .initialized = false,
         .shell_kind = drop.shellKindFor(config.command),
         .scrollbar = .{ .enabled = config.scrollbar == .system },
-        .id = next_id.fetchAdd(1, .monotonic),
+        .id = id,
+        .pane_id = opts.pane_id orelse id,
         .size = .init(0),
         .content_scale = dpi.contentScale(window.dpi),
         .title = null,
@@ -461,8 +470,21 @@ pub fn setClipboard(
 }
 
 pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
-    _ = self;
-    return global.environMap();
+    var map = try global.environMap();
+    errdefer map.deinit();
+    const enabled = self.app.config.@"windows-tmux-shim";
+    const st = &self.app.tmux_server;
+    try tmux_env.apply(&map, .{
+        .enabled = enabled,
+        .pipe = st.pipe,
+        .server_pid = win32.kernel32.GetCurrentProcessId(),
+        .pane_id = self.pane_id,
+        .exe_dir = st.exe_dir,
+    });
+    // Test state only: what this pane was told.
+    const mutable: *Surface = @constCast(self);
+    mutable.env_tmux_pane = if (enabled and st.pipe != null) self.pane_id else null;
+    return map;
 }
 
 pub fn renderDeviceOptions(self: *const Surface) !renderer.Device.Options {
