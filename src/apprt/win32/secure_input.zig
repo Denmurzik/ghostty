@@ -30,8 +30,9 @@
 //!    exclusion was not verified.
 //!  - ConPTY has no termios, so there is no automatic secure input at
 //!    password prompts (macOS `macos-auto-secure-input`). A documented gap.
-//!  - Needs Windows 10 version 2004 or later; where the call fails it is
-//!    logged and the windows stay capturable.
+//!  - Before Windows 10 version 2004 the exclusion behaves as
+//!    `WDA_MONITOR`: the windows show as black in captures instead of
+//!    being left out. Where the call fails it is logged.
 const std = @import("std");
 const win32 = @import("win32");
 const apprt = @import("../../apprt.zig");

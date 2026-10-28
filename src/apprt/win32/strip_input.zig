@@ -11,6 +11,7 @@ const Window = @import("Window.zig");
 const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const proxy_icon = @import("proxy_icon.zig");
+const secure_input = @import("secure_input.zig");
 const title_edit = @import("title_edit.zig");
 const App = @import("App.zig");
 const Tab = @import("Tab.zig");
@@ -327,6 +328,8 @@ fn tooltipWindow(window: *Window) ?win32.foundation.HWND {
         return null;
     }
     _ = user32.SendMessageW(tip, comctl32.TTM_SETMAXTIPWIDTH, 0, geom.scale(tooltip_max_width, window.dpi));
+    // Created lazily: it may appear after secure input was turned on.
+    secure_input.apply(tip);
     window.strip_input.tooltip = tip;
     return tip;
 }

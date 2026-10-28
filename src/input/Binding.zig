@@ -789,7 +789,12 @@ pub const Action = union(enum) {
     /// This applies to the entire application, not just the focused terminal.
     /// You must manually untoggle it or quit Ghostty entirely to disable it.
     ///
-    /// Only implemented on macOS, as this uses a built-in system API.
+    /// Implemented on macOS, as this uses a built-in system API.
+    ///
+    /// On Windows there is no system-wide secure input. Ghostty instead
+    /// excludes its windows from screen capture and keeps copied text out
+    /// of the clipboard history and cloud clipboard, and shows a lock badge.
+    /// It does not stop keyboard hooks or programs running as the same user.
     toggle_secure_input,
 
     /// Toggle mouse reporting on or off.
