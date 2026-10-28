@@ -246,14 +246,37 @@ const win = struct {
 
 const path_cap = 2100;
 
+fn isSep(c: u8) bool {
+    return c == '\\' or c == '/';
+}
+
+/// `X:\...` or `\\server\...`. A drive-relative, rooted-only or bare name
+/// would be resolved against the current directory, so it is never accepted.
+fn isAbsolute(p: []const u8) bool {
+    if (p.len >= 3 and std.ascii.isAlphabetic(p[0]) and p[1] == ':' and isSep(p[2])) return true;
+    return p.len >= 3 and isSep(p[0]) and isSep(p[1]) and !isSep(p[2]);
+}
+
 /// R-M6-5: UTF-8 path to a full, long UTF-16 path (no `\\?\` prefix, no 8.3
-/// names). A path that does not exist keeps its full form.
+/// names). A path that does not exist keeps its full form. A relative path
+/// is refused (null): `GetFullPathNameW` would anchor it at our cwd, and a
+/// foreign verb could then look like ours. Junctions and `subst` drives are
+/// not resolved: a copy reached through another alias is missed (its verbs
+/// stay), never a foreign one deleted.
 fn normalizePath(path: []const u8, out: *[path_cap]u16) ?[]const u16 {
     var raw: [path_cap:0]u16 = undefined;
-    const trimmed = if (std.mem.startsWith(u8, path, "\\\\?\\") and path.len > 6 and path[5] == ':')
+    var unc: [path_cap]u8 = undefined;
+    const trimmed = if (std.ascii.startsWithIgnoreCase(path, "\\\\?\\UNC\\") and path.len > 8) t: {
+        // \\?\UNC\server\share -> \\server\share
+        if (path.len - 6 > unc.len) return null;
+        unc[0] = '\\';
+        @memcpy(unc[1 .. path.len - 6], path[7..]);
+        break :t unc[0 .. path.len - 7 + 1];
+    } else if (std.mem.startsWith(u8, path, "\\\\?\\") and path.len > 6 and path[5] == ':')
         path[4..]
     else
         path;
+    if (!isAbsolute(trimmed)) return null;
     const n = std.unicode.utf8ToUtf16Le(&raw, trimmed) catch return null;
     if (n >= path_cap) return null;
     raw[n] = 0;
@@ -627,7 +650,7 @@ test "explorer cli: --only-this-exe deletes its own verbs and keeps a foreign on
     try std.testing.expectEqual(@as(usize, 0), try countVerbs(alloc, &h));
 }
 
-test "explorer cli: only-this-exe matches a short or prefixed path" {
+test "explorer cli: only-this-exe matches a prefixed path" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
 
@@ -640,16 +663,69 @@ test "explorer cli: only-this-exe matches a short or prefixed path" {
     try std.testing.expect(pathsEqual(exe, prefixed));
     try std.testing.expect(!pathsEqual(exe, "C:\\Other\\ghostty.exe"));
 
-    // The 8.3 form, if the volume has short names.
+    // A quoted `\\?\` command is ours; the same name in a sibling dir is not.
+    const cmd = try std.fmt.allocPrint(alloc, "\"{s}\" \"%V\"", .{prefixed});
+    defer alloc.free(cmd);
+    try std.testing.expect(explorer.ownsKeyFor(cmd, null, exe, pathsEqual));
+    const sibling = try std.fmt.allocPrint(alloc, "\"\\\\?\\C:\\Other\\{s}\" \"%V\"", .{std.fs.path.basename(exe)});
+    defer alloc.free(sibling);
+    try std.testing.expect(!explorer.ownsKeyFor(sibling, null, exe, pathsEqual));
+}
+
+test "explorer cli: only-this-exe normalises dots, slashes and UNC" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(pathsEqual("C:\\A\\..\\A\\Ghostty.EXE", "C:\\A\\ghostty.exe"));
+    try std.testing.expect(pathsEqual("C:/A/ghostty.exe", "C:\\A\\ghostty.exe"));
+    try std.testing.expect(pathsEqual("C:\\A\\ghostty.exe.", "C:\\A\\ghostty.exe"));
+    try std.testing.expect(!pathsEqual("C:\\A\\..\\B\\ghostty.exe", "C:\\A\\ghostty.exe"));
+    try std.testing.expect(pathsEqual("\\\\?\\UNC\\srv\\share\\g.exe", "\\\\srv\\share\\G.exe"));
+}
+
+test "explorer cli: only-this-exe never matches a relative command" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe = exe_buf[0..try std.process.executablePath(std.testing.io, &exe_buf)];
+    const base = std.fs.path.basename(exe);
+
+    // Relative to the cwd, a bare name, a rooted path and a drive-relative one.
+    try std.testing.expect(!explorer.ownsKeyFor("\"ghostty.exe\" \"%V\"", null, "C:\\A\\ghostty.exe", pathsEqual));
+    try std.testing.expect(!explorer.ownsKeyFor("\"\\A\\ghostty.exe\" \"%V\"", null, "C:\\A\\ghostty.exe", pathsEqual));
+    try std.testing.expect(!explorer.ownsKeyFor("\"C:ghostty.exe\" \"%V\"", null, "C:\\A\\ghostty.exe", pathsEqual));
+    const rel = try std.fmt.allocPrint(alloc, "\"{s}\" \"%V\"", .{base});
+    defer alloc.free(rel);
+    try std.testing.expect(!explorer.ownsKeyFor(rel, null, exe, pathsEqual));
+    const dots = try std.fmt.allocPrint(alloc, "\"..\\{s}\" \"%V\"", .{base});
+    defer alloc.free(dots);
+    try std.testing.expect(!explorer.ownsKeyFor(dots, null, exe, pathsEqual));
+}
+
+test "explorer cli: only-this-exe expands an 8.3 name" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(std.testing.io, "A Long Directory Name", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "A Long Directory Name/Long Program Name.exe", .data = "x" });
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, "A Long Directory Name/Long Program Name.exe", alloc);
+    defer alloc.free(base);
+
     var wide: [path_cap:0]u16 = undefined;
-    const wn = try std.unicode.utf8ToUtf16Le(&wide, exe);
+    const wn = try std.unicode.utf8ToUtf16Le(&wide, base);
     wide[wn] = 0;
     var short: [path_cap]u16 = undefined;
     const sl = win.GetShortPathNameW(&wide, &short, path_cap);
-    if (sl == 0 or sl >= path_cap) return error.SkipZigTest;
+    try std.testing.expect(sl != 0 and sl < path_cap);
     const short8 = try std.unicode.utf16LeToUtf8Alloc(alloc, short[0..sl]);
     defer alloc.free(short8);
-    try std.testing.expect(pathsEqual(short8, exe));
+    // The volume has no 8.3 names: nothing to expand.
+    if (std.ascii.eqlIgnoreCase(short8, base)) return error.SkipZigTest;
+
+    try std.testing.expect(pathsEqual(short8, base));
+    const cmd = try std.fmt.allocPrint(alloc, "\"{s}\" \"%V\"", .{short8});
+    defer alloc.free(cmd);
+    try std.testing.expect(explorer.ownsKeyFor(cmd, null, base, pathsEqual));
 }
 
 test "explorer cli: dry-run uninstall --all --only-this-exe" {
