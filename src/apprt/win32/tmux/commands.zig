@@ -19,6 +19,12 @@ pub const Context = struct {
     deadline_ms: u64,
 };
 
+/// The most a request may leave in stdout, and the longest error line. A
+/// format can expand far past the request (`#{x}` repeated) and it all sits
+/// in the UI thread's arena before the reply is framed.
+pub const max_output: usize = 1 << 20;
+const max_error_line: usize = 4096;
+
 pub const Output = struct {
     code: u8 = 0,
     stdout: std.ArrayList(u8) = .empty,
@@ -238,7 +244,11 @@ pub fn execute(
 fn failOut(out: *Output, arena: Allocator, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
     out.code = 1;
     const s = try std.fmt.allocPrint(arena, fmt ++ "\n", args);
-    try out.stderr.appendSlice(arena, s);
+    // An echoed argument can be megabytes long.
+    if (s.len > max_error_line) {
+        try out.stderr.appendSlice(arena, s[0..max_error_line]);
+        try out.stderr.append(arena, '\n');
+    } else try out.stderr.appendSlice(arena, s);
 }
 
 /// Format variable lookup for `format.expand`.
@@ -248,8 +258,22 @@ const Fmt = struct {
     window_panes: usize,
     options: *const Options,
     oom: bool = false,
+    /// What the expansion may still add (`max_output` less the stdout so far).
+    budget: usize = max_output,
+    too_large: bool = false,
 
     pub fn lookup(self: *Fmt, name: []const u8) ?[]const u8 {
+        const value = self.lookupRaw(name) orelse return null;
+        if (value.len > self.budget) {
+            self.too_large = true;
+            self.budget = 0;
+            return null;
+        }
+        self.budget -= value.len;
+        return value;
+    }
+
+    fn lookupRaw(self: *Fmt, name: []const u8) ?[]const u8 {
         const v = &self.vars;
         const eql = std.mem.eql;
         if (eql(u8, name, "pane_id")) return self.print("%{d}", .{v.pane_id});
@@ -331,6 +355,11 @@ fn Env(comptime Host: type) type {
                 .send_keys => try self.sendKeys(cmd),
                 .capture_pane => try self.capturePane(cmd),
             }
+        }
+
+        fn replyTooLarge(self: Self) Allocator.Error!void {
+            self.out.stdout.clearRetainingCapacity();
+            return self.fail("ghostty: reply too large", .{});
         }
 
         fn fail(self: Self, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
@@ -426,10 +455,12 @@ fn Env(comptime Host: type) type {
                 .vars = self.host.vars(pane),
                 .window_panes = (try self.host.panes(self.arena, win)).len,
                 .options = self.host.options(),
+                .budget = max_output -| self.out.stdout.items.len,
             };
             var aw: std.Io.Writer.Allocating = .init(self.arena);
             format.expand(&aw.writer, fmt, &f) catch return error.OutOfMemory;
             if (f.oom) return error.OutOfMemory;
+            if (f.too_large or aw.written().len >= max_output -| self.out.stdout.items.len) return self.replyTooLarge();
             try self.out.stdout.appendSlice(self.arena, aw.written());
             try self.out.stdout.append(self.arena, '\n');
         }
@@ -615,12 +646,18 @@ fn Env(comptime Host: type) type {
             const fmt = cmd.value('F') orelse "#{pane_index}: [#{pane_width}x#{pane_height}] #{pane_id}";
             if (cmd.has('a') or cmd.has('s')) {
                 for (try self.host.windows(self.arena)) |w| {
-                    for (try self.host.panes(self.arena, w)) |p| try self.emitLine(fmt, p);
+                    for (try self.host.panes(self.arena, w)) |p| {
+                        try self.emitLine(fmt, p);
+                        if (self.out.code != 0) return;
+                    }
                 }
                 return;
             }
             const win = (try self.resolveWindow(cmd.value('t'))) orelse return;
-            for (try self.host.panes(self.arena, win)) |p| try self.emitLine(fmt, p);
+            for (try self.host.panes(self.arena, win)) |p| {
+                try self.emitLine(fmt, p);
+                if (self.out.code != 0) return;
+            }
         }
 
         fn listWindows(self: Self, cmd: *const cli.Command) Allocator.Error!void {
@@ -628,7 +665,10 @@ fn Env(comptime Host: type) type {
             if (!try self.counts(cmd, 0, 0)) return;
             const fmt = cmd.value('F') orelse "#{window_index}: #{window_name} (#{window_panes} panes) #{window_id}";
             // tmux lists the target's session (-a: all sessions): every window here.
-            for (try self.host.windows(self.arena)) |w| try self.emitLine(fmt, self.host.activePane(w));
+            for (try self.host.windows(self.arena)) |w| {
+                try self.emitLine(fmt, self.host.activePane(w));
+                if (self.out.code != 0) return;
+            }
         }
 
         fn showEnvironment(self: Self, cmd: *const cli.Command) Allocator.Error!void {
@@ -680,12 +720,16 @@ fn Env(comptime Host: type) type {
             };
             if (map) |m| {
                 var it = m.iterator();
-                while (it.next()) |e| try self.emitOption(cmd, e.key_ptr.*, e.value_ptr.*);
+                while (it.next()) |e| {
+                    try self.emitOption(cmd, e.key_ptr.*, e.value_ptr.*);
+                    if (self.out.code != 0) return;
+                }
             }
         }
 
         fn emitOption(self: Self, cmd: *const cli.Command, name: []const u8, value: []const u8) Allocator.Error!void {
             const out = &self.out.stdout;
+            if (name.len + value.len + 3 > max_output -| out.items.len) return self.replyTooLarge();
             if (cmd.has('v')) {
                 try out.appendSlice(self.arena, value);
             } else {
@@ -706,7 +750,11 @@ fn Env(comptime Host: type) type {
                 return self.fail("load-buffer: only stdin (-) is supported by Ghostty", .{});
             }
             try self.host.options().setBuffer(self.host.gpa(), data.?);
-            if (cmd.has('w')) self.host.setClipboard(data.?) catch |err| return self.hostError(err);
+            // Like OSC 52 through tmux, the clipboard follows clipboard-write; the
+            // buffer is kept either way.
+            if (cmd.has('w') and self.host.clipboardWriteAllowed()) {
+                self.host.setClipboard(data.?) catch |err| return self.hostError(err);
+            }
         }
 
         fn sendKeys(self: Self, cmd: *const cli.Command) Allocator.Error!void {
@@ -719,6 +767,7 @@ fn Env(comptime Host: type) type {
             }
             self.host.sendKeys(pane, cmd.positional, cmd.has('l'), cmd.has('H'), repeat) catch |err| {
                 if (err == error.UnknownKey) return self.fail("unknown key", .{});
+                if (err == error.TooLarge) return self.fail("ghostty: request too large", .{});
                 return self.hostError(err);
             };
         }
@@ -738,6 +787,7 @@ fn Env(comptime Host: type) type {
                 return self.hostError(err);
             };
             if (cmd.has('p')) {
+                if (aw.written().len >= max_output -| self.out.stdout.items.len) return self.replyTooLarge();
                 try self.out.stdout.appendSlice(self.arena, aw.written());
             } else {
                 try self.host.options().setBuffer(self.host.gpa(), aw.written());
@@ -1280,4 +1330,54 @@ test "win32 tmux commands: option values are capped, also when appended" {
     @memset(over, 'v');
     try rig.bad(&.{ "set-option", "-g", "other", over }, "option value too long");
     try testing.expect(rig.host.opts.global.get("other") == null);
+}
+
+test "win32 tmux commands: a format cannot expand the reply past max_output" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const big = try testing.allocator.alloc(u8, max_option_value);
+    defer testing.allocator.free(big);
+    @memset(big, 'v');
+    _ = try rig.ok(&.{ "set-option", "-g", "status-left", big });
+
+    // One expansion fits; 130 x 8192 B pass the 1 MiB cap.
+    var many: std.ArrayList(u8) = .empty;
+    defer many.deinit(testing.allocator);
+    for (0..130) |_| try many.appendSlice(testing.allocator, "#{status-left}");
+    try testing.expectEqual(max_option_value + 1, (try rig.ok(&.{ "display-message", "-p", "#{status-left}" })).len);
+    try rig.bad(&.{ "display-message", "-p", many.items }, "ghostty: reply too large");
+    const out = try rig.run(&.{ "display-message", "-p", many.items });
+    try testing.expectEqual(@as(usize, 0), out.stdout.items.len);
+    try testing.expect(out.stderr.items.len < 100);
+
+    // The same expansion through list-panes -a -F.
+    try rig.bad(&.{ "list-panes", "-a", "-F", many.items }, "ghostty: reply too large");
+}
+
+test "win32 tmux commands: send-keys over the cap answers request too large" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    rig.host.keys_too_large = true;
+    try rig.bad(&.{ "send-keys", "-t", "%1", "-N", "100000", "a" }, "ghostty: request too large");
+}
+
+test "win32 tmux commands: error lines are truncated" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const long = try testing.allocator.alloc(u8, 100_000);
+    defer testing.allocator.free(long);
+    @memset(long, 'n');
+    const out = try rig.run(&.{ "show-environment", "-g", long });
+    try testing.expectEqual(@as(u8, 1), out.code);
+    try testing.expect(out.stderr.items.len <= 4097);
+}
+
+test "win32 tmux commands: load-buffer -w keeps the buffer when clipboard-write is deny" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    rig.host.clipboard_denied = true;
+    const out = try rig.runCtx(Rig.ctxWith("secret"), &.{ "load-buffer", "-w", "-" });
+    try testing.expectEqual(@as(u8, 0), out.code);
+    try testing.expectEqualStrings("secret", rig.host.opts.buffer.?);
+    try testing.expect(rig.host.clipboard == null);
 }

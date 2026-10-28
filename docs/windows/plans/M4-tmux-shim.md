@@ -267,7 +267,7 @@ Message and timer ids (`messages.zig`, Task 8): no new message. The tmux pipe re
     - Stdin content is replaced by `"<n> bytes"` (it may hold clipboard text).
 
 - [ ] **Step 0: CLI check.** Run `claude --version` and `claude --help`. Record the spelling of `--agent-teams`, `--teammate-mode`, `--model`, `--permission-mode` and `--settings`, and any trust option. Fallbacks for hidden flags: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, and `teammateMode` inside the `--settings` JSON. Write the result into `ClaudeRun.psm1`.
-- [ ] **Step 1: Static re-check.** Run the extraction recipe from the recon header against `C:\Users\user\.local\bin\claude.exe`. Diff against recon §2–§9:
+- [ ] **Step 1: Static re-check.** Run the extraction recipe from the recon header against `%USERPROFILE%\.local\bin\claude.exe`. Diff against recon §2–§9:
   - backend detection and the `TMUX` snapshot;
   - command table rows 1–15 (argv shapes, `-t` before `-p`, `-l 70%`, the `-v`/`-h` alternation);
   - ENVS/IDENT and the initial command `cat`;
@@ -430,7 +430,7 @@ Message and timer ids (`messages.zig`, Task 8): no new message. The tmux pipe re
 - [ ] **Step 1: Failing tests:**
   - `"tmux shim format: Claude probe"`: the 8-field TAB probe expands to `xterm-ghostty\toff\t0\t0\t0\ton\tbottom\t0` with the matching lookup.
   - `"tmux shim format: unknown var is empty"`, `"tmux shim format: ## and #[ ] and short aliases"`, `"tmux shim format: unterminated"`.
-  - `"tmux shim sh_command: recon §6 Windows example"`: the exact string from recon §6 gives cwd `C:\D\den4ik\Ghostty`, env `{CLAUDECODE=1, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1, CLAUDE_CODE_ATTRIBUTION_PROJECT=}`, argv[0] `C:\Users\user\.local\bin\claude.exe`, and keeps `--agent-id researcher@my-team`.
+  - `"tmux shim sh_command: recon §6 Windows example"`: the exact string from recon §6 gives cwd `C:\D\den4ik\Ghostty`, env `{CLAUDECODE=1, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1, CLAUDE_CODE_ATTRIBUTION_PROJECT=}`, argv[0] `%USERPROFILE%\.local\bin\claude.exe`, and keeps `--agent-id researcher@my-team`.
   - `"tmux shim sh_command: quote escape"`: `'it'"'"'s'` → `it's`. Also `'C:\a\'"'"'b'` → `C:\a\'b`.
   - `"tmux shim sh_command: double quotes"`: `"a \"b\" \$c"` → `a "b" $c`.
   - `"tmux shim sh_command: unsupported"`: `$HOME`, `a; b`, `a | b`, `` `x` ``, `a*`, a newline, and `cd x` without `&&` → `error.Unsupported`.

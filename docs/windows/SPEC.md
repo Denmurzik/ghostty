@@ -391,7 +391,7 @@ Spawn failure of a resolved shell is reported by core's abnormal-exit message; n
 - ConPTY flags stay `0` in M1; passthrough/INHERIT_CURSOR evaluated in M5.
 
 ### 8.5 Later core changes
-M4: DCS `tmux;` passthrough unwrap in `src/terminal/dcs.zig` [tmux §10]; `SplitTree.replace`. M5: OSC 7 path translation
+M4: DCS `tmux;` passthrough is already unwrapped by the core stream (tests only; the ConPTY gap is documented, R-M4-10, §12.4); `SplitTree.replace`. M5: OSC 7 path translation
 (`/c/x`, `/C:/x` → `C:\x`) in `stream_handler.zig`, case-insensitive hostname compare, `.exe`-stripping shell detection,
 pwsh integration, forward-slash env paths for MSYS shells, compiled terminfo emitted by the build (then `TERM`
 default back to `xterm-ghostty`), `+edit-config` on Windows.
@@ -440,7 +440,7 @@ FreeType + HarfBuzz.
 ## 12. Built-in tmux shim (M4)
 
 ### 12.1 Processes and transport
-- `tmux.exe` (console subsystem, no SharedDeps, no libc; imports only kernel32 and ntdll; measured: -V p95 21 ms, peak
+- `tmux.exe` (console subsystem, no SharedDeps, no libc; imports only kernel32 and ntdll; measured: -V p50 21 ms (the process-creation floor), peak
   private 0.6 MB). Steps: parse global flags (`-S <path>`, `-L <name>`, `-V`); `-V` → print `tmux 3.5a\n`, exit 0 (no IPC);
   resolve the pipe: `-S` value, else the first field of `TMUX`, else `no server running on default` (exit 1). Only
   `\\.\pipe\ghostty-tmux-<pid>-<16 hex>` is accepted (anything else: `not a Ghostty tmux socket`; a file or UNC path never gets the
@@ -492,13 +492,13 @@ FreeType + HarfBuzz.
     `pane_id window_id window_name session_name pane_title pane_top pane_left client_termtype allow-passthrough
     focus-events status status-position window_bigger client_control_mode` with the safe answers of [tmux §9].
   - `show-environment -g` → empty, exit 0. `load-buffer [-w] -` → store buffer; `-w` also sets the Windows clipboard.
-  - Placeholder `cat`: a command string exactly `cat` starts `tmux.exe __idle` (blocks reading console input until
+  - Placeholder `cat`: a command string exactly `cat` starts `tmux.exe __idle` (waits on its own process handle, reads no input, until
     killed); never a shell.
 ### 12.3 Pane command execution (R1, R2)
 - Env (R1): Ghostty `defaultTermioEnv` overlaid with the request's client `env`, then `TMUX`, `TMUX_PANE`, PATH with exe
   dir first, then the command's own `env K=V` assignments.
 - Command (R2): if Git Bash is resolvable (§8.3 list, plus `CLAUDE_CODE_GIT_BASH_PATH` from the client env first) →
-  argv `{<git>\bin\bash.exe, "-c", <string>}` with cwd = client cwd; else `sh_command.parse(string)` for the grammar
+  argv `{<git>\bin\bash.exe, "-c", <string>}` with cwd = `-c`, else the `cd` target of the string, else the client cwd (R-M4-5); else `sh_command.parse(string)` for the grammar
   `[cd W &&] [env (NAME=W)*] W+` with POSIX single/double-quote rules and `'"'"'` escapes, no expansions → direct argv,
   cwd from `cd`, env overrides; parse failure → exit 1, stderr `ghostty: unsupported pane command`.
 ### 12.4 Other
@@ -672,7 +672,7 @@ underline colour: the inbox ConPTY drops them, §18.33; ligatures, Kitty keyboar
 latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the numbers over budget and the Git
 Bash input-loss workaround (Task 26.4) are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
 
-**M4 (done, accepted with concerns: see the CHANGELOG "M4" section and the numbers below; acceptance commit `docs(windows): M4 acceptance — tmux shim RAM, latency, Claude Code agent-team runs`) — tmux shim + IPC + Claude Code e2e.**
+**M4 (done, accepted with pending: `E2E -Milestone all` (next quiet-desktop batch), owner manual checks (`load-buffer -w` with a text clipboard); record `docs/windows/m4/acceptance.md`, final review `docs/windows/m4/final-review.md`, CHANGELOG "M4"; acceptance commit `docs(windows): M4 acceptance — tmux shim RAM, latency, Claude Code agent-team runs`) — tmux shim + IPC + Claude Code e2e.**
 `tmux.exe` (console exe, imports kernel32/ntdll only), a second IPC server on `\\.\pipe\ghostty-tmux-<pid>-<nonce>` (§12.1, R-M4-1), the
 registry/host over Ghostty tabs and surfaces with the §12.2 command set (`split-window`, `respawn-pane`, `kill-pane`,
 `select-layout`, `resize-pane`, `select-pane`, `set-option`, `show-options`, `display-message`, `list-panes/windows`,
@@ -956,7 +956,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     - R-M4-5, pane spawn: `cat` is `tmux.exe __idle`; an empty command is the configured one; with Git Bash
       (`CLAUDE_CODE_GIT_BASH_PATH` of the client, else the search) the string runs as `bash -c`; else the one-liner parser
       (`[cd W &&] [env (NAME=W)*] W+`); cwd = `-c`, else the `cd` target (parser path), else the client cwd; a missing
-      directory fails with `can't find directory`; every shim pane gets `wait-after-command`. Known gap: a config reload drops
+      directory fails with `can't find directory`; every shim pane gets `wait-after-command`. `MSYS_NO_PATHCONV` is not set (it would leak into the teammates' Bash tool), so native Windows targets see MSYS path conversion: an intended difference from tmux. Known gap: a config reload drops
       it.
     - R-M4-6, `send-keys` gate: the answer is immediate; bytes are queued and flushed by a message-window timer once the
       pane is 300 ms old and its tab's layout has been quiet for 150 ms (Git Bash first-byte loss; kept after the Task

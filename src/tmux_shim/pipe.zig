@@ -28,12 +28,12 @@ fn toUtf16(out: *[max_name_u16:0]u16, name: []const u8) ?usize {
 }
 
 /// `deadline_ms` is an absolute `GetTickCount64` value; it bounds the whole
-/// exchange. `expected_pid` (from `protocol.pidFromTmuxPipe`) must equal the
-/// pipe server's pid when given. Caller owns the returned response payload.
+/// exchange. `expected_pid` (from `protocol.tmuxPipePid`) must equal the
+/// pipe server's pid. Caller owns the returned response payload.
 pub fn request(
     alloc: Allocator,
     name: []const u8,
-    expected_pid: ?u32,
+    expected_pid: u32,
     payload: []const u8,
     deadline_ms: u64,
 ) TransportError![]u8 {
@@ -51,10 +51,8 @@ pub fn request(
     // this name.
     if (win.GetFileType(pipe) != win.FILE_TYPE_PIPE) return error.NotOurServer;
 
-    if (expected_pid) |want| {
-        var pid: u32 = 0;
-        if (win.GetNamedPipeServerProcessId(pipe, &pid) == 0 or pid != want) return error.NotOurServer;
-    }
+    var pid: u32 = 0;
+    if (win.GetNamedPipeServerProcessId(pipe, &pid) == 0 or pid != expected_pid) return error.NotOurServer;
 
     const event = win.CreateEventW(null, 1, 0, null) orelse return error.BrokenPipe;
     defer _ = win.CloseHandle(event);
@@ -253,7 +251,7 @@ test "tmux shim pipe: no server" {
     const t0 = win.GetTickCount64();
     try std.testing.expectError(
         error.NoServer,
-        request(std.testing.allocator, name, null, "{}", t0 + 2000),
+        request(std.testing.allocator, name, win.GetCurrentProcessId(), "{}", t0 + 2000),
     );
     try std.testing.expect(win.GetTickCount64() - t0 < 200);
 }
@@ -263,12 +261,12 @@ test "tmux shim pipe: a name that does not fit is NoServer" {
     const long = "\\\\.\\pipe\\ghostty-tmux-1-" ++ zeros;
     try std.testing.expectError(
         error.NoServer,
-        request(std.testing.allocator, long, null, "{}", win.GetTickCount64() + 1000),
+        request(std.testing.allocator, long, win.GetCurrentProcessId(), "{}", win.GetTickCount64() + 1000),
     );
     // Invalid UTF-8 as well.
     try std.testing.expectError(
         error.NoServer,
-        request(std.testing.allocator, "\xff\xfe", null, "{}", win.GetTickCount64() + 1000),
+        request(std.testing.allocator, "\xff\xfe", win.GetCurrentProcessId(), "{}", win.GetTickCount64() + 1000),
     );
 }
 
@@ -289,7 +287,7 @@ test "tmux shim pipe: a regular file is NotOurServer and stays untouched" {
     const n8 = try std.unicode.utf16LeToUtf8(&path8, tmp[0 .. tn + leaf.len]);
     try std.testing.expectError(
         error.NotOurServer,
-        request(std.testing.allocator, path8[0..n8], null, "SECRET", win.GetTickCount64() + 1000),
+        request(std.testing.allocator, path8[0..n8], win.GetCurrentProcessId(), "SECRET", win.GetTickCount64() + 1000),
     );
 
     const h2 = win.CreateFileW(path_w, win.GENERIC_READ, win.FILE_SHARE_READ, null, win.OPEN_EXISTING, win.FILE_ATTRIBUTE_NORMAL, null);
@@ -346,7 +344,7 @@ test "tmux shim pipe: busy retries until the deadline" {
     defer _ = win.CloseHandle(blocker);
 
     const t0 = win.GetTickCount64();
-    const reply = try request(alloc, name, null, "{\"v\":1}", t0 + 6000);
+    const reply = try request(alloc, name, win.GetCurrentProcessId(), "{\"v\":1}", t0 + 6000);
     defer alloc.free(reply);
     try std.testing.expect(std.mem.indexOf(u8, reply, "\"stdout\":\"ok\"") != null);
     try std.testing.expect(win.GetTickCount64() - t0 >= 1000);
@@ -368,6 +366,6 @@ test "tmux shim pipe: busy past the deadline is Timeout" {
     defer _ = win.CloseHandle(blocker);
 
     const t0 = win.GetTickCount64();
-    try std.testing.expectError(error.Timeout, request(alloc, name, null, "{}", t0 + 300));
+    try std.testing.expectError(error.Timeout, request(alloc, name, win.GetCurrentProcessId(), "{}", t0 + 300));
     try std.testing.expect(win.GetTickCount64() - t0 < 1000);
 }

@@ -431,6 +431,11 @@ pub const Host = struct {
         return self.app.core_app.alloc;
     }
 
+    /// `clipboard-write` is not `deny`; `ask` counts as allowed.
+    pub fn clipboardWriteAllowed(self: *Host) bool {
+        return self.app.config.@"clipboard-write" != .deny;
+    }
+
     pub fn setClipboard(self: *Host, data: []const u8) !void {
         try clipboard.write(self.app.msg_hwnd, data);
     }
@@ -442,10 +447,10 @@ pub const Host = struct {
         literal: bool,
         hex: bool,
         repeat: u32,
-    ) error{ UnknownKey, OutOfMemory }!void {
+    ) error{ UnknownKey, TooLarge, OutOfMemory }!void {
         const s = surfaceOf(self.app, pane.id) orelse return;
         const bytes = try keys.encode(self.arena, keys_in, literal, hex, repeat);
-        pane_io.sendKeys(self.app, s, bytes) catch return error.OutOfMemory;
+        pane_io.sendKeys(self.app, s, bytes) catch |err| return if (err == error.QueueFull) error.TooLarge else error.OutOfMemory;
     }
 
     pub fn capture(self: *Host, pane: Pane, req: commands.CaptureRequest, w: *std.Io.Writer) !void {
@@ -461,6 +466,7 @@ const layout_mod = layout;
 pub fn run(app: *App, req: protocol.Request, arena: Allocator) Reply {
     // The labels read the options; attached once, detached by `appStopping`.
     if (app.tmux_labels.options == null) labels.attachOptions(app, &app.tmux.options);
+    app.tmux_keys.used = true;
 
     var host: Host = .{ .app = app, .arena = arena, .caller = parseCaller(req.pane) };
     var out: commands.Output = .{};

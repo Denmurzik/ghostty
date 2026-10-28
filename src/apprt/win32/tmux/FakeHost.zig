@@ -83,6 +83,9 @@ failed_dir: []const u8 = "",
 options_changed: std.ArrayList(u32) = .empty,
 zoom_toggles: u32 = 0,
 clipboard: ?[]u8 = null,
+clipboard_denied: bool = false,
+/// Test switch: send-keys answers TooLarge.
+keys_too_large: bool = false,
 keys: std.ArrayList([]u8) = .empty,
 
 /// One window holding the leader pane (%1, @1).
@@ -472,6 +475,11 @@ pub fn gpa(self: *FakeHost) Allocator {
     return self.alloc;
 }
 
+/// Test switch: `clipboard-write = deny`.
+pub fn clipboardWriteAllowed(self: *FakeHost) bool {
+    return !self.clipboard_denied;
+}
+
 pub fn setClipboard(self: *FakeHost, data: []const u8) !void {
     const copy = try self.alloc.dupe(u8, data);
     if (self.clipboard) |c| self.alloc.free(c);
@@ -485,8 +493,9 @@ pub fn sendKeys(
     literal: bool,
     hex: bool,
     repeat: u32,
-) error{ UnknownKey, OutOfMemory }!void {
+) error{ UnknownKey, TooLarge, OutOfMemory }!void {
     _ = pane;
+    if (self.keys_too_large) return error.TooLarge;
     const body = try std.mem.join(self.alloc, "|", keys_in);
     defer self.alloc.free(body);
     const joined = try std.fmt.allocPrint(self.alloc, "{s}{s}x{d}:{s}", .{

@@ -25,6 +25,9 @@ const log = std.log.scoped(.win32_tmux_pane_io);
 
 pub const gate_age_ms = 300;
 pub const gate_settle_ms = 150;
+/// What the queue may hold in total; a request over it fails (R-final I1).
+pub const max_queue_bytes = 1 << 20;
+pub const max_queue_entries = 1024;
 const timer_ms = 25;
 
 pub const Item = struct {
@@ -36,7 +39,11 @@ pub const Item = struct {
 
 /// `App.tmux_keys`.
 pub const State = struct {
+    /// Set by the first tmux request; until then no pane is tracked, so a
+    /// session that never uses tmux allocates nothing here.
+    used: bool = false,
     queue: std.ArrayList(Item) = .empty,
+    queued_bytes: usize = 0,
     timer_armed: bool = false,
     /// Tab id to the time of its last layout change.
     tab_changed_ms: std.AutoHashMapUnmanaged(u32, u64) = .empty,
@@ -53,22 +60,25 @@ pub fn gateOpen(created_ms: u64, tab_changed_ms: u64, now_ms: u64) bool {
 }
 
 /// Queue `bytes` for `surface`; they are written once the gate opens.
-pub fn sendKeys(app: *App, surface: *Surface, bytes: []const u8) !void {
+pub fn sendKeys(app: *App, surface: *Surface, bytes: []const u8) error{ QueueFull, OutOfMemory }!void {
     if (bytes.len == 0) return;
     const alloc = app.core_app.alloc;
     const st = &app.tmux_keys;
-    const owned = try alloc.dupe(u8, bytes);
-    errdefer alloc.free(owned);
     try st.pane_seen_ms.ensureUnusedCapacity(alloc, 1);
-    try st.queue.append(alloc, .{
-        .surface = surface,
-        .tab_id = surface.tab.id,
-        .pane_id = surface.pane_id,
-        .bytes = owned,
-    });
+    try push(st, alloc, surface, surface.tab.id, surface.pane_id, bytes);
     // A pane no layout change has seen yet counts from now.
     st.pane_seen_ms.putAssumeCapacity(surface.pane_id, st.pane_seen_ms.get(surface.pane_id) orelse nowMs());
     armTimer(app);
+}
+
+/// Copies `bytes` onto the queue unless that would pass the total caps.
+fn push(st: *State, alloc: Allocator, surface: *Surface, tab_id: u32, pane_id: u32, bytes: []const u8) error{ QueueFull, OutOfMemory }!void {
+    if (st.queue.items.len >= max_queue_entries) return error.QueueFull;
+    if (bytes.len > max_queue_bytes - st.queued_bytes) return error.QueueFull;
+    const owned = try alloc.dupe(u8, bytes);
+    errdefer alloc.free(owned);
+    try st.queue.append(alloc, .{ .surface = surface, .tab_id = tab_id, .pane_id = pane_id, .bytes = owned });
+    st.queued_bytes += bytes.len;
 }
 
 fn armTimer(app: *App) void {
@@ -96,6 +106,7 @@ fn flush(
         const changed = st.tab_changed_ms.get(head.tab_id) orelse 0;
         if (!gateOpen(created, changed, now_ms)) return;
         _ = st.queue.orderedRemove(0);
+        st.queued_bytes -= head.bytes.len;
         deliver(ctx, head.surface, head.bytes);
         alloc.free(head.bytes);
     }
@@ -126,6 +137,7 @@ pub fn layoutChanged(tab: *Tab) void {
     const app = tab.window.app;
     const alloc = app.core_app.alloc;
     const st = &app.tmux_keys;
+    if (!st.used) return;
     const now = nowMs();
     st.tab_changed_ms.put(alloc, tab.id, now) catch return;
     pruneTabs(st, now);
@@ -139,17 +151,31 @@ pub fn layoutChanged(tab: *Tab) void {
 
 pub fn surfaceDestroying(surface: *Surface) void {
     const app = surface.app;
-    dropPane(&app.tmux_keys, app.core_app.alloc, surface.pane_id);
+    const st = &app.tmux_keys;
+    // Respawn gives two surfaces one pane id: the pane stays tracked while
+    // another live surface has it.
+    var other_alive = false;
+    for (app.windows.items) |w| {
+        for (w.tabs.items) |t| {
+            var it = t.tree.iterator();
+            while (it.next()) |e| {
+                if (e.view != surface and e.view.pane_id == surface.pane_id) other_alive = true;
+            }
+        }
+    }
+    dropSurface(st, app.core_app.alloc, surface, surface.pane_id, !other_alive);
 }
 
-fn dropPane(st: *State, alloc: Allocator, pane_id: u32) void {
+fn dropSurface(st: *State, alloc: Allocator, surface: *Surface, pane_id: u32, forget_pane: bool) void {
     var i: usize = 0;
     while (i < st.queue.items.len) {
-        if (st.queue.items[i].pane_id == pane_id) {
-            alloc.free(st.queue.orderedRemove(i).bytes);
+        if (st.queue.items[i].surface == surface) {
+            const item = st.queue.orderedRemove(i);
+            st.queued_bytes -= item.bytes.len;
+            alloc.free(item.bytes);
         } else i += 1;
     }
-    _ = st.pane_seen_ms.remove(pane_id);
+    if (forget_pane) _ = st.pane_seen_ms.remove(pane_id);
 }
 
 /// Drops the tabs whose layout has been quiet long enough: no entry means
@@ -239,6 +265,7 @@ fn fakeSurface(n: usize) *Surface {
 }
 
 fn enqueue(st: *State, pane: u32, tab: u32, bytes: []const u8) !void {
+    st.queued_bytes += bytes.len;
     try st.queue.append(testing.allocator, .{
         .surface = fakeSurface(pane),
         .tab_id = tab,
@@ -282,7 +309,7 @@ test "win32 tmux pane_io: closed pane drops its queue" {
     try enqueue(&st, 1, 7, "a");
     try enqueue(&st, 2, 7, "b");
     try enqueue(&st, 1, 7, "c");
-    dropPane(&st, testing.allocator, 1);
+    dropSurface(&st, testing.allocator, fakeSurface(1), 1, true);
     try testing.expect(st.pane_seen_ms.get(1) == null);
     flush(&st, testing.allocator, 1000, &sink, Sink.deliver);
     try testing.expectEqualSlices(u8, &.{ 2, 'b' }, sink.got.items);
@@ -328,4 +355,40 @@ test "win32 tmux pane_io: releaseAll frees everything" {
     try testing.expectEqual(@as(usize, 0), st.queue.items.len);
     try testing.expect(!st.timer_armed);
     try testing.expectEqual(@as(u32, 0), st.pane_seen_ms.count());
+}
+
+test "win32 tmux pane_io: queue caps in bytes and entries" {
+    var st: State = .{};
+    defer deinitState(&st);
+    const big = try testing.allocator.alloc(u8, max_queue_bytes - 10);
+    defer testing.allocator.free(big);
+    @memset(big, 'x');
+    try push(&st, testing.allocator, fakeSurface(1), 7, 1, big);
+    try testing.expectError(error.QueueFull, push(&st, testing.allocator, fakeSurface(1), 7, 1, "0123456789a"));
+    try push(&st, testing.allocator, fakeSurface(1), 7, 1, "0123456789");
+    try testing.expectEqual(@as(usize, max_queue_bytes), st.queued_bytes);
+    // Writing the head frees its share again.
+    var sink: Sink = .{};
+    defer sink.got.deinit(testing.allocator);
+    try st.pane_seen_ms.put(testing.allocator, 1, 0);
+    flush(&st, testing.allocator, 1000, &sink, Sink.deliver);
+    try testing.expectEqual(@as(usize, 0), st.queued_bytes);
+
+    for (0..max_queue_entries) |_| try push(&st, testing.allocator, fakeSurface(1), 7, 1, "k");
+    try testing.expectError(error.QueueFull, push(&st, testing.allocator, fakeSurface(1), 7, 1, "k"));
+}
+
+test "win32 tmux pane_io: a destroyed surface drops only its own keys" {
+    var st: State = .{};
+    defer deinitState(&st);
+    // Respawn: two surfaces share pane 1.
+    try st.pane_seen_ms.put(testing.allocator, 1, 0);
+    try enqueue(&st, 1, 7, "old");
+    st.queue.items[0].surface = fakeSurface(5);
+    try enqueue(&st, 1, 7, "live");
+    dropSurface(&st, testing.allocator, fakeSurface(5), 1, false);
+    try testing.expectEqual(@as(usize, 1), st.queue.items.len);
+    try testing.expectEqualStrings("live", st.queue.items[0].bytes);
+    try testing.expectEqual(@as(usize, 4), st.queued_bytes);
+    try testing.expect(st.pane_seen_ms.get(1) != null);
 }

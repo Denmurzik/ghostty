@@ -161,7 +161,7 @@ const FakeTransport = struct {
     err: ?TransportError = null,
     calls: usize = 0,
     pipe: []const u8 = "",
-    expected_pid: ?u32 = null,
+    expected_pid: u32 = 0,
     payload: []const u8 = "",
     deadline: u64 = 0,
 
@@ -169,7 +169,7 @@ const FakeTransport = struct {
         return self.now;
     }
 
-    pub fn request(self: *FakeTransport, alloc: Allocator, pipe: []const u8, expected_pid: ?u32, payload: []const u8, deadline_ms: u64) TransportError![]u8 {
+    pub fn request(self: *FakeTransport, alloc: Allocator, pipe: []const u8, expected_pid: u32, payload: []const u8, deadline_ms: u64) TransportError![]u8 {
         self.calls += 1;
         self.pipe = pipe;
         self.expected_pid = expected_pid;
@@ -244,7 +244,7 @@ test "tmux shim run: -S beats TMUX" {
     );
     try std.testing.expectEqual(@as(u8, 0), out.code);
     try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff", tr.pipe);
-    try std.testing.expectEqual(@as(?u32, 42), tr.expected_pid);
+    try std.testing.expectEqual(@as(u32, 42), tr.expected_pid);
 }
 
 test "tmux shim run: TMUX first field and expected pid from pipe name" {
@@ -253,9 +253,9 @@ test "tmux shim run: TMUX first field and expected pid from pipe name" {
     var tr: FakeTransport = .{ .reply = ok_reply };
     _ = try run(arena_state.allocator(), &.{"list-panes"}, testEnv(.{ .tmux = "\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa,7,0" }), "C:\\", &tr, NoStdin{});
     try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-7-00000000000000aa", tr.pipe);
-    try std.testing.expectEqual(@as(?u32, 7), tr.expected_pid);
-    try std.testing.expectEqual(@as(?u32, 42), protocol.pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-42-00ff00ff00ff00ff"));
-    try std.testing.expectEqual(@as(?u32, null), protocol.pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-x"));
+    try std.testing.expectEqual(@as(u32, 7), tr.expected_pid);
+    try std.testing.expectEqual(@as(?u32, 42), protocol.tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-42-00ff00ff00ff00ff"));
+    try std.testing.expectEqual(@as(?u32, null), protocol.tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-x"));
 }
 
 test "tmux shim run: request fields" {

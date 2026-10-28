@@ -2,6 +2,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const configpkg = @import("../../../config.zig");
+const protocol = @import("../ipc/protocol.zig");
+
+/// What one `encode` may produce: the most a client can send as stdin.
+pub const max_bytes: usize = protocol.max_stdin_tmux;
 
 const named = std.StaticStringMap([]const u8).initComptime(.{
     .{ "enter", "\r" },
@@ -132,7 +136,7 @@ pub fn encode(
     literal: bool,
     hex: bool,
     repeat: u32,
-) error{ UnknownKey, OutOfMemory }![]u8 {
+) error{ UnknownKey, TooLarge, OutOfMemory }![]u8 {
     var once: std.ArrayList(u8) = .empty;
     for (args) |arg| {
         if (hex) {
@@ -144,10 +148,11 @@ pub fn encode(
             try token(arena, arg, &once);
         }
     }
+    if (once.items.len > max_bytes) return error.TooLarge;
     if (repeat == 0) return arena.alloc(u8, 0);
     if (repeat == 1) return once.items;
-    const total = std.math.mul(usize, once.items.len, repeat) catch return error.OutOfMemory;
-    if (total > 16 * 1024 * 1024) return error.OutOfMemory;
+    const total = std.math.mul(usize, once.items.len, repeat) catch return error.TooLarge;
+    if (total > max_bytes) return error.TooLarge;
     const out = try arena.alloc(u8, total);
     for (0..repeat) |i| @memcpy(out[i * once.items.len ..][0..once.items.len], once.items);
     return out;
@@ -222,4 +227,21 @@ test "win32 tmux keys: case, aliases, modifiers, M- literal, -N 0" {
     try testing.expectEqualStrings("\x1b\x03", try enc(a, &.{"M-C-c"}));
     try testing.expectEqualStrings("\x1b[1;5A\x1b[1;2D\x1b[5;6~", try enc(a, &.{ "C-Up", "S-Left", "C-S-PageUp" }));
     try testing.expectEqualStrings("", try encode(a, &.{"Enter"}, false, false, 0));
+}
+
+test "win32 tmux keys: output is bounded by the stdin cap" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // -N: exactly the cap passes, one more does not.
+    const at_cap = try encode(a, &.{"a"}, true, false, @intCast(max_bytes));
+    try testing.expectEqual(max_bytes, at_cap.len);
+    try testing.expectError(error.TooLarge, encode(a, &.{"a"}, true, false, @intCast(max_bytes + 1)));
+    try testing.expectError(error.TooLarge, encode(a, &.{"ab"}, true, false, @intCast(max_bytes / 2 + 1)));
+    // A huge count never allocates.
+    try testing.expectError(error.TooLarge, encode(a, &.{"a"}, true, false, std.math.maxInt(u32)));
+    // Plain arguments over the cap.
+    const long = try a.alloc(u8, max_bytes + 1);
+    @memset(long, 'x');
+    try testing.expectError(error.TooLarge, encode(a, &.{long}, true, false, 1));
 }

@@ -118,7 +118,7 @@ $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powersh
 
 # Scenarios with many surfaces on a Debug exe run under the shared test-lock
 # (the team's RAM gate). Release builds (zig-out-rf) are small enough not to.
-$testLock = if ($env:GHOSTTY_TEST_LOCK) { $env:GHOSTTY_TEST_LOCK } else { '%USERPROFILE%/.claude/mods/teamlead/skills/teamlead/scripts/test-lock' }
+$testLock = if ($env:GHOSTTY_TEST_LOCK) { $env:GHOSTTY_TEST_LOCK } else { (Join-Path $env:USERPROFILE '.claude/mods/teamlead/skills/teamlead/scripts/test-lock') }
 $bashExe = $null
 foreach ($c in "$env:ProgramFiles\Git\bin\bash.exe", "$env:ProgramFiles\Git\usr\bin\bash.exe") {
     if (Test-Path -LiteralPath $c) { $bashExe = $c; break }

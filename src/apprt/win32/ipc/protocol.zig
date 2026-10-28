@@ -76,22 +76,6 @@ pub fn tmuxEnvValue(buf: []u8, pipe: []const u8, pid: u32) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s},{d},0", .{ pipe, pid });
 }
 
-/// The server pid inside a tmux pipe name: the digits between
-/// `ghostty-tmux-` and the next `-`.
-/// The marker must start the name, optionally behind `\\.\pipe\`.
-pub fn pidFromTmuxPipe(name: []const u8) ?u32 {
-    const marker = "ghostty-tmux-";
-    const local = "\\\\.\\pipe\\";
-    var s = name;
-    if (s.len >= local.len and std.ascii.eqlIgnoreCase(s[0..local.len], local)) s = s[local.len..];
-    if (!std.mem.startsWith(u8, s, marker)) return null;
-    const rest = s[marker.len..];
-    const end = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
-    if (end == 0) return null;
-    for (rest[0..end]) |c| if (!std.ascii.isDigit(c)) return null;
-    return std.fmt.parseInt(u32, rest[0..end], 10) catch null;
-}
-
 /// The pid of a name that is exactly `\\.\pipe\ghostty-tmux-<pid>-<16 hex>`
 /// (prefix compared ASCII case-insensitively), else null. This is the only
 /// shape `tmux.exe` connects to.
@@ -340,14 +324,8 @@ test "win32 ipc protocol: tmux pipe name, env value and pid" {
         "\\\\.\\pipe\\ghostty-tmux-42-00000000000000ff,42,0",
         try tmuxEnvValue(&b2, name, 42),
     );
-    try t.expectEqual(@as(?u32, 42), pidFromTmuxPipe(name));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-x"));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-7"));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux--ab"));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("garbage"));
-    // Anchored: a marker in the middle (a UNC share, a file path) is no pid.
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\host\\pipe\\ghostty-tmux-1-ab"));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("C:\\x\\ghostty-tmux-1-ab"));
+    // A pid that does not fit u32 is no pid.
+    try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\ghostty-tmux-99999999999-00000000000000ff"));
 
     // The strict form the client connects to.
     try t.expectEqual(@as(?u32, 42), tmuxPipePid(name));
@@ -360,7 +338,6 @@ test "win32 ipc protocol: tmux pipe name, env value and pid" {
     try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\host\\pipe\\ghostty-tmux-42-00000000000000ff"));
     try t.expectEqual(@as(?u32, null), tmuxPipePid("C:\\x\\victim.txt"));
     try t.expectEqual(@as(?u32, null), tmuxPipePid("\\\\.\\pipe\\other"));
-    try t.expectEqual(@as(?u32, null), pidFromTmuxPipe("\\\\.\\pipe\\ghostty-tmux-99999999999-ab"));
 }
 
 test "win32 ipc protocol: tmux request fields roundtrip" {

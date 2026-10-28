@@ -15,7 +15,7 @@ const Transport = struct {
         return win.GetTickCount64();
     }
 
-    pub fn request(_: Transport, alloc: Allocator, name: []const u8, expected_pid: ?u32, payload: []const u8, deadline_ms: u64) run_mod.TransportError![]u8 {
+    pub fn request(_: Transport, alloc: Allocator, name: []const u8, expected_pid: u32, payload: []const u8, deadline_ms: u64) run_mod.TransportError![]u8 {
         return pipe.request(alloc, name, expected_pid, payload, deadline_ms);
     }
 };

@@ -131,7 +131,7 @@ Commit `946b48316` is on `origin/windows` (github.com/Denmurzik/ghostty). It add
 `aeba59a2a` sanitised the file, but the history keeps the original.
 
 HEAD still has:
-- `user` in the Task 10 test, at `src/apprt/win32/tmux/spawn.zig:228,240`;
+- the user name in the Task 10 test, at `src/apprt/win32/tmux/spawn.zig:228,240`;
 - the real `--parent-session-id 00000000-…` in `claude-spawn.jsonl:17,30`.
 
 Fix:
