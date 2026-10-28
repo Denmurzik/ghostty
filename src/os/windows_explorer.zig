@@ -23,6 +23,23 @@ pub const toast_icon_name = "toast-icon.png";
 /// The AUMID registration key, relative to `HKCU`.
 pub const aumid_subkey = "Software\\Classes\\AppUserModelId\\" ++ aumid;
 
+/// The registrations of both build modes: `--all` removes whichever exist.
+pub const aumid_subkeys = [_][]const u8{
+    "Software\\Classes\\AppUserModelId\\com.mitchellh.ghostty.windows-unofficial",
+    "Software\\Classes\\AppUserModelId\\com.mitchellh.ghostty.windows-unofficial-debug",
+};
+
+/// The icon file earlier builds wrote (`notify.zig`), also removed by `--all`.
+pub const legacy_toast_icon_name = "notify-icon.png";
+
+/// Whether an existing verb key is ours: its command is ours, or it has no
+/// command but our menu text (what a failed install would leave behind).
+pub fn ownsKey(command: ?[]const u8, menu: ?[]const u8) bool {
+    if (command) |c| return ownsCommand(c);
+    const m = menu orelse return false;
+    return std.mem.eql(u8, m, menu_text);
+}
+
 /// One registry string value. `name` null is the `(default)` value.
 pub const Write = struct {
     subkey: []const u8,
@@ -55,7 +72,7 @@ pub fn commandLine(alloc: Allocator, exe_path: []const u8) Allocator.Error![]u8 
 pub fn installWrites(alloc: Allocator, exe_path: []const u8) Allocator.Error![]Write {
     const command = try commandLine(alloc, exe_path);
     defer alloc.free(command);
-    const icon = try std.fmt.allocPrint(alloc, "\"{s}\",0", .{exe_path});
+    const icon = try std.fmt.allocPrint(alloc, "{s},0", .{exe_path});
     defer alloc.free(icon);
 
     var list: std.ArrayList(Write) = try .initCapacity(alloc, key_names.len * 3);
@@ -67,9 +84,10 @@ pub fn installWrites(alloc: Allocator, exe_path: []const u8) Allocator.Error![]W
     for (key_names) |key| {
         var buf: [128]u8 = undefined;
         const command_key = std.fmt.bufPrint(&buf, "{s}\\command", .{key}) catch unreachable;
+        // The command goes first: a menu entry that is visible always has one.
+        try add(alloc, &list, command_key, null, command);
         try add(alloc, &list, key, null, menu_text);
         try add(alloc, &list, key, "Icon", icon);
-        try add(alloc, &list, command_key, null, command);
     }
     return list.toOwnedSlice(alloc);
 }
@@ -120,24 +138,25 @@ test "windows explorer: install writes" {
     const writes = try installWrites(alloc, "C:\\Program Files\\Ghostty\\ghostty.exe");
     defer freeWrites(alloc, writes);
 
-    const icon = "\"C:\\Program Files\\Ghostty\\ghostty.exe\",0";
+    const icon = "C:\\Program Files\\Ghostty\\ghostty.exe,0";
     const cmd = "\"C:\\Program Files\\Ghostty\\ghostty.exe\" \"--working-directory=%V\\.\"";
     try std.testing.expectEqual(@as(usize, 9), writes.len);
     for (key_names, 0..) |key, i| {
         const w = writes[i * 3 ..][0..3];
-        try std.testing.expectEqualStrings(key, w[0].subkey);
-        try std.testing.expectEqual(@as(?[]const u8, null), w[0].name);
-        try std.testing.expectEqualStrings("Open Ghostty here", w[0].value);
-
-        try std.testing.expectEqualStrings(key, w[1].subkey);
-        try std.testing.expectEqualStrings("Icon", w[1].name.?);
-        try std.testing.expectEqualStrings(icon, w[1].value);
-
+        // command first, then the menu text, then the icon
         const cmd_key = try std.fmt.allocPrint(alloc, "{s}\\command", .{key});
         defer alloc.free(cmd_key);
-        try std.testing.expectEqualStrings(cmd_key, w[2].subkey);
-        try std.testing.expectEqual(@as(?[]const u8, null), w[2].name);
-        try std.testing.expectEqualStrings(cmd, w[2].value);
+        try std.testing.expectEqualStrings(cmd_key, w[0].subkey);
+        try std.testing.expectEqual(@as(?[]const u8, null), w[0].name);
+        try std.testing.expectEqualStrings(cmd, w[0].value);
+
+        try std.testing.expectEqualStrings(key, w[1].subkey);
+        try std.testing.expectEqual(@as(?[]const u8, null), w[1].name);
+        try std.testing.expectEqualStrings("Open Ghostty here", w[1].value);
+
+        try std.testing.expectEqualStrings(key, w[2].subkey);
+        try std.testing.expectEqualStrings("Icon", w[2].name.?);
+        try std.testing.expectEqualStrings(icon, w[2].value);
     }
 }
 
@@ -185,6 +204,14 @@ test "windows explorer: ownsCommand" {
     try std.testing.expect(!ownsCommand("\"C:\\x\\ghostty.exe.bak\" \"%V\""));
     try std.testing.expect(!ownsCommand("\"C:\\x\\ghostty.exe"));
     try std.testing.expect(!ownsCommand(""));
+}
+
+test "windows explorer: ownsKey" {
+    try std.testing.expect(ownsKey("\"C:\\g\\ghostty.exe\" \"%V\"", null));
+    try std.testing.expect(!ownsKey("\"C:\\x\\code.exe\" \"%V\"", menu_text));
+    try std.testing.expect(ownsKey(null, menu_text));
+    try std.testing.expect(!ownsKey(null, "Something else"));
+    try std.testing.expect(!ownsKey(null, null));
 }
 
 test "windows explorer: aumid matches the R-M3-5 value" {

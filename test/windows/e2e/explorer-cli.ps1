@@ -18,6 +18,7 @@ function Invoke-ExplorerCli([string[]]$CliArgs, [hashtable]$Env = @{}) {
     $psi.EnvironmentVariables['APPDATA'] = $script:Sbx.Roaming
     $psi.EnvironmentVariables['USERPROFILE'] = $script:Sbx.Home
     $psi.EnvironmentVariables.Remove('GHOSTTY_WIN32_TEST_HIVE')
+    [void]$psi.EnvironmentVariables.Remove("GHOSTTY_WIN32_TEST_IPC")
     foreach ($k in $Env.Keys) { $psi.EnvironmentVariables[$k] = $Env[$k] }
     $p = [System.Diagnostics.Process]::Start($psi)
     $out = $p.StandardOutput.ReadToEndAsync()
@@ -45,13 +46,13 @@ Invoke-E2eScenario 'explorer-cli' {
 
     $v = '"' + $exe + '"'
     $cmd = $v + ' "--working-directory=%V\."'
-    $icon = $v.TrimEnd('"') + '",0'
+    $icon = $exe + ',0'
     $head = 'set Software\Classes\'
     $want = @()
     foreach ($k in 'Directory\shell\GhosttyOpenHere', 'Directory\Background\shell\GhosttyOpenHere', 'Drive\shell\GhosttyOpenHere') {
+        $want += "$head$k\command\(default) = $cmd"
         $want += "$head$k\(default) = Open Ghostty here"
         $want += "$head$k\Icon = $icon"
-        $want += "$head$k\command\(default) = $cmd"
     }
 
     function Split-Lines([string]$s) { @($s -split "`r?`n" | Where-Object { $_ }) }
@@ -72,22 +73,23 @@ Invoke-E2eScenario 'explorer-cli' {
     $r = Invoke-ExplorerCli @('+uninstall-explorer-integration', '--dry-run', '--all')
     if ($r.Code -ne 0) { throw "uninstall --dry-run --all exited $($r.Code): $($r.Stderr)" }
     $lines = @(Split-Lines $r.Stdout)
-    if ($lines.Count -ne 5) { throw "uninstall --dry-run --all printed $($lines.Count) lines:`n$($r.Stdout)" }
+    if ($lines.Count -ne 7) { throw "uninstall --dry-run --all printed $($lines.Count) lines:`n$($r.Stdout)" }
     foreach ($l in $lines) { if (-not $l.StartsWith('delete ')) { throw "not a delete line: $l" } }
     $iconPath = Join-Path (Join-Path $script:Sbx.Local 'ghostty') 'toast-icon.png'
-    if ($lines[4] -ne "delete $iconPath") { throw "last line is '$($lines[4])', wanted 'delete $iconPath'" }
+    if ($lines[5] -ne "delete $iconPath") { throw "last line is '$($lines[5])', wanted 'delete $iconPath'" }
 
     # Private hive: install, then uninstall; both exit 0.
     $hive = Join-Path $script:Sbx.Tmp 'x.hive'
-    $env_ = @{ GHOSTTY_WIN32_TEST_HIVE = $hive }
+    $env_ = @{ GHOSTTY_WIN32_TEST_HIVE = $hive; GHOSTTY_WIN32_TEST_IPC = '1' }
     $r = Invoke-ExplorerCli @('+install-explorer-integration') $env_
     if ($r.Code -ne 0) { throw "install in the hive exited $($r.Code): $($r.Stdout) $($r.Stderr)" }
     Assert-Lines $r.Stdout $want 'install (hive)'
+    if ($r.Stderr -notmatch 'using test hive') { throw "stderr does not announce the test hive: $($r.Stderr)" }
     $r = Invoke-ExplorerCli @('+uninstall-explorer-integration', '--all') $env_
     if ($r.Code -ne 0) { throw "uninstall in the hive exited $($r.Code): $($r.Stdout) $($r.Stderr)" }
     $lines = @(Split-Lines $r.Stdout)
     $dels = @($lines | Where-Object { $_.StartsWith('delete ') })
-    if ($dels.Count -ne 5) { throw "uninstall --all (hive) printed:`n$($r.Stdout)" }
+    if ($dels.Count -ne 7) { throw "uninstall --all (hive) printed:`n$($r.Stdout)" }
 
     # A second uninstall on the now empty hive reports, and still exits 0.
     $r = Invoke-ExplorerCli @('+uninstall-explorer-integration') $env_

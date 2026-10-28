@@ -28,6 +28,7 @@ const ERROR_FILE_NOT_FOUND: LSTATUS = 2;
 const ERROR_MORE_DATA: LSTATUS = 234;
 
 const REG_SZ: u32 = 1;
+const REG_EXPAND_SZ: u32 = 2;
 const REG_OPTION_NON_VOLATILE: u32 = 0;
 const KEY_QUERY_VALUE: u32 = 0x0001;
 const KEY_SET_VALUE: u32 = 0x0002;
@@ -103,6 +104,10 @@ pub fn close(root: Root) void {
 /// Sets a `REG_SZ` value, creating the key (and its parents) as needed.
 /// `name` null is the `(default)` value.
 pub fn setString(root: Root, subkey: []const u8, name: ?[]const u8, value: []const u8) Error!void {
+    return setTyped(root, subkey, name, value, REG_SZ);
+}
+
+fn setTyped(root: Root, subkey: []const u8, name: ?[]const u8, value: []const u8, kind: u32) Error!void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -129,7 +134,7 @@ pub fn setString(root: Root, subkey: []const u8, name: ?[]const u8, value: []con
         key,
         if (name_w) |n| n.ptr else null,
         0,
-        REG_SZ,
+        kind,
         @ptrCast(value_w.ptr),
         @intCast((value_w.len + 1) * @sizeOf(u16)),
     ));
@@ -157,7 +162,9 @@ pub fn getString(alloc: Allocator, root: Root, subkey: []const u8, name: ?[]cons
     const probe = advapi32.RegQueryValueExW(key, name_ptr, null, &kind, null, &size);
     if (probe == ERROR_FILE_NOT_FOUND) return null;
     try check("RegQueryValueExW", probe);
-    if (kind != REG_SZ) return null;
+    // A `REG_EXPAND_SZ` (a hand edit or a script wrote it) reads as its
+    // text, unexpanded.
+    if (kind != REG_SZ and kind != REG_EXPAND_SZ) return null;
 
     // +1 unit: the stored data need not carry its terminator.
     const units = size / @sizeOf(u16);
@@ -228,6 +235,12 @@ test "windows registry: app hive round trip" {
         defer alloc.free(got);
         try std.testing.expectEqualStrings(w.value, got);
     }
+
+    // REG_EXPAND_SZ reads as its unexpanded text.
+    try setTyped(root, "Software\\Classes\\Probe", "exp", "%SystemRoot%\\x", REG_EXPAND_SZ);
+    const exp = (try getString(alloc, root, "Software\\Classes\\Probe", "exp")).?;
+    defer alloc.free(exp);
+    try std.testing.expectEqualStrings("%SystemRoot%\\x", exp);
 
     // Unicode survives; a missing value or key reads as null.
     try setString(root, "Software\\Classes\\Probe", "Имя", "Анна \u{1F600}");
