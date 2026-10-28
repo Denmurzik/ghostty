@@ -149,6 +149,8 @@ pub const Host = struct {
     caller: ?u32,
     /// The caller's own pane, to close once the reply is out.
     deferred_close: ?u32 = null,
+    /// The directory a NoDirectory error names (read by commands.zig).
+    failed_dir: []const u8 = "",
 
     fn state(self: *Host) *State {
         return &self.app.tmux;
@@ -260,9 +262,13 @@ pub const Host = struct {
         };
     }
 
-    fn planOf(self: *Host, s: commands.Spawn) error{ Unsupported, OutOfMemory }!spawn.Plan {
+    fn planOf(self: *Host, s: commands.Spawn) error{ Unsupported, NoDirectory, OutOfMemory }!spawn.Plan {
         const exe_dir = self.app.tmux_server.exe_dir orelse "";
-        return spawn.plan(self.arena, s, exe_dir, spawn.systemProbe());
+        var diag: spawn.Diag = .{};
+        return spawn.plan(self.arena, s, exe_dir, spawn.systemProbe(), &diag) catch |err| {
+            if (err == error.NoDirectory) self.failed_dir = diag.dir;
+            return err;
+        };
     }
 
     pub fn split(self: *Host, pane: Pane, req: commands.SplitRequest) commands.SplitError!Pane {
