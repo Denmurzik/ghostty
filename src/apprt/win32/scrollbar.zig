@@ -25,6 +25,7 @@ const theme = @import("theme.zig");
 const renderer = @import("../../renderer.zig");
 const configpkg = @import("../../config.zig");
 const App = @import("App.zig");
+const Tab = @import("Tab.zig");
 
 const log = std.log.scoped(.win32_scrollbar);
 
@@ -64,6 +65,9 @@ pub const State = struct {
     /// The pointer is on the popup.
     hover: bool = false,
     tracking_leave: bool = false,
+    /// The tab hid while the pointer was on the scroller: the hover was
+    /// dropped without timers, the fade is armed when the tab shows again.
+    rearm_on_show: bool = false,
     /// Opacity of what is drawn; falls to 0 while fading.
     alpha: u8 = 255,
     fading: bool = false,
@@ -266,6 +270,34 @@ pub fn flash(surface: *Surface) void {
     restartHold(state);
 }
 
+/// A tab left the screen or came back. A hidden popup gets no
+/// WM_MOUSELEAVE, so its hover would stick and keep the scroller from
+/// fading. Hiding only drops the hover (no timer is touched); the fade is
+/// armed once the tab shows again.
+pub fn tabShown(tab: *Tab, shown: bool) void {
+    var it = tab.tree.iterator();
+    while (it.next()) |entry| {
+        const state = &entry.view.scrollbar;
+        if (!shown) {
+            clearHover(state);
+        } else if (state.rearm_on_show) {
+            state.rearm_on_show = false;
+            if (state.popup_made and state.popup.visible) {
+                state.drawn = null;
+                restartHold(state);
+            }
+        }
+    }
+}
+
+/// Drops the hover state and remembers that the fade needs arming.
+fn clearHover(state: *State) void {
+    if (!state.hover and !state.tracking_leave) return;
+    state.hover = false;
+    state.tracking_leave = false;
+    state.rearm_on_show = true;
+}
+
 fn restartHold(state: *State) void {
     const hwnd = state.popup.hwnd orelse return;
     _ = user32.KillTimer(hwnd, messages.timers.overlay.scroller_hold);
@@ -284,6 +316,7 @@ fn hide(state: *State) void {
     }
     p.hide();
     state.hover = false;
+    state.rearm_on_show = false;
     state.tracking_leave = false;
     state.fading = false;
     state.alpha = 255;
@@ -582,4 +615,16 @@ test "win32 scrollbar: colours follow the background and grow on hover" {
 
     try t.expect(isDark(.{ .r = 0x1e, .g = 0x1e, .b = 0x2e }));
     try t.expect(!isDark(.{ .r = 0xfa, .g = 0xfa, .b = 0xfa }));
+}
+
+test "win32 scrollbar: hiding the tab drops a stuck hover and asks for a fade on show" {
+    var state: State = .{ .hover = true, .tracking_leave = true };
+    clearHover(&state);
+    try std.testing.expect(!state.hover and !state.tracking_leave);
+    try std.testing.expect(state.rearm_on_show);
+
+    // Nothing to drop: nothing to arm.
+    var idle: State = .{};
+    clearHover(&idle);
+    try std.testing.expect(!idle.rearm_on_show);
 }

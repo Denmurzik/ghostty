@@ -31,6 +31,7 @@ const osk = @import("osk.zig");
 const overlay = @import("overlay.zig");
 const profiles = @import("profiles.zig");
 const recovery = @import("recovery.zig");
+const scrollbar = @import("scrollbar.zig");
 const secure_input = @import("secure_input.zig");
 const shell_open = @import("shell_open.zig");
 const tmux_Registry = @import("tmux/Registry.zig");
@@ -48,7 +49,7 @@ const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
 
 /// What `WM_GHOSTTY_POSTED_DIALOG` (wparam) asks for.
-pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm };
+pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done };
 
 /// Set by the crash handler (M5 Task 12): looks for a crash dump of the last run.
 pub var crash_recheck: ?*const fn () void = null;
@@ -78,6 +79,7 @@ pub fn appStopping(app: *App) void {
     undo_actions.flushAll(app);
     Updater.stop(app);
     jumplist.stop(app);
+    export_io.appStopping(app);
     drainDialogs(app.msg_hwnd);
 }
 
@@ -148,6 +150,7 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
                 .config_errors => config_errors.postedApp(app, lparam),
                 .url_confirm => link.postedApp(app, lparam),
                 .export_io => discardDialog(wparam, lparam),
+                .export_done => export_io.doneApp(app, lparam),
             }
             return 0;
         },
@@ -161,6 +164,7 @@ pub fn discardDialog(wparam: WPARAM, lparam: LPARAM) void {
     const kind = std.enums.fromInt(DialogKind, wparam) orelse return;
     switch (kind) {
         .export_io => export_io.discard(lparam),
+        .export_done => export_io.discardDone(lparam),
         .config_errors => config_errors.discard(lparam),
         .url_confirm => link.discard(lparam),
     }
@@ -187,6 +191,7 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             };
             switch (kind) {
                 .export_io => export_io.postedDialog(window, lparam),
+                .export_done => export_io.discardDone(lparam),
                 .config_errors => config_errors.postedDialog(window, lparam),
                 .url_confirm => link.postedDialog(window, lparam),
             }
@@ -216,6 +221,7 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
 /// The tab became the window's visible one (or stopped being it).
 pub fn tabShown(tab: *Tab, shown: bool) void {
     overlay.tabShown(tab, shown);
+    scrollbar.tabShown(tab, shown);
     tmux_labels.tabShown(tab, shown);
 }
 
@@ -291,7 +297,7 @@ pub fn clipboardWritten(surface: *Surface, cleared: bool) void {
 }
 
 pub fn rendererHealth(surface: *Surface, health: apprt.Action.Value(.renderer_health)) void {
-    badges.rendererHealth(surface, health, surface.app.recovery.reason);
+    badges.rendererHealth(surface, health, recovery.reasonFor(surface.badges.health_reason, surface.app.recovery.warp));
     recovery.rendererHealth(surface, health);
 }
 

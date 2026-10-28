@@ -62,11 +62,6 @@ pub const State = struct {
     /// Custom shaders were turned off after a loss.
     shaders_disabled: bool = false,
 
-    /// Why the surfaces are unhealthy (the text of the last sweep): the
-    /// renderers report `unhealthy` again once they are on the new device,
-    /// and that report must not replace it with the default text.
-    reason: ?[]const u8 = null,
-
     /// Delay of the next sweep while recoveries keep failing.
     backoff_ms: u32 = verify_ms,
 
@@ -113,6 +108,13 @@ pub const State = struct {
     }
 };
 
+/// The health bar reason of a surface: its own (what the sweep found for
+/// it), else the final text of the switch to WARP, which holds for every
+/// surface.
+pub fn reasonFor(own: ?[]const u8, warp: bool) ?[]const u8 {
+    return own orelse if (warp) warp_final_text else null;
+}
+
 pub const Decision = enum { retry, warp };
 
 /// Whether the failures (times of `nowMs`, 0 = none) call for WARP: three
@@ -153,9 +155,9 @@ pub fn timer(app: *App, wparam: win32.foundation.WPARAM) ?win32.foundation.LRESU
 pub fn rendererHealth(surface: *Surface, health: apprt.Action.Value(.renderer_health)) void {
     if (health == .healthy) {
         // The bar of the switch to WARP is not cleared by a healthy frame.
-        const state = &surface.app.recovery;
-        state.reason = if (state.warp) warp_final_text else null;
-        if (state.warp) badges.setHealthText(surface, warp_final_text);
+        const warp = surface.app.recovery.warp;
+        surface.badges.health_reason = reasonFor(null, warp);
+        if (warp) badges.setHealthText(surface, warp_final_text);
         return;
     }
     arm(surface.app, debounce_ms);
@@ -231,15 +233,16 @@ fn sweep(app: *App, now_ms: u64) void {
         },
     }
 
-    if (text) |t| state.reason = t;
-
     for (app.windows.items) |window| {
         for (window.tabs.items) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 const s = entry.view;
                 if (!isLost(s)) continue;
-                if (text) |t| badges.setHealthText(s, t);
+                if (text) |t| {
+                    s.badges.health_reason = t;
+                    badges.setHealthText(s, t);
+                }
                 recoverSurface(state, s, now_ms);
             }
         }
@@ -344,4 +347,14 @@ test "win32 recovery: failures keep the last three and repeats are windowed" {
     try std.testing.expect(!state.recoveredRecently(8, 12_000));
     try std.testing.expect(state.anyRecentRecovery(12_000));
     try std.testing.expect(!state.anyRecentRecovery(16_000));
+}
+
+test "win32 recovery: the health reason is per surface" {
+    const own = "Rendering paused: custom shaders are turned off.";
+    // A surface keeps what the sweep found for it; another one does not inherit it.
+    try std.testing.expectEqualStrings(own, reasonFor(own, false).?);
+    try std.testing.expect(reasonFor(null, false) == null);
+    // After the switch to WARP every surface shows the final text, unless it has its own.
+    try std.testing.expectEqualStrings(warp_final_text, reasonFor(null, true).?);
+    try std.testing.expectEqualStrings(own, reasonFor(own, true).?);
 }

@@ -53,6 +53,10 @@ pub const State = struct {
     health: ?*TextLabel = null,
     /// The in-app toast of this surface (`app_toast`).
     toast: ?*TextLabel = null,
+    /// Why this surface is unhealthy (what the last recovery sweep found for
+    /// it): the renderer reports `unhealthy` again once it is on the new
+    /// device, and that report must not replace it with the default text.
+    health_reason: ?[]const u8 = null,
 };
 
 /// A label popup and the text it paints.

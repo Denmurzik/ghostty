@@ -397,9 +397,23 @@ pub fn getPwd(self: *const Surface) ?[:0]const u8 {
     return if (pwd.len == 0) null else pwd;
 }
 
-/// Remember the working directory the shell reported.
-pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
+/// Remember the working directory core reported (already a drive path, or
+/// empty when the shell has none).
+pub fn setReportedPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
     try storePwd(self.app.core_app.alloc, &self.pwd, pwd);
+}
+
+/// Remember a working directory as OSC 7 would hand it over (`/c/x`, `C:/x`):
+/// translated like core does; one that is not a local drive path is no pwd.
+/// The IPC test op `pwd` goes through here.
+pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
+    try storeUntranslated(self.app.core_app.alloc, &self.pwd, pwd);
+}
+
+fn storeUntranslated(alloc: Allocator, slot: *?[:0]u8, pwd: []const u8) Allocator.Error!void {
+    const translated = try internal_os.pwd_path.translate(alloc, pwd);
+    defer if (translated) |t| alloc.free(t);
+    try storePwd(alloc, slot, translated orelse "");
 }
 
 /// The command, directory and `wait-after-command` of a tmux pane. The
@@ -935,4 +949,20 @@ test "win32 surface: pwd is stored per surface" {
 
     try std.testing.expectEqualStrings("/a/sub", first.getPwd().?);
     try std.testing.expectEqualStrings("/b", second.getPwd().?);
+}
+
+test "win32 surface: the pwd of the test op is translated like OSC 7" {
+    const alloc = std.testing.allocator;
+    var slot: ?[:0]u8 = null;
+    defer if (slot) |p| alloc.free(p);
+
+    try storeUntranslated(alloc, &slot, "/c/Users/x");
+    try std.testing.expectEqualStrings("C:\\Users\\x", slot.?);
+    try storeUntranslated(alloc, &slot, "D:/work");
+    try std.testing.expectEqualStrings("D:\\work", slot.?);
+    // Not a local drive path: no pwd (empty), never stored verbatim.
+    try storeUntranslated(alloc, &slot, "/tmp/x");
+    try std.testing.expectEqualStrings("", slot.?);
+    try storeUntranslated(alloc, &slot, "\\\\server\\share");
+    try std.testing.expectEqualStrings("", slot.?);
 }

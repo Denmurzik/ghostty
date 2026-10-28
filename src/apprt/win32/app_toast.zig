@@ -16,13 +16,15 @@ const margin_px = 8;
 /// Room for the key state indicator below (its height and gap), logical px.
 const stack_px = 40;
 
-const Kind = enum { copied, cleared, reloaded };
+const Kind = enum { copied, cleared, reloaded, exported, export_failed };
 
 fn textFor(kind: Kind) []const u8 {
     return switch (kind) {
         .copied => "Copied to clipboard",
         .cleared => "Cleared clipboard",
         .reloaded => "Reloaded the configuration",
+        .exported => "Exported terminal IO",
+        .export_failed => "Unable to export terminal IO",
     };
 }
 
@@ -31,6 +33,8 @@ fn enabled(notifications: configpkg.Config.AppNotifications, kind: Kind) bool {
     return switch (kind) {
         .copied, .cleared => notifications.@"clipboard-copy",
         .reloaded => notifications.@"config-reload",
+        // The answer to an explicit save.
+        .exported, .export_failed => true,
     };
 }
 
@@ -40,6 +44,14 @@ pub fn configReloaded(app: *App) void {
     const tab = window.activeTab() orelse return;
     const surface = tab.focusedSurface() orelse return;
     show(surface, .reloaded);
+}
+
+/// The export of the terminal IO finished (on a worker thread, reported here).
+pub fn exportResult(app: *App, ok: bool) void {
+    const window = app.last_active orelse app.lastNormalWindow() orelse return;
+    const tab = window.activeTab() orelse return;
+    const surface = tab.focusedSurface() orelse return;
+    show(surface, if (ok) .exported else .export_failed);
 }
 
 /// After a successful write to the standard clipboard.

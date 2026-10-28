@@ -6,6 +6,7 @@ const apprt = @import("../../apprt.zig");
 const global = @import("../../global.zig");
 const App = @import("App.zig");
 const Window = @import("Window.zig");
+const app_toast = @import("app_toast.zig");
 const hooks = @import("hooks.zig");
 const messages = @import("messages.zig");
 const ops = @import("ipc/ops.zig");
@@ -147,11 +148,136 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
         log.warn("refusing to write the export to an unsafe path", .{});
         return;
     }
-    writeBytes(alloc, path, payload.bytes) catch |err| {
-        log.warn("unable to write the export err={}", .{err});
-        return;
+    // The write runs on a worker thread; the result comes back through a
+    // posted message (`doneApp`). The job owns the bytes from here on.
+    const bytes = payload.bytes;
+    payload.bytes = &.{};
+    startJob(window.app, path, bytes, postDone) catch |err| {
+        log.warn("unable to start the export err={}", .{err});
+        alloc.free(bytes);
+        app_toast.exportResult(window.app, false);
     };
-    record(path, payload.bytes.len);
+}
+
+/// A write that is in flight (or finished and waiting to be reported).
+/// Allocated by `startJob`, freed by whoever consumes the result.
+const Job = struct {
+    alloc: Allocator,
+    path: []u8,
+    bytes: []u8,
+    msg_hwnd: win32.foundation.HWND,
+    ok: bool = false,
+    on_done: *const fn (*Job) void,
+
+    fn destroy(self: *Job) void {
+        self.alloc.free(self.path);
+        self.alloc.free(self.bytes);
+        self.alloc.destroy(self);
+    }
+
+    fn run(self: *Job) void {
+        writeBytes(self.alloc, self.path, self.bytes) catch |err| {
+            log.warn("unable to write the export err={}", .{err});
+            self.ok = false;
+            self.finish();
+            return;
+        };
+        self.ok = true;
+        self.finish();
+    }
+
+    fn finish(self: *Job) void {
+        // After the decrement a bounded wait may return; the callback only
+        // relies on `self`.
+        const on_done = self.on_done;
+        _ = in_flight.fetchSub(1, .release);
+        on_done(self);
+    }
+};
+
+/// Jobs started and not finished writing. The quit path waits for it to
+/// reach zero (bounded).
+var in_flight: std.atomic.Value(u32) = .init(0);
+/// Set once the app is stopping: finished jobs free themselves.
+var stopping: std.atomic.Value(bool) = .init(false);
+
+/// How long quitting waits for a write in flight, milliseconds.
+const quit_wait_ms = 3000;
+
+/// Starts a worker that writes `bytes` to a copy of `path` and then calls
+/// `on_done` on the worker thread. On success the job owns `bytes`; on an
+/// error the caller keeps them.
+fn startJob(app: *App, path: []const u8, bytes: []u8, on_done: *const fn (*Job) void) !void {
+    const alloc = app.core_app.alloc;
+    const job = try alloc.create(Job);
+    errdefer alloc.destroy(job);
+    const path_copy = try alloc.dupe(u8, path);
+    errdefer alloc.free(path_copy);
+    job.* = .{
+        .alloc = alloc,
+        .path = path_copy,
+        .bytes = bytes,
+        .msg_hwnd = app.msg_hwnd,
+        .on_done = on_done,
+    };
+    try spawn(job);
+}
+
+fn spawn(job: *Job) !void {
+    _ = in_flight.fetchAdd(1, .acq_rel);
+    errdefer _ = in_flight.fetchSub(1, .acq_rel);
+    const thread = try std.Thread.spawn(.{}, Job.run, .{job});
+    thread.detach();
+}
+
+/// On the worker: posts the finished job to the message window. A failed
+/// post (the window is gone) or a stopping app frees the job here.
+fn postDone(job: *Job) void {
+    if (stopping.load(.acquire)) return job.destroy();
+    if (win32.user32.PostMessageW(
+        job.msg_hwnd,
+        messages.WM_GHOSTTY_POSTED_DIALOG,
+        @backingInt(hooks.DialogKind.export_done),
+        @bitCast(@intFromPtr(job)),
+    ) == 0) job.destroy();
+}
+
+fn jobOf(lparam: win32.foundation.LPARAM) *Job {
+    return @ptrFromInt(@as(usize, @bitCast(lparam)));
+}
+
+/// `WM_GHOSTTY_POSTED_DIALOG` of kind `export_done` on the message window:
+/// the write finished; record it and tell the user.
+pub fn doneApp(app: *App, lparam: win32.foundation.LPARAM) void {
+    const job = jobOf(lparam);
+    defer job.destroy();
+    if (job.ok) record(job.path, job.bytes.len);
+    app_toast.exportResult(app, job.ok);
+}
+
+/// The message window is going away with a result in its queue.
+pub fn discardDone(lparam: win32.foundation.LPARAM) void {
+    jobOf(lparam).destroy();
+}
+
+/// The start of `App.terminate`: waits (bounded) for writes in flight so a
+/// quit does not cut a file in half. A write that outlasts the wait frees
+/// itself when it ends; the process exits anyway.
+pub fn appStopping(app: *App) void {
+    _ = app;
+    stopping.store(true, .release);
+    if (!waitIdle(quit_wait_ms)) log.warn("an export write is still running at quit", .{});
+}
+
+/// Whether every write in flight finished within `timeout_ms`.
+fn waitIdle(timeout_ms: u32) bool {
+    var waited: u32 = 0;
+    while (in_flight.load(.acquire) != 0) {
+        if (waited >= timeout_ms) return false;
+        std.Io.sleep(global.io(), .fromMilliseconds(5), .awake) catch {};
+        waited += 5;
+    }
+    return true;
 }
 
 /// The bytes exactly as given: no BOM, no line-ending conversion. Written to
@@ -245,4 +371,51 @@ test "win32 export: path safety refuses dot-dot, streams and device paths" {
     try t.expect(!pathSafe("\\\\.\\C:\\x"));
     try t.expect(!pathSafe("\\??\\UNC\\s\\x"));
     try t.expect(!pathSafe("C:\\x\x00y"));
+}
+
+const TestDone = struct {
+    var finished: std.atomic.Value(bool) = .init(false);
+    var ok: bool = false;
+    fn done(job: *Job) void {
+        ok = job.ok;
+        job.destroy();
+        finished.store(true, .release);
+    }
+};
+
+test "win32 export: the write runs on a worker and reports back" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(global.io(), ".", t.allocator);
+    defer t.allocator.free(dir);
+    const path = try std.fmt.allocPrint(t.allocator, "{s}\\out.txt", .{dir});
+    defer t.allocator.free(path);
+
+    TestDone.finished.store(false, .release);
+    const job = try t.allocator.create(Job);
+    job.* = .{
+        .alloc = t.allocator,
+        .path = try t.allocator.dupe(u8, path),
+        .bytes = try t.allocator.dupe(u8, "hello\r\nworld"),
+        .msg_hwnd = undefined,
+        .on_done = TestDone.done,
+    };
+    try spawn(job);
+    try t.expect(waitIdle(5000));
+    while (!TestDone.finished.load(.acquire)) std.Io.sleep(global.io(), .fromMilliseconds(1), .awake) catch {};
+    try t.expect(TestDone.ok);
+
+    const got = try tmp.dir.readFileAlloc(global.io(), "out.txt", t.allocator, .limited(64));
+    defer t.allocator.free(got);
+    try t.expectEqualStrings("hello\r\nworld", got);
+}
+
+test "win32 export: quit waits for a write in flight, bounded" {
+    const t = std.testing;
+    try t.expect(waitIdle(0));
+    _ = in_flight.fetchAdd(1, .acq_rel);
+    try t.expect(!waitIdle(20));
+    _ = in_flight.fetchSub(1, .acq_rel);
+    try t.expect(waitIdle(20));
 }

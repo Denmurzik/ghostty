@@ -127,7 +127,7 @@ pub fn pwd(app: *App, target: apprt.Target, value: apprt.Action.Value(.pwd)) !bo
     };
     const surface = app.surfaceFor(core) orelse return false;
     // Core hands over the Windows path (an empty one when the shell has none).
-    try surface.setPwd(value.pwd);
+    try surface.setReportedPwd(value.pwd);
     // The proxy icon of the title row follows the directory.
     surface.window.surfaceTitleChanged(surface);
     return true;
