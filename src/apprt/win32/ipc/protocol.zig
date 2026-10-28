@@ -225,8 +225,9 @@ pub fn pipeName(
     });
 }
 
-/// `\\.\pipe\ghostty-tmux-<user SID>-<session>-<class>[-admin]`: the opt-in
-/// external-mode pipe (R-M5-14). `-admin` marks an elevated server. The SID
+/// `\\.\pipe\ghostty-tmux-<user SID>-<u|a>-<session>-<class>`: the opt-in
+/// external-mode pipe (R-M5-14). The marker (`a` elevated, `u` not) precedes
+/// the class, as in the M2 name, so a class can never mimic it. The SID
 /// starts with a letter, so the name can never read as a per-process tmux
 /// pipe (`tmuxPipePid` wants digits there).
 pub fn tmuxUserPipeName(
@@ -237,11 +238,11 @@ pub fn tmuxUserPipeName(
     admin: bool,
 ) ![]const u8 {
     var class_buf: [max_class_len]u8 = undefined;
-    return std.fmt.bufPrint(buf, tmux_pipe_prefix ++ "{s}-{d}-{s}{s}", .{
+    return std.fmt.bufPrint(buf, tmux_pipe_prefix ++ "{s}-{c}-{d}-{s}", .{
         sid,
+        @as(u8, if (admin) 'a' else 'u'),
         session,
         sanitizeClass(&class_buf, class),
-        if (admin) "-admin" else "",
     });
 }
 

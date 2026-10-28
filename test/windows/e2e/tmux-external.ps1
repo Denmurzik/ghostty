@@ -71,8 +71,8 @@ Invoke-E2eScenario 'tmux-external' {
     $g = Start-E2eGhostty -ConfigText ($script:BaseConfig + "`nwindows-tmux-external = true`n")
     $s = Get-GhosttyState -Class $g.Class
     $user = [string]$s.tmux.user_pipe
-    if ($user -notmatch '^\\\\\.\\pipe\\ghostty-tmux-S-1-\d+(-\d+)+-\d+-.+') { throw "unexpected user pipe name '$user'" }
-    if ($user -like '*-admin') { throw "the sandbox Ghostty is not elevated, but the pipe is '$user'" }
+    if ($user -notmatch '^..[.].pipe.ghostty-tmux-S-1-[0-9]+(-[0-9]+)+-[ua]-[0-9]+-.+') { throw "unexpected user pipe name '$user'" }
+    if ($user -notmatch '-u-[0-9]+-') { throw "the sandbox Ghostty is not elevated, but the pipe is '$user'" }
     if (-not [string]$s.tmux.pipe) { throw 'the per-process pipe is missing' }
 
     $r = Invoke-TmuxExt $g @('-L', 'claude-swarm-1', 'has-session', '-t', 'claude-swarm')
@@ -119,7 +119,7 @@ Invoke-E2eScenario 'tmux-external' {
     $s = Get-GhosttyState -Class $g.Class
     if ([string]$s.tmux.user_pipe) { throw "user pipe '$($s.tmux.user_pipe)' exists with windows-tmux-external = false" }
     $r = Invoke-TmuxExt $g @('-L', 'claude-swarm-1', 'has-session', '-t', 'claude-swarm')
-    Assert-Failed $r 'no server running on \\.\pipe\ghostty-tmux-S-1-*' 'key false'
+    Assert-Failed $r 'no server running on claude-swarm-1*' 'key false'
     $r = Invoke-TmuxExt $g @('has-session', '-t', 'claude-swarm')
     Assert-Failed $r 'no server running on *' 'key false, no -L'
 }

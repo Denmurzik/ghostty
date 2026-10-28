@@ -17,6 +17,7 @@ const global = @import("../../../global.zig");
 const util = @import("../util.zig");
 const protocol = @import("../ipc/protocol.zig");
 const instance = @import("../instance.zig");
+const messages = @import("../messages.zig");
 const Config = @import("../../../config.zig").Config;
 const ipc = struct {
     const Server = @import("../ipc/Server.zig");
@@ -26,8 +27,16 @@ const log = std.log.scoped(.win32_tmux_server);
 
 /// `WM_GHOSTTY_IPC` wparam of this pipe.
 pub const post_tag: usize = 1;
-/// `WM_GHOSTTY_IPC` wparam of the opt-in external (user) pipe.
+/// Low byte of the `WM_GHOSTTY_IPC` wparam of the opt-in external (user)
+/// pipe; the claim's generation sits above it (`userTag`).
 pub const post_tag_user: usize = 2;
+
+/// The wparam of the user pipe's `n`th claim. A message posted by an earlier
+/// claim can then never be mistaken for one of the live server, whose
+/// `Pending`s are different objects.
+pub fn userTag(generation: usize) usize {
+    return post_tag_user | (generation << 8);
+}
 
 /// A silent client must not hold the queue: 500 ms to send its request and
 /// 200 ms to read the answer.
@@ -47,6 +56,8 @@ pub const State = struct {
     /// key is false or the claim failed.
     user_server: ?*ipc.Server = null,
     user_pipe: ?[]u8 = null,
+    /// Counts the claims of the user pipe (`userTag`).
+    user_generation: usize = 0,
 };
 
 /// Where a `WM_GHOSTTY_IPC` goes.
@@ -54,10 +65,12 @@ pub const Route = enum { main, tmux, tmux_user, drop };
 
 /// Routing on wparam first. A tmux request is answered even when the main
 /// pipe is not ours (standalone process); a request of a stopped server is
-/// dropped, its `Pending` belongs to the server again.
-pub fn routeIpc(wparam: usize, main_server: ?*ipc.Server, tmux_server: ?*ipc.Server, user_server: ?*ipc.Server) Route {
+/// dropped, its `Pending` belongs to the server again. `user_tag` is the
+/// `post_tag` of the live user-pipe server, if any; a message of another
+/// generation is dropped.
+pub fn routeIpc(wparam: usize, main_server: ?*ipc.Server, tmux_server: ?*ipc.Server, user_tag: ?usize) Route {
     if (wparam == post_tag) return if (tmux_server == null) .drop else .tmux;
-    if (wparam == post_tag_user) return if (user_server == null) .drop else .tmux_user;
+    if (wparam & 0xFF == post_tag_user) return if (user_tag != null and user_tag.? == wparam) .tmux_user else .drop;
     if (wparam == 0) return if (main_server == null) .drop else .main;
     return .drop;
 }
@@ -119,7 +132,9 @@ fn syncExternal(app: *App, config: *const Config) void {
     const st = &app.tmux_server;
     if (!st.started) return;
     if (config.@"windows-tmux-external") {
-        if (st.user_server == null) claimUser(app);
+        // Only the primary instance (the owner of the main pipe) serves it: a
+        // standalone process would take the name from the one that should.
+        if (st.user_server == null and app.serving()) claimUser(app);
     } else {
         stopUser(app);
     }
@@ -136,7 +151,9 @@ fn claimUser(app: *App) void {
     defer alloc.free(sid);
     var session: u32 = 0;
     if (win32.kernel32.ProcessIdToSessionId(win32.kernel32.GetCurrentProcessId(), &session) == 0) {
-        log.warn("ProcessIdToSessionId failed err={}", .{win32.kernel32.GetLastError()});
+        // tmux.exe could not name the pipe either: nobody would look it up.
+        log.warn("ProcessIdToSessionId failed err={}, not opening the external tmux pipe", .{win32.kernel32.GetLastError()});
+        return;
     }
     var name_buf: [512]u8 = undefined;
     const name = protocol.tmuxUserPipeName(&name_buf, sid, session, app.config.class orelse instance.defaultClass(), instance.isElevated()) catch return;
@@ -151,7 +168,8 @@ fn claimUser(app: *App) void {
         log.warn("unable to claim the external tmux pipe err={}", .{err});
         return;
     };
-    server.post_tag = post_tag_user;
+    st.user_generation += 1;
+    server.post_tag = userTag(st.user_generation);
     server.max_request = protocol.max_request_tmux;
     server.io_timeout_ms = io_timeout_ms;
     server.close_wait_ms = close_wait_ms;
@@ -165,11 +183,30 @@ fn claimUser(app: *App) void {
     log.info("external tmux pipe open", .{});
 }
 
+/// Removes the user pipe's posted `WM_GHOSTTY_IPC` messages from the queue
+/// before its server stops: `Server.stop` completes (and frees) what the
+/// server still waits on, so a message that outlived it must never reach a
+/// handler. Messages of the other pipes are posted again. The generation in
+/// the wparam is the second line of defence (`routeIpc`).
+fn drainUserMessages(app: *App) void {
+    var keep: [8]win32.user32.MSG = undefined;
+    var kept: usize = 0;
+    var msg: win32.user32.MSG = undefined;
+    const m = messages.WM_GHOSTTY_IPC;
+    while (kept < keep.len and win32.user32.PeekMessageW(&msg, app.msg_hwnd, m, m, win32.user32.PM_REMOVE) != 0) {
+        if (msg.wParam & 0xFF == post_tag_user) continue;
+        keep[kept] = msg;
+        kept += 1;
+    }
+    for (keep[0..kept]) |k| _ = win32.user32.PostMessageW(app.msg_hwnd, k.message, k.wParam, k.lParam);
+}
+
 fn stopUser(app: *App) void {
     const alloc = app.core_app.alloc;
     const st = &app.tmux_server;
     if (st.user_server) |server| {
         st.user_server = null;
+        drainUserMessages(app);
         server.stop();
         log.info("external tmux pipe closed", .{});
     }
@@ -408,11 +445,15 @@ test "win32 tmux server: routing is by wparam before the server check" {
     try std.testing.expectEqual(Route.tmux, routeIpc(1, null, fake, null));
     try std.testing.expectEqual(Route.drop, routeIpc(0, null, fake, null));
     try std.testing.expectEqual(Route.main, routeIpc(0, fake, null, null));
-    try std.testing.expectEqual(Route.drop, routeIpc(1, fake, null, fake));
-    // The user pipe has its own tag; released, its requests are dropped.
-    try std.testing.expectEqual(Route.tmux_user, routeIpc(2, null, null, fake));
-    try std.testing.expectEqual(Route.drop, routeIpc(2, fake, fake, null));
-    try std.testing.expectEqual(Route.drop, routeIpc(3, fake, fake, fake));
+    try std.testing.expectEqual(Route.drop, routeIpc(1, fake, null, userTag(1)));
+    // The user pipe has its own tag per claim; released, or from an earlier
+    // claim, its messages are dropped.
+    try std.testing.expectEqual(Route.tmux_user, routeIpc(userTag(1), null, null, userTag(1)));
+    try std.testing.expectEqual(Route.drop, routeIpc(userTag(1), fake, fake, null));
+    try std.testing.expectEqual(Route.drop, routeIpc(userTag(1), null, null, userTag(2)));
+    try std.testing.expectEqual(Route.drop, routeIpc(userTag(2), null, null, userTag(1)));
+    try std.testing.expectEqual(Route.drop, routeIpc(post_tag_user, null, null, userTag(1)));
+    try std.testing.expectEqual(Route.drop, routeIpc(3, fake, fake, userTag(1)));
 }
 
 fn testUiHandler(ctx: ?*anyopaque, pending: *ipc.Server.Pending) void {

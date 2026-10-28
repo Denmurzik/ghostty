@@ -106,7 +106,7 @@ Invoke-E2eScenario 'tmux-cli' {
     # not exist, so no server (R-M5-14; the class keeps the owner's Ghostty out of it).
     $r = Invoke-Tmux @('display-message', '-p', 'x') @{ GHOSTTY_TMUX_CLASS = 'ghostty-e2e-no-such-class' }
     if ($r.Code -ne 1) { throw "no server: exit $($r.Code), expected 1" }
-    if ($r.Stderr -notlike "no server running on \\.\pipe\ghostty-tmux-S-1-*-ghostty-e2e-no-such-class`n") { throw "no server: stderr '$($r.Stderr)'" }
+    if ($r.Stderr -ne "no server running on default`n") { throw "no server: stderr '$($r.Stderr)'" }
 
     # A pipe that does not exist is "no server" too, quickly.
     $ghost = '\\.\pipe\ghostty-tmux-1-0000000000000000'

@@ -580,7 +580,7 @@ fn msgWndProc(
             // that does not own the main pipe. After a server stopped, its
             // requests belong to it again.
             const pending: *ipc.Server.Pending = @ptrFromInt(@as(usize, @bitCast(lparam)));
-            switch (tmux_Server.routeIpc(wparam, self.server, self.tmux_server.server, self.tmux_server.user_server)) {
+            switch (tmux_Server.routeIpc(wparam, self.server, self.tmux_server.server, if (self.tmux_server.user_server) |s| s.post_tag else null)) {
                 .tmux => tmux_Server.handle(self, pending, false),
                 .tmux_user => tmux_Server.handle(self, pending, true),
                 .main => self.handleIpc(pending),

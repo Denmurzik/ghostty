@@ -146,7 +146,9 @@ pub fn run(
     const stdin_len = if (stdin_text) |s| s.len else 0;
     const bytes = transport.request(arena, pipe, expected_pid, payload, start + client_timeout_ms) catch |err| {
         var out = switch (err) {
-            error.NoServer, error.NotOurServer => try fail(arena, "no server running on {s}\n", .{pipe}),
+            // The user pipe is named after the caller's SID: say the
+            // namespace instead, as before external mode existed.
+            error.NoServer, error.NotOurServer => try fail(arena, "no server running on {s}\n", .{namespace orelse pipe}),
             error.Timeout => try fail(arena, "ghostty: server timed out\n", .{}),
             else => try fail(arena, "ghostty: lost connection to {s}\n", .{pipe}),
         };
@@ -247,11 +249,24 @@ test "tmux shim run: -V needs no server" {
 test "tmux shim run: no TMUX and no -S" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    var tr: FakeTransport = .{};
+    // The user pipe is tried, and does not exist: the M4 text, "default".
+    var tr: FakeTransport = .{ .user = test_user, .err = error.NoServer };
     const out = try run(arena_state.allocator(), &.{ "display-message", "-p", "x" }, testEnv(.{}), "C:\\", &tr, NoStdin{});
     try std.testing.expectEqual(@as(u8, 1), out.code);
     try std.testing.expectEqualStrings("no server running on default\n", out.stderr);
-    try std.testing.expectEqual(@as(usize, 0), tr.calls);
+    try std.testing.expectEqual(@as(usize, 1), tr.calls);
+    try std.testing.expectEqual(@as(u32, 0), tr.expected_pid);
+
+    // -L: the namespace is named, and a foreign owner reads the same.
+    var tr2: FakeTransport = .{ .user = test_user, .err = error.NotOurServer };
+    const out2 = try run(arena_state.allocator(), &.{ "-L", "work", "list-panes" }, testEnv(.{}), "C:\\", &tr2, NoStdin{});
+    try std.testing.expectEqualStrings("no server running on work\n", out2.stderr);
+
+    // Without an identity nothing is tried at all.
+    var none: FakeTransport = .{};
+    const out3 = try run(arena_state.allocator(), &.{ "display-message", "-p", "x" }, testEnv(.{}), "C:\\", &none, NoStdin{});
+    try std.testing.expectEqualStrings("no server running on default\n", out3.stderr);
+    try std.testing.expectEqual(@as(usize, 0), none.calls);
 }
 
 const test_user: UserInfo = .{ .sid = "S-1-5-21-1-2-3-1001", .session = 1, .elevated = false };
@@ -259,14 +274,19 @@ const test_user: UserInfo = .{ .sid = "S-1-5-21-1-2-3-1001", .session = 1, .elev
 test "tmux shim external: pipe name" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-com.mitchellh.ghostty",
+        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-u-1-com.mitchellh.ghostty",
         try protocol.tmuxUserPipeName(&buf, "S-1-5-21-1-2-3-1001", 1, "com.mitchellh.ghostty", false),
     );
     // The class is sanitised like the M2 name's; an elevated server gets -admin.
     try std.testing.expectEqualStrings(
-        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-2-a_b_c-admin",
+        "\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-a-2-a_b_c",
         try protocol.tmuxUserPipeName(&buf, "S-1-5-21-1-2-3-1001", 2, "a b/c", true),
     );
+    // A class can not mimic the elevation marker.
+    var other: [256]u8 = undefined;
+    const user_foo_admin = try protocol.tmuxUserPipeName(&buf, "S-1-5-18", 1, "foo-admin", false);
+    const admin_foo = try protocol.tmuxUserPipeName(&other, "S-1-5-18", 1, "foo", true);
+    try std.testing.expect(!std.mem.eql(u8, user_foo_admin, admin_foo));
     // Never the shape of a per-process pipe.
     try std.testing.expectEqual(@as(?u32, null), protocol.tmuxPipePid(try protocol.tmuxUserPipeName(&buf, "S-1-5-18", 0, "x", false)));
 }
@@ -281,7 +301,7 @@ test "tmux shim external: -L sets the namespace, no -L is default" {
     env.class = "cls";
     const out = try run(a, &.{ "has-session", "-t", "x" }, env, "C:\\", &tr, NoStdin{});
     try std.testing.expectEqual(@as(u8, 0), out.code);
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-cls", tr.pipe);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-u-1-cls", tr.pipe);
     try std.testing.expectEqual(@as(u32, 0), tr.expected_pid);
     try std.testing.expectEqualStrings("default", (try protocol.parseRequest(a, tr.payload)).namespace.?);
 
@@ -291,7 +311,7 @@ test "tmux shim external: -L sets the namespace, no -L is default" {
     // Elevated: the -admin pipe.
     tr.user.?.elevated = true;
     _ = try run(a, &.{"has-session"}, env, "C:\\", &tr, NoStdin{});
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-1-cls-admin", tr.pipe);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\ghostty-tmux-S-1-5-21-1-2-3-1001-a-1-cls", tr.pipe);
 
     // Without an identity there is no pipe to try.
     var none: FakeTransport = .{};

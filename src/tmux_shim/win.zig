@@ -136,6 +136,38 @@ pub const Identity = struct {
     }
 };
 
+pub const SE_KERNEL_OBJECT: DWORD = 6;
+pub const OWNER_SECURITY_INFORMATION: DWORD = 1;
+pub extern "advapi32" fn GetSecurityInfo(handle: HANDLE, object_type: DWORD, info: DWORD, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, sd: *?*anyopaque) callconv(.winapi) DWORD;
+
+/// The text form of a SID ("S-1-5-...") into `out`; its length, or null.
+pub fn sidText(sid: *anyopaque, out: *[184]u8) ?usize {
+    var wide: ?[*:0]u16 = null;
+    if (ConvertSidToStringSidW(sid, &wide) == 0) return null;
+    defer _ = LocalFree(wide);
+    const text = std.mem.span(wide.?);
+    if (text.len == 0 or text.len > out.len) return null;
+    for (text, out[0..text.len]) |c, *o| {
+        if (c > 0x7f) return null;
+        o.* = @intCast(c);
+    }
+    return text.len;
+}
+
+/// Whether the object `handle` (an open pipe) is owned by `own`'s user, or,
+/// for an elevated caller, by the Administrators group (the owner an
+/// elevated process gives what it creates).
+pub fn ownedByUser(handle: HANDLE, own: *const Identity) bool {
+    var owner: ?*anyopaque = null;
+    var sd: ?*anyopaque = null;
+    if (GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, null, null, null, &sd) != 0) return false;
+    defer _ = LocalFree(sd);
+    var buf: [184]u8 = undefined;
+    const n = sidText(owner orelse return false, &buf) orelse return false;
+    if (std.mem.eql(u8, buf[0..n], own.sid())) return true;
+    return own.elevated and std.mem.eql(u8, buf[0..n], "S-1-5-32-544");
+}
+
 /// The identity of `process` (a handle with at least
 /// `PROCESS_QUERY_LIMITED_INFORMATION`); null when its token cannot be read.
 pub fn identityOf(process: HANDLE) ?Identity {
@@ -149,16 +181,7 @@ pub fn identityOf(process: HANDLE) ?Identity {
 
     if (GetTokenInformation(token, TokenUser, &buf, buf.len, &len) == 0) return null;
     const user: *const SID_AND_ATTRIBUTES = @ptrCast(&buf);
-    var wide: ?[*:0]u16 = null;
-    if (ConvertSidToStringSidW(user.Sid orelse return null, &wide) == 0) return null;
-    defer _ = LocalFree(wide);
-    const text = std.mem.span(wide.?);
-    if (text.len == 0 or text.len > id.sid_buf.len) return null;
-    for (text, id.sid_buf[0..text.len]) |c, *out| {
-        if (c > 0x7f) return null;
-        out.* = @intCast(c);
-    }
-    id.sid_len = text.len;
+    id.sid_len = sidText(user.Sid orelse return null, &id.sid_buf) orelse return null;
 
     var elevation: DWORD = 0;
     if (GetTokenInformation(token, TokenElevation, &elevation, @sizeOf(DWORD), &len) == 0) return null;

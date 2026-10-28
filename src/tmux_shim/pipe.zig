@@ -60,6 +60,9 @@ pub fn request(
         const own = win.identityOf(win.GetCurrentProcess()) orelse return error.NotOurServer;
         const peer = win.identityOfPid(pid) orelse return error.NotOurServer;
         if (!own.sameAs(&peer)) return error.NotOurServer;
+        // A pid can be reused; the owner of the pipe object cannot be faked
+        // by a process of another user.
+        if (!win.ownedByUser(pipe, &own)) return error.NotOurServer;
     } else if (pid != expected_pid) return error.NotOurServer;
 
     const event = win.CreateEventW(null, 1, 0, null) orelse return error.BrokenPipe;
