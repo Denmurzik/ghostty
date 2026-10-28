@@ -402,6 +402,7 @@ pub fn setTitle(self: *Surface, title: []const u8) Allocator.Error!void {
     const copy: ?[:0]u8 = if (title_rules.programTitleAfter(self.title, title)) |t| try alloc.dupeSentinel(u8, t, 0) else null;
     if (self.title) |old| alloc.free(old);
     self.title = copy;
+    hooks_mod.surfaceTitleChanged(self);
 }
 
 /// Pin (or, when empty, release) the title the user typed. A pinned title
@@ -411,6 +412,7 @@ pub fn setUserTitle(self: *Surface, title: []const u8) Allocator.Error!void {
     const copy: ?[:0]u8 = if (title.len == 0) null else try alloc.dupeSentinel(u8, title, 0);
     if (self.title_user) |old| alloc.free(old);
     self.title_user = copy;
+    hooks_mod.surfaceTitleChanged(self);
 }
 
 /// The title the caption and strip show for this surface: what is set,

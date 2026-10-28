@@ -21,6 +21,7 @@ const theme = @import("../theme.zig");
 const commands = @import("commands.zig");
 const format = @import("../../../tmux_shim/format.zig");
 const color = @import("../../../terminal/color.zig");
+const link_policy = @import("../link_policy.zig");
 const win32 = @import("win32");
 
 const log = std.log.scoped(.win32_tmux_labels);
@@ -49,6 +50,8 @@ const Label = struct {
     text8: [text_cap * 3]u8 = undefined,
     text8_len: usize = 0,
     ink: ?color.RGB = null,
+    /// The DPI the pill was sized for.
+    dpi: u32 = 0,
 
     fn text8Slice(self: *const Label) []const u8 {
         return self.text8[0..self.text8_len];
@@ -78,25 +81,7 @@ pub fn visibleAs(status: ?[]const u8, text: []const u8, cols: u32) ?Placement {
     return placement;
 }
 
-/// `s` without its `#[...]` runs, trimmed.
-pub fn stripStyles(arena: Allocator, s: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (s[i] == '#' and i + 1 < s.len and s[i + 1] == '[') {
-            if (std.mem.indexOfScalarPos(u8, s, i + 2, ']')) |end| {
-                i = end + 1;
-                continue;
-            }
-        }
-        try out.append(arena, s[i]);
-        i += 1;
-    }
-    return std.mem.trim(u8, out.items, " \t");
-}
-
-/// The value of the first `fg=` token of a style ("fg=red,bold" or
-/// "fg=red bold").
+/// The value of the first fg= token of a style ("fg=red,bold" or "fg=red bold").
 fn fgOfStyle(style: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeAny(u8, style, ", \t");
     while (it.next()) |tok| {
@@ -105,37 +90,34 @@ fn fgOfStyle(style: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The first `fg=` of the `#[...]` runs of `s`.
-pub fn firstFg(s: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, s, i, "#[")) |start| {
-        const end = std.mem.indexOfScalarPos(u8, s, start + 2, ']') orelse return null;
-        if (fgOfStyle(s[start + 2 .. end])) |v| return v;
-        i = end + 1;
-    }
-    return null;
-}
-
 const ansi_names = [_][]const u8{ "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" };
 
-/// A tmux colour: a name (`red`, `brightred`), `colourN` / `colorN`, or
-/// `#rrggbb`; palette entries come from the terminal palette. `default` and
-/// unknown names give null.
+/// A tmux colour: a name (red, brightred), colourN / colorN (N = 0..255) or
+/// #rrggbb; case-insensitive like tmux. Palette entries come from the
+/// terminal palette. default and unknown names give null.
 pub fn parseColour(name: []const u8, palette: *const color.Palette) ?color.RGB {
-    if (name.len == 7 and name[0] == '#') {
-        const v = std.fmt.parseInt(u24, name[1..], 16) catch return null;
+    var buf: [16]u8 = undefined;
+    if (name.len == 0 or name.len > buf.len) return null;
+    const lower = std.ascii.lowerString(&buf, name);
+
+    if (lower.len == 7 and lower[0] == '#') {
+        for (lower[1..]) |c| if (!std.ascii.isHex(c)) return null;
+        const v = std.fmt.parseInt(u24, lower[1..], 16) catch return null;
         return .{ .r = @intCast(v >> 16), .g = @intCast((v >> 8) & 0xff), .b = @intCast(v & 0xff) };
     }
     inline for (.{ "colour", "color" }) |prefix| {
-        if (std.mem.startsWith(u8, name, prefix)) {
-            const n = std.fmt.parseInt(u16, name[prefix.len..], 10) catch return null;
+        if (std.mem.startsWith(u8, lower, prefix)) {
+            const digits = lower[prefix.len..];
+            if (digits.len == 0 or digits.len > 3) return null;
+            for (digits) |c| if (!std.ascii.isDigit(c)) return null;
+            const n = std.fmt.parseInt(u16, digits, 10) catch return null;
             return if (n < 256) palette[n] else null;
         }
     }
-    var base = name;
+    var base: []const u8 = lower;
     var bright: usize = 0;
-    if (std.mem.startsWith(u8, name, "bright")) {
-        base = name["bright".len..];
+    if (std.mem.startsWith(u8, lower, "bright")) {
+        base = lower["bright".len..];
         bright = 8;
     }
     for (ansi_names, 0..) |n, i| {
@@ -149,18 +131,109 @@ pub const Spec = struct {
     ink: ?color.RGB,
 };
 
-/// What the label shows and in which colour, from an expanded format.
+/// The label shows at most this many code points; more ends in an ellipsis.
+pub const max_cells = 100;
+
+const ellipsis = "\xe2\x80\xa6";
+
+/// Control characters, C1, bidi controls, invalid UTF-8: the text of a pane
+/// title is the program's. Controls become a space, bidi controls are
+/// dropped, an invalid byte becomes U+FFFD; the result is trimmed and cut
+/// to max_cells code points (ending in an ellipsis).
+pub fn sanitize(arena: Allocator, s: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var cells: usize = 0;
+    var cut_short = false;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 0;
+        const valid = len > 0 and i + len <= s.len and std.unicode.utf8ValidateSlice(s[i .. i + len]);
+        var piece: []const u8 = undefined;
+        if (!valid) {
+            piece = "\xef\xbf\xbd";
+            i += 1;
+        } else {
+            piece = s[i .. i + len];
+            i += len;
+            const cp = std.unicode.utf8Decode(piece) catch 0xFFFD;
+            if (cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp <= 0x9f)) {
+                piece = " ";
+            } else if (link_policy.hasBidiControl(piece)) {
+                continue;
+            }
+        }
+        if (cells == max_cells) {
+            cut_short = true;
+            break;
+        }
+        try out.appendSlice(arena, piece);
+        cells += 1;
+    }
+    var text = std.mem.trim(u8, out.items, " ");
+    if (cut_short) {
+        // The last kept code point makes room for the ellipsis.
+        var n = text.len;
+        while (n > 0 and (text[n - 1] & 0xC0) == 0x80) n -= 1;
+        if (n > 0) n -= 1;
+        var cut_out: std.ArrayList(u8) = .empty;
+        try cut_out.appendSlice(arena, std.mem.trimEnd(u8, text[0..n], " "));
+        try cut_out.appendSlice(arena, ellipsis);
+        text = cut_out.items;
+    }
+    return text;
+}
+
+/// What the label shows and in which colour. Styles are read from the
+/// template only: a #[ that arrives through a variable (a pane title) is
+/// text. ctx has lookup(name) for format.expand.
 pub fn specFor(
     arena: Allocator,
-    expanded: []const u8,
+    template: []const u8,
+    ctx: anytype,
     style: ?[]const u8,
     palette: *const color.Palette,
 ) Allocator.Error!Spec {
-    const fg = firstFg(expanded) orelse (if (style) |s| fgOfStyle(s) else null);
+    var raw: std.ArrayList(u8) = .empty;
+    var fg: ?[]const u8 = null;
+    var have_fg = false;
+    var chunk_start: usize = 0;
+    var i: usize = 0;
+    while (i < template.len) {
+        if (template[i] == '#' and i + 1 < template.len) {
+            if (template[i + 1] == '#') {
+                i += 2;
+                continue;
+            }
+            if (template[i + 1] == '[') {
+                if (std.mem.indexOfScalarPos(u8, template, i + 2, ']')) |end| {
+                    try expandInto(arena, &raw, template[chunk_start..i], ctx);
+                    if (!have_fg) {
+                        if (fgOfStyle(template[i + 2 .. end])) |v| {
+                            fg = v;
+                            have_fg = true;
+                        }
+                    }
+                    i = end + 1;
+                    chunk_start = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    try expandInto(arena, &raw, template[chunk_start..], ctx);
+
+    if (!have_fg) fg = if (style) |st| fgOfStyle(st) else null;
     return .{
-        .text = try stripStyles(arena, expanded),
+        .text = try sanitize(arena, raw.items),
         .ink = if (fg) |v| parseColour(v, palette) else null,
     };
+}
+
+fn expandInto(arena: Allocator, out: *std.ArrayList(u8), chunk: []const u8, ctx: anytype) Allocator.Error!void {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    format.expand(&aw.writer, chunk, ctx) catch return error.OutOfMemory;
+    try out.appendSlice(arena, aw.written());
 }
 
 /// Format variables of one pane.
@@ -197,18 +270,43 @@ const Ctx = struct {
     }
 };
 
-fn expandFormat(arena: Allocator, fmt: []const u8, ctx: *const Ctx) Allocator.Error![]const u8 {
-    var aw: std.Io.Writer.Allocating = .init(arena);
-    format.expand(&aw.writer, fmt, ctx) catch return error.OutOfMemory;
-    return aw.written();
-}
-
 // ---- glue ------------------------------------------------------------
 
 /// Called by the registry once its options exist (and again if they move).
 pub fn attachOptions(app: *App, options: *const commands.Options) void {
     app.tmux_labels.options = options;
     refreshApp(app);
+}
+
+/// Task 12 calls this from its teardown (before the Options are freed or
+/// moved): the labels hide and nothing reads the Options again. The Options
+/// must keep their address between attachOptions and detachOptions.
+pub fn detachOptions(app: *App) void {
+    app.tmux_labels.options = null;
+    for (app.tmux_labels.labels.items) |label| label.popup.hide();
+}
+
+/// A pane title changed (set_title, select-pane -T): the title is a format
+/// variable.
+pub fn refreshPane(surface: *Surface) void {
+    const app = surface.app;
+    if (app.tmux_labels.options == null) return;
+    const tab = surface.tab;
+    var index: usize = 0;
+    var it = tab.tree.iterator();
+    while (it.next()) |entry| : (index += 1) {
+        if (entry.view == surface) {
+            refreshSurface(app, tab, surface, index, false);
+            return;
+        }
+    }
+}
+
+/// The config (palette, theme) changed.
+pub fn configChanged(app: *App) void {
+    for (app.windows.items) |window| {
+        for (window.tabs.items) |tab| refreshTabForced(tab);
+    }
 }
 
 pub fn optionsChanged(app: *App, window_id: u32) void {
@@ -238,7 +336,7 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
 pub fn windowChanged(window: *Window, change: hooks.WindowChange) void {
     // A new DPI changes the text width.
     if (change != .dpi) return;
-    for (window.tabs.items) |tab| refreshTab(tab);
+    for (window.tabs.items) |tab| refreshTabForced(tab);
 }
 
 pub fn surfaceDestroying(surface: *Surface) void {
@@ -268,12 +366,21 @@ fn refreshApp(app: *App) void {
 }
 
 fn refreshTab(tab: *Tab) void {
+    refreshTabWith(tab, false);
+}
+
+/// Redraws even when text and colour are unchanged (DPI, palette).
+fn refreshTabForced(tab: *Tab) void {
+    refreshTabWith(tab, true);
+}
+
+fn refreshTabWith(tab: *Tab, force: bool) void {
     const app = tab.window.app;
     if (app.tmux_labels.options == null) return;
     var index: usize = 0;
     var it = tab.tree.iterator();
     while (it.next()) |entry| : (index += 1) {
-        refreshSurface(app, tab, entry.view, index);
+        refreshSurface(app, tab, entry.view, index, force);
     }
 }
 
@@ -282,7 +389,7 @@ fn labelOf(state: *State, surface: *const Surface) ?*Label {
     return null;
 }
 
-fn refreshSurface(app: *App, tab: *Tab, surface: *Surface, pane_index: usize) void {
+fn refreshSurface(app: *App, tab: *Tab, surface: *Surface, pane_index: usize, force: bool) void {
     const state = &app.tmux_labels;
     const options = state.options orelse return;
     const alloc = app.core_app.alloc;
@@ -318,8 +425,7 @@ fn refreshSurface(app: *App, tab: *Tab, surface: *Surface, pane_index: usize) vo
             .cols = cols,
             .rows = rows,
         };
-        const expanded = expandFormat(arena, fmt, &ctx) catch return;
-        spec = specFor(arena, expanded, options.lookup(pane_id, window_id, "pane-border-style"), &app.config.palette.value) catch return;
+        spec = specFor(arena, fmt, &ctx, options.lookup(pane_id, window_id, "pane-border-style"), &app.config.palette.value) catch return;
     }
 
     const placement = visibleAs(status, spec.text, cols) orelse {
@@ -332,15 +438,18 @@ fn refreshSurface(app: *App, tab: *Tab, surface: *Surface, pane_index: usize) vo
         .top => .surface_top_right,
         .bottom => .surface_bottom_right,
     };
-    const same = label.popup.visible and label.popup.anchor == anchor and
+    const dpi = tab.window.dpi;
+    const same = !force and label.popup.visible and label.popup.anchor == anchor and
+        label.dpi == dpi and
         std.mem.eql(u8, label.text8Slice(), spec.text) and
         std.meta.eql(label.ink, spec.ink);
     if (same) return;
 
+    label.dpi = dpi;
     label.popup.anchor = anchor;
     label.ink = spec.ink;
     setText(label, spec.text);
-    label.popup.size = .{ .w = widthOf(label, tab.window.dpi), .h = height_px };
+    label.popup.size = .{ .w = widthOf(label, dpi), .h = height_px };
     label.popup.show() catch |err| log.warn("unable to show a pane label err={}", .{err});
 }
 
@@ -455,60 +564,116 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
 
 // ---- tests -----------------------------------------------------------
 
+const NullCtx = struct {
+    pub fn lookup(_: *const NullCtx, _: []const u8) ?[]const u8 {
+        return null;
+    }
+};
+
+const TitleCtx = struct {
+    title: []const u8,
+    pub fn lookup(self: *const TitleCtx, name: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, name, "pane_title")) return self.title;
+        return null;
+    }
+};
+
 test "win32 tmux labels: text and colour from Claude's border format" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const spec = try specFor(a, "#[fg=red,bold] alpha #[default]", null, &color.default);
+    const spec = try specFor(a, "#[fg=red,bold] alpha #[default]", &NullCtx{}, null, &color.default);
     try std.testing.expectEqualStrings("alpha", spec.text);
     try std.testing.expectEqual(color.default[1], spec.ink.?);
 
-    // Through the real expansion of Claude's format.
-    var options: commands.Options = .{};
-    const ctx: Ctx = .{
-        .arena = a,
-        .options = &options,
-        .pane_id = 3,
-        .window_id = 1,
-        .pane_index = 0,
-        .pane_active = true,
-        .pane_title = "alpha",
-        .window_index = 0,
-        .window_name = "w",
-        .cols = 80,
-        .rows = 24,
-    };
-    const expanded = try expandFormat(a, "#[fg=blue,bold] #{pane_title} #[default]", &ctx);
-    const s2 = try specFor(a, expanded, null, &color.default);
+    // Through the expansion of Claude's format.
+    const s2 = try specFor(a, "#[fg=blue,bold] #{pane_title} #[default]", &TitleCtx{ .title = "alpha" }, null, &color.default);
     try std.testing.expectEqualStrings("alpha", s2.text);
     try std.testing.expectEqual(color.default[4], s2.ink.?);
 
     // The style option colours a format without its own fg.
-    const s3 = try specFor(a, "beta", "fg=green", &color.default);
+    const s3 = try specFor(a, "beta", &NullCtx{}, "fg=green", &color.default);
     try std.testing.expectEqualStrings("beta", s3.text);
     try std.testing.expectEqual(color.default[2], s3.ink.?);
+}
+
+test "win32 tmux labels: a style in a pane title is text, not a style" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const evil = TitleCtx{ .title = "#[fg=red]evil" };
+    const spec = try specFor(a, "#{pane_title}", &evil, null, &color.default);
+    try std.testing.expectEqualStrings("#[fg=red]evil", spec.text);
+    try std.testing.expect(spec.ink == null);
+    // The template's own colour still wins, and the title stays literal.
+    const s2 = try specFor(a, "#[fg=blue]#{pane_title}", &evil, null, &color.default);
+    try std.testing.expectEqualStrings("#[fg=red]evil", s2.text);
+    try std.testing.expectEqual(color.default[4], s2.ink.?);
+    // An escaped ## is no style start.
+    const s3 = try specFor(a, "##[fg=red]x", &NullCtx{}, null, &color.default);
+    try std.testing.expect(s3.ink == null);
 }
 
 test "win32 tmux labels: colour208 and default" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const orange = try specFor(a, "#[fg=colour208]x", null, &color.default);
+    const n = &NullCtx{};
+    const orange = try specFor(a, "#[fg=colour208]x", n, null, &color.default);
     try std.testing.expectEqual(color.default[208], orange.ink.?);
-    const bright = try specFor(a, "#[fg=brightred]x", null, &color.default);
+    const bright = try specFor(a, "#[fg=brightred]x", n, null, &color.default);
     try std.testing.expectEqual(color.default[9], bright.ink.?);
-    const hex = try specFor(a, "#[fg=#102030]x", null, &color.default);
+    const hex = try specFor(a, "#[fg=#102030]x", n, null, &color.default);
     try std.testing.expectEqual(@as(u8, 0x20), hex.ink.?.g);
     // `default` (and an unknown name) is no colour, even with a style option.
-    const def = try specFor(a, "#[fg=default]x", "fg=red", &color.default);
+    const def = try specFor(a, "#[fg=default]x", n, "fg=red", &color.default);
     try std.testing.expect(def.ink == null);
-    const unknown = try specFor(a, "#[fg=nope]x", null, &color.default);
+    const unknown = try specFor(a, "#[fg=nope]x", n, null, &color.default);
     try std.testing.expect(unknown.ink == null);
-    try std.testing.expect(parseColour("colour999", &color.default) == null);
     // No fg anywhere.
-    const plain = try specFor(a, "#[bold]x#[default]", null, &color.default);
+    const plain = try specFor(a, "#[bold]x#[default]", n, null, &color.default);
     try std.testing.expectEqualStrings("x", plain.text);
     try std.testing.expect(plain.ink == null);
+}
+
+test "win32 tmux labels: colour parsing is case-insensitive and strict" {
+    const p = &color.default;
+    try std.testing.expectEqual(p[1], parseColour("RED", p).?);
+    try std.testing.expectEqual(p[9], parseColour("BrightRed", p).?);
+    try std.testing.expectEqual(p[208], parseColour("Colour208", p).?);
+    try std.testing.expectEqual(p[5], parseColour("color5", p).?);
+    try std.testing.expectEqual(@as(u8, 0xab), parseColour("#ABCDEF", p).?.r);
+    try std.testing.expect(parseColour("colour999", p) == null);
+    try std.testing.expect(parseColour("colour256", p) == null);
+    try std.testing.expect(parseColour("colour+5", p) == null);
+    try std.testing.expect(parseColour("colour", p) == null);
+    try std.testing.expect(parseColour("#+fffff", p) == null);
+    try std.testing.expect(parseColour("#12345", p) == null);
+    try std.testing.expect(parseColour("", p) == null);
+    try std.testing.expect(parseColour("brightnope", p) == null);
+}
+
+test "win32 tmux labels: untrusted text is sanitised" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Controls become spaces, ESC and CR too.
+    try std.testing.expectEqualStrings("a b c", try sanitize(a, "a\x1bb\rc"));
+    // C1 control U+0085 becomes a space; bidi overrides are dropped.
+    try std.testing.expectEqualStrings("a b", try sanitize(a, "a\xc2\x85b"));
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "a\xe2\x80\xaeb"));
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "a\xe2\x81\xa6b"));
+    // Invalid UTF-8 is replaced, never an empty label.
+    try std.testing.expectEqualStrings("a\xef\xbf\xbdb", try sanitize(a, "a\xffb"));
+    try std.testing.expectEqualStrings("\xef\xbf\xbd", try sanitize(a, "\xff"));
+    // Cut text ends in an ellipsis.
+    const long: [150]u8 = @splat('x');
+    const cut = try sanitize(a, &long);
+    try std.testing.expect(std.mem.endsWith(u8, cut, "\xe2\x80\xa6"));
+    try std.testing.expectEqual(@as(usize, max_cells), try std.unicode.utf8CountCodepoints(cut));
+    // Exactly max_cells is not cut.
+    const exact: [max_cells]u8 = @splat('y');
+    try std.testing.expectEqualStrings(&exact, try sanitize(a, &exact));
 }
 
 test "win32 tmux labels: hidden when status off or pane too narrow" {

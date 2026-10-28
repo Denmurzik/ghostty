@@ -76,6 +76,7 @@ fn drainDialogs(hwnd: win32.foundation.HWND) void {
 
 /// The app-level config changed; `reloaded` when the files were read again.
 pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
+    tmux_labels.configChanged(app);
     decor.configChanged(app, config);
     overlay.configChanged(app, config);
     hotkeys.configChanged(app, config);
@@ -187,6 +188,11 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     overlay.tabReparented(tab, from, to);
     composition.tabReparented(tab, from, to);
     tmux_labels.tabReparented(tab, from, to);
+}
+
+/// The title of the surface changed (the program's or the user's).
+pub fn surfaceTitleChanged(surface: *Surface) void {
+    tmux_labels.refreshPane(surface);
 }
 
 pub fn surfaceCreated(surface: *Surface) void {
