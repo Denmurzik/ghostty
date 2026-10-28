@@ -27,6 +27,7 @@ $script:Sbx = $null
 $script:WantLayout = $null
 
 Import-Module (Join-Path $script:WinDir 'lib\Harness.psm1') -Force
+Import-Module (Join-Path $script:WinDir 'lib\Clipboard.psm1') -Force
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -794,37 +795,25 @@ function Invoke-ClipboardRetry([scriptblock]$Action) {
     & $Action
 }
 
-# Remembers the clipboard text; SKIPs when the clipboard holds anything we
-# could not put back (images, files, ...).
+# Remembers the whole clipboard (every format that can be copied: text,
+# HTML, RTF, images ...); SKIPs when it holds anything that could not be
+# put back. Memory first; the on-disk copy (DPAPI, current user) is for the
+# runner, which puts it back if this scenario is killed before
+# Restore-ClipboardText.
 function Save-ClipboardText {
     if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { throw 'E2E-SKIP: clipboard needs an STA thread (run with powershell -STA)' }
-    $data = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
-    $formats = if ($data) { @($data.GetFormats($false)) } else { @() }
-    $textFormats = 'Text', 'UnicodeText', 'OEMText', 'Locale'
-    $other = @($formats | Where-Object { $textFormats -notcontains $_ })
-    if ($other.Count -gt 0) { throw "E2E-SKIP: clipboard holds non-text data ($($other -join ', ')) that would be lost" }
-    $hasText = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::ContainsText() }
-    $text = if ($hasText) { Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() } } else { $null }
-    # A copy on disk for the runner, which puts it back if this scenario is
-    # killed before Restore-ClipboardText.
-    $root = Get-E2eTempRoot
-    $utf8 = New-Object Text.UTF8Encoding $false
-    [IO.File]::WriteAllText((Join-Path $root 'clipboard-backup.txt'), [string]$text, $utf8)
-    [IO.File]::WriteAllText((Join-Path $root 'clipboard-backup.meta'), $(if ($hasText) { 'text' } else { 'empty' }), $utf8)
-    [pscustomobject]@{ HasText = [bool]$hasText; Text = $text }
+    $snap = Get-ClipboardSnapshot
+    Export-ClipboardSnapshot $snap (Join-Path (Get-E2eTempRoot) 'clipboard-backup.bin')
+    $snap
 }
 
 function Restore-ClipboardText($Saved) {
     if ($null -eq $Saved) { return }
-    try {
-        if ($Saved.HasText) { Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($Saved.Text) } }
-        else { Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::Clear() } }
-    } catch {
+    try { Set-ClipboardSnapshot $Saved } catch {
         Write-Host "WARN could not restore the clipboard: $($_.Exception.Message)"
         return
     }
-    $root = Get-E2eTempRoot
-    Remove-Item -LiteralPath (Join-Path $root 'clipboard-backup.txt'), (Join-Path $root 'clipboard-backup.meta') -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Get-E2eTempRoot) 'clipboard-backup.bin') -ErrorAction SilentlyContinue
 }
 
 function Set-ClipboardText([string]$Text) {

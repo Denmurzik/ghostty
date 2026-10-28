@@ -128,46 +128,45 @@ $isDebugExe = $exeUnderTest -notmatch 'zig-out-rf|ReleaseFast|ReleaseSafe|Releas
 $failed = 0
 $lines = @()
 
-# paste-confirm backs the clipboard text up in two files before it changes
-# the clipboard and deletes them after restoring. A backup left by a crashed
-# run is looked at once, at the start of a run, and an after-kill restore
-# happens during a run; both put it back only while the clipboard still holds
-# the scenario's test text ('gt-pa.txt'), so neither overwrites what the owner
-# copied since. When SetText fails the backup is kept and reported.
-$clipText = Join-Path $temp 'clipboard-backup.txt'
-$clipMeta = Join-Path $temp 'clipboard-backup.meta'
+# Scenarios that change the clipboard keep a DPAPI-protected copy of it in
+# %TEMP%\ghostty-e2e\clipboard-backup.bin and delete it after restoring. A
+# backup left by a crashed run is looked at once, at the start of a run, and
+# an after-kill restore happens during a run; both put it back only while
+# the clipboard still holds a scenario's test text, so neither overwrites
+# what the owner copied since. When the restore fails the backup is kept.
+$clipBackup = Join-Path $temp 'clipboard-backup.bin'
+$clipModule = Join-Path $PSScriptRoot 'lib\Clipboard.psm1'
 function Restore-ClipboardBackup([string]$OnlyIfContains = '') {
-    if (-not (Test-Path $clipMeta)) { return }
+    if (-not (Test-Path $clipBackup)) { return }
     $code = @'
 Add-Type -AssemblyName System.Windows.Forms
-$meta = (Get-Content -LiteralPath $env:E2E_CLIP_META -Raw).Trim()
+Import-Module $env:E2E_CLIP_MODULE -Force
 $guard = $env:E2E_CLIP_GUARD
 for ($i = 0; $i -lt 20; $i++) {
     try {
-        if ($guard -and -not ([System.Windows.Forms.Clipboard]::ContainsText() -and [System.Windows.Forms.Clipboard]::GetText().Contains($guard))) { exit 2 }
-        if ($meta -eq 'text') { [System.Windows.Forms.Clipboard]::SetText([IO.File]::ReadAllText($env:E2E_CLIP_TEXT, [Text.Encoding]::UTF8)) }
-        else { [System.Windows.Forms.Clipboard]::Clear() }
+        if ($guard -and -not ([System.Windows.Forms.Clipboard]::ContainsText() -and [System.Windows.Forms.Clipboard]::GetText() -match $guard)) { exit 2 }
+        Set-ClipboardSnapshot (Import-ClipboardSnapshot $env:E2E_CLIP_FILE)
         exit 0
     } catch { Start-Sleep -Milliseconds 100 }
 }
 exit 1
 '@
-    $env:E2E_CLIP_TEXT = $clipText
-    $env:E2E_CLIP_META = $clipMeta
+    $env:E2E_CLIP_FILE = $clipBackup
+    $env:E2E_CLIP_MODULE = $clipModule
     $env:E2E_CLIP_GUARD = $OnlyIfContains
     & $powershell -NoProfile -STA -ExecutionPolicy Bypass -Command $code 2>&1 | Out-Null
     $rc = $LASTEXITCODE
-    Remove-Item Env:\E2E_CLIP_TEXT, Env:\E2E_CLIP_META, Env:\E2E_CLIP_GUARD -ErrorAction SilentlyContinue
+    Remove-Item Env:\E2E_CLIP_FILE, Env:\E2E_CLIP_MODULE, Env:\E2E_CLIP_GUARD -ErrorAction SilentlyContinue
     if ($rc -eq 0) {
-        Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
-        Write-Host 'INFO clipboard text restored from a backup'
+        Remove-Item -LiteralPath $clipBackup -ErrorAction SilentlyContinue
+        Write-Host 'INFO clipboard restored from a backup'
     } elseif ($rc -eq 2) {
         # The clipboard no longer holds our test text: the owner copied
         # something since. Leave it alone.
-        Remove-Item -LiteralPath $clipText, $clipMeta -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $clipBackup -ErrorAction SilentlyContinue
         Write-Host 'INFO clipboard changed since the backup; backup dropped, clipboard left alone'
     } else {
-        Write-Host "WARN could not restore the clipboard; the backup is kept in $clipText"
+        Write-Host "WARN could not restore the clipboard; the backup is kept in $clipBackup"
     }
 }
 
@@ -191,7 +190,7 @@ try {
     # Whatever a killed scenario left behind in the keyboard layout list.
     Save-KeyboardLayouts
     # A backup from a crashed earlier run, before any scenario of this one.
-    Restore-ClipboardBackup 'gt-pa.txt'
+    Restore-ClipboardBackup 'gt-(pa|rc)|SELECTME|sentinel'
     foreach ($s in $all) {
         $name = $s.Name
         Update-GuiLock $lockToken
@@ -257,7 +256,7 @@ try {
                 $line = "FAIL ${name}: no result (exit code $($p.ExitCode)): $("$err".Trim() -replace '\s+', ' ')"
             }
             # A killed scenario never ran its clipboard restore.
-            if ($timedOut -and $name -eq 'paste-confirm') { Restore-ClipboardBackup 'gt-pa.txt' }
+            if ($timedOut -and $name -in 'paste-confirm','right-click') { Restore-ClipboardBackup 'gt-(pa|rc)|SELECTME|sentinel' }
 
             $noFocus = $line -like 'SKIP*could not take the foreground*'
             $interfered = ($line -like 'FAIL*' -and $line -match $interference) -or $noFocus

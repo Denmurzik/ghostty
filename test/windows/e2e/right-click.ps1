@@ -16,7 +16,7 @@ Invoke-E2eScenario 'right-click' {
     try {
 
         function Start-Case([string]$Extra) {
-            $g = Start-BashE2e 'gitbash-de' -ExtraConfig $Extra
+            $g = Start-BashE2e 'unsafe-paste' -ExtraConfig $Extra
             $global:E2eLast = $g
             [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
             $g
