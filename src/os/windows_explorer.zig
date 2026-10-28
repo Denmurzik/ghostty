@@ -40,6 +40,24 @@ pub fn ownsKey(command: ?[]const u8, menu: ?[]const u8) bool {
     return std.mem.eql(u8, m, menu_text);
 }
 
+/// Whether two full paths name the same file. The CLI normalises both sides
+/// (R-M6-5) and compares case-insensitively; tests pass an ASCII fold.
+pub const PathEql = *const fn (a: []const u8, b: []const u8) bool;
+
+/// `ownsKey` for `--only-this-exe`: with an `exe`, the command's first quoted
+/// program must be that very file. A key with no command but our menu text
+/// still counts (a failed install of this exe). A null `exe` is `ownsKey`.
+pub fn ownsKeyFor(command: ?[]const u8, menu: ?[]const u8, exe: ?[]const u8, eql: PathEql) bool {
+    const want = exe orelse return ownsKey(command, menu);
+    if (command) |c| {
+        if (c.len == 0 or c[0] != '"') return false;
+        const end = std.mem.indexOfScalarPos(u8, c, 1, '"') orelse return false;
+        return eql(c[1..end], want);
+    }
+    const m = menu orelse return false;
+    return std.mem.eql(u8, m, menu_text);
+}
+
 /// One registry string value. `name` null is the `(default)` value.
 pub const Write = struct {
     subkey: []const u8,
@@ -204,6 +222,28 @@ test "windows explorer: ownsCommand" {
     try std.testing.expect(!ownsCommand("\"C:\\x\\ghostty.exe.bak\" \"%V\""));
     try std.testing.expect(!ownsCommand("\"C:\\x\\ghostty.exe"));
     try std.testing.expect(!ownsCommand(""));
+}
+
+fn asciiEql(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+test "windows explorer: only-this-exe owns only the same exe" {
+    const a = "\"C:\\A\\ghostty.exe\" \"--working-directory=%V\\.\"";
+    try std.testing.expect(ownsKeyFor(a, null, "c:\\a\\GHOSTTY.EXE", asciiEql));
+    try std.testing.expect(!ownsKeyFor(a, null, "C:\\B\\ghostty.exe", asciiEql));
+    // exe null: the M5 answers
+    try std.testing.expect(ownsKeyFor(a, null, null, asciiEql));
+    try std.testing.expect(!ownsKeyFor("\"C:\\x\\code.exe\" \"%V\"", menu_text, null, asciiEql));
+    try std.testing.expect(ownsKeyFor(null, menu_text, null, asciiEql));
+    // unquoted or empty command
+    try std.testing.expect(!ownsKeyFor("C:\\A\\ghostty.exe %V", null, "C:\\A\\ghostty.exe", asciiEql));
+    try std.testing.expect(!ownsKeyFor("", menu_text, "C:\\A\\ghostty.exe", asciiEql));
+    try std.testing.expect(!ownsKeyFor("\"C:\\A\\ghostty.exe", null, "C:\\A\\ghostty.exe", asciiEql));
+    // no command, our menu text
+    try std.testing.expect(ownsKeyFor(null, menu_text, "C:\\A\\ghostty.exe", asciiEql));
+    try std.testing.expect(!ownsKeyFor(null, "Other", "C:\\A\\ghostty.exe", asciiEql));
+    try std.testing.expect(!ownsKeyFor(null, null, "C:\\A\\ghostty.exe", asciiEql));
 }
 
 test "windows explorer: ownsKey" {

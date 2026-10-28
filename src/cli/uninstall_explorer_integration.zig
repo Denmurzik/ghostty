@@ -22,6 +22,11 @@ pub const Options = explorer_integration.UninstallOptions;
 ///     toast icon under `%LOCALAPPDATA%\ghostty`. This is the full revert for
 ///     a portable copy.
 ///
+///   * `--only-this-exe`: Delete a verb key only if its command names this
+///     very `ghostty.exe` (compared as full paths, ignoring case, `\\?\`
+///     prefixes and 8.3 names). Verbs of another copy are kept. The installer
+///     uses this so that a portable copy keeps working.
+///
 /// Only supported on Windows.
 pub fn run(alloc: Allocator) !u8 {
     return explorer_integration.runUninstall(alloc);

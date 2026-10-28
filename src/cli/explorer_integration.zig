@@ -39,6 +39,10 @@ pub const UninstallOptions = struct {
     /// Also remove the notification registration and its icon file.
     all: bool = false,
 
+    /// Delete a verb only if its command names this very ghostty.exe, so
+    /// that uninstalling one copy keeps the verbs of another.
+    @"only-this-exe": bool = false,
+
     /// Enables "-h" and "--help" to work.
     pub fn help(self: UninstallOptions) !void {
         _ = self;
@@ -147,7 +151,16 @@ fn runWith(alloc: Allocator, request: Request) !u8 {
         .uninstall => |o| {
             const base = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch null;
             defer if (base) |b| alloc.free(b);
-            return uninstall(alloc, out, root, o.all, base);
+            var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var only_exe: ?[]const u8 = null;
+            if (o.@"only-this-exe") {
+                const exe_len = std.process.executablePath(global.io(), &exe_buf) catch |err| {
+                    try out.print("cannot find the running executable: {}\n", .{err});
+                    return 1;
+                };
+                only_exe = exe_buf[0..exe_len];
+            }
+            return uninstall(alloc, out, root, o.all, base, only_exe);
         },
     }
 }
@@ -224,6 +237,48 @@ fn rollback(alloc: Allocator, out: *std.Io.Writer, root: registry.Root, existed:
     }
 }
 
+const win = struct {
+    extern "kernel32" fn GetFullPathNameW(name: [*:0]const u16, len: u32, buf: ?[*]u16, file_part: ?*?[*]u16) callconv(.winapi) u32;
+    extern "kernel32" fn GetShortPathNameW(name: [*:0]const u16, buf: ?[*]u16, len: u32) callconv(.winapi) u32;
+    extern "kernel32" fn GetLongPathNameW(name: [*:0]const u16, buf: ?[*]u16, len: u32) callconv(.winapi) u32;
+    extern "kernel32" fn CompareStringOrdinal(a: [*]const u16, a_len: i32, b: [*]const u16, b_len: i32, ignore_case: i32) callconv(.winapi) i32;
+};
+
+const path_cap = 2100;
+
+/// R-M6-5: UTF-8 path to a full, long UTF-16 path (no `\\?\` prefix, no 8.3
+/// names). A path that does not exist keeps its full form.
+fn normalizePath(path: []const u8, out: *[path_cap]u16) ?[]const u16 {
+    var raw: [path_cap:0]u16 = undefined;
+    const trimmed = if (std.mem.startsWith(u8, path, "\\\\?\\") and path.len > 6 and path[5] == ':')
+        path[4..]
+    else
+        path;
+    const n = std.unicode.utf8ToUtf16Le(&raw, trimmed) catch return null;
+    if (n >= path_cap) return null;
+    raw[n] = 0;
+
+    var full: [path_cap:0]u16 = undefined;
+    const fl = win.GetFullPathNameW(&raw, path_cap, &full, null);
+    if (fl == 0 or fl >= path_cap) return null;
+    full[fl] = 0;
+
+    const ll = win.GetLongPathNameW(&full, out, path_cap);
+    if (ll != 0 and ll < path_cap) return out[0..ll];
+    @memcpy(out[0..fl], full[0..fl]);
+    return out[0..fl];
+}
+
+/// `explorer.PathEql` for the CLI.
+fn pathsEqual(a: []const u8, b: []const u8) bool {
+    var abuf: [path_cap]u16 = undefined;
+    var bbuf: [path_cap]u16 = undefined;
+    const na = normalizePath(a, &abuf) orelse return false;
+    const nb = normalizePath(b, &bbuf) orelse return false;
+    // CSTR_EQUAL
+    return win.CompareStringOrdinal(na.ptr, @intCast(na.len), nb.ptr, @intCast(nb.len), 1) == 2;
+}
+
 /// Deletes the verbs that are ours (and with `all` the notification
 /// registration and icon). A null `root` is a dry run: it lists every delete
 /// and opens nothing.
@@ -233,6 +288,7 @@ fn uninstall(
     root: ?registry.Root,
     all: bool,
     local_app_data: ?[]const u8,
+    only_exe: ?[]const u8,
 ) !u8 {
     var failed = false;
 
@@ -255,8 +311,9 @@ fn uninstall(
                 try out.print("not installed: {s}\n", .{full});
                 continue;
             }
-            if (!explorer.ownsKey(command, menu)) {
-                try out.print("kept (not ours): {s}\n", .{full});
+            if (!explorer.ownsKeyFor(command, menu, only_exe, pathsEqual)) {
+                const any_ghostty = only_exe != null and explorer.ownsKey(command, menu);
+                try out.print("kept ({s}): {s}\n", .{ if (any_ghostty) "other ghostty.exe" else "not ours", full });
                 continue;
             }
             registry.deleteTree(r, full) catch |err| {
@@ -265,7 +322,9 @@ fn uninstall(
                 continue;
             };
         }
-        try out.print("delete {s}\n", .{full});
+        if (root == null and only_exe != null) {
+            try out.print("delete {s} if its command names {s}\n", .{ full, only_exe.? });
+        } else try out.print("delete {s}\n", .{full});
     }
 
     if (all) {
@@ -330,7 +389,7 @@ test "explorer cli: dry-run uninstall --all lists the deletes" {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
 
-    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, null, true, "C:\\Users\\x\\AppData\\Local"));
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, null, true, "C:\\Users\\x\\AppData\\Local", null));
 
     var n: usize = 0;
     var lines = std.mem.splitScalar(u8, aw.written(), '\n');
@@ -424,7 +483,7 @@ test "explorer cli: uninstall removes a key with our menu text and no command" {
     try registry.setString(h.root, orphan, null, "Open Ghostty here");
     try registry.setString(h.root, other, null, "Something else");
 
-    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, h.root, false, null));
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, h.root, false, null, null));
     try std.testing.expect(!try h.has(alloc, orphan));
     try std.testing.expect(try h.has(alloc, other));
 }
@@ -480,7 +539,7 @@ test "explorer cli: install then uninstall in a private hive keeps a foreign key
     try std.testing.expectEqual(@as(u8, 0), try install(alloc, &aw.writer, root, "C:\\g\\ghostty.exe", .{}));
     try registry.setString(root, foreign, null, "\"C:\\x\\code.exe\" \"%V\"");
 
-    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, root, false, null));
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, root, false, null, null));
     for (explorer.key_names[0..2]) |key| {
         const full = try std.fmt.allocPrint(alloc, "{s}\\{s}\\command", .{ explorer.verbs_root, key });
         defer alloc.free(full);
@@ -506,4 +565,107 @@ test "explorer cli: install then uninstall in a private hive keeps a foreign key
         if (gone) break;
         std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
+}
+
+fn seedVerbs(root: registry.Root, command: []const u8) !void {
+    for (explorer.key_names) |key| {
+        var buf: [256]u8 = undefined;
+        const full = try std.fmt.bufPrint(&buf, "{s}\\{s}", .{ explorer.verbs_root, key });
+        try registry.setString(root, full, null, explorer.menu_text);
+        var cbuf: [300]u8 = undefined;
+        const ck = try std.fmt.bufPrint(&cbuf, "{s}\\command", .{full});
+        try registry.setString(root, ck, null, command);
+    }
+}
+
+fn countVerbs(alloc: Allocator, h: *TestHive) !usize {
+    var n: usize = 0;
+    for (explorer.key_names) |key| {
+        const full = try std.fmt.allocPrint(alloc, "{s}\\{s}\\command", .{ explorer.verbs_root, key });
+        defer alloc.free(full);
+        if (try h.has(alloc, full)) n += 1;
+    }
+    return n;
+}
+
+fn countLines(text: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, needle)) n += 1;
+    }
+    return n;
+}
+
+test "explorer cli: --only-this-exe deletes its own verbs and keeps a foreign one" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var h = try TestHive.init(alloc, "t.hive");
+    defer h.deinit("t.hive");
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe = exe_buf[0..try std.process.executablePath(std.testing.io, &exe_buf)];
+
+    // Our own verbs go.
+    try std.testing.expectEqual(@as(u8, 0), try install(alloc, &aw.writer, h.root, exe, .{}));
+    try std.testing.expectEqual(@as(usize, 3), try countVerbs(alloc, &h));
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, h.root, false, null, exe));
+    try std.testing.expectEqual(@as(usize, 0), try countVerbs(alloc, &h));
+
+    // Another copy's verbs stay.
+    aw.clearRetainingCapacity();
+    try seedVerbs(h.root, "\"C:\\Other\\ghostty.exe\" \"--working-directory=%V\\.\"");
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, h.root, false, null, exe));
+    try std.testing.expectEqual(@as(usize, 3), try countVerbs(alloc, &h));
+    try std.testing.expectEqual(@as(usize, 3), countLines(aw.written(), "kept (other ghostty.exe)"));
+
+    // Without the flag they go.
+    aw.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, h.root, false, null, null));
+    try std.testing.expectEqual(@as(usize, 0), try countVerbs(alloc, &h));
+}
+
+test "explorer cli: only-this-exe matches a short or prefixed path" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe = exe_buf[0..try std.process.executablePath(std.testing.io, &exe_buf)];
+
+    const prefixed = try std.fmt.allocPrint(alloc, "\\\\?\\{s}", .{exe});
+    defer alloc.free(prefixed);
+    try std.testing.expect(pathsEqual(prefixed, exe));
+    try std.testing.expect(pathsEqual(exe, prefixed));
+    try std.testing.expect(!pathsEqual(exe, "C:\\Other\\ghostty.exe"));
+
+    // The 8.3 form, if the volume has short names.
+    var wide: [path_cap:0]u16 = undefined;
+    const wn = try std.unicode.utf8ToUtf16Le(&wide, exe);
+    wide[wn] = 0;
+    var short: [path_cap]u16 = undefined;
+    const sl = win.GetShortPathNameW(&wide, &short, path_cap);
+    if (sl == 0 or sl >= path_cap) return error.SkipZigTest;
+    const short8 = try std.unicode.utf16LeToUtf8Alloc(alloc, short[0..sl]);
+    defer alloc.free(short8);
+    try std.testing.expect(pathsEqual(short8, exe));
+}
+
+test "explorer cli: dry-run uninstall --all --only-this-exe" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+
+    try std.testing.expectEqual(@as(u8, 0), try uninstall(alloc, &aw.writer, null, true, "C:\\Users\\x\\AppData\\Local", "C:\\g\\ghostty.exe"));
+    var lines = std.mem.splitScalar(u8, aw.written(), '\n');
+    var ifs: usize = 0;
+    while (lines.next()) |line| {
+        if (std.mem.endsWith(u8, line, " if its command names C:\\g\\ghostty.exe")) ifs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), ifs);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "windows-unofficial-debug\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\\ghostty\\toast-icon.png\n") != null);
+    try std.testing.expectEqual(@as(usize, 7), countLines(aw.written(), "delete "));
 }

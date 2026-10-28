@@ -78,6 +78,15 @@ Invoke-E2eScenario 'explorer-cli' {
     $iconPath = Join-Path (Join-Path $script:Sbx.Local 'ghostty') 'toast-icon.png'
     if ($lines[5] -ne "delete $iconPath") { throw "last line is '$($lines[5])', wanted 'delete $iconPath'" }
 
+    # --only-this-exe dry run: three "if its command names <exe>" lines, then the AUMID/icon lines.
+    $r = Invoke-ExplorerCli @('+uninstall-explorer-integration', '--dry-run', '--all', '--only-this-exe')
+    if ($r.Code -ne 0) { throw "uninstall --dry-run --all --only-this-exe exited $($r.Code): $($r.Stderr)" }
+    $lines = @(Split-Lines $r.Stdout)
+    if ($lines.Count -ne 7) { throw "uninstall --dry-run --only-this-exe printed $($lines.Count) lines:`n$($r.Stdout)" }
+    foreach ($i in 0..2) {
+        if ($lines[$i] -notmatch ([regex]::Escape(" if its command names $exe") + '$')) { throw "line $($i + 1) lacks the exe condition: $($lines[$i])" }
+    }
+
     # Private hive: install, then uninstall; both exit 0.
     $hive = Join-Path $script:Sbx.Tmp 'x.hive'
     $env_ = @{ GHOSTTY_WIN32_TEST_HIVE = $hive; GHOSTTY_WIN32_TEST_IPC = '1' }
