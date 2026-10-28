@@ -3,6 +3,7 @@ const Ghostty = @This();
 const std = @import("std");
 const Config = @import("Config.zig");
 const SharedDeps = @import("SharedDeps.zig");
+const windows_version = @import("windows_version.zig");
 
 /// The primary Ghostty executable.
 exe: *std.Build.Step.Compile,
@@ -50,8 +51,17 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             // the entry at the CRT startup calls Zig's `main` instead
             // (proof: test/windows/gui-entry).
             exe.entry = .{ .symbol_name = "mainCRTStartup" };
+            const header = try windows_version.rcHeader(
+                b.allocator,
+                cfg.version,
+                cfg.optimize == .debug,
+                .ghostty,
+            );
             exe.root_module.addWin32ResourceFile(.{
                 .file = b.path("dist/windows/ghostty.rc"),
+                .include_paths = &.{
+                    b.addWriteFiles().add("ghostty_version.h", header).dirname(),
+                },
             });
         },
 

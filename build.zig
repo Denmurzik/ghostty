@@ -426,6 +426,9 @@ pub fn build(b: *std.Build) !void {
 
         // Normal test running
         const test_run = b.addRunArtifact(test_exe);
+        // A foreign-target test exe (e.g. aarch64-windows) installs but is
+        // not run.
+        test_run.skip_foreign_checks = true;
         config.addPatchElf(test_exe, &test_run.step);
         test_step.dependOn(&test_run.step);
 

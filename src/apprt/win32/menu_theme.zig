@@ -47,8 +47,8 @@ fn resolve() void {
     // GetProcAddress takes an ordinal as a pointer-sized integer.
     const a = win32.kernel32.GetProcAddress(module, @ptrFromInt(135)) orelse return;
     const b = win32.kernel32.GetProcAddress(module, @ptrFromInt(136)) orelse return;
-    set_mode = @ptrCast(a);
-    flush = @ptrCast(b);
+    set_mode = @ptrCast(@alignCast(a));
+    flush = @ptrCast(@alignCast(b));
 }
 
 fn buildNumber() u32 {
