@@ -3843,12 +3843,17 @@ else
 /// opens panes as Ghostty splits, tabs and windows.
 ///
 /// When enabled (the default), every pane gets `TMUX` and `TMUX_PANE`, and the
-/// directory of `tmux.exe` is put first on its `PATH`.
+/// directory of `tmux.exe` is put first on its `PATH` (moved to the front if
+/// it was already there), so Ghostty's `tmux.exe` wins over any other `tmux`.
+/// A login shell such as Git Bash may reorder `PATH` in its profile; run
+/// `command -v tmux` in a pane to check which `tmux` is found.
 ///
 /// When disabled, `TMUX` and `TMUX_PANE` are neither set nor removed (an
 /// inherited `TMUX` stays as it is), `PATH` is not changed, and `tmux.exe`
 /// is only found if Ghostty's own directory is on `PATH`. The setting is read
-/// when a surface starts, so a reload affects new surfaces only.
+/// when a surface starts, so a reload affects new surfaces only. The key is
+/// app-wide: a per-window override (for example on the command line of a
+/// window) is ignored.
 ///
 /// This only applies to Windows.
 @"windows-tmux-shim": bool = true,
