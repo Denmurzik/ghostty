@@ -944,7 +944,7 @@ const Subprocess = struct {
                 try env.put("TERM", choice.term);
                 if (choice.terminfo) |dir| {
                     var pbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                    try env.put("TERMINFO", msysTerminfo(&pbuf, dir, if (args.len > 0) args[0] else ""));
+                    try env.put("TERMINFO", msysTerminfo(&pbuf, dir));
                 }
             }
         }
@@ -2728,21 +2728,13 @@ fn windowsTerm(
     return .{ .term = cfg_term, .terminfo = dir };
 }
 
-/// MSYS ncurses splits TERMINFO at `:`, so a POSIX shell gets `/c/g/terminfo`
-/// instead of `C:/g/terminfo`. Native programs keep the drive path.
-fn msysTerminfo(buf: []u8, dir: []const u8, argv0: []const u8) []const u8 {
-    if (dir.len < 3 or dir[1] != ':' or !isPosixShell(argv0)) return dir;
+/// MSYS and Cygwin ncurses split TERMINFO at `:`, so `C:/g/terminfo` is read as
+/// `C` and `/g/terminfo`; only `/c/g/terminfo` is found. Native programs do not
+/// read TERMINFO, so every child gets the POSIX form. Cygwin (`/cygdrive/c`)
+/// is a known gap, as is ssh to a remote that lacks xterm-ghostty.
+fn msysTerminfo(buf: []u8, dir: []const u8) []const u8 {
+    if (dir.len < 3 or dir[1] != ':') return dir;
     return std.mem.print(buf, "/{c}{s}", .{ std.ascii.toLower(dir[0]), dir[2..] }) catch dir;
-}
-
-fn isPosixShell(argv0: []const u8) bool {
-    const seps = [_]u8{ 0x5c, '/' };
-    var name = if (std.mem.lastIndexOfAny(u8, argv0, &seps)) |i| argv0[i + 1 ..] else argv0;
-    if (std.ascii.endsWithIgnoreCase(name, ".exe")) name = name[0 .. name.len - 4];
-    inline for (.{ "bash", "sh", "zsh", "fish", "dash", "ksh" }) |s| {
-        if (std.ascii.eqlIgnoreCase(name, s)) return true;
-    }
-    return false;
 }
 
 fn terminfoEntryExists(path: []const u8) bool {
@@ -2756,6 +2748,10 @@ fn isWslArgv0(argv0: []const u8) bool {
     const sep = std.mem.lastIndexOfAny(u8, argv0, &seps);
     const name = if (sep) |i| argv0[i + 1 ..] else argv0;
     if (std.ascii.eqlIgnoreCase(name, "wsl") or std.ascii.eqlIgnoreCase(name, "wsl.exe")) return true;
+    // Distro launchers (Store apps in WindowsApps).
+    inline for (.{ "ubuntu", "debian", "kali", "opensuse", "suse", "sles", "archlinux", "oraclelinux", "fedora" }) |p| {
+        if (std.ascii.startsWithIgnoreCase(name, p) and std.ascii.endsWithIgnoreCase(name, ".exe")) return true;
+    }
     if (!std.ascii.eqlIgnoreCase(name, "bash.exe")) return false;
     const parent = argv0[0 .. sep orelse return false];
     const psep = std.mem.lastIndexOfAny(u8, parent, &seps) orelse return false;
@@ -2797,6 +2793,9 @@ test "Exec: wsl gets xterm-256color" {
         "WSL.EXE",
         "D:/tools/wsl.exe",
         "c:/windows/sysnative/bash.exe",
+        "C:/Users/x/AppData/Local/Microsoft/WindowsApps/ubuntu2204.exe",
+        "Debian.exe",
+        "kali.exe",
     }) |argv0| {
         const r = windowsTerm("xterm-ghostty", "C:/g/share/terminfo", argv0, &probeYes);
         try std.testing.expectEqualStrings("xterm-256color", r.term);
@@ -2806,10 +2805,11 @@ test "Exec: wsl gets xterm-256color" {
     try std.testing.expectEqualStrings("xterm-ghostty", git.term);
 }
 
-test "Exec: git bash gets a POSIX TERMINFO" {
+test "Exec: TERMINFO gets the POSIX drive form" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("/c/g/share/terminfo", msysTerminfo(&buf, "C:/g/share/terminfo", "C:/Program Files/Git/bin/bash.exe"));
-    try std.testing.expectEqualStrings("C:/g/share/terminfo", msysTerminfo(&buf, "C:/g/share/terminfo", "pwsh.exe"));
+    try std.testing.expectEqualStrings("/c/g/share/terminfo", msysTerminfo(&buf, "C:/g/share/terminfo"));
+    try std.testing.expectEqualStrings("/d/g", msysTerminfo(&buf, "d:/g"));
+    try std.testing.expectEqualStrings("/usr/share/terminfo", msysTerminfo(&buf, "/usr/share/terminfo"));
 }
 
 test "Exec: windows TERMINFO points at the share dir" {

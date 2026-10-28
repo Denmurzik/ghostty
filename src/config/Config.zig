@@ -4027,7 +4027,10 @@ else
 /// from working properly. https://github.com/vim/vim/pull/13211 fixes this.
 ///
 /// On Windows the default is still `xterm-ghostty`; the terminal falls back to
-/// `xterm-256color` when the compiled entry is missing, and for WSL.
+/// `xterm-256color` when the compiled entry is missing, and for WSL. TERMINFO
+/// is passed as `/c/...` (MSYS ncurses splits `C:/...` at the colon). Known
+/// gaps: Cygwin needs `/cygdrive/c/...`, and ssh to a host without the
+/// `xterm-ghostty` entry forwards a TERM the remote may not know.
 term: []const u8 = default_term,
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are
