@@ -140,10 +140,19 @@ function Assert-Dialog($G, [IntPtr]$Dlg, [string]$Kind, [string]$Theme, [string[
     Write-E2eInfo "$Kind ${Theme}: ${w}x${h} px at $dpi dpi, buttons $($widths -join '/')"
 
     # The button bar has the Fluent footer colour of the theme.
+    # The dialog is visible a moment before the screen shows it (the one at
+    # start-up, while the first frame is made, up to some 700 ms), so the
+    # colour is read until it matches or a second has passed.
     $want = if ($Theme -eq 'dark') { 0x20 } else { 0xF3 }
-    $px = Get-ScreenPixel ($r.Left + [int](6 * $s)) ($r.Bottom - [int](6 * $s))
+    $bad = { param($p) [math]::Abs($p.R - $want) -gt 3 -or [math]::Abs($p.G - $want) -gt 3 -or [math]::Abs($p.B - $want) -gt 3 }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $px = Get-ScreenPixel ($r.Left + [int](6 * $s)) ($r.Bottom - [int](6 * $s))
+        if (-not $px -or -not (& $bad $px)) { break }
+        Start-Sleep -Milliseconds 50
+    } while ($sw.ElapsedMilliseconds -lt 1000)
     if ($px) {
-        if ([math]::Abs($px.R - $want) -gt 3 -or [math]::Abs($px.G - $want) -gt 3 -or [math]::Abs($px.B - $want) -gt 3) {
+        if (& $bad $px) {
             throw ("$Kind ${Theme}: the button bar is #{0:x2}{1:x2}{2:x2}, expected #{3:x2}{3:x2}{3:x2}" -f $px.R, $px.G, $px.B, $want)
         }
     } else {
