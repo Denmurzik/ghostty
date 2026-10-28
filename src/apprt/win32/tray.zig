@@ -6,6 +6,7 @@
 const std = @import("std");
 const win32 = @import("win32");
 const App = @import("App.zig");
+const about = @import("about.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const Window = @import("Window.zig");
 const dpi_mod = @import("dpi.zig");
@@ -34,6 +35,7 @@ const icon_id: u32 = 1;
 
 pub const menu_new_window: u32 = 1;
 pub const menu_quit: u32 = 2;
+pub const menu_about: u32 = 3;
 
 pub const State = struct {
     hwnd: ?HWND = null,
@@ -278,6 +280,7 @@ fn showMenu(app: *App, x: i32, y: i32) void {
     _ = user32.AppendMenuW(menu, user32.MF_STRING, menu_new_window, std.unicode.utf8ToUtf16LeStringLiteral("&New Window"));
     _ = profiles_menu.appendTrayItems(app, menu, profiles_menu.tray_first_id);
     _ = user32.AppendMenuW(menu, user32.MF_SEPARATOR, 0, null);
+    _ = user32.AppendMenuW(menu, user32.MF_STRING, menu_about, std.unicode.utf8ToUtf16LeStringLiteral("&About Ghostty"));
     _ = user32.AppendMenuW(menu, user32.MF_STRING, menu_quit, std.unicode.utf8ToUtf16LeStringLiteral("&Quit"));
 
     // The menu belongs to the foreground window, or it will not close
@@ -305,6 +308,7 @@ fn showMenu(app: *App, x: i32, y: i32) void {
 fn runCommand(app: *App, id: u32) void {
     switch (id) {
         menu_new_window => newWindow(app),
+        menu_about => about.request(app),
         // Confirms if a process is running; with no window it quits at once.
         menu_quit => if (user32.PostMessageW(app.msg_hwnd, App.WM_GHOSTTY_QUIT, 0, 0) == 0) {
             log.warn("unable to post quit request", .{});
@@ -320,13 +324,13 @@ test "win32 tray: click action" {
 }
 
 test "win32 tray: menu ids and message" {
-    try std.testing.expect(menu_new_window != menu_quit);
+    try std.testing.expect(menu_new_window != menu_quit and menu_about != menu_quit and menu_about != menu_new_window);
     try std.testing.expectEqual(user32.WM_APP + 9, WM_GHOSTTY_TRAY);
 }
 
 test "win32 tray: profile submenu ids do not collide" {
     const pm = profiles_menu;
-    try std.testing.expect(menu_new_window < pm.tray_first_id and menu_quit < pm.tray_first_id);
+    try std.testing.expect(menu_new_window < pm.tray_first_id and menu_quit < pm.tray_first_id and menu_about < pm.tray_first_id);
     // The strip menu range ends before the tray range starts.
     try std.testing.expect(pm.first_id + 2 * pm.max_profiles <= pm.tray_first_id);
     try std.testing.expect(pm.tray_first_id + pm.max_profiles < 0x10000);

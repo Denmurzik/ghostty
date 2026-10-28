@@ -23,6 +23,7 @@ const geom = @import("geom.zig");
 const messages = @import("messages.zig");
 const overlay = @import("overlay.zig");
 const profiles = @import("profiles.zig");
+const about = @import("about.zig");
 const profiles_menu = @import("profiles_menu.zig");
 const theme = @import("theme.zig");
 const util = @import("util.zig");
@@ -90,6 +91,8 @@ const Run = union(enum) {
     jump: u32,
     /// Start a shell profile in a new tab (or window).
     profile: struct { id: []const u8, window: bool },
+    /// The About dialog.
+    about,
 };
 
 /// What the heap block of an open palette holds; `popup` is its first field.
@@ -158,6 +161,8 @@ pub const Command = struct {
         jump: struct { serial: u32, surface_id: u32 },
         /// Closes the palette and starts the shell profile `id`.
         profile: struct { serial: u32, id: []const u8, window: bool },
+        /// Closes the palette and shows the About dialog.
+        about: u32,
     };
 
     /// `kind` is copied: the action gets its own memory.
@@ -538,6 +543,12 @@ fn begin(
             });
         }
     }
+    try items.append(a, .{
+        .title = "About Ghostty",
+        .description = "Show the version and the project links.",
+        .shortcut = "",
+        .run = .about,
+    });
     std.mem.sort(Item, items.items, {}, itemLess);
     panel.items = items.items;
 
@@ -882,6 +893,7 @@ fn postExecute(panel: *Panel, row: usize) void {
         .action => |a| .{ .execute = .{ .serial = panel.serial, .target_id = target, .action = a } },
         .jump => |id| .{ .jump = .{ .serial = panel.serial, .surface_id = id } },
         .profile => |p| .{ .profile = .{ .serial = panel.serial, .id = p.id, .window = p.window } },
+        .about => .{ .about = panel.serial },
     };
     const cmd = Command.create(window.app.core_app.alloc, kind) catch |err| {
         log.warn("unable to copy a palette action err={}", .{err});
@@ -940,6 +952,10 @@ pub fn command(window: *Window, lparam: LPARAM) bool {
         .profile => |p| {
             closeIfSerial(window, p.serial);
             profiles_menu.launch(window.app, window, p.id, p.window);
+        },
+        .about => |serial| {
+            closeIfSerial(window, serial);
+            about.request(window.app);
         },
         .jump => |j| {
             closeIfSerial(window, j.serial);

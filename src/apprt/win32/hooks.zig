@@ -15,6 +15,7 @@ const CommandPalette = @import("CommandPalette.zig");
 const Inspector = @import("inspector/Inspector.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const SearchBar = @import("SearchBar.zig");
+const about = @import("about.zig");
 const app_toast = @import("app_toast.zig");
 const badges = @import("badges.zig");
 const composition = @import("composition.zig");
@@ -50,7 +51,7 @@ const LPARAM = win32.foundation.LPARAM;
 const LRESULT = win32.foundation.LRESULT;
 
 /// What `WM_GHOSTTY_POSTED_DIALOG` (wparam) asks for.
-pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done, secure_input };
+pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done, secure_input, about };
 
 /// Set by the crash handler (M5 Task 12): re-installs the unhandled-exception
 /// filter if another module replaced it.
@@ -154,6 +155,7 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
                 .config_errors => config_errors.postedApp(app, lparam),
                 .url_confirm => link.postedApp(app, lparam),
                 .secure_input => {},
+                .about => about.postedApp(app),
                 .export_io => discardDialog(wparam, lparam),
                 .export_done => export_io.doneApp(app, lparam),
             }
@@ -173,6 +175,7 @@ pub fn discardDialog(wparam: WPARAM, lparam: LPARAM) void {
         .config_errors => config_errors.discard(lparam),
         .url_confirm => link.discard(lparam),
         .secure_input => {},
+        .about => {},
     }
 }
 
@@ -202,6 +205,7 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 .config_errors => config_errors.postedDialog(window, lparam),
                 .url_confirm => link.postedDialog(window, lparam),
                 .secure_input => secure_input.postedDialog(window),
+                .about => about.postedDialog(window),
             }
             return 0;
         },
