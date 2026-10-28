@@ -20,6 +20,8 @@ prompt for `confirm-close-surface = true` (Terminal.cursorIsAtPrompt).
   zsh-path         the path feature adds no `C:/...` dir to PATH under MSYS
   pwsh             pwsh -NoProfile with the ghostty.ps1 -Command
   cmd              cmd.exe with the marked PROMPT
+  cmd-busy         cmd running `ping -t`: the ping is the shell's only child,
+                   the idle prompt has none (what Exec.shellBusy counts)
 
 Cases whose shell is missing are skipped. Exit code 1 when a case fails.
 Keep this file ASCII only.
@@ -55,9 +57,19 @@ public static class ShellMarksPty {
     [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr h, uint c);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
+    // What `probe` said about the shell right before the input and at the
+    // end, as "<before>|<after>".
+    public static string Probed;
+
+    public static byte[] Run(string cmdline, string env, string cwd, string input, int waitMs) {
+        return Run(cmdline, env, cwd, input, waitMs, null);
+    }
+
     // Runs `cmdline` in an 80x24 pseudoconsole, types `input` after `waitMs`
     // and returns everything the pseudoconsole wrote by `waitMs` later.
-    public static byte[] Run(string cmdline, string env, string cwd, string input, int waitMs) {
+    // `probe` (may be null) gets the shell's process id before the input and
+    // at the end.
+    public static byte[] Run(string cmdline, string env, string cwd, string input, int waitMs, Func<int, string> probe) {
         SafeFileHandle inR, inW, outR, outW;
         CreatePipe(out inR, out inW, IntPtr.Zero, 0);
         CreatePipe(out outR, out outW, IntPtr.Zero, 0);
@@ -91,10 +103,12 @@ public static class ShellMarksPty {
         reader.IsBackground = true;
         reader.Start();
         Thread.Sleep(waitMs);
+        string before = probe == null ? "" : probe(pi.pid);
         var b = Encoding.UTF8.GetBytes(input);
         inFs.Write(b, 0, b.Length);
         inFs.Flush();
         Thread.Sleep(waitMs);
+        Probed = probe == null ? null : before + "|" + probe(pi.pid);
         byte[] result;
         lock (ms) result = ms.ToArray();
         TerminateProcess(pi.hp, 0);
@@ -116,6 +130,18 @@ $zsh = Join-Path $GitDir 'usr\bin\zsh.exe'
 $pwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not $pwsh) { $pwsh = 'pwsh.exe' }
 $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+# The PROMPT setupCmd builds with the title feature.
+$cmdPrompt = '$e]133;D$e\$e]133;A$e\$e]2;$P$e\$e]7;kitty-shell-cwd:///$P$e\$P$G$e]133;B$e\'
+
+# The images of the shell's child processes other than console hosts, as
+# Ghostty's close confirmation counts them for cmd (Exec.shellBusy).
+$childProbe = [Func[int, string]] {
+    param([int]$ShellPid)
+    $names = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ShellPid" |
+            Where-Object { $_.Name -notin 'conhost.exe', 'OpenConsole.exe' } |
+            ForEach-Object { $_.Name.ToLowerInvariant() })
+    ($names | Sort-Object) -join ','
+}
 
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("ghostty-shell-marks-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $sandbox | Out-Null
@@ -196,9 +222,14 @@ $cases = @(
         Args = "-NoLogo -NoProfile -NoExit -Command `". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))`""
     },
     @{
-        # The PROMPT setupCmd builds with the title feature.
         Name = 'cmd'; Exe = $cmd; Args = ''; Input = "echo cmd-%OS%`r"; Home = @{}; Expect = 'cmd-Windows_NT'
-        Env = @{ PROMPT = '$e]133;D$e\$e]133;A$e\$e]2;$P$e\$e]7;kitty-shell-cwd:///$P$e\$P$G$e]133;B$e\' }
+        Env = @{ PROMPT = $cmdPrompt }
+    },
+    @{
+        # cmd marks no command start: Ghostty asks the process list instead.
+        # A running ping is the shell's child, an idle prompt has none.
+        Name = 'cmd-busy'; Exe = $cmd; Args = ''; Input = "ping -t 127.0.0.1`r"; Home = @{}; Expect = '127.0.0.1'
+        Env = @{ PROMPT = $cmdPrompt }; Children = '|ping.exe'
     }
 )
 
@@ -211,10 +242,14 @@ try {
             continue
         }
         $h = New-Home $c.Name $c.Home
-        $bytes = [ShellMarksPty]::Run("`"$($c.Exe)`" $($c.Args)", (Get-EnvBlock $h $c.Env), $h, $c.Input, $WaitMs)
+        $probe = if ($c.Children) { $childProbe } else { $null }
+        $bytes = [ShellMarksPty]::Run("`"$($c.Exe)`" $($c.Args)", (Get-EnvBlock $h $c.Env), $h, $c.Input, $WaitMs, $probe)
         $text = [Text.Encoding]::UTF8.GetString($bytes)
         [IO.File]::WriteAllBytes((Join-Path $sandbox "$($c.Name).bin"), $bytes)
         $problems = @()
+        if ($c.Children -and [ShellMarksPty]::Probed -ne $c.Children) {
+            $problems += "shell children (prompt|command) are '$([ShellMarksPty]::Probed)', expected '$($c.Children)'"
+        }
         if ($text.IndexOf($c.Expect) -lt 0) { $problems += "no '$($c.Expect)' in the output" }
         if (-not (Test-PromptMarked $text)) { $problems += 'the last prompt has no OSC 133 A..B' }
         if ($problems.Count) {

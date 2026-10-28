@@ -658,6 +658,13 @@ const Subprocess = struct {
     pty: ?Pty = null,
     process: ?Process = null,
 
+    /// The shell the automatic shell integration was set up for, if any.
+    integration: ?shell_integration.Shell = null,
+
+    /// Windows: the process id of the running shell, 0 when none. Written by
+    /// the IO thread, read by the app thread (`shellBusy`).
+    shell_pid: std.atomic.Value(u32) = .init(0),
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
 
@@ -832,6 +839,7 @@ const Subprocess = struct {
         _ = env.orderedRemove("VTE_VERSION");
 
         // Setup our shell integration, if we can.
+        var integration_shell: ?shell_integration.Shell = null;
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
                 cfg.command orelse .{ .shell = switch (builtin.target.os.tag) {
@@ -887,6 +895,7 @@ const Subprocess = struct {
                 .{integration.shell},
             );
 
+            integration_shell = integration.shell;
             break :shell integration.command;
         };
 
@@ -977,6 +986,7 @@ const Subprocess = struct {
             .env = env,
             .cwd = cwd,
             .args = args,
+            .integration = integration_shell,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
@@ -1189,6 +1199,7 @@ const Subprocess = struct {
         };
         log.info("started subcommand path={s} pid={?}", .{ self.args[0], cmd.pid });
 
+        if (comptime is_windows) self.shell_pid.store(shell_children.GetProcessId(cmd.pid.?), .release);
         self.process = .{ .fork_exec = cmd };
         return switch (builtin.target.os.tag) {
             .windows => .{
@@ -1223,6 +1234,7 @@ const Subprocess = struct {
                 .flatpak => {},
             };
         }
+        self.shell_pid.store(0, .release);
         self.process = null;
     }
 
@@ -1253,6 +1265,7 @@ const Subprocess = struct {
             },
         }
 
+        self.shell_pid.store(0, .release);
         self.process = null;
     }
 
@@ -2357,6 +2370,163 @@ fn appendEnvAlways(
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.subprocess.getProcessInfo(info);
+}
+
+/// Whether the shell runs a command, for a shell whose prompt marks cannot
+/// tell: cmd marks its prompt but not the start of a command (no OSC 133;C),
+/// so a running `ping -t` would look like the prompt. Null for every other
+/// shell and off Windows: the terminal's prompt state decides there. Called
+/// from the app thread.
+pub fn shellBusy(self: *Exec) ?bool {
+    if (comptime !is_windows) return null;
+    if (self.subprocess.integration != .cmd) return null;
+    const pid = self.subprocess.shell_pid.load(.acquire);
+    if (pid == 0) return null;
+    return shell_children.runsCommand(pid);
+}
+
+/// The commands a Windows shell runs: its child processes in a Toolhelp
+/// snapshot (there is no job object around the shell).
+const shell_children = struct {
+    const PROCESSENTRY32W = extern struct {
+        dwSize: windows.DWORD,
+        cntUsage: windows.DWORD,
+        th32ProcessID: windows.DWORD,
+        th32DefaultHeapID: windows.ULONG_PTR,
+        th32ModuleID: windows.DWORD,
+        cntThreads: windows.DWORD,
+        th32ParentProcessID: windows.DWORD,
+        pcPriClassBase: i32,
+        dwFlags: windows.DWORD,
+        szExeFile: [260]u16,
+    };
+    const FILETIME = extern struct { low: windows.DWORD, high: windows.DWORD };
+    const TH32CS_SNAPPROCESS = 0x2;
+    const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    extern "kernel32" fn GetProcessId(process: windows.HANDLE) callconv(.winapi) windows.DWORD;
+    extern "kernel32" fn CreateToolhelp32Snapshot(flags: windows.DWORD, pid: windows.DWORD) callconv(.winapi) windows.HANDLE;
+    extern "kernel32" fn Process32FirstW(snapshot: windows.HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn Process32NextW(snapshot: windows.HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn GetProcessTimes(
+        process: windows.HANDLE,
+        creation: *FILETIME,
+        exit: *FILETIME,
+        kernel: *FILETIME,
+        user: *FILETIME,
+    ) callconv(.winapi) windows.BOOL;
+
+    /// Whether the process `shell_pid` has a child other than a console
+    /// host. When the shell itself cannot be looked at, it counts as busy:
+    /// the close then asks.
+    fn runsCommand(shell_pid: u32) bool {
+        const shell_created = created(shell_pid) orelse return true;
+        const snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == windows.INVALID_HANDLE_VALUE) return true;
+        defer _ = windows.exp.kernel32.CloseHandle(snapshot);
+
+        var entry: PROCESSENTRY32W = undefined;
+        entry.dwSize = @sizeOf(PROCESSENTRY32W);
+        var ok = Process32FirstW(snapshot, &entry);
+        while (ok != windows.FALSE) : (ok = Process32NextW(snapshot, &entry)) {
+            const len = std.mem.indexOfScalar(u16, &entry.szExeFile, 0) orelse entry.szExeFile.len;
+            if (!isCommand(entry.th32ParentProcessID, entry.szExeFile[0..len], shell_pid)) continue;
+            // A process keeps the id of its parent after the parent is gone,
+            // and ids are reused: a child is never older than its shell. One
+            // that cannot be opened has exited since the snapshot.
+            const child_created = created(entry.th32ProcessID) orelse continue;
+            if (child_created >= shell_created) return true;
+        }
+        return false;
+    }
+
+    /// Whether a snapshot entry (parent id, image name) is a command run by
+    /// `shell_pid`. A console host is not.
+    fn isCommand(parent: u32, exe: []const u16, shell_pid: u32) bool {
+        if (parent != shell_pid) return false;
+        return !eqlAsciiW(exe, "conhost.exe") and !eqlAsciiW(exe, "OpenConsole.exe");
+    }
+
+    fn eqlAsciiW(a: []const u16, b: []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| {
+            if (x > 0x7f or std.ascii.toLower(@intCast(x)) != std.ascii.toLower(y)) return false;
+        }
+        return true;
+    }
+
+    /// The creation time of process `pid`, or null if it cannot be opened.
+    fn created(pid: u32) ?u64 {
+        const h = windows.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, windows.FALSE, pid) orelse return null;
+        defer _ = windows.exp.kernel32.CloseHandle(h);
+        var c: FILETIME = undefined;
+        var e: FILETIME = undefined;
+        var k: FILETIME = undefined;
+        var u: FILETIME = undefined;
+        if (GetProcessTimes(h, &c, &e, &k, &u) == windows.FALSE) return null;
+        return (@as(u64, c.high) << 32) | c.low;
+    }
+};
+
+test "shellBusy: a console host is not a command" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const W = std.unicode.utf8ToUtf16LeStringLiteral;
+    try testing.expect(shell_children.isCommand(7, W("PING.EXE"), 7));
+    try testing.expect(!shell_children.isCommand(8, W("ping.exe"), 7));
+    try testing.expect(!shell_children.isCommand(7, W("conhost.exe"), 7));
+    try testing.expect(!shell_children.isCommand(7, W("OpenConsole.EXE"), 7));
+    try testing.expect(shell_children.isCommand(7, W("conhost.exe.bak"), 7));
+}
+
+test "shellBusy: cmd is busy while ping runs, idle at its prompt" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 });
+    defer pty.deinit();
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/k", "ping -n 60 127.0.0.1" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(testing.allocator);
+    defer cmd.closeProcess();
+    defer {
+        cmd.killChild() catch {};
+        pty.closeConsoleAsync();
+    }
+    pty.closeChildSide();
+
+    var loop = try TestReadLoop.init(pty.out_pipe);
+    defer loop.deinit();
+    try loop.start();
+
+    const shell_pid = shell_children.GetProcessId(cmd.pid.?);
+    var ping: ?windows.HANDLE = null;
+    defer if (ping) |h| {
+        _ = k32.CloseHandle(h);
+    };
+    const begin: std.Io.Timestamp = .now(global.io(), .awake);
+    while (ping == null) {
+        ping = openChildNamed(cmd.pid.?, "ping.exe");
+        if (ping != null) break;
+        try testing.expect(testElapsedMs(begin) < 8000);
+        try std.Io.sleep(global.io(), .fromMilliseconds(50), .awake);
+    }
+    try testing.expect(shell_children.runsCommand(shell_pid));
+
+    // Back at the prompt once the ping is gone.
+    _ = k32.TerminateProcess(ping.?, 0);
+    _ = k32.WaitForSingleObject(ping.?, 5000);
+    try testing.expect(!shell_children.runsCommand(shell_pid));
 }
 
 test "execCommand darwin: shell command" {

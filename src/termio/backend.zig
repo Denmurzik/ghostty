@@ -110,6 +110,13 @@ pub const Backend = union(Kind) {
             .exec => |*exec| exec.getProcessInfo(info),
         };
     }
+
+    /// See `termio.Exec.shellBusy`.
+    pub fn shellBusy(self: *Backend) ?bool {
+        return switch (self.*) {
+            .exec => |*exec| exec.shellBusy(),
+        };
+    }
 };
 
 /// Termio thread data. See termio.ThreadData for docs.

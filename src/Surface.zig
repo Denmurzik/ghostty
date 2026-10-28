@@ -1041,11 +1041,34 @@ pub fn needsConfirmQuit(self: *Surface) bool {
         .always => true,
         .false => false,
         .true => true: {
+            // Outside the lock: on Windows this looks at the process list.
+            const busy = self.io.shellBusy();
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
-            break :true !self.io.terminal.cursorIsAtPrompt();
+            break :true closeNeedsConfirm(self.io.terminal.cursorIsAtPrompt(), busy);
         },
     };
+}
+
+/// The `confirm-close-surface = true` decision. `shell_busy` is the
+/// backend's own answer for a shell whose prompt marks cannot tell a running
+/// command apart (cmd on Windows), null otherwise: then only the prompt
+/// counts.
+fn closeNeedsConfirm(at_prompt: bool, shell_busy: ?bool) bool {
+    if (shell_busy) |busy| return busy or !at_prompt;
+    return !at_prompt;
+}
+
+test closeNeedsConfirm {
+    const testing = std.testing;
+    // bash, zsh, pwsh: the prompt marks decide.
+    try testing.expect(!closeNeedsConfirm(true, null));
+    try testing.expect(closeNeedsConfirm(false, null));
+    // cmd: a running command asks even though its line reads as the prompt.
+    try testing.expect(closeNeedsConfirm(true, true));
+    try testing.expect(!closeNeedsConfirm(true, false));
+    // cmd with a prompt that lost its marks still asks.
+    try testing.expect(closeNeedsConfirm(false, false));
 }
 
 /// Called from the app thread to handle mailbox messages to our specific

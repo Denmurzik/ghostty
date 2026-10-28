@@ -868,6 +868,12 @@ pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Ty
     return self.backend.getProcessInfo(info);
 }
 
+/// Whether the shell runs a command, when its prompt marks cannot tell.
+/// Null when the terminal's prompt state decides. See `termio.Exec.shellBusy`.
+pub fn shellBusy(self: *Termio) ?bool {
+    return self.backend.shellBusy();
+}
+
 test "termio renderer wakeup notifies the original Async" {
     const testing = std.testing;
 

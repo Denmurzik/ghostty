@@ -2,7 +2,8 @@
 # close-idle-prompt: with `confirm-close-surface = true`, closing a window
 # whose shell sits at an idle prompt (OSC 133 marks from the shell
 # integration) asks nothing: no GhosttyDialog, Ghostty exits. Cases: Git Bash,
-# and Git Bash whose rc file runs `exec zsh` (zsh gets the zsh integration).
+# cmd (idle closes unasked, a running `ping -t` asks), and Git Bash whose rc
+# file runs `exec zsh` (zsh gets the zsh integration).
 # The headless counterpart is test/windows/shell-marks/run.ps1.
 # PENDING: written without a GUI run (task #53); first run in the M5 Task 19
 # e2e pass.
@@ -33,7 +34,30 @@ Invoke-E2eScenario 'close-idle-prompt' {
     Wait-BashReady $g
     Assert-ClosesUnasked $g 'git bash'
 
-    # 2. A bash rc file that ends in `exec zsh`.
+    # 2. cmd: its idle prompt closes unasked; with `ping -t` running (cmd marks
+    # no command start, Ghostty looks at the shell's children) it asks, and
+    # "Close" (id 100) closes.
+    $cmdCfg = (Get-ConfirmText).TrimEnd() + "`ncommand = direct:$env:SystemRoot\System32\cmd.exe`n"
+    $g = Start-E2eGhostty -ConfigText $cmdCfg
+    Start-Sleep -Seconds 2
+    Assert-ClosesUnasked $g 'cmd'
+
+    $g = Start-E2eGhostty -ConfigText $cmdCfg
+    Start-Sleep -Seconds 2
+    Set-WindowLayout $g.Hwnd '00000409'
+    Send-Line $g.Hwnd 'ping -t 127.0.0.1'
+    if (-not (Wait-ChildNamed $g @('ping.exe') 15)) { throw 'cmd: ping.exe never started' }
+    Start-Sleep -Milliseconds 500
+    [void][GhosttyE2e.Win]::PostMessageW($g.Hwnd, $script:WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    $dlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {
+        @([GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog')) | Select-Object -First 1
+    }
+    if (-not $dlg) { throw 'cmd: no confirmation dialog within 8 s while ping -t runs' }
+    [void][GhosttyE2e.Win]::PostMessageW($dlg, 0x466, [IntPtr]100, [IntPtr]::Zero)   # TDM_CLICK_BUTTON, Close
+    $exit = Wait-ProcessExit $g 5
+    if (-not $exit.Exited) { throw 'cmd: ghostty still running 5 s after Close' }
+
+    # 3. A bash rc file that ends in `exec zsh`.
     $bash = Find-GitBash
     $zsh = if ($bash) { Join-Path (Split-Path (Split-Path $bash)) 'usr\bin\zsh.exe' }
     if (-not $zsh -or -not (Test-Path -LiteralPath $zsh)) { throw 'E2E-SKIP: no zsh next to Git Bash' }
