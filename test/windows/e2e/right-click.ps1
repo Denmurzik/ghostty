@@ -50,6 +50,16 @@ Invoke-E2eScenario 'right-click' {
             Start-Sleep -Milliseconds 1500
             if (Test-Path (Get-Marker $g $Name)) { throw "'$Name': the clipboard text was pasted" }
         }
+        # The copy lands asynchronously (slower on Debug): poll instead of one read.
+        function Wait-ClipboardMatch([string]$Pattern) {
+            $end = [DateTime]::UtcNow.AddSeconds(6)
+            do {
+                Start-Sleep -Milliseconds 300
+                Update-ClipboardMark
+                $c = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+            } while (($c -notmatch $Pattern) -and ([DateTime]::UtcNow -lt $end))
+            $c
+        }
         # Select what is on the screen and make the clipboard hold a sentinel.
         function Select-Screen($g, [string]$Word) {
             Send-Line $g.Hwnd "echo $Word"
@@ -88,9 +98,7 @@ Invoke-E2eScenario 'right-click' {
         Select-Screen $g 'SELECTME-cop'
         Set-ClipboardText 'echo SENTINEL > "$TEMP/gt-rc-cop-sel.txt"'
         Click-Right $g
-        Start-Sleep -Milliseconds 600
-        Update-ClipboardMark
-        $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+        $clip = Wait-ClipboardMatch 'SELECTME-cop'
         if ($clip -notmatch 'SELECTME-cop') { throw "the right click did not copy the selection; clipboard: '$clip'" }
         if (Test-Selection $g) { throw 'the selection is still there after the right click' }
         Assert-NotPasted $g 'cop-sel'
@@ -113,9 +121,7 @@ Invoke-E2eScenario 'right-click' {
         Select-Screen $g 'SELECTME-copy'
         Set-ClipboardText 'sentinel-before'
         Click-Right $g
-        Start-Sleep -Milliseconds 600
-        Update-ClipboardMark
-        $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+        $clip = Wait-ClipboardMatch 'SELECTME-copy'
         if ($clip -notmatch 'SELECTME-copy') { throw "copy: the selection was not copied; clipboard: '$clip'" }
         if (Test-Selection $g) { throw 'copy: the selection is still there' }
         Stop-Case $g
@@ -145,9 +151,7 @@ Invoke-E2eScenario 'right-click' {
         Save-Evidence 'menu-selection' $g -Window
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'down', 'enter' -Panel
         Wait-Popup $g $false 'Enter on Copy'
-        Start-Sleep -Milliseconds 500
-        Update-ClipboardMark
-        $clip = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+        $clip = Wait-ClipboardMatch 'SELECTME-menu'
         if ($clip -notmatch 'SELECTME-menu') { throw "menu Copy did not copy; clipboard: '$clip'" }
         Stop-Case $g
 
