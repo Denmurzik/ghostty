@@ -16,6 +16,9 @@ prompt for `confirm-close-surface = true` (Terminal.cursorIsAtPrompt).
   bash-zdotdir-env a ZDOTDIR from the environment survives `exec zsh`
   bash-zdotdir-rc  so does `export ZDOTDIR="${ZDOTDIR:-...}"` in ~/.bashrc
   bash-zdotdir-leak  what ~/.bashrc starts sees no ZDOTDIR
+  bash-trap-gone   the handoff trap is gone after the startup files
+  bash-trap-chained  a user DEBUG trap chaining ours survives, no errors
+  bash-last-arg    `cd "$_"` in ~/.bashrc still works under the trap
   bash-exec-zsh    ~/.bashrc ends in `exec zsh` (the usual way to get zsh in
                    Git Bash): the zsh inherits the zsh integration
   zsh-drive        zsh with ZDOTDIR=C:/.../shell-integration/zsh
@@ -224,6 +227,32 @@ $cases = @(
         Home = @{ '.bashrc' = 'env > "$HOME/env.txt"' + "`nPS1='bash$ '`n" }; Env = (Get-BashEnv); Expect = 'leak-0'
     },
     @{
+        # The handoff trap is gone once the startup files ran. The quotes keep
+        # the typed line from matching the expected output.
+        Name = 'bash-trap-gone'; Exe = $bash; Args = '--posix'
+        Input = "echo n-`$(trap -p DEBUG | grep -c zsh_hand`"`"off)`r"
+        Home = @{ '.bashrc' = "PS1='bash$ '`n" }; Env = (Get-BashEnv); Expect = 'n-0'
+    },
+    @{
+        # A user DEBUG trap that chains the one before it keeps working.
+        Name = 'bash-trap-chained'; Exe = $bash; Args = '--posix'
+        Input = "echo t-`$(trap -p DEBUG | grep -c my_d`"`"bg)`r"
+        Home = @{ '.bashrc' = (@(
+                    'prev=$(trap -p DEBUG); prev=${prev#trap -- \''}; prev=${prev%\'' DEBUG}'
+                    '__my_dbg() { :; }'
+                    'trap "${prev:+$prev; }__my_dbg" DEBUG'
+                    "PS1='bash$ '"
+                ) -join "`n") + "`n"
+        }
+        Env = (Get-BashEnv); Expect = 't-1'
+    },
+    @{
+        # `$_` survives the trap that runs before every startup command.
+        Name = 'bash-last-arg'; Exe = $bash; Args = '--posix'; Input = "echo at-`${PWD##*/}`r"
+        Home = @{ '.bashrc' = 'mkdir -p "$HOME/under"' + "`n" + 'cd "$_"' + "`nPS1='bash$ '`n" }
+        Env = (Get-BashEnv); Expect = 'at-under'
+    },
+    @{
         Name = 'zsh-drive'; Exe = $zsh; Args = '-i'; Input = "echo in-`$ZSH_NAME`r"
         Home = @{ '.zshrc' = "PROMPT='zsh%% '`n" }
         Env = @{ ZDOTDIR = "$resMixed/shell-integration/zsh"; GHOSTTY_RESOURCES_DIR = $resWin }; Expect = 'in-zsh'
@@ -277,6 +306,7 @@ try {
             $problems += "shell children (prompt|command) are '$([ShellMarksPty]::Probed)', expected '$($c.Children)'"
         }
         if ($text.IndexOf($c.Expect) -lt 0) { $problems += "no '$($c.Expect)' in the output" }
+        if ($text -match "command not found") { $problems += "'command not found' in the output" }
         if (-not (Test-PromptMarked $text)) { $problems += 'the last prompt has no OSC 133 A..B' }
         if ($problems.Count) {
             $failed++

@@ -49,13 +49,14 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
   # GHOSTTY_ZSH_ZDOTDIR holds the user's own ZDOTDIR, if any: the integration
   # restores it before it reads the user's files. Nothing else the startup
   # files run sees either variable.
-  builtin unset GHOSTTY_ZSH_ZDOTDIR
   if [[ ("$OSTYPE" == msys* || "$OSTYPE" == cygwin*) &&
     -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/.zshenv" ]]; then
+    builtin unset GHOSTTY_ZSH_ZDOTDIR
     builtin declare __ghostty_zdotdir="$GHOSTTY_RESOURCES_DIR/shell-integration/zsh"
-    builtin declare __ghostty_zsh_armed="" __ghostty_zsh_tick=""
+    builtin declare __ghostty_zsh_armed="" __ghostty_zsh_functrace=""
+    [[ $- == *T* ]] && __ghostty_zsh_functrace=1
+    # The trap passes $_ along: the call keeps it for the next command.
     __ghostty_zsh_handoff() {
-      __ghostty_zsh_tick=1
       # A zsh that returned: the user's ZDOTDIR comes back.
       if [[ -n "$__ghostty_zsh_armed" ]]; then
         __ghostty_zsh_armed=""
@@ -82,7 +83,7 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
       __ghostty_zsh_armed=1
     }
     builtin set -T
-    builtin trap __ghostty_zsh_handoff DEBUG
+    builtin trap '__ghostty_zsh_handoff "$_"' DEBUG
   fi
 
   # Manually source the startup files. See INVOCATION in bash(1) and
@@ -116,16 +117,17 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
     fi
   fi
 
-  # No zsh took over: drop the trap unless a startup file set its own (ours
-  # then no longer runs for the `:`), and the ZDOTDIR of a zsh that was last.
+  # No zsh took over: drop the trap if it is still exactly ours (a startup
+  # file may have set its own, even one that calls ours), put functrace back
+  # and the ZDOTDIR of a zsh that ran last. The function stays, as a no-op,
+  # for a user trap that calls it.
   if [[ -n "${__ghostty_zdotdir-}" ]]; then
-    __ghostty_zsh_tick=""
-    :
-    [[ -n "$__ghostty_zsh_tick" ]] && builtin trap - DEBUG
-    builtin set +T
+    [[ "$(builtin trap -p DEBUG)" == "trap -- '__ghostty_zsh_handoff \"\$_\"' DEBUG" ]] &&
+      builtin trap - DEBUG
+    [[ -n "$__ghostty_zsh_functrace" ]] || builtin set +T
     __ghostty_zsh_handoff
-    builtin unset -f __ghostty_zsh_handoff
-    builtin unset __ghostty_zdotdir __ghostty_zsh_armed __ghostty_zsh_tick
+    __ghostty_zsh_handoff() { :; }
+    builtin unset __ghostty_zdotdir __ghostty_zsh_armed __ghostty_zsh_functrace
   fi
 
   builtin unset __ghostty_rcfile

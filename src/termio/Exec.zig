@@ -2436,8 +2436,27 @@ const shell_children = struct {
         size: *windows.DWORD,
     ) callconv(.winapi) windows.BOOL;
 
+    extern "ntdll" fn NtQueryInformationProcess(
+        process: windows.HANDLE,
+        class: u32,
+        info: *anyopaque,
+        len: u32,
+        ret_len: ?*u32,
+    ) callconv(.winapi) i32;
+    const ProcessCommandLineInformation = 60;
+
+    /// A console host, by the console it serves.
+    const Host = enum {
+        /// Not a console host.
+        none,
+        /// A console of its own: what `start` runs, with a window of its own.
+        own_console,
+        /// A pseudoconsole (`--headless`) that its parent program hosts.
+        pseudo_console,
+    };
+
     /// One process of a snapshot, as far as the busy check cares.
-    const Proc = struct { pid: u32, parent: u32, console_host: bool };
+    const Proc = struct { pid: u32, parent: u32, host: Host = .none };
 
     /// What a child process turned out to be.
     const Child = union(enum) {
@@ -2477,8 +2496,16 @@ const shell_children = struct {
             procs.append(alloc, .{
                 .pid = entry.th32ProcessID,
                 .parent = entry.th32ParentProcessID,
-                .console_host = isConsoleHost(entry.szExeFile[0..len]),
+                .host = if (isConsoleHost(entry.szExeFile[0..len])) .own_console else .none,
             }) catch return true;
+        }
+        // The console hosts of the shell's children: which console they serve.
+        for (procs.items) |*p| {
+            if (p.host == .none) continue;
+            const grandchild = for (procs.items) |q| {
+                if (q.pid == p.parent and q.parent == shell_pid and q.host == .none) break true;
+            } else false;
+            if (grandchild) p.host = hostKind(p.pid);
         }
 
         var buf: [32]u32 = undefined;
@@ -2492,15 +2519,16 @@ const shell_children = struct {
     }
 
     /// The children of `shell_pid` in `procs` that may share its console:
-    /// not a console host, and without a console host of their own (what
-    /// `start` runs gets a console of its own, so closing ours leaves it
-    /// alone). Null when there are more than `out` holds.
+    /// not a console host, and without a console of their own (what `start`
+    /// runs gets one, so closing ours leaves it alone). A program that hosts
+    /// a pseudoconsole (node-pty, winpty) still runs on ours. Null when there
+    /// are more than `out` holds.
     fn consoleChildren(procs: []const Proc, shell_pid: u32, out: []u32) ?[]u32 {
         var n: usize = 0;
         for (procs) |p| {
-            if (p.parent != shell_pid or p.console_host) continue;
+            if (p.parent != shell_pid or p.host != .none) continue;
             const own_console = for (procs) |q| {
-                if (q.parent == p.pid and q.console_host) break true;
+                if (q.parent == p.pid and q.host == .own_console) break true;
             } else false;
             if (own_console) continue;
             if (n == out.len) return null;
@@ -2535,6 +2563,25 @@ const shell_children = struct {
         return .{ .info = .{ .created = created, .gui = windows_pe.isGui(path[0..n]) } };
     }
 
+    /// Which console the console host `pid` serves, from its command line:
+    /// a pseudoconsole host runs with `--headless`. One that cannot be read
+    /// counts as a pseudoconsole host: its parent then counts as a command.
+    fn hostKind(pid: u32) Host {
+        const h = windows.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, windows.FALSE, pid) orelse
+            return .pseudo_console;
+        defer _ = windows.exp.kernel32.CloseHandle(h);
+        // A UNICODE_STRING followed by the text it points at.
+        var buf: [4096]u8 align(8) = undefined;
+        if (NtQueryInformationProcess(h, ProcessCommandLineInformation, &buf, buf.len, null) != 0) return .pseudo_console;
+        const UnicodeString = extern struct { len: u16, max: u16, ptr: [*]const u16 };
+        const us: *const UnicodeString = @ptrCast(&buf);
+        return if (isHeadless(us.ptr[0 .. us.len / 2])) .pseudo_console else .own_console;
+    }
+
+    fn isHeadless(cmdline: []const u16) bool {
+        return std.mem.indexOf(u16, cmdline, std.unicode.utf8ToUtf16LeStringLiteral("--headless")) != null;
+    }
+
     fn isConsoleHost(exe: []const u16) bool {
         return eqlAsciiW(exe, "conhost.exe") or eqlAsciiW(exe, "OpenConsole.exe");
     }
@@ -2551,15 +2598,17 @@ const shell_children = struct {
 test "shellBusy: the shell's console children" {
     const testing = std.testing;
     const procs = [_]shell_children.Proc{
-        .{ .pid = 10, .parent = 1, .console_host = false }, // the shell
-        .{ .pid = 11, .parent = 10, .console_host = false }, // ping
-        .{ .pid = 12, .parent = 10, .console_host = true }, // a console host
-        .{ .pid = 13, .parent = 10, .console_host = false }, // `start x`: own console
-        .{ .pid = 14, .parent = 13, .console_host = true },
-        .{ .pid = 15, .parent = 99, .console_host = false }, // someone else's
+        .{ .pid = 10, .parent = 1 }, // the shell
+        .{ .pid = 11, .parent = 10 }, // ping
+        .{ .pid = 12, .parent = 10, .host = .own_console }, // a console host
+        .{ .pid = 13, .parent = 10 }, // `start x`: a console of its own
+        .{ .pid = 14, .parent = 13, .host = .own_console },
+        .{ .pid = 15, .parent = 99 }, // someone else's
+        .{ .pid = 16, .parent = 10 }, // node with node-pty, on our console
+        .{ .pid = 17, .parent = 16, .host = .pseudo_console },
     };
     var buf: [4]u32 = undefined;
-    try testing.expectEqualSlices(u32, &.{11}, shell_children.consoleChildren(&procs, 10, &buf).?);
+    try testing.expectEqualSlices(u32, &.{ 11, 16 }, shell_children.consoleChildren(&procs, 10, &buf).?);
     try testing.expectEqualSlices(u32, &.{}, shell_children.consoleChildren(&procs, 15, &buf).?);
     var small: [0]u32 = undefined;
     try testing.expect(shell_children.consoleChildren(&procs, 10, &small) == null);
@@ -2583,6 +2632,8 @@ test "shellBusy: console hosts" {
     try testing.expect(shell_children.isConsoleHost(W("OpenConsole.exe")));
     try testing.expect(!shell_children.isConsoleHost(W("conhost.exe.bak")));
     try testing.expect(!shell_children.isConsoleHost(W("ping.exe")));
+    try testing.expect(shell_children.isHeadless(W("\\\\?\\C:\\WINDOWS\\system32\\conhost.exe --headless --width 80 --height 24 --signal 0x434")));
+    try testing.expect(!shell_children.isHeadless(W("\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4")));
 }
 
 test "shellBusy: cmd is busy while ping runs, idle at its prompt" {
@@ -2631,6 +2682,12 @@ test "shellBusy: cmd is busy while ping runs, idle at its prompt" {
         try std.Io.sleep(global.io(), .fromMilliseconds(50), .awake);
     };
     try testing.expect(shell_children.runsCommand(shell_pid, shell_created));
+
+    // The host of this test's own pseudoconsole reads as one.
+    if (openChildNamed(k32.GetCurrentProcess(), "conhost.exe")) |host| {
+        defer _ = k32.CloseHandle(host);
+        try testing.expectEqual(.pseudo_console, shell_children.hostKind(shell_children.GetProcessId(host)));
+    }
 
     // Back at the prompt once the ping is gone (and no handle keeps it).
     _ = k32.TerminateProcess(ping, 0);
