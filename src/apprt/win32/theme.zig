@@ -330,7 +330,8 @@ pub fn applyToWindow(window: *Window) void {
 }
 
 fn applyToAll(app: *App) void {
-    for (app.windows.items) |window| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
         if (!window.tearing_down) applyToWindow(window);
     }
 }
@@ -338,7 +339,8 @@ fn applyToAll(app: *App) void {
 /// Remember the config the chrome is drawn from, and apply it everywhere.
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
     applied = .from(config);
-    for (app.windows.items) |window| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
         if (window.tearing_down) continue;
         applyToWindow(window);
         // A window still being created is in the list without tabs; its
@@ -362,9 +364,11 @@ pub fn schemeChanged(app: *App, scheme: apprt.ColorScheme) void {
     app.core_app.colorSchemeEvent(app, scheme) catch |err| {
         log.warn("unable to report the color scheme err={}", .{err});
     };
-    for (app.windows.items) |window| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
         if (window.tearing_down) continue;
-        for (window.tabs.items) |tab| {
+        var all_tabs = window.allTabs();
+        while (all_tabs.next()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 entry.view.core().colorSchemeCallback(scheme) catch |err| {

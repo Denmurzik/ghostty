@@ -189,7 +189,10 @@ pub fn open_config(app: *App, target: apprt.Target, value: apprt.Action.Value(.o
 pub fn color_change(app: *App, target: apprt.Target, value: apprt.Action.Value(.color_change)) !bool {
     _ = value;
     switch (target) {
-        .app => for (app.windows.items) |window| Chrome.invalidate(window),
+        .app => {
+            var windows = app.forEachWindow(true);
+            while (windows.next()) |window| Chrome.invalidate(window);
+        },
         .surface => if (app.windowForTarget(target)) |window| Chrome.invalidate(window),
     }
     return true;

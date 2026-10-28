@@ -66,6 +66,9 @@ id: u32,
 /// Whether the container HWND was already taken down with its parent.
 hwnd_destroyed: bool = false,
 
+/// Closed by the user and kept by the close-undo (`Window.parked_tabs`).
+parked: bool = false,
+
 /// The divider being dragged, while the left button is held.
 drag: ?Drag = null,
 
@@ -250,6 +253,30 @@ pub fn focus(self: *Tab) void {
     const s = self.focusedSurface() orelse return;
     if (!mayTakeFocus(win32.user32.GetActiveWindow(), self.window.hwnd)) return;
     _ = win32.user32.SetFocus(s.hwnd);
+}
+
+/// Core must not see a parked surface as the focused one.
+pub fn parkSurfaces(self: *Tab) void {
+    var it = self.tree.iterator();
+    while (it.next()) |entry| {
+        const s = entry.view;
+        if (!s.initialized) continue;
+        s.core_surface.focusCallback(false) catch |err|
+            log.warn("focus callback failed err={}", .{err});
+        const core_app = s.app.core_app;
+        if (core_app.focused_surface == &s.core_surface) core_app.focused_surface = null;
+    }
+}
+
+/// Hide the tab for the close-undo; its shells keep running.
+pub fn park(self: *Tab) void {
+    self.parked = true;
+    self.parkSurfaces();
+    self.setVisible(false);
+}
+
+pub fn unpark(self: *Tab) void {
+    self.parked = false;
 }
 
 pub fn setVisible(self: *Tab, visible: bool) void {

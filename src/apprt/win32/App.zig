@@ -240,6 +240,7 @@ pub fn terminate(self: *App) void {
 
     _ = win32.user32.DestroyWindow(self.msg_hwnd);
     profiles_mod.deinit(self);
+    self.undo.stack.deinit(self.core_app.alloc);
     self.config.deinit();
     win32.ole32.OleUninitialize();
 }
@@ -451,8 +452,57 @@ pub fn unregisterWindow(self: *App, window: *Window) bool {
     return false;
 }
 
+/// Whether closing `window` ends the session (`quit-after-last-window-closed`
+/// with no other window open): such a close is not undoable.
+pub fn closingQuits(self: *App, window: *Window) bool {
+    if (!self.config.@"quit-after-last-window-closed") return false;
+    for (self.windows.items) |w| {
+        if (w == window) continue;
+        if (w.kind == .normal or self.quick.shown) return false;
+    }
+    return true;
+}
+
+/// Hide `window` for the close-undo: it leaves `windows` (tray, hotkeys,
+/// tmux and the last-window rule no longer see it) and waits in
+/// `parked_windows`. False: nothing changed.
+pub fn parkWindow(self: *App, window: *Window) bool {
+    self.parked_windows.ensureUnusedCapacity(self.core_app.alloc, 1) catch return false;
+    if (!self.unregisterWindow(window)) return false;
+    window.park();
+    self.parked_windows.appendAssumeCapacity(window);
+    return true;
+}
+
+/// Bring a parked window back.
+pub fn unparkWindow(self: *App, window: *Window) void {
+    for (self.parked_windows.items, 0..) |w, i| {
+        if (w != window) continue;
+        self.windows.ensureUnusedCapacity(self.core_app.alloc, 1) catch |err| {
+            log.warn("unable to restore a window err={}", .{err});
+            return;
+        };
+        _ = self.parked_windows.orderedRemove(i);
+        self.windows.appendAssumeCapacity(window);
+        window.unpark();
+        return;
+    }
+}
+
+/// A parked window closes for real.
+pub fn releaseParkedWindow(self: *App, window: *Window) void {
+    window.destroy();
+    _ = self;
+}
+
 /// Called from the window procedure when a top-level window goes away.
 pub fn windowDestroyed(self: *App, window: *Window) void {
+    // A parked window never counted as open: its end changes nothing else.
+    for (self.parked_windows.items, 0..) |w, i| {
+        if (w != window) continue;
+        _ = self.parked_windows.orderedRemove(i);
+        return;
+    }
     _ = self.unregisterWindow(window);
     self.lastWindowCheck();
 }
@@ -610,6 +660,9 @@ fn msgWndProc(
 /// surface has a running process (`confirm-close-surface` is applied by
 /// `needsConfirmQuit`). The default answer is "No".
 fn handleQuit(self: *App) void {
+    // Parked items are closed first: the question is only about what is
+    // really open, and nothing parked may outlive the quit.
+    undo_actions_mod.flushAll(self);
     const Asker = struct {
         app: *App,
         fn confirm(a: @This()) bool {

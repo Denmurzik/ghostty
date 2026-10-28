@@ -23,6 +23,7 @@ const geom = @import("../geom.zig");
 const instance = @import("../instance.zig");
 const theme = @import("../theme.zig");
 const protocol = @import("protocol.zig");
+const undo_actions = @import("../actions/undo_actions.zig");
 const Server = @import("Server.zig");
 const QuickTerminal = @import("../QuickTerminal.zig");
 const export_io = @import("../export_io.zig");
@@ -286,8 +287,14 @@ fn targetWindow(app: *App, id: u32) ?*Window {
 fn action(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
     const parsed = input.Binding.Action.parse(req.action) catch
         return reply(alloc, .bad_request, "", "invalid action", null);
-    const surface = targetSurface(app, req.surface) orelse
+    const surface = targetSurface(app, req.surface) orelse {
+        // With every window parked there is no surface to address; undo is app-wide.
+        if (parsed == .undo) {
+            const done = undo_actions.undo(app, .app, {}) catch false;
+            return reply(alloc, .ok, "", "", if (done) "{\"performed\":true}" else "{\"performed\":false}");
+        }
         return reply(alloc, .failed, "", "no such surface", null);
+    };
     const performed = surface.core().performBindingAction(parsed) catch |err| {
         log.warn("binding action failed err={}", .{err});
         return reply(alloc, .failed, "", "action failed", null);

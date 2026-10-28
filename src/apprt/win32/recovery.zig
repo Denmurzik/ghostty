@@ -188,8 +188,10 @@ fn sweep(app: *App, now_ms: u64) void {
     var repeated = false;
     var failed_acquire = false;
     var shader_active = false;
-    for (app.windows.items) |window| {
-        for (window.tabs.items) |tab| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
+        var all_tabs = window.allTabs();
+        while (all_tabs.next()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 const s = entry.view;
@@ -233,8 +235,10 @@ fn sweep(app: *App, now_ms: u64) void {
         },
     }
 
-    for (app.windows.items) |window| {
-        for (window.tabs.items) |tab| {
+    var windows2 = app.forEachWindow(true);
+    while (windows2.next()) |window| {
+        var all_tabs = window.allTabs();
+        while (all_tabs.next()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 const s = entry.view;
@@ -299,8 +303,10 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.objectField("recovered");
     try jw.write(state.recovered);
     var bars: u32 = 0;
-    for (app.windows.items) |window| {
-        for (window.tabs.items) |tab| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
+        var all_tabs = window.allTabs();
+        while (all_tabs.next()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 if (entry.view.badges.health) |label| {

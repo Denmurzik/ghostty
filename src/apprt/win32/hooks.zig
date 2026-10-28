@@ -365,6 +365,7 @@ test "win32 hooks: testState writes an m3 object" {
     // Only the windows are looked at.
     var app: App = undefined;
     app.windows = .empty;
+    app.parked_windows = .empty;
     app.quick = .{};
     app.shell_open = .{};
     app.tmux_server = .{};

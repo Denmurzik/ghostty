@@ -34,6 +34,7 @@ const tab_anim_mod = @import("tab_anim.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
 const title_edit = @import("title_edit.zig");
+const undo_actions = @import("actions/undo_actions.zig");
 const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 
@@ -94,6 +95,14 @@ id: u32,
 
 tabs: std.ArrayList(*Tab) = .empty,
 active_tab: usize = 0,
+
+/// Tabs closed by the user that the close-undo keeps alive and hidden
+/// (`actions/undo_actions.zig`). Not part of `tabs`, so nothing that walks
+/// the tabs (tmux, IPC, the tab strip) sees them.
+parked_tabs: std.ArrayList(*Tab) = .empty,
+
+/// The whole window is parked: hidden, kept in `App.parked_windows`.
+parked: bool = false,
 
 /// The window's DPI, the single source of it: read once at creation, then
 /// only by WM_DPICHANGED.
@@ -320,7 +329,15 @@ pub fn placeInitial(self: *Window, parent: ?*Window) void {
 pub fn destroy(self: *Window) void {
     const alloc = self.app.core_app.alloc;
 
+    // Its undo entries die with it; the parked tabs go below.
+    undo_actions.forget(self.app, self);
     self.beginTeardown();
+    {
+        const was = self.tearing_down;
+        self.tearing_down = true;
+        defer self.tearing_down = was;
+        while (self.parked_tabs.pop()) |tab| tab.destroy();
+    }
 
     drop.revoke(self);
     title_edit.cancel(self);
@@ -333,6 +350,7 @@ pub fn destroy(self: *Window) void {
     self.tab_anim.deinit(alloc);
     self.proxy.deinit(alloc);
     self.tabs.deinit(alloc);
+    self.parked_tabs.deinit(alloc);
     if (self.title_override) |t| alloc.free(t);
     if (self.chrome_title) |t| alloc.free(t);
     alloc.destroy(self);
@@ -542,6 +560,117 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     tab.destroy();
 }
 
+// -- Parking (close-undo) ------------------------------------------------------
+
+/// Hide a tab the user closed and keep it alive, out of `tabs`. Returns the
+/// index it had; null when nothing was parked (the last tab of a window is
+/// never parked: the window is).
+pub fn parkTab(self: *Window, tab: *Tab) ?usize {
+    const index = self.tabIndex(tab) orelse return null;
+    if (self.tabs.items.len < 2) return null;
+    self.parked_tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1) catch return null;
+    {
+        const was = self.tearing_down;
+        self.tearing_down = true;
+        defer self.tearing_down = was;
+        _ = self.unlinkTab(tab);
+        tab.park();
+    }
+    self.parked_tabs.appendAssumeCapacity(tab);
+    self.selectTab(self.active_tab);
+    return index;
+}
+
+/// Every tab of the window, parked ones last: for sweeps that must reach
+/// all surfaces (colour scheme, device loss).
+pub const AllTabs = struct {
+    window: *const Window,
+    index: usize = 0,
+
+    pub fn next(self: *AllTabs) ?*Tab {
+        const live = self.window.tabs.items;
+        if (self.index < live.len) {
+            defer self.index += 1;
+            return live[self.index];
+        }
+        const j = self.index - live.len;
+        if (j >= self.window.parked_tabs.items.len) return null;
+        self.index += 1;
+        return self.window.parked_tabs.items[j];
+    }
+};
+
+pub fn allTabs(self: *const Window) AllTabs {
+    return .{ .window = self };
+}
+
+fn parkedIndex(self: *const Window, tab: *const Tab) ?usize {
+    for (self.parked_tabs.items, 0..) |t, i| {
+        if (t == tab) return i;
+    }
+    return null;
+}
+
+/// Bring a parked tab back at `index` and select it.
+pub fn unparkTab(self: *Window, tab: *Tab, index: usize) void {
+    const at = self.parkedIndex(tab) orelse return;
+    self.tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1) catch |err| {
+        log.warn("unable to restore a tab err={}", .{err});
+        return;
+    };
+    _ = self.parked_tabs.orderedRemove(at);
+    tab.unpark();
+    self.insertTab(tab, index);
+    self.selectTab(self.tabIndex(tab) orelse return);
+}
+
+/// A parked tab closes for real (expiry, quit, its shell exited).
+pub fn releaseParkedTab(self: *Window, tab: *Tab) void {
+    const at = self.parkedIndex(tab) orelse return;
+    _ = self.parked_tabs.orderedRemove(at);
+    const was = self.tearing_down;
+    self.tearing_down = true;
+    defer self.tearing_down = was;
+    tab.destroy();
+}
+
+/// A surface of a parked tab, by id.
+pub fn findParkedSurface(self: *Window, id: u32) ?*Surface {
+    for (self.parked_tabs.items) |tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| {
+            if (entry.view.id == id) return entry.view;
+        }
+    }
+    return null;
+}
+
+/// Hide the whole window for the close-undo: its tabs stay as they are.
+/// `App.parkWindow` has taken it out of `App.windows`.
+pub fn park(self: *Window) void {
+    self.parked = true;
+    title_edit.cancel(self);
+    _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
+    for (self.tabs.items) |tab| {
+        tab.parkSurfaces();
+        tab.setVisible(false);
+    }
+}
+
+/// Show a parked window again (`App.unparkWindow` listed it).
+pub fn unpark(self: *Window) void {
+    self.parked = false;
+    theme.applyToWindow(self);
+    _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_SHOW);
+    self.selectTabFocus(self.active_tab, false);
+}
+
+/// Close tabs the user asked to close: parked when undo is on, else closed.
+/// `targets` never covers every tab of the window.
+fn closeTabsUndoable(self: *Window, targets: []const *Tab) bool {
+    return undo_actions.closeTabs(self, targets);
+}
+
 /// Take a tab out of the window without destroying it (it goes to another
 /// window). The neighbour becomes active; the caller keeps the window from
 /// ending up empty.
@@ -667,6 +796,7 @@ fn handleCloseAll(self: *Window) void {
         return;
     };
     defer alloc.free(all);
+    if (undo_actions.closeWindows(app, all)) return;
     for (all) |w| {
         w.beginTeardown();
         w.requestClose(true);
@@ -1156,12 +1286,24 @@ fn askClose(self: *Window, kind: dialogs.CloseKind) ?bool {
 }
 
 fn handleClose(self: *Window) void {
+    // A parked window closes for real (its last shell exited).
+    if (self.parked) {
+        self.close_confirmed = true;
+        self.destroy();
+        return;
+    }
+    // Only the user's own close can be undone; a pre-confirmed one comes from
+    // the non-undoable primitives (tmux, IPC, child exit).
+    const undoable = !self.close_confirmed;
+
     // A confirmation only covers the tabs the window had: one added since
     // is asked about.
     const confirmed = self.close_confirmed and self.tabs.items.len == 0;
     if (closeDecision(confirmed, self.needsConfirmClose()) == .ask) {
         if (!(self.askClose(.window) orelse return)) return;
     }
+
+    if (undoable and undo_actions.closeWindow(self)) return;
 
     // `self` is freed here; nothing may touch it afterwards.
     self.close_confirmed = true;
@@ -1172,6 +1314,11 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
     // The surface's tab may have moved to another window since the close
     // was posted.
     var surface = self.findSurface(id) orelse {
+        // Its shell exited while the tab was parked: it closes for real.
+        if (self.findParkedSurface(id)) |s| {
+            self.closeParkedSurface(s);
+            return;
+        }
         for (self.app.windows.items) |w| {
             if (w == self or w.findSurface(id) == null) continue;
             _ = win32.user32.PostMessageW(w.hwnd, messages.WM_GHOSTTY_CLOSE_SURFACE, id, @intFromBool(process_active));
@@ -1189,7 +1336,29 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
         // Closed behind the dialog (the shell exited).
         surface = self.findSurface(id) orelse return;
     }
+    // A surface the user closes is undoable as a tab (or window); one whose
+    // child exited is not. Splits are Task 15b.
+    if (!surface.tab.tree.isSplit() and !surface.core_surface.child_exited and !self.parked) {
+        const tab = surface.tab;
+        const ok = if (self.tabs.items.len == 1)
+            undo_actions.closeWindow(self)
+        else
+            undo_actions.closeTab(self, tab);
+        if (ok) return;
+    }
     surface.tab.removeSurface(surface);
+}
+
+/// A surface of a parked tab went away by itself. A tab with other panes
+/// just loses the pane; the last pane takes the tab (and its undo entry).
+fn closeParkedSurface(self: *Window, surface: *Surface) void {
+    const tab = surface.tab;
+    if (tab.tree.isSplit()) {
+        tab.removeSurface(surface);
+        return;
+    }
+    undo_actions.forgetTab(self.app, tab);
+    self.releaseParkedTab(tab);
 }
 
 fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
@@ -1208,6 +1377,26 @@ fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
 
     if (closeDecision(false, self.closeTargetsNeedConfirm(mode, anchor_id)) == .ask) {
         if (!(self.askClose(.tab) orelse return)) return;
+    }
+
+    // Undo: park the targets instead (one entry for all of them). Closing
+    // every tab is closing the window.
+    if (undo_actions.enabled(self.app) and !self.parked) {
+        const alloc = self.app.core_app.alloc;
+        var targets: std.ArrayList(*Tab) = .empty;
+        defer targets.deinit(alloc);
+        if (self.tabIndex(self.findTab(anchor_id) orelse return)) |anchor| {
+            for (self.tabs.items, 0..) |tab, i| {
+                if (closeModeMatches(mode, anchor, i)) targets.append(alloc, tab) catch break;
+            }
+        }
+        if (targets.items.len > 0) {
+            const handled = if (targets.items.len == self.tabs.items.len)
+                undo_actions.closeWindow(self)
+            else
+                self.closeTabsUndoable(targets.items);
+            if (handled) return;
+        }
     }
 
     // Targets are looked up afresh each round. Closing the last tab posts
