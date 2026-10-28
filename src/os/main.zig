@@ -33,6 +33,7 @@ pub const windows_cmdline = @import("windows_cmdline.zig");
 pub const windows_latency = @import("windows_latency.zig");
 pub const windows_explorer = @import("windows_explorer.zig");
 pub const windows_registry = @import("windows_registry.zig");
+pub const windows_crash = @import("windows_crash.zig");
 pub const macos = @import("macos.zig");
 pub const shell = @import("shell.zig");
 pub const thread = @import("thread.zig");
@@ -78,6 +79,7 @@ test {
     _ = windows_latency;
     _ = windows_explorer;
     _ = windows_registry;
+    _ = windows_crash;
     _ = thread;
 
     if (comptime builtin.target.os.tag == .linux) {

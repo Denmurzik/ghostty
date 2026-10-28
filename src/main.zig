@@ -31,6 +31,7 @@ fn windowsPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     // (or on another thread meanwhile) goes straight to the default handler.
     if (windows_log.beginPanic()) {
         windows_log.writePanic(msg, null, first_trace_addr orelse @returnAddress());
+        @import("os/windows_crash.zig").dumpNow();
     }
     std.debug.defaultPanic(msg, first_trace_addr);
 }

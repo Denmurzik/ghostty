@@ -16,6 +16,7 @@ const Ghostty = @import("main_c.zig").Ghostty;
 const global = @import("global.zig");
 const windows_console = @import("os/windows_console.zig");
 const windows_log = @import("os/windows_log.zig");
+const windows_crash = @import("os/windows_crash.zig");
 
 /// The return type for main() depends on the build artifact. The lib build
 /// also calls "main" in order to run the CLI actions, but it calls it as
@@ -26,6 +27,15 @@ const MainReturn = switch (build_config.artifact) {
 };
 
 pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
+    // Crash minidumps: first thing, so every later crash is covered.
+    if (comptime builtin.os.tag == .windows) {
+        windows_crash.installFromEnv();
+        if (comptime build_config.app_runtime == .win32) {
+            @import("apprt/win32/ipc/ops.zig").crash_hook = windows_crash.testCrash;
+            @import("apprt/win32/hooks.zig").crash_recheck = windows_crash.ensureInstalled;
+        }
+    }
+
     // We first start by initializing our global state. This will setup
     // process-level state we need to run the terminal. The reason we use
     // a global is because the C API needs to be able to access this state;
@@ -225,6 +235,10 @@ fn macosLogger(comptime scope: @TypeOf(.EnumLiteral)) *macos.os.Log {
 }
 
 pub const std_options: std.Options = .{
+    // Windows: Zig's vectored handler would print and abort before the
+    // unhandled-exception filter of `windows_crash` could write a dump.
+    .enable_segfault_handler = builtin.os.tag != .windows,
+
     // Our log level is always at least info in every build mode.
     //
     // Note, we don't lower this to debug even with conditional logging
@@ -256,6 +270,10 @@ pub const std_options: std.Options = .{
     else
         !builtin.strip_debug_info,
 };
+
+test "windows crash: segfault handler is off on windows" {
+    try std.testing.expect(std_options.enable_segfault_handler == (builtin.os.tag != .windows));
+}
 
 test {
     _ = windows_console;
