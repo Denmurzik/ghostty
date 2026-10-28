@@ -24,6 +24,9 @@ pub const Probe = struct {
     git_bash: *const fn (arena: Allocator, env: []const []const u8) ?[]const u8,
 };
 
+/// Where `plan` reports why it failed.
+pub const Diag = struct { dir: []const u8 = "" };
+
 pub const git_bash_var = "CLAUDE_CODE_GIT_BASH_PATH";
 
 /// What the pane at `s` runs.
@@ -33,12 +36,22 @@ pub const git_bash_var = "CLAUDE_CODE_GIT_BASH_PATH";
 ///    `CLAUDE_CODE_GIT_BASH_PATH` if that file exists, else the usual
 ///    search); else the one-liner parser (`Unsupported` if it refuses).
 /// cwd: `-c`, else the `cd` target (parser path only), else the client cwd.
+/// A `cd` target that does not exist fails with `NoDirectory` (`diag.dir`
+/// names it), as `cd X && prog` would not run `prog`.
+///
+/// The `-c` string always reaches bash quoted: an argument without
+/// whitespace or a quote is left bare by `writeCommandLine`, and Cygwin then
+/// re-parses it (globbing, stripping quotes and backslashes, `@file`).
+/// Path conversion is deliberately left as in a real MSYS tmux: bash converts
+/// `/c/x` style arguments for a native child (no `MSYS_NO_PATHCONV`), which
+/// the pane's Windows-path command strings do not trigger.
 pub fn plan(
     arena: Allocator,
     s: commands.Spawn,
     exe_dir: []const u8,
     probe: Probe,
-) error{ Unsupported, OutOfMemory }!Plan {
+    diag: *Diag,
+) error{ Unsupported, NoDirectory, OutOfMemory }!Plan {
     var extra: std.ArrayList([]const u8) = .empty;
     try extra.appendSlice(arena, s.extra_env);
     var cwd: []const u8 = s.start_dir orelse s.cwd;
@@ -51,7 +64,7 @@ pub fn plan(
         const exe = try std.fs.path.join(arena, &.{ exe_dir, "tmux.exe" });
         argv = try dupeArgv(arena, &.{ exe, "__idle" });
     } else if (gitBash(arena, s.client_env, probe)) |bash| {
-        argv = try dupeArgv(arena, &.{ bash, "-c", command });
+        argv = try dupeArgv(arena, &.{ bash, "-c", try quoteForCygwin(arena, command) });
     } else {
         const parsed = sh_command.parse(arena, command) catch |err| switch (err) {
             error.Unsupported => return error.Unsupported,
@@ -60,7 +73,13 @@ pub fn plan(
         argv = try dupeArgv(arena, parsed.argv);
         try extra.appendSlice(arena, parsed.env);
         if (s.start_dir == null) {
-            if (parsed.cwd) |c| cwd = c;
+            if (parsed.cwd) |c| {
+                if (!probe.exists(c)) {
+                    diag.dir = c;
+                    return error.NoDirectory;
+                }
+                cwd = c;
+            }
         }
     }
 
@@ -70,6 +89,13 @@ pub fn plan(
         .client_env = s.client_env,
         .extra_env = extra.items,
     };
+}
+
+/// `command` with a trailing blank when it has no whitespace or quote, so
+/// that the command line quotes it (bash ignores the blank).
+fn quoteForCygwin(arena: Allocator, command: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.indexOfAny(u8, command, " \t\n\"") != null) return command;
+    return std.fmt.allocPrint(arena, "{s} ", .{command});
 }
 
 fn dupeArgv(arena: Allocator, args: []const []const u8) Allocator.Error![]const [:0]const u8 {
@@ -130,6 +156,11 @@ fn spawnOf(command: ?[]const u8) commands.Spawn {
     return .{ .command = command, .cwd = "C:\\work", .client_env = &.{}, .extra_env = &.{}, .start_dir = null };
 }
 
+fn planT(arena: Allocator, s: commands.Spawn, exe_dir: []const u8, probe: Probe) !Plan {
+    var diag: Diag = .{};
+    return plan(arena, s, exe_dir, probe, &diag);
+}
+
 fn expectArgv(want: []const []const u8, got: ?[]const [:0]const u8) !void {
     try t.expectEqual(want.len, got.?.len);
     for (want, got.?) |w, g| try t.expectEqualStrings(w, g);
@@ -139,7 +170,7 @@ test "win32 tmux spawn: cat is the idle placeholder" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
-    const p = try plan(arena.allocator(), spawnOf("cat"), "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), spawnOf("cat"), "C:\\g", FakeProbe.probe);
     try expectArgv(&.{ "C:\\g\\tmux.exe", "__idle" }, p.argv);
     try t.expectEqualStrings("C:\\work", p.cwd);
 }
@@ -152,12 +183,12 @@ test "win32 tmux spawn: CLAUDE_CODE_GIT_BASH_PATH wins" {
     defer FakeProbe.existing = &.{};
     var s = spawnOf("echo hi");
     s.client_env = &.{ "A=1", "claude_code_git_bash_path=D:\\mine\\bash.exe" };
-    const p = try plan(arena.allocator(), s, "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), s, "C:\\g", FakeProbe.probe);
     try expectArgv(&.{ "D:\\mine\\bash.exe", "-c", "echo hi" }, p.argv);
 
     // A path that does not exist falls back to the search.
     s.client_env = &.{"CLAUDE_CODE_GIT_BASH_PATH=D:\\gone\\bash.exe"};
-    const q = try plan(arena.allocator(), s, "C:\\g", FakeProbe.probe);
+    const q = try planT(arena.allocator(), s, "C:\\g", FakeProbe.probe);
     try expectArgv(&.{ "C:\\Git\\bin\\bash.exe", "-c", "echo hi" }, q.argv);
 }
 
@@ -165,7 +196,7 @@ test "win32 tmux spawn: Git Bash -c" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
-    const p = try plan(arena.allocator(), spawnOf("cd '/c/x y' && ls"), "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), spawnOf("cd '/c/x y' && ls"), "C:\\g", FakeProbe.probe);
     try expectArgv(&.{ "C:\\Git\\bin\\bash.exe", "-c", "cd '/c/x y' && ls" }, p.argv);
     // The string runs in bash: no cd target is lifted out.
     try t.expectEqualStrings("C:\\work", p.cwd);
@@ -179,9 +210,11 @@ test "win32 tmux spawn: no Git Bash uses the parser" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = null;
+    FakeProbe.existing = &.{"C:\\D\\den4ik\\Ghostty"};
+    defer FakeProbe.existing = &.{};
     var s = spawnOf(recon_command);
     s.extra_env = &.{"E=1"};
-    const p = try plan(arena.allocator(), s, "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), s, "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\Users\\user\\.local\\bin\\claude.exe", p.argv.?[0]);
     try t.expectEqualStrings("--agent-id", p.argv.?[1]);
     try t.expectEqualStrings("C:\\D\\den4ik\\Ghostty", p.cwd);
@@ -197,17 +230,19 @@ test "win32 tmux spawn: -c start dir beats client cwd" {
     FakeProbe.bash = null;
     var s = spawnOf("'C:\\p\\x.exe'");
     s.start_dir = "C:\\start";
-    const p = try plan(arena.allocator(), s, "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), s, "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\start", p.cwd);
 
     // ... and beats the cd target of the parser path.
     var s2 = spawnOf("cd 'C:\\cd' && 'C:\\p\\x.exe'");
     s2.start_dir = "C:\\start";
-    const p2 = try plan(arena.allocator(), s2, "C:\\g", FakeProbe.probe);
+    const p2 = try planT(arena.allocator(), s2, "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\start", p2.cwd);
 
+    FakeProbe.existing = &.{"C:\\cd"};
+    defer FakeProbe.existing = &.{};
     // Without -c the cd target beats the client cwd.
-    const p3 = try plan(arena.allocator(), spawnOf("cd 'C:\\cd' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe);
+    const p3 = try planT(arena.allocator(), spawnOf("cd 'C:\\cd' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\cd", p3.cwd);
 }
 
@@ -215,9 +250,9 @@ test "win32 tmux spawn: empty command is the configured one" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
-    const p = try plan(arena.allocator(), spawnOf(""), "C:\\g", FakeProbe.probe);
+    const p = try planT(arena.allocator(), spawnOf(""), "C:\\g", FakeProbe.probe);
     try t.expect(p.argv == null);
-    const q = try plan(arena.allocator(), spawnOf(null), "C:\\g", FakeProbe.probe);
+    const q = try planT(arena.allocator(), spawnOf(null), "C:\\g", FakeProbe.probe);
     try t.expect(q.argv == null);
 }
 
@@ -225,8 +260,32 @@ test "win32 tmux spawn: unparsable without Git Bash" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = null;
-    try t.expectError(error.Unsupported, plan(arena.allocator(), spawnOf("a | b"), "C:\\g", FakeProbe.probe));
-    try t.expectError(error.Unsupported, plan(arena.allocator(), spawnOf("echo $HOME"), "C:\\g", FakeProbe.probe));
+    try t.expectError(error.Unsupported, planT(arena.allocator(), spawnOf("a | b"), "C:\\g", FakeProbe.probe));
+    try t.expectError(error.Unsupported, planT(arena.allocator(), spawnOf("echo $HOME"), "C:\\g", FakeProbe.probe));
+}
+
+test "win32 tmux spawn: -c string is always quoted for Cygwin" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
+    const p = try planT(arena.allocator(), spawnOf("x*"), "C:\\g", FakeProbe.probe);
+    try expectArgv(&.{ "C:\\Git\\bin\\bash.exe", "-c", "x* " }, p.argv);
+    // Whitespace or a double quote makes the command line quote it already.
+    const q = try planT(arena.allocator(), spawnOf("echo\"a\""), "C:\\g", FakeProbe.probe);
+    try expectArgv(&.{ "C:\\Git\\bin\\bash.exe", "-c", "echo\"a\"" }, q.argv);
+}
+
+test "win32 tmux spawn: missing cd target fails on the parser path" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    FakeProbe.bash = null;
+    FakeProbe.existing = &.{};
+    var diag: Diag = .{};
+    try t.expectError(error.NoDirectory, plan(arena.allocator(), spawnOf("cd 'C:\\gone' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe, &diag));
+    try t.expectEqualStrings("C:\\gone", diag.dir);
+    // With Git Bash the cd runs inside bash, which reports it itself.
+    FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
+    _ = try planT(arena.allocator(), spawnOf("cd 'C:\\gone' && x"), "C:\\g", FakeProbe.probe);
 }
 
 // ---- real Git Bash -----------------------------------------------------
@@ -239,12 +298,28 @@ const file_mod = @import("../../../os/file.zig");
 
 /// Runs `command` as the pane would (plan -> Command.direct ->
 /// writeCommandLine -> CreateProcessW) in the directory `<tmp>\<td>\тест m4`
-/// and returns what it wrote to stdout. Caller frees.
-fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) ![]u8 {
+/// and returns what it wrote (stdout and stderr) and its exit code. The
+/// directory holds a file `xa`, a file `foo` and `args.bat` (echoes its
+/// arguments). Caller frees `out`.
+const Run = struct { out: []u8, code: u32 };
+
+fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) !Run {
     var td = try internal_os.TempDir.init();
     defer td.deinit();
     const io = global.io();
     try td.dir.createDir(io, "\xd1\x82\xd0\xb5\xd1\x81\xd1\x82 m4", .default_dir);
+    const files = [_]struct { name: []const u8, data: []const u8 }{
+        .{ .name = "xa", .data = "" },
+        .{ .name = "foo", .data = "echo AT-FILE-EXPANDED" },
+        .{ .name = "args.bat", .data = "@echo ARGS: %*\r\n" },
+    };
+    for (files) |file| {
+        const path = try std.fmt.allocPrint(alloc, "\xd1\x82\xd0\xb5\xd1\x81\xd1\x82 m4/{s}", .{file.name});
+        defer alloc.free(path);
+        const fh = try td.dir.createFile(io, path, .{});
+        defer fh.close(io);
+        try fh.writePositionalAll(io, file.data, 0);
+    }
 
     const tmp = try file_mod.allocTmpDir(alloc, global.environ());
     defer file_mod.freeTmpDir(alloc, tmp);
@@ -255,7 +330,11 @@ fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) ![]u8 {
     defer alloc.free(full);
     const printf_path = try std.fs.path.join(alloc, &.{ git_dir, "usr", "bin", "printf.exe" });
     defer alloc.free(printf_path);
-    const full2 = try std.mem.replaceOwned(u8, alloc, full, "<printf>", printf_path);
+    const printenv_path = try std.fs.path.join(alloc, &.{ git_dir, "usr", "bin", "printenv.exe" });
+    defer alloc.free(printenv_path);
+    const full1 = try std.mem.replaceOwned(u8, alloc, full, "<printf>", printf_path);
+    defer alloc.free(full1);
+    const full2 = try std.mem.replaceOwned(u8, alloc, full1, "<printenv>", printenv_path);
     defer alloc.free(full2);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -269,8 +348,9 @@ fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) ![]u8 {
     }
     var s = spawnOf(full2);
     s.client_env = env_list.items;
-    const p = try plan(arena.allocator(), s, "C:\\g", systemProbe());
+    const p = try planT(arena.allocator(), s, "C:\\g", systemProbe());
     const argv = p.argv orelse return error.TestUnexpectedResult;
+    std.debug.print("bash -c argv: {s} | {s} | [{s}]\n", .{ argv[0], argv[1], argv[2] });
 
     const out_file = try td.dir.createFile(io, "out.txt", .{ .read = true });
     defer out_file.close(io);
@@ -290,15 +370,21 @@ fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) ![]u8 {
         .rt_post_fork_info = undefined,
     };
     try cmd.start(alloc);
+    // Bounded: a case that hangs must not hold the test lock.
+    const waited = windows.exp.kernel32.WaitForSingleObject(cmd.pid.?, 20_000);
+    if (waited == windows.WAIT_TIMEOUT) {
+        cmd.killChild() catch {};
+        cmd.closeProcess();
+        return error.TestTimeout;
+    }
     const exit = try cmd.wait(true);
     cmd.closeProcess();
-    if (exit.Exited != 0) return error.TestUnexpectedResult;
 
     const size = (try out_file.stat(io)).size;
     const data = try alloc.alloc(u8, size);
     errdefer alloc.free(data);
     if (try out_file.readPositionalAll(io, data, 0) != size) return error.TestUnexpectedResult;
-    return data;
+    return .{ .out = data, .code = exit.Exited };
 }
 
 test "win32 tmux spawn: bash -c receives Claude's command line verbatim" {
@@ -311,25 +397,53 @@ test "win32 tmux spawn: bash -c receives Claude's command line verbatim" {
 
     const cases = [_]struct { cmd: []const u8, want: []const u8 }{
         .{
-            .cmd = "cd '<dir>' && env A='x y' B='it'\"'\"'s' '<printf>' '%s|' 'a b' 'C:\\p q' \"$A\" \"$B\"",
-            // The brief expected "x y|it's|" at the end, but bash expands
-            // "$A" before `env` sets it: observed output is empty there.
+            // "$A" is expanded by the outer bash before `env` runs.
+            .cmd = "cd '<dir>' && env GHOSTTY_T10_A='x y' GHOSTTY_T10_B='it'\"'\"'s' '<printf>' '%s|' 'a b' 'C:\\p q' \"$GHOSTTY_T10_A\" \"$GHOSTTY_T10_B\"",
             .want = "a b|C:\\p q|||",
         },
         .{
+            // Claude's pattern: `env K=v prog`, the child sees quoted values.
+            .cmd = "cd '<dir>' && env GHOSTTY_T10_A='x y' GHOSTTY_T10_B='it'\"'\"'s' '<printenv>' GHOSTTY_T10_A GHOSTTY_T10_B",
+            .want = "x y\nit's\n",
+        },
+        .{
             // Quoting of assignments through the shell itself.
-            .cmd = "cd '<dir>' && A='x y' B='it'\"'\"'s' && '<printf>' '%s|' \"$A\" \"$B\"",
+            .cmd = "cd '<dir>' && GHOSTTY_T10_A='x y' GHOSTTY_T10_B='it'\"'\"'s' && '<printf>' '%s|' \"$GHOSTTY_T10_A\" \"$GHOSTTY_T10_B\"",
             .want = "x y|it's|",
         },
         .{ .cmd = "'<printf>' '%s|' 'C:\\a\\'\"'\"'b'", .want = "C:\\a\\'b|" },
         .{ .cmd = "'<printf>' '%s|' '*'", .want = "*|" },
-        .{ .cmd = "'<printf>' '%s|' '/c/x'", .want = "/c/x|" },
+        // No whitespace and no double quote: the command line would leave
+        // the -c string bare, and Cygwin would re-parse it.
+        .{ .cmd = "echo${IFS}'C:\\x\\y'", .want = "C:\\x\\y\n" },
+        .{ .cmd = "echo${IFS}'x*'", .want = "x*\n" }, // the cwd holds `xa`
+        .{ .cmd = "echo${IFS}'a\\'", .want = "a\\\n" },
     };
     for (cases) |c| {
         const got = try runPane(t.allocator, c.cmd, git_dir);
-        defer t.allocator.free(got);
-        std.debug.print("bash -c case: argv command={s} -> stdout={s}\n", .{ c.cmd, got });
-        try t.expectEqualStrings(c.want, got);
+        defer t.allocator.free(got.out);
+        try t.expectEqual(@as(u32, 0), got.code);
+        try t.expectEqualStrings(c.want, got.out);
+    }
+
+    // `@name` must not be replaced by the contents of the file `name`:
+    // bash gets the text and fails to find a command of that name.
+    {
+        const got = try runPane(t.allocator, "@foo", git_dir);
+        defer t.allocator.free(got.out);
+        try t.expectEqual(@as(u32, 127), got.code);
+        try t.expect(std.mem.indexOf(u8, got.out, "@foo") != null);
+    }
+
+    // Intended difference from a pane whose program is MSYS itself: as in a
+    // real MSYS tmux, bash converts MSYS-style arguments for a NATIVE child
+    // (`MSYS_NO_PATHCONV` is not set). The teammate's own command string uses
+    // Windows paths, which conversion leaves alone.
+    {
+        const got = try runPane(t.allocator, "'<dir>\\args.bat' '/c/x' '--opt=/c/y'", git_dir);
+        defer t.allocator.free(got.out);
+        try t.expectEqual(@as(u32, 0), got.code);
+        try t.expectEqualStrings("ARGS: C:/x --opt=C:/y\r\n", got.out);
     }
 }
 

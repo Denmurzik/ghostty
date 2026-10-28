@@ -77,6 +77,8 @@ focused: u32 = 0,
 /// Test hooks: errors the next split/respawn returns.
 inject_split: ?commands.SplitError = null,
 inject_respawn: ?commands.RespawnError = null,
+/// The directory a `NoDirectory` error names.
+failed_dir: []const u8 = "",
 
 options_changed: std.ArrayList(u32) = .empty,
 zoom_toggles: u32 = 0,

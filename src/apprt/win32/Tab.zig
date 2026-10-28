@@ -472,6 +472,15 @@ pub fn split(
     return self.splitWith(at, direction, .{});
 }
 
+/// Bounds of `SplitOptions.ratio`: a split must leave both panes a share.
+const min_split_ratio: f16 = 0.1;
+const max_split_ratio: f16 = 0.9;
+
+fn clampRatio(r: f16) f16 {
+    if (!(r > min_split_ratio)) return min_split_ratio; // also NaN
+    return @min(r, max_split_ratio);
+}
+
 pub fn splitWith(
     self: *Tab,
     at: *Surface,
@@ -499,7 +508,7 @@ pub fn splitWith(
     // Drops the creator's reference; the new tree holds its own.
     defer single.deinit();
 
-    const new_tree = try self.tree.split(alloc, handle, direction, opts.ratio, &single);
+    const new_tree = try self.tree.split(alloc, handle, direction, clampRatio(opts.ratio), &single);
     self.replaceTree(new_tree);
     self.sizeFromLeafRects(surface);
     surface.applySize(surface.size.load(.acquire));
@@ -998,6 +1007,15 @@ test "win32 tab: focus is taken only inside the active top-level" {
     try std.testing.expect(mayTakeFocus(a, a));
     try std.testing.expect(!mayTakeFocus(b, a));
     try std.testing.expect(!mayTakeFocus(null, a));
+}
+
+test "win32 tab: split ratio is clamped" {
+    try std.testing.expectEqual(@as(f16, 0.1), clampRatio(0));
+    try std.testing.expectEqual(@as(f16, 0.1), clampRatio(-1));
+    try std.testing.expectEqual(@as(f16, 0.1), clampRatio(std.math.nan(f16)));
+    try std.testing.expectEqual(@as(f16, 0.9), clampRatio(1));
+    try std.testing.expectEqual(@as(f16, 0.9), clampRatio(std.math.inf(f16)));
+    try std.testing.expectEqual(@as(f16, 0.5), clampRatio(0.5));
 }
 
 test "win32 tab: leaf rects while minimized" {

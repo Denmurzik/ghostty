@@ -394,9 +394,6 @@ pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
     try storePwd(self.app.core_app.alloc, &self.pwd, pwd);
 }
 
-/// `newConfig` inherits the directory the terminal stored: the path core
-/// already translated to a drive path. A configured `working-directory`
-/// that is an MSYS path (`/c/work`) is translated the same way.
 /// The command, directory and `wait-after-command` of a tmux pane. The
 /// strings live in the config's arena.
 fn applyTmuxPlan(config: *configpkg.Config, plan: *const tmux_spawn.Plan) !void {
@@ -431,6 +428,9 @@ fn freeTmuxEnv(alloc: Allocator, env: *TmuxEnv) void {
     alloc.destroy(env);
 }
 
+/// `newConfig` inherits the directory the terminal stored: the path core
+/// already translated to a drive path. A configured `working-directory`
+/// that is an MSYS path (`/c/work`) is translated the same way.
 fn normalizeWorkingDirectory(config: *configpkg.Config) !void {
     const wd = config.@"working-directory" orelse return;
     const path = switch (wd) {

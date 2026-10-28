@@ -55,8 +55,8 @@ pub const ResizeRequest = struct { x: ?cli.Size, y: ?cli.Size };
 /// R-M4-7: the visible screen only.
 pub const CaptureRequest = struct { to_stdout: bool };
 
-pub const SplitError = error{ NoSpace, TooSmall, Unsupported, SpawnFailed, OutOfMemory };
-pub const RespawnError = error{ Unsupported, SpawnFailed, OutOfMemory };
+pub const SplitError = error{ NoSpace, TooSmall, Unsupported, NoDirectory, SpawnFailed, OutOfMemory };
+pub const RespawnError = error{ Unsupported, NoDirectory, SpawnFailed, OutOfMemory };
 
 pub const Vars = struct {
     pane_id: u32,
@@ -322,6 +322,7 @@ fn Env(comptime Host: type) type {
         fn hostError(self: Self, err: anyerror) Allocator.Error!void {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             if (err == error.Unsupported) return self.fail("ghostty: unsupported pane command", .{});
+            if (err == error.NoDirectory) return self.fail("can't find directory: {s}", .{self.host.failed_dir});
             if (err == error.NoSpace) return self.fail("no space for new pane", .{});
             if (err == error.TooSmall) return self.fail("create pane failed: pane too small", .{});
             if (err == error.SpawnFailed) return self.fail("create pane failed: could not start the command", .{});
@@ -964,6 +965,16 @@ test "win32 tmux commands: unsupported pane command" {
     try testing.expectEqualStrings("ghostty: unsupported pane command\n", out.stderr.items);
     rig.host.inject_respawn = error.Unsupported;
     try rig.bad(&.{ "respawn-pane", "-k", "-t", "%1" }, "ghostty: unsupported pane command");
+}
+
+test "win32 tmux commands: missing directory is a tmux-like error" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    rig.host.inject_split = error.NoDirectory;
+    rig.host.failed_dir = "C:\\gone";
+    const out = try rig.run(&.{ "split-window", "-t", "%1" });
+    try testing.expectEqual(@as(u8, 1), out.code);
+    try testing.expectEqualStrings("can't find directory: C:\\gone\n", out.stderr.items);
 }
 
 test "win32 tmux commands: select-pane -T does not move focus" {
