@@ -222,3 +222,20 @@ Before the close:
 - complete I3 (`E2E -Milestone all` recorded, owner checks listed as pending).
 
 M1–M5 may go into the same fix round or be parked.
+
+## Re-review of fix commit `93964ebba` (`rerev-m4-final`, 2026-10-28)
+
+Unit run (test-lock, `-j4`, worktree `sdd-task-m4-final-fix`): `zig build test -Dtest-filter="win32 tmux "` exit 0.
+
+| Finding | Verdict | Notes |
+| --- | --- | --- |
+| I1 output | FIXED | `max_output` 1 MiB in `Fmt.lookup` budget, `emitLine`, `emitOption`, `capture-pane -p`; over the cap stdout is cleared and the reply is `ghostty: reply too large`, exit 1. Loops stop on `code != 0`. Tests cover display-message and list-panes -a -F. |
+| I1 input | FIXED | `keys.encode` bounded by `max_stdin_tmux`, `TooLarge` before any allocation of the repeated buffer; Registry maps it and `QueueFull` to `ghostty: request too large`. `pane_io.push` checks 1 MiB / 1024 entries before `dupe`, so a refused push leaks nothing and `queued_bytes` stays exact (tested, also on flush and drop). |
+| I2 | FIXED | `git grep -i user` (minus the git author) is empty at HEAD. The old fixture holds the UUID `00000000-...` and plugin names `plugin-a`, `plugin-b`, `plugin-c`; none of them is in HEAD. The UUID and its short form are replaced consistently in all lines (same length), the replay ignores them, and the replay tests pass. The fixture's line endings changed from CRLF to LF (index is LF; harmless). History rewrite is the owner's task (#60). |
+| I3 | FIXED | `m4/acceptance.md` exists and SPEC §17 says "accepted with pending" with the same two pending items (E2E all, owner manual checks). Consistent. |
+| M1-M5 | FIXED | `used` gate set in `Registry.run`; `dropSurface` by surface with `other_alive` scan; `pidFromTmuxPipe` removed and `expected_pid: u32`; `load-buffer -w` honours `clipboard-write = deny` (`ask` allowed); SPEC wording points fixed. |
+
+New-breakage check: none blocking. `e2e.ps1` builds the test-lock path with `Join-Path $env:USERPROFILE` and keeps the `GHOSTTY_TEST_LOCK` override; the resulting path equals the old one on this machine.
+Notes (not blocking): error lines are cut at 4096 bytes by byte count, so a multi-byte character may be split in stderr; the `Fmt` cap does not count literal text, but the final `aw.written()` check does.
+
+**APPROVED.**
