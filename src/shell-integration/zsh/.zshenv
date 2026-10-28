@@ -54,9 +54,15 @@ fi
         if [[ "$_ghostty_file" == [A-Za-z]:[/\\]* ]]; then
             # A Windows zsh (MSYS2, Cygwin) takes a drive path (C:/...) for
             # a relative one: :A would prefix it with the working directory
-            # and autoload would search fpath for it. Source it instead.
+            # and autoload would search fpath for it. Source it instead, in a
+            # function (as autoload runs it) without the user's aliases.
             _ghostty_file="${_ghostty_file:h}"/ghostty-integration
-            [[ ! -r "$_ghostty_file" ]] || 'builtin' 'source' '--' "$_ghostty_file"
+            if [[ -r "$_ghostty_file" ]]; then
+                () {
+                    'builtin' 'setopt' 'local_options' 'no_aliases'
+                    'builtin' 'source' '--' "$1"
+                } "$_ghostty_file"
+            fi
         else
             _ghostty_file="${${_ghostty_file:A}:h}"/ghostty-integration
             if [[ -r "$_ghostty_file" ]]; then

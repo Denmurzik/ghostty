@@ -43,15 +43,46 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
     builtin unset GHOSTTY_BASH_UNEXPORT_HISTFILE
   fi
 
-  # Git Bash cannot switch to zsh with chsh, so a startup file often ends in
-  # `exec zsh`. While they run, ZDOTDIR points at our zsh integration, which
-  # such a zsh then loads as if Ghostty had started it (and which restores
-  # the ZDOTDIR saved here).
+  # Git Bash cannot switch to zsh with chsh, so a startup file often runs
+  # `exec zsh`. Right before such a zsh command (a DEBUG trap, traced into
+  # the startup files), ZDOTDIR points at our zsh integration and
+  # GHOSTTY_ZSH_ZDOTDIR holds the user's own ZDOTDIR, if any: the integration
+  # restores it before it reads the user's files. Nothing else the startup
+  # files run sees either variable.
+  builtin unset GHOSTTY_ZSH_ZDOTDIR
   if [[ ("$OSTYPE" == msys* || "$OSTYPE" == cygwin*) &&
     -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/.zshenv" ]]; then
-    if [[ -n "${ZDOTDIR+X}" ]]; then builtin export GHOSTTY_ZSH_ZDOTDIR="$ZDOTDIR"; fi
     builtin declare __ghostty_zdotdir="$GHOSTTY_RESOURCES_DIR/shell-integration/zsh"
-    builtin export ZDOTDIR="$__ghostty_zdotdir"
+    builtin declare __ghostty_zsh_armed="" __ghostty_zsh_tick=""
+    __ghostty_zsh_handoff() {
+      __ghostty_zsh_tick=1
+      # A zsh that returned: the user's ZDOTDIR comes back.
+      if [[ -n "$__ghostty_zsh_armed" ]]; then
+        __ghostty_zsh_armed=""
+        if [[ "${ZDOTDIR-}" == "$__ghostty_zdotdir" ]]; then
+          if [[ -n "${GHOSTTY_ZSH_ZDOTDIR+X}" ]]; then
+            builtin export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+          else
+            builtin unset ZDOTDIR
+          fi
+        fi
+        builtin unset GHOSTTY_ZSH_ZDOTDIR
+      fi
+      # `[exec [-opts]] [path/]zsh[.exe] ...`; patterns only, so the user's
+      # BASH_REMATCH survives.
+      builtin local c="$BASH_COMMAND"
+      if [[ "$c" == "exec "* ]]; then
+        c="${c#exec }"
+        while [[ "$c" == -*" "* ]]; do c="${c#* }"; done
+      fi
+      c="${c%% *}"
+      [[ "${c##*/}" == zsh || "${c##*/}" == zsh.exe ]] || builtin return 0
+      if [[ -n "${ZDOTDIR+X}" ]]; then builtin export GHOSTTY_ZSH_ZDOTDIR="$ZDOTDIR"; fi
+      builtin export ZDOTDIR="$__ghostty_zdotdir"
+      __ghostty_zsh_armed=1
+    }
+    builtin set -T
+    builtin trap __ghostty_zsh_handoff DEBUG
   fi
 
   # Manually source the startup files. See INVOCATION in bash(1) and
@@ -85,16 +116,16 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
     fi
   fi
 
-  # No zsh took over: put ZDOTDIR back unless a startup file changed it.
+  # No zsh took over: drop the trap unless a startup file set its own (ours
+  # then no longer runs for the `:`), and the ZDOTDIR of a zsh that was last.
   if [[ -n "${__ghostty_zdotdir-}" ]]; then
-    if [[ "${ZDOTDIR-}" == "$__ghostty_zdotdir" ]]; then
-      if [[ -n "${GHOSTTY_ZSH_ZDOTDIR+X}" ]]; then
-        builtin export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
-      else
-        builtin unset ZDOTDIR
-      fi
-    fi
-    builtin unset GHOSTTY_ZSH_ZDOTDIR __ghostty_zdotdir
+    __ghostty_zsh_tick=""
+    :
+    [[ -n "$__ghostty_zsh_tick" ]] && builtin trap - DEBUG
+    builtin set +T
+    __ghostty_zsh_handoff
+    builtin unset -f __ghostty_zsh_handoff
+    builtin unset __ghostty_zdotdir __ghostty_zsh_armed __ghostty_zsh_tick
   fi
 
   builtin unset __ghostty_rcfile

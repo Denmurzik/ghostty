@@ -13,6 +13,9 @@ prompt for `confirm-close-surface = true` (Terminal.cursorIsAtPrompt).
 
   bash             Git Bash with the bash integration (ENV + --posix)
   bash-zdotdir     the same, and ZDOTDIR is the user's again afterwards
+  bash-zdotdir-env a ZDOTDIR from the environment survives `exec zsh`
+  bash-zdotdir-rc  so does `export ZDOTDIR="${ZDOTDIR:-...}"` in ~/.bashrc
+  bash-zdotdir-leak  what ~/.bashrc starts sees no ZDOTDIR
   bash-exec-zsh    ~/.bashrc ends in `exec zsh` (the usual way to get zsh in
                    Git Bash): the zsh inherits the zsh integration
   zsh-drive        zsh with ZDOTDIR=C:/.../shell-integration/zsh
@@ -150,10 +153,15 @@ function New-Home([string]$Name, [hashtable]$Files) {
     $h = Join-Path $sandbox $Name
     New-Item -ItemType Directory -Path $h | Out-Null
     foreach ($k in $Files.Keys) {
-        [IO.File]::WriteAllText((Join-Path $h $k), $Files[$k].Replace("`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
+        $p = Join-Path $h $k
+        New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null
+        [IO.File]::WriteAllText($p, $Files[$k].Replace("`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
     }
     $h
 }
+
+# A zsh config in ZDOTDIR=<home>/zd: its own prompt and a marker.
+$zdFiles = @{ 'zd/.zshrc' = "PROMPT='zd%% '`nexport ZD_MARK=yes`n" }
 
 function Get-EnvBlock([string]$HomeDir, [hashtable]$Extra) {
     $envs = @{}
@@ -196,6 +204,24 @@ $cases = @(
         Name = 'bash-exec-zsh'; Exe = $bash; Args = '--posix'; Input = "echo in-`$ZSH_NAME`r"
         Home = @{ '.bashrc' = "if [ -t 1 ]; then exec zsh; fi`n"; '.zshrc' = "PROMPT='zsh%% '`n" }
         Env = (Get-BashEnv); Expect = 'in-zsh'; Needs = $zsh
+    },
+    @{
+        Name = 'bash-zdotdir-env'; Exe = $bash; Args = '--posix'; Input = "echo zd-`$ZD_MARK`r"
+        Home = @{ '.bashrc' = "if [ -t 1 ]; then exec zsh; fi`n" } + $zdFiles
+        Env = (Get-BashEnv) + @{ ZDOTDIR = ((Join-Path $sandbox 'bash-zdotdir-env\zd') -replace '\\', '/') }
+        Expect = 'zd-yes'; Needs = $zsh
+    },
+    @{
+        Name = 'bash-zdotdir-rc'; Exe = $bash; Args = '--posix'; Input = "echo zd-`$ZD_MARK`r"
+        Home = @{ '.bashrc' = 'export ZDOTDIR="${ZDOTDIR:-$HOME/zd}"' + "`nif [ -t 1 ]; then exec zsh; fi`n" } + $zdFiles
+        Env = (Get-BashEnv); Expect = 'zd-yes'; Needs = $zsh
+    },
+    @{
+        # What a startup file starts (a tmux server, an agent) gets neither
+        # ZDOTDIR nor GHOSTTY_ZSH_ZDOTDIR.
+        Name = 'bash-zdotdir-leak'; Exe = $bash; Args = '--posix'
+        Input = "echo leak-`$(grep -c -e ZDOTDIR -e GHOSTTY_ZSH `"`$HOME/env.txt`")`r"
+        Home = @{ '.bashrc' = 'env > "$HOME/env.txt"' + "`nPS1='bash$ '`n" }; Env = (Get-BashEnv); Expect = 'leak-0'
     },
     @{
         Name = 'zsh-drive'; Exe = $zsh; Args = '-i'; Input = "echo in-`$ZSH_NAME`r"
