@@ -8,7 +8,7 @@
 # working directory.
 
 if ($Host.Name -ne 'ConsoleHost') { return }
-if ($global:__ghostty_integrated) { return }
+if (Get-Variable -Name __ghostty_integrated -Scope Global -ValueOnly -ErrorAction SilentlyContinue) { return }
 $global:__ghostty_integrated = $true
 
 $script:__ghostty_title = $env:GHOSTTY_SHELL_FEATURES -like '*title*'
@@ -16,8 +16,9 @@ $script:__ghostty_esc = [char]27
 $script:__ghostty_bel = [char]7
 # Set when a command was accepted and its end (D) is still to be reported.
 $script:__ghostty_pending = $false
-# $LASTEXITCODE as it was before the command: the wrapper clears it, so that a
-# value set afterwards tells that a native command ran.
+# $LASTEXITCODE as it was before the command (the Windows Terminal pattern):
+# the variable itself is never touched, `prompt` compares against this copy to
+# tell that a native command changed it.
 $script:__ghostty_saved_exit = $null
 
 function global:__ghostty_title([string]$text) {
@@ -44,14 +45,14 @@ function global:__ghostty_pwd([string]$path) {
 $script:__ghostty_prompt = $function:prompt
 function global:prompt {
     $ok = $?
-    $exit = $global:LASTEXITCODE
+    # Not set before the first native command, which Set-StrictMode would
+    # turn into an error.
+    $exit = Get-Variable -Name LASTEXITCODE -Scope Global -ValueOnly -ErrorAction SilentlyContinue
     if ($script:__ghostty_pending) {
         $script:__ghostty_pending = $false
         $code = if ($ok) { 0 }
-                elseif ($null -ne $exit -and $exit -ne 0) { $exit }
+                elseif ($exit -is [int] -and $exit -ne 0 -and $exit -ne $script:__ghostty_saved_exit) { $exit }
                 else { 1 }
-        # No native command ran: the value from before stays visible.
-        if ($null -eq $exit) { $global:LASTEXITCODE = $script:__ghostty_saved_exit }
         [Console]::Out.Write("$script:__ghostty_esc]133;D;$code$script:__ghostty_bel")
     }
     $result = if ($script:__ghostty_prompt) {
@@ -95,8 +96,7 @@ if (Get-Module PSReadLine) {
         }
         if ($line -and $line.Trim()) {
             $script:__ghostty_pending = $true
-            $script:__ghostty_saved_exit = $global:LASTEXITCODE
-            $global:LASTEXITCODE = $null
+            $script:__ghostty_saved_exit = Get-Variable -Name LASTEXITCODE -Scope Global -ValueOnly -ErrorAction SilentlyContinue
             [Console]::Out.Write("$([char]27)]133;C$([char]7)")
         }
         $line
