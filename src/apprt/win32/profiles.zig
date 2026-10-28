@@ -7,6 +7,7 @@ const global = @import("../../global.zig");
 const windows_shell = @import("../../os/windows_shell.zig");
 const App = @import("App.zig");
 const Overrides = @import("Overrides.zig");
+const jumplist = @import("jumplist.zig");
 
 const log = std.log.scoped(.win32_profiles);
 
@@ -34,6 +35,7 @@ pub fn refresh(app: *App) []const Profile {
         return &.{};
     };
     app.profiles = .{ .list = list, .arena = arena.state };
+    jumplist.profilesChanged(app);
     return list;
 }
 
