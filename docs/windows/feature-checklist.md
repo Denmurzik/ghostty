@@ -107,6 +107,8 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 - **Manual rows (owner checks, no automation).** Ligatures (core shaper, no Windows path), the Kitty keyboard protocol end
   to end, `open_config`, IME composition, the real toast and its click (needs the HKCU AUMID key, owner-approval-gated), the
   real export save dialog, a real GPU reset (TDR), and the translucent look with "Transparency effects" off.
-- **Git Bash input loss (known issue; PLACEHOLDER until the Task 26.4 verdict).** Git Bash can lose the first byte typed after its pty was
-  resized or after a tab switch (cmd.exe does not). It affects the `background-focus` and `device-recover` scenarios
-  (they re-send) and typing right after such a change.
+- **Git Bash input after a resize (Task 26.4, worked around).** MSYS2 could drop the first input record after a pty
+  resize (window drag, split, tab strip shown or gone). Ghostty sends a win32-input-mode Shift key-up ahead of the first
+  write after a grid change, only once the pseudo console has requested `?9001h`. Evidence: `e2e/resize-input`
+  (Git Bash 36/36 checks, cmd.exe and pwsh unchanged; 9/20 lost without the fix), `background-focus` 0 retries in 5
+  runs. Residual: 2 of 36 lost once under heavy CPU load. Follow-up: msys2-runtime report.

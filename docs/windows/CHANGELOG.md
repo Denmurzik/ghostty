@@ -120,8 +120,14 @@
 - The quick terminal cannot be resized by the user.
 - With `background-blur` the system Acrylic needs "Transparency effects" on in Windows settings; with it off the window
   is solid. The window owner of a message box and a second blurred window are drawn active too.
-- Git Bash: PENDING (Task 26.4 verdict): the first character typed right after its pty was resized or after a tab
-  switch can be lost (measured 3 to 5 of 5 times with Git Bash, never with cmd.exe).
+- Git Bash: the first key typed after a pty resize (window drag, split, tab strip) could be lost: MSYS2 sometimes takes
+  in conhost's window-size event only with the next input record and drops that record (`exit` ran as `xit`). Fixed
+  with a workaround (Task 26.4): the first pty write after a grid change starts with a win32-input-mode Shift key-up,
+  which absorbs the loss and which readers ignore; it is armed only after the pseudo console asked for
+  win32-input-mode (`CSI ? 9001 h`), so an older conhost never gets it. `e2e/resize-input`: 9 of 20 lines lost before,
+  0 of 36 (window, split, tab) after; cmd.exe and pwsh unchanged. Residual: one run on a heavily loaded machine
+  (a shell taking ~1 s per command) still lost 2 of 36. Root cause in MSYS2/conhost not proven; an msys2-runtime report is
+  a follow-up.
 - Over the RAM budget (owner to decide, see `docs/windows/m3/acceptance.md`): custom shader (+1.3 MB at the default
   size), overlays (+1.1 MB), inspector memory after close (+1.6 MB), quick terminal (+10.1 MB first toggle).
 - The latency gates are relative (+0.5 ms): the absolute 6 ms Ghostty-owned p95 is not reached while the machine has

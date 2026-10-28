@@ -42,9 +42,34 @@ pub const ResizePrime = struct {
     /// Set by the read thread once `request` was seen.
     win32_input: std.atomic.Value(bool) = .init(false),
 
+    /// Read thread only: the end of the previous chunk, so a `request`
+    /// split across two reads is still found.
+    tail: [request.len - 1]u8 = undefined,
+    tail_len: usize = 0,
+
     /// Pseudo console output, read thread.
     pub fn noteOutput(self: *ResizePrime, buf: []const u8) void {
-        if (std.mem.indexOf(u8, buf, request) != null) self.win32_input.store(true, .release);
+        // The tail joined with the head of this chunk covers every split.
+        var join: [2 * (request.len - 1)]u8 = undefined;
+        const head = buf[0..@min(buf.len, request.len - 1)];
+        @memcpy(join[0..self.tail_len], self.tail[0..self.tail_len]);
+        @memcpy(join[self.tail_len..][0..head.len], head);
+        if (std.mem.indexOf(u8, join[0 .. self.tail_len + head.len], request) != null or
+            std.mem.indexOf(u8, buf, request) != null)
+        {
+            self.win32_input.store(true, .release);
+        }
+
+        // Keep the last bytes of tail + buf.
+        if (buf.len >= self.tail.len) {
+            @memcpy(&self.tail, buf[buf.len - self.tail.len ..]);
+            self.tail_len = self.tail.len;
+        } else {
+            const keep = @min(self.tail_len, self.tail.len - buf.len);
+            std.mem.copyForwards(u8, self.tail[0..keep], self.tail[self.tail_len - keep .. self.tail_len]);
+            @memcpy(self.tail[keep..][0..buf.len], buf);
+            self.tail_len = keep + buf.len;
+        }
     }
 
     /// The pseudo console was given this grid at `now_ns`. The first grid
@@ -128,4 +153,30 @@ test "ResizePrime: nothing armed until the pseudo console asks for win32-input-m
     p.noteOutput("\x1b[?25l\x1b[?9001h\x1b[?1004h");
     p.resized(90, 30, 3000 * ms);
     try std.testing.expect(p.take(4000 * ms));
+}
+
+test "ResizePrime: the request is found when a read splits it at any offset" {
+    const out = "\x1b[?25l" ++ ResizePrime.request ++ "\x1b[?1004h";
+    const start = "\x1b[?25l".len;
+    for (start..start + ResizePrime.request.len + 1) |cut| {
+        var p: ResizePrime = .{};
+        p.noteOutput(out[0..cut]);
+        p.noteOutput(out[cut..]);
+        try std.testing.expect(p.win32_input.load(.acquire));
+    }
+}
+
+test "ResizePrime: the request is found across many one-byte reads" {
+    var p: ResizePrime = .{};
+    for ("ab" ++ ResizePrime.request) |c| p.noteOutput(&.{c});
+    try std.testing.expect(p.win32_input.load(.acquire));
+}
+
+test "ResizePrime: no request, no win32 input" {
+    var p: ResizePrime = .{};
+    p.noteOutput("\x1b[?9001");
+    p.noteOutput("l\x1b[?1004h");
+    p.noteOutput("\x1b[?900");
+    p.noteOutput("2h");
+    try std.testing.expect(!p.win32_input.load(.acquire));
 }

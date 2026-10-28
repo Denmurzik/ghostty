@@ -97,7 +97,7 @@ run on `e60878000` failed with `pkg/win32/dcomp.zig:43:22: error: @ptrCast incre
 
 ## Open items for the lead
 
-- Task 26.4 verdict (Git Bash first keystroke lost after a pty resize or tab switch): PLACEHOLDER in the changelog,
-  the checklist and SPEC section 18.34.
+- Task 26.4 done (worked around, see the changelog, the checklist and SPEC section 18.34); an msys2-runtime report is
+  a follow-up.
 - RAM overruns above; the quick terminal (+10.1 MB) is the one worth a look.
 - Plan line 119 (message ids) still lists `+11..+14`; the shipped ids are `+12..+15` (ledger note), not edited here.

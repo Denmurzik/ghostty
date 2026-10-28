@@ -858,5 +858,14 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       capture area; images are cropped to the Ghostty window (a margin only over the scenario's own backdrop).
     - Task 26: `vt-smoke` references are keyed by display scale (`ref/<case>@<dpi>.png`, a missing DPI is a SKIP);
       `background-focus` retries an exit line lost by Git Bash. Open: see the known issue below.
-    - Known issue (pending the Task 26.4 verdict): Git Bash can lose the first byte typed after its pty was resized or after a
-      tab switch (3-5 of 5 probes, cmd.exe 0 of 5). Not fixed in M3; see the changelog.
+    - Task 26.4: after a pseudo console resize, MSYS2 (Git Bash) sometimes takes in the window-size event only together
+      with the next input record and loses that record (the shell misses the SIGWINCH until then; a delay does not help:
+      0 lost at 0-20 ms, 3-5 of 12 at 50-1500 ms). Workaround in `termio/resize_prime.zig`: the first pty write after a
+      grid change (and any write within 50 ms of it) starts with a win32-input-mode Shift key-up (`CSI 16;42;0;0;0;1 _`);
+      it is the record lost, and every reader ignores a lone key-up (Cygwin drops key-ups, cooked readers never see
+      them). Armed only after the pseudo console asked for win32-input-mode (`CSI ? 9001 h` in its first output, found
+      across read splits), so an older conhost never gets the sequence; the write path costs one branch otherwise.
+      Evidence: `e2e/resize-input` (Git Bash 36 checks over window, split and tab-strip resizes; cmd.exe and pwsh lines
+      unchanged), 9 of 20 lost without it; residual: 2 of 36 lost in one run under heavy CPU load (the 50 ms window
+      assumes conhost handles the resize promptly). Root cause not proven (a minimal kernel32 ConPTY host never reproduced it);
+      follow-up: report to msys2-runtime (pointer: `strip_inrec` in the Cygwin console code).
