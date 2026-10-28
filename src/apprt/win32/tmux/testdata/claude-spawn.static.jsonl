@@ -1,0 +1,31 @@
+{"argv":["display-message","-p","-t","%1","#{client_termtype}\t#{allow-passthrough}\t#{focus-events}\t#{pane_top}\t#{pane_left}\t#{status}\t#{status-position}\t#{window_bigger}"],"stdin":null,"stdout":"xterm-ghostty\toff\t0\t0\t0\ton\tbottom\t0\n"}
+{"argv":["show-environment","-g"],"stdin":null,"stdout":""}
+{"argv":["display-message","-p","-t","%1","#{session_name}:#{window_id}.#{pane_id}"],"stdin":null,"stdout":"0:@1.%1\n"}
+{"argv":["load-buffer","-w","-"],"stdin":"11 bytes","stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","display-message","-t","%1","-p","#{window_id}"],"stdin":null,"stdout":"@1\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null,"stdout":"%1\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","split-window","-d","-t","%1","-h","-l","70%","-P","-F","#{pane_id}","--","cat"],"stdin":null,"stdout":"%2\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%2","window-style","bg=default,fg=red"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%2","pane-border-style","fg=red"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%2","pane-active-border-style","fg=red"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","select-pane","-t","%2","-T","alpha"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%2","pane-border-format","#[fg=red,bold] #{pane_title} #[default]"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null,"stdout":"%1\n%2\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-w","-t","@1","pane-border-status","top"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%2","remain-on-exit","failed"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","respawn-pane","-k","-t","%2","--","cd 'C:\\work' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' 'C:\\Users\\u\\.local\\bin\\claude.exe' --agent-id alpha@team --agent-name alpha --team-name team --agent-color red --parent-session-id 3f2c0000-0000-4000-8000-000000000000 --model sonnet"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","display-message","-t","%1","-p","#{window_id}"],"stdin":null,"stdout":"@1\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null,"stdout":"%1\n%2\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","split-window","-d","-t","%2","-v","-P","-F","#{pane_id}","--","cat"],"stdin":null,"stdout":"%3\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%3","window-style","bg=default,fg=blue"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%3","pane-border-style","fg=blue"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%3","pane-active-border-style","fg=blue"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","select-pane","-t","%3","-T","beta"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%3","pane-border-format","#[fg=blue,bold] #{pane_title} #[default]"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","list-panes","-t","@1","-F","#{pane_id}"],"stdin":null,"stdout":"%1\n%2\n%3\n"}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","select-layout","-t","@1","main-vertical"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","resize-pane","-t","%1","-x","30%"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","set-option","-p","-t","%3","remain-on-exit","failed"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","respawn-pane","-k","-t","%3","--","cd 'C:\\work' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' 'C:\\Users\\u\\.local\\bin\\claude.exe' --agent-id beta@team --agent-name beta --team-name team --agent-color blue --parent-session-id 3f2c0000-0000-4000-8000-000000000000 --model sonnet"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","kill-pane","-t","%3"],"stdin":null,"stdout":""}
+{"argv":["-S","\\\\.\\pipe\\ghostty-tmux-1-ab","kill-pane","-t","%2"],"stdin":null,"stdout":""}
