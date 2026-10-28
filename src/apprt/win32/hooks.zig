@@ -34,6 +34,7 @@ const recovery = @import("recovery.zig");
 const scrollbar = @import("scrollbar.zig");
 const secure_input = @import("secure_input.zig");
 const shell_open = @import("shell_open.zig");
+const step_resize = @import("step_resize.zig");
 const tmux_Registry = @import("tmux/Registry.zig");
 const tmux_Server = @import("tmux/Server.zig");
 const tmux_pane_io = @import("tmux/pane_io.zig");
@@ -189,6 +190,7 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         win32.user32.WM_NCACTIVATE => return overlay.windowMessage(window, msg, wparam, lparam) orelse composition.windowMessage(window, msg, wparam),
         win32.user32.WM_SHOWWINDOW => return composition.windowMessage(window, msg, wparam),
         win32.user32.WM_TIMER => return QuickTerminal.windowMessage(window, msg, wparam, lparam),
+        win32.user32.WM_SIZING => return step_resize.sizing(window, wparam, lparam),
         messages.WM_GHOSTTY_POSTED_DIALOG => {
             const kind = std.enums.fromInt(DialogKind, wparam) orelse {
                 log.warn("unknown dialog kind={}", .{wparam});
