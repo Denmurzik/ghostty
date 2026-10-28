@@ -181,6 +181,21 @@ pub const Options = struct {
     }
 };
 
+/// tmux 3.5a defaults of the options Claude Code (and scripts) ask for.
+fn optionDefault(name: []const u8) ?[]const u8 {
+    const defaults = [_][2][]const u8{
+        .{ "mouse", "off" },
+        .{ "focus-events", "off" },
+        .{ "allow-passthrough", "off" },
+        .{ "status", "on" },
+        .{ "status-position", "bottom" },
+        .{ "remain-on-exit", "off" },
+        .{ "pane-border-status", "off" },
+    };
+    for (defaults) |kv| if (std.mem.eql(u8, kv[0], name)) return kv[1];
+    return null;
+}
+
 fn freeMap(gpa: Allocator, map: *Map) void {
     var it = map.iterator();
     while (it.next()) |e| {
@@ -308,6 +323,7 @@ fn Env(comptime Host: type) type {
                 .list_panes => try self.listPanes(cmd),
                 .list_windows => try self.listWindows(cmd),
                 .show_environment => try self.showEnvironment(cmd),
+                .show_options => try self.showOptions(cmd),
                 .load_buffer => try self.loadBuffer(cmd),
                 .send_keys => try self.sendKeys(cmd),
                 .capture_pane => try self.capturePane(cmd),
@@ -612,6 +628,68 @@ fn Env(comptime Host: type) type {
             if (cmd.positional.len == 1) return self.fail("unknown variable: {s}", .{cmd.positional[0]});
         }
 
+        /// `show-options [-AgpqvwH] [-t target] [name]`. Values come from the options
+        /// the client set; unset names answer tmux's defaults (so `show -Av mouse` is `off`).
+        fn showOptions(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.reject(cmd, "H")) return;
+            if (!try self.counts(cmd, 0, 1)) return;
+            const opts = self.host.options();
+            const t = cmd.value('t');
+
+            var pane_id: ?u32 = null;
+            var window_id: ?u32 = null;
+            var scope: Options.Scope = .global;
+            if (cmd.has('p') and !cmd.has('g')) {
+                const pane = (try self.resolvePane(t)) orelse return;
+                pane_id = self.host.vars(pane).pane_id;
+                window_id = self.windowIdOf(pane);
+                scope = .{ .pane = pane_id.? };
+            } else if (cmd.has('w') and !cmd.has('g')) {
+                const win = (try self.resolveWindow(t)) orelse return;
+                window_id = self.host.windowId(win);
+                scope = .{ .window = window_id.? };
+            } else if (cmd.has('A')) {
+                if (self.currentPane()) |p| {
+                    pane_id = self.host.vars(p).pane_id;
+                    window_id = self.windowIdOf(p);
+                }
+            }
+
+            if (cmd.positional.len == 1) {
+                const name = cmd.positional[0];
+                const value: ?[]const u8 = if (cmd.has('A') or scope == .global)
+                    opts.lookup(pane_id, window_id, name) orelse optionDefault(name)
+                else
+                    opts.get(scope, name);
+                if (value) |v| try self.emitOption(cmd, name, v);
+                return;
+            }
+            const map: ?*const Map = switch (scope) {
+                .global => &opts.global,
+                .window => |id| opts.windows.getPtr(id),
+                .pane => |id| opts.panes.getPtr(id),
+            };
+            if (map) |m| {
+                var it = m.iterator();
+                while (it.next()) |e| try self.emitOption(cmd, e.key_ptr.*, e.value_ptr.*);
+            }
+        }
+
+        fn emitOption(self: Self, cmd: *const cli.Command, name: []const u8, value: []const u8) Allocator.Error!void {
+            const out = &self.out.stdout;
+            if (cmd.has('v')) {
+                try out.appendSlice(self.arena, value);
+            } else {
+                try out.appendSlice(self.arena, name);
+                try out.append(self.arena, ' ');
+                const quote = value.len == 0 or std.mem.indexOfScalar(u8, value, ' ') != null;
+                if (quote) try out.append(self.arena, '"');
+                try out.appendSlice(self.arena, value);
+                if (quote) try out.append(self.arena, '"');
+            }
+            try out.append(self.arena, '\n');
+        }
+
         fn loadBuffer(self: Self, cmd: *const cli.Command) Allocator.Error!void {
             if (!try self.counts(cmd, 1, 1)) return;
             const data = self.ctx.stdin;
@@ -808,9 +886,6 @@ test "win32 tmux commands: replay Claude spawn fixture" {
 }
 
 test "win32 tmux commands: replay live Claude spawn capture" {
-    // The capture holds `show -Av mouse` and `show -gv focus-events` (recon 13), which
-    // show-options does not answer yet (cli.zig: unsupported). Remove this skip once it does.
-    if (true) return error.SkipZigTest;
     try replayFixture(live_fixture);
 }
 
@@ -899,6 +974,20 @@ fn expectSpawnedTree(rig: *Rig, ids: *IdMap) !void {
     }
     try testing.expectEqualStrings("alpha", rig.host.titleOf(alpha));
     try testing.expectEqualStrings("beta", rig.host.titleOf(beta));
+}
+
+test "win32 tmux commands: show-options answers tmux defaults and set values" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    try testing.expectEqualStrings("off\n", try rig.ok(&.{ "show", "-Av", "mouse" }));
+    try testing.expectEqualStrings("off\n", try rig.ok(&.{ "show", "-gv", "focus-events" }));
+    try testing.expectEqualStrings("mouse off\n", try rig.ok(&.{ "show-options", "-g", "mouse" }));
+    _ = try rig.ok(&.{ "set-option", "-g", "mouse", "on" });
+    try testing.expectEqualStrings("on\n", try rig.ok(&.{ "show", "-Av", "mouse" }));
+    _ = try rig.ok(&.{ "set-option", "-g", "status-left", "a b" });
+    try testing.expectEqualStrings("mouse on\nstatus-left \"a b\"\n", try rig.ok(&.{ "show", "-g" }));
+    try testing.expectEqualStrings("", try rig.ok(&.{ "show", "-gv", "no-such-option" }));
+    try rig.bad(&.{ "show", "-H" }, "-H is not supported");
 }
 
 test "win32 tmux commands: split refuses below two cells" {

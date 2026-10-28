@@ -91,6 +91,7 @@ pub const CommandId = enum {
     list_panes,
     list_windows,
     show_environment,
+    show_options,
     load_buffer,
     send_keys,
     capture_pane,
@@ -109,6 +110,7 @@ pub fn commandName(id: CommandId) []const u8 {
         .list_panes => "list-panes",
         .list_windows => "list-windows",
         .show_environment => "show-environment",
+        .show_options => "show-options",
         .load_buffer => "load-buffer",
         .send_keys => "send-keys",
         .capture_pane => "capture-pane",
@@ -129,6 +131,7 @@ fn template(id: CommandId) []const u8 {
         .list_panes => "asF:f:t:",
         .list_windows => "F:f:at:",
         .show_environment => "hgst:",
+        .show_options => "AgHpqst:vw",
         .load_buffer => "b:t:w",
         .send_keys => "c:FHKlMN:Rt:X",
         .capture_pane => "ab:CeE:JMNpPqS:Tt:",
@@ -155,7 +158,7 @@ pub const Command = struct {
 
 const Entry = struct { name: []const u8, alias: ?[]const u8 = null, id: ?CommandId = null };
 
-/// Every tmux 3.5a command, in tmux's (alphabetical) order. Only the 14
+/// Every tmux 3.5a command, in tmux's (alphabetical) order. Only the 15
 /// supported ones carry an id.
 const table = [_]Entry{
     .{ .name = "attach-session", .alias = "attach" },
@@ -233,7 +236,7 @@ const table = [_]Entry{
     .{ .name = "show-environment", .alias = "showenv", .id = .show_environment },
     .{ .name = "show-hooks" },
     .{ .name = "show-messages", .alias = "showmsgs" },
-    .{ .name = "show-options", .alias = "show" },
+    .{ .name = "show-options", .alias = "show", .id = .show_options },
     .{ .name = "show-prompt-history", .alias = "showphist" },
     .{ .name = "show-window-options", .alias = "showw" },
     .{ .name = "source-file", .alias = "source" },
@@ -249,7 +252,7 @@ const table = [_]Entry{
 };
 
 /// Mirrors tmux's `cmd_find`: an exact alias or name wins, otherwise a unique
-/// name prefix. Resolving to a command outside the supported 14 is "unknown".
+/// name prefix. Resolving to a command outside the supported 15 is "unknown".
 fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
     var found: ?*const Entry = null;
     var ambiguous = false;
@@ -465,8 +468,8 @@ test "tmux shim cli: aliases and prefixes" {
     try std.testing.expectEqual(CommandId.list_panes, (try parseCommands(a, &.{"lsp"}, &d))[0].id);
     try expectUsage(&.{"kill"}, "ambiguous command: kill, could be: kill-pane, kill-server, kill-session, kill-window");
     try expectUsage(&.{"new-session"}, "new-session: unsupported by Ghostty");
-    // "show" is tmux's exact alias of show-options: a real, unsupported command.
-    try expectUsage(&.{"show"}, "show-options: unsupported by Ghostty");
+    try std.testing.expectEqual(CommandId.show_options, (try parseCommands(a, &.{"show"}, &d))[0].id);
+    try expectUsage(&.{"show-hooks"}, "show-hooks: unsupported by Ghostty");
     try expectUsage(&.{"sho"}, "ambiguous command: sho, could be: show-buffer, show-environment, show-hooks, show-messages, show-options, show-prompt-history, show-window-options");
 }
 
