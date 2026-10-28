@@ -13,6 +13,10 @@ Invoke-E2eScenario 'tmux-send-keys' {
     $g = Start-BashE2e
     if (-not (Wait-Until -TimeoutSec 10 -Condition { @(Get-TmuxPanes $g).Count -eq 1 })) { throw 'the state does not list exactly one tmux pane' }
 
+    # The pane gets the client's environment (tmux.exe's, here the harness's own),
+    # so TEMP in it is not the sandbox: the file is named by its sandbox path.
+    $sbxMsys = ConvertTo-MsysPath $script:Sbx.Tmp
+
     for ($i = 1; $i -le 20; $i++) {
         $file = "tmux-send-keys-$i.txt"
         $path = Join-Path $script:Sbx.Tmp $file
@@ -24,7 +28,7 @@ Invoke-E2eScenario 'tmux-send-keys' {
         if ($pane -notmatch '^%\d+$') { throw "round ${i}: split-window printed '$pane'" }
 
         # No wait: the gate is what keeps the first byte.
-        $k = Invoke-Tmux $g @('send-keys', '-t', $pane, "echo tok-$i > `"`$TEMP/$file`"; printf 'mark-%s\n' $i", 'Enter')
+        $k = Invoke-Tmux $g @('send-keys', '-t', $pane, "echo tok-$i > `"$sbxMsys/$file`"; printf 'mark-%s\n' $i", 'Enter')
         if ($k.Code -ne 0) { throw "round ${i}: send-keys exit $($k.Code): $($k.Stderr.Trim())" }
 
         if (-not (Wait-File $path 20)) { throw "round ${i}: the pane never wrote $path (first byte lost?)" }
