@@ -666,14 +666,16 @@ pub fn park(self: *Window) void {
 /// Show a parked window again (`App.unparkWindow` listed it).
 pub fn unpark(self: *Window) void {
     self.parked = false;
-    overlay_mod.windowParkChanged(self);
     for (self.tabs.items) |tab| {
+        tab.restoreProgress();
         var it = tab.tree.iterator();
         while (it.next()) |entry| Inspector.parkSync(entry.view);
     }
     theme.applyToWindow(self);
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_SHOW);
     self.selectTabFocus(self.active_tab, false);
+    // After the window itself: a popup shown first would flash on its own.
+    overlay_mod.windowParkChanged(self);
 }
 
 /// Take a tab out of the window without destroying it (it goes to another

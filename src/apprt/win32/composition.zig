@@ -346,6 +346,14 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     while (it.next()) |entry| syncSurface(entry.view, want);
 }
 
+/// A split that was parked (out of every tree, so out of `configChanged`) is
+/// back: it takes the mode the config asks for now.
+pub fn surfaceUnparked(surface: *Surface) void {
+    const window = surface.window;
+    decide(window);
+    syncSurface(surface, wantFor(window.composition.glass, wantComposition(&window.app.config, theme.highContrast())));
+}
+
 // ----------------------------------------------------------------------
 // Window
 

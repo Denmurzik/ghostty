@@ -286,8 +286,15 @@ pub fn park(self: *Tab) void {
 
 pub fn unpark(self: *Tab) void {
     self.parked = false;
+    self.restoreProgress();
     var it = self.tree.iterator();
     while (it.next()) |entry| Inspector.parkSync(entry.view);
+}
+
+/// The progress reports the closes of a parked tab took off the taskbar.
+pub fn restoreProgress(self: *Tab) void {
+    var it = self.tree.iterator();
+    while (it.next()) |entry| taskbar.surfaceRestored(self.window, entry.view.id);
 }
 
 /// The tree of the tab before and after a split was taken out.
@@ -342,6 +349,8 @@ pub fn swapTree(self: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void 
         // The sweeps skipped it while it was parked.
         theme.reportScheme(s);
         recovery.checkSurface(s);
+        composition.surfaceUnparked(s);
+        taskbar.surfaceRestored(self.window, s.id);
     } else {
         s.split_parked = true;
         _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_HIDE);
@@ -370,6 +379,7 @@ pub fn setVisible(self: *Tab, visible: bool) void {
 /// zoomed-out and empty-rect leaves stay occluded. A minimized window keeps
 /// every surface occluded.
 pub fn applyOcclusion(self: *Tab, shown: bool) void {
+    // (A parked window or tab renders nothing, whatever selects a tab in it.)
     const minimized = win32.user32.IsIconic(self.window.hwnd) != 0;
     var it = self.tree.iterator();
     while (it.next()) |entry| {
@@ -380,7 +390,8 @@ pub fn applyOcclusion(self: *Tab, shown: bool) void {
             (if (l.leafFor(s)) |leaf| leaf.visible else true)
         else
             true;
-        s.core_surface.occlusionCallback(shown and !minimized and leaf_visible) catch |err|
+        const on_screen = onScreen(shown, minimized, self.window.parked or self.parked, leaf_visible);
+        s.core_surface.occlusionCallback(on_screen) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
     }
 }
@@ -1169,4 +1180,18 @@ test "win32 tab: leaf rects while minimized" {
     defer copy.deinit(alloc);
     try std.testing.expectEqual(applied.leaves[0].rect.w, copy.leaves[0].rect.w);
     try std.testing.expect(copy.leaves.ptr != applied.leaves.ptr);
+}
+
+/// Whether a leaf renders: its tab is shown, the window is not minimized and
+/// neither window nor tab is parked (a hidden item presents no frames).
+fn onScreen(shown: bool, minimized: bool, parked: bool, leaf_visible: bool) bool {
+    return shown and !minimized and !parked and leaf_visible;
+}
+
+test "win32 tab: a parked window or tab renders nothing" {
+    try std.testing.expect(onScreen(true, false, false, true));
+    try std.testing.expect(!onScreen(true, false, true, true)); // parked
+    try std.testing.expect(!onScreen(true, true, false, true)); // minimized
+    try std.testing.expect(!onScreen(false, false, false, true));
+    try std.testing.expect(!onScreen(true, false, false, false));
 }

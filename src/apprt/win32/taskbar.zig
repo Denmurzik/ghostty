@@ -30,6 +30,27 @@ pub const State = struct {
     reporter: u32 = 0,
     /// Created lazily, again after every "TaskbarButtonCreated".
     list: ?*ITaskbarList3 = null,
+    /// The report a closing surface took along (it may come back with an
+    /// undo): its reporter and the report. At most one.
+    stash: ?struct { reporter: u32, report: Report } = null,
+
+    /// The surface `id` closes: its report moves to the stash.
+    fn dropFor(self: *State, id: u32) bool {
+        const p = self.progress orelse return false;
+        if (self.reporter != id) return false;
+        self.stash = .{ .reporter = id, .report = p };
+        return true;
+    }
+
+    /// The report to show again for the surface `id` that came back: only
+    /// while nothing else is on the bar.
+    fn takeStash(self: *State, id: u32) ?Report {
+        const s = self.stash orelse return null;
+        if (s.reporter != id) return null;
+        self.stash = null;
+        if (self.progress != null) return null;
+        return s.report;
+    }
 };
 
 /// `TBPF_*` for a progress state.
@@ -70,8 +91,36 @@ pub fn setProgressFrom(window: *Window, reporter: u32, report: Report) bool {
 
 /// The surface `id` is closing: its progress goes with it.
 pub fn surfaceClosed(window: *Window, id: u32) void {
-    if (window.taskbar.reporter != id or window.taskbar.progress == null) return;
+    if (!window.taskbar.dropFor(id)) return;
     _ = setProgressFrom(window, 0, .{ .state = .remove });
+}
+
+/// The surface `id` is back from a close-undo: its progress returns.
+pub fn surfaceRestored(window: *Window, id: u32) void {
+    const report = window.taskbar.takeStash(id) orelse return;
+    _ = setProgressFrom(window, id, report);
+}
+
+test "win32 taskbar: the progress of a closed surface comes back with it" {
+    var st: State = .{};
+    try std.testing.expect(!st.dropFor(5)); // nothing reported
+    st.progress = .{ .state = .set, .progress = 40 };
+    st.reporter = 5;
+    try std.testing.expect(!st.dropFor(6)); // another surface closes
+    try std.testing.expect(st.dropFor(5));
+    st.progress = null;
+    st.reporter = 0;
+    try std.testing.expect(st.takeStash(6) == null);
+    try std.testing.expectEqual(@as(?u8, 40), st.takeStash(5).?.progress);
+    try std.testing.expect(st.takeStash(5) == null); // once
+
+    // A newer report on the bar wins over the stash.
+    st.progress = .{ .state = .set, .progress = 10 };
+    st.reporter = 5;
+    try std.testing.expect(st.dropFor(5));
+    st.progress = .{ .state = .set, .progress = 90 };
+    st.reporter = 7;
+    try std.testing.expect(st.takeStash(5) == null);
 }
 
 /// The bar's value for a report: 0-100.
