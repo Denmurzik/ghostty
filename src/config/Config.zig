@@ -2569,8 +2569,12 @@ keybind: Keybinds = .{},
 ///      the clipboard; otherwise, paste the contents of the clipboard.
 ///   * `ignore` - Do nothing, ignore the right-click.
 ///
-/// The default value is `context-menu`.
-@"right-click-action": RightClickAction = .@"context-menu",
+/// The default value is `context-menu`, except on Windows, where it is
+/// `copy-or-paste` like Windows Terminal and the console host.
+@"right-click-action": RightClickAction = switch (builtin.target.os.tag) {
+    .windows => .@"copy-or-paste",
+    else => .@"context-menu",
+},
 
 /// The action to take when the user middle-clicks on the terminal surface.
 ///
