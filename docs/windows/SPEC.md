@@ -672,9 +672,30 @@ underline colour: the inbox ConPTY drops them, §18.33; ligatures, Kitty keyboar
 latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the numbers over budget and the Git
 Bash input-loss workaround (Task 26.4) are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
 
-**M4 — tmux shim + IPC + Claude Code e2e.** `tmux.exe`, IPC server, registry, all §12 semantics, DCS tmux unwrap,
-`SplitTree.replace`, PATH prepend + TMUX/TMUX_PANE in every surface. Exit: replay test green; real Claude Code agent-team
-run (§15.6b) green twice in a row; tmux.exe ≤ 5 MB / ≤ 100 ms.
+**M4 (done, accepted with concerns: see the CHANGELOG "M4" section and the numbers below; acceptance commit `docs(windows): M4 acceptance — tmux shim RAM, latency, Claude Code agent-team runs`) — tmux shim + IPC + Claude Code e2e.**
+`tmux.exe` (console exe, imports kernel32/ntdll only), a second IPC server on `\\.\pipe\ghostty-tmux-<pid>-<nonce>` (§12.1, R-M4-1), the
+registry/host over Ghostty tabs and surfaces with the §12.2 command set (`split-window`, `respawn-pane`, `kill-pane`,
+`select-layout`, `resize-pane`, `select-pane`, `set-option`, `show-options`, `display-message`, `list-panes/windows`,
+`show-environment`, `load-buffer`, plus `send-keys` with a post-resize gate and `capture-pane`), `SplitTree.replace`,
+`TMUX`/`TMUX_PANE` and the exe dir first on PATH in every surface, the opt-out key `windows-tmux-shim` (R-M4-11), `remain-on-exit`,
+pane border labels, DCS `tmux;` verified in core (the ConPTY gap is documented, §12.4). Exit (plan "M4 exit checklist"):
+- Replay: `tmux-replay` is green on Debug and ReleaseFast (live and static fixture), with the leader typing 7 of 7 lines
+  across the layout changes; `tmux-cli`, `tmux-env`, `tmux-send-keys`, `tmux-labels` green on both builds.
+- Real Claude Code 2.1.312 (sonnet, the owner's login, `test/windows/claude-team.ps1`): the agent-team run passed twice in
+  a row in a ReleaseFast Ghostty (3 panes, leader 621 of 2073 px = 30.0 %, panes titled alpha/beta, both teammates' messages
+  in the inbox, only the leader after `/exit`, no stray processes, the trace has exactly the shapes of the recorded
+  fixture). The G1 run (Debug) and these two found no product bug.
+- Budgets (ReleaseFast, `m4-*` rows): `tmux.exe` peak private 0.6 MB (`load-buffer` at the 512 KiB cap 3.9 MB, `__idle`
+  0.5 MB); one surface 72.0 MB against 72.1 MB for the M3 acceptance build measured the same day (+0.0); the team layout
+  (leader + 2 respawned teammates) 84.1 MB, 30 s after killing them 78.2 MB (+5.9 % of the pre-team value). `tmux.exe`
+  process wall p95: `display-message` 32.2 ms (p50 25.3; **gate 30 ms missed by 2.2 ms**, the process-creation floor on
+  this machine is about 21 ms: `-V` p50), `split-window -- cat` 35.5 ms and `respawn-pane -k` 114.6 ms (gates 300 ms).
+  Key-echo latency (Ghostty-owned p95, `input-latency`, same-day interleaved, 6 runs each): 2.14 ms median against
+  1.63 ms for the M3 acceptance build (+0.5 ms), single runs 1.3-11.6 ms with 7-13 % background CPU: within the noise; no
+  code of M4 runs on the key to pty write path.
+- Gaps and owner checks: the clipboard path of `load-buffer -w` is covered by unit tests and needs a run with a text
+  clipboard (owner-run); DCS `tmux;` with an ST-terminated inner sequence is dropped by the inbox ConPTY (§12.4);
+  external mode, `new-session`/`attach` and the other known gaps are listed in the CHANGELOG. Plan: `docs/windows/plans/M4-tmux-shim.md`.
 
 **M5 — Windows extras.** Jump lists (new window/tab, profiles), shell-profiles dropdown (Git Bash, pwsh, cmd, WSL distros
 from `wsl.exe -l -q`), Explorer "Open Ghostty here" (`+install-explorer-integration` + installer), pwsh integration
@@ -917,3 +938,39 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     - M3 final review (`docs/windows/m3/final-review.md`): title updates use a fixed 75 ms window; link confirmations go
       through the message window; proxy icon and reveal refuse links that leave the local disk; deferred to M5:
       `export_terminal_io` write off the UI thread, translucent capture guard, DPAPI for the e2e clipboard backup.
+35. Rulings of M4 (plan-m4 revision 2, lead 2026-10-28; owner may overturn). Ledger rulings: (a) the opt-out key
+    `windows-tmux-shim` (R-M4-11); (b) a DCS `tmux;` channel that ConPTY does not provide is a documented gap, not code
+    (R-M4-10); (c) real Claude Code runs are allowed (owner's shared login, option B: CLI flags only, `CLAUDE_*` removed,
+    sonnet, 10 minute box, stop at the first auth error, only the run's own files removed).
+    - R-M4-1, one server implementation, two pipes: the tmux pipe is a second `ipc.Server` instance with `post_tag` 1,
+      `max_request` 4 MiB, `io_timeout_ms` 500 and `close_wait_ms` 200; routing on wparam before the main-server guard; every
+      non-forwarding process claims its own pipe (`ghostty-tmux-<pid>-<nonce>`, 64-bit nonce); a failed claim leaves `TMUX`
+      unset. The client opens only that name shape, with `SECURITY_IDENTIFICATION`, and checks the server pid (§12.1).
+    - R-M4-2, ids without a registry table: `Surface.pane_id` from a monotonic counter (a respawn keeps its number); `@N` =
+      `Tab.id`; lookups scan the windows and re-resolve by id after every mutation.
+    - R-M4-3, headless semantics: `tmux/commands.zig` runs against a duck-typed `Host`; the replay of the recorded Claude
+      sequence runs against `FakeHost` (same `layout.zig`), the real host against the same sequence in `tmux-replay`.
+    - R-M4-4, flag policy: every command parses tmux 3.5a's full getopt template; a flag with no visible effect is
+      accepted and ignored, an unimplemented semantic fails with `<cmd>: -X is not supported by Ghostty`, an unknown flag
+      with `command <cmd>: unknown flag -X`; names, aliases and unique prefixes resolve against the full command table.
+    - R-M4-5, pane spawn: `cat` is `tmux.exe __idle`; an empty command is the configured one; with Git Bash
+      (`CLAUDE_CODE_GIT_BASH_PATH` of the client, else the search) the string runs as `bash -c`; else the one-liner parser
+      (`[cd W &&] [env (NAME=W)*] W+`); cwd = `-c`, else the `cd` target (parser path), else the client cwd; a missing
+      directory fails with `can't find directory`; every shim pane gets `wait-after-command`. Known gap: a config reload drops
+      it.
+    - R-M4-6, `send-keys` gate: the answer is immediate; bytes are queued and flushed by a message-window timer once the
+      pane is 300 ms old and its tab's layout has been quiet for 150 ms (Git Bash first-byte loss; kept after the Task
+      26.4 prime, which only covers resize).
+    - R-M4-7, `capture-pane`: the visible screen only (`-p` prints, else the buffer); ranges (`-S`, `-E`) are ignored with a note on stderr, `-a -b -C -e -M -P -T` are
+      refused.
+    - R-M4-8, titles and styles: `select-pane -T` pins the user title (re-applied after a respawn); options are stored
+      verbatim (value ≤ 8192 bytes, ≤ 256 per map); only `remain-on-exit` and the `pane-border-*` options act; labels follow
+      `optionsChanged`.
+    - R-M4-9, trace and stats: `GHOSTTY_TMUX_TRACE` (one JSON line per call, append-only, stdin never traced) and
+      `GHOSTTY_TMUX_STATS=1` (`peak_private_kb`, `wall_ms`, `build`).
+    - R-M4-10, DCS `tmux;`: core already dispatches the unwrapped inner sequence (stream tests); the inbox ConPTY drops
+      an ST-terminated inner OSC 777 and forwards a BEL-terminated OSC 9 as a bare OSC 9 (Task 2): documented gap (§12.4).
+    - R-M4-11, the key `windows-tmux-shim = true|false` (default true, Windows only, app-wide, read when a surface starts):
+      false sets/removes neither `TMUX` nor `TMUX_PANE` and does not change PATH.
+    - Acceptance (M4 Task 15): the budgets and the real runs are in §17; the RAM rows are tagged `m4-*` in
+      `docs/windows/ram-baseline.csv`, the latency rows `m4-tmux`/`m4-a`/`m4-base` in `latency-baseline.csv`.

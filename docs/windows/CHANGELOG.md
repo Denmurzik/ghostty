@@ -154,3 +154,55 @@
 ### Acceptance
 
 See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit checklist).
+
+
+## M4 — tmux shim for Claude Code agent teams
+
+### What works
+
+- `tmux.exe` ships next to `ghostty.exe` (a small console exe, no libc, about 0.6 MB private per call). Every pane gets `TMUX`,
+  `TMUX_PANE` and the exe directory first on `PATH`, so programs that drive tmux (Claude Code's agent teams with
+  `teammateMode: "tmux"`) open their panes as Ghostty splits in the window they run in: `split-window`, `respawn-pane`,
+  `kill-pane`, `select-layout main-vertical`/`tiled`, `resize-pane`, `select-pane -T`, `set-option`, `show-options`,
+  `display-message`, `list-panes`/`list-windows`, `show-environment`, `load-buffer` (`-w` fills the clipboard), `send-keys` and
+  `capture-pane` (visible screen).
+- A teammate pane keeps its title and shows a coloured label in its corner when the tmux options ask for it
+  (`pane-border-status`, `pane-border-format`, `pane-border-style`). `remain-on-exit` works for panes the shim created.
+- The tmux pipe is private to your user (`\\.\pipe\ghostty-tmux-<pid>-<nonce>`, remote clients rejected); `tmux.exe` refuses any
+  other path.
+- It also works without Claude: `tmux split-window -h` and `tmux kill-pane` in a Git Bash pane act on the Ghostty window.
+
+### Config
+
+- `windows-tmux-shim = true|false` (default `true`, Windows only, app-wide, read when a surface starts). `false` leaves
+  `TMUX`/`TMUX_PANE` and `PATH` as they were: an MSYS2 tmux you installed works as before.
+- Debugging: `GHOSTTY_TMUX_TRACE=<file>` makes `tmux.exe` append one JSON line per call; `GHOSTTY_TMUX_STATS=1` prints its peak
+  memory and wall time.
+
+### Known limitations (gaps)
+
+- External mode (`TMUX` unset, `-L`) and `new-session`/`attach`/`has-session`/`kill-server` are M5.
+- `select-layout` other than `main-vertical` and `tiled` is accepted and does nothing; `capture-pane` covers the visible screen only.
+- DCS `tmux;` passthrough: core unwraps it, but the inbox ConPTY drops an ST-terminated inner sequence (an OSC 9 with a
+  BEL terminator arrives); Claude notifications that use ST are lost while `TMUX` is set.
+- Images stay disabled under `TMUX` (XTVERSION is not spoofed, SPEC 12.4).
+- A config reload drops a shim pane's `wait-after-command`: after a reload a teammate that exits non-zero closes instead of staying.
+- A split answered after its client timed out (a UI stall past about 10 s) leaves an `__idle` pane.
+- `send-keys` is held back for 300 ms after a split (150 ms after the last layout change): scripted keys never get lost, at a
+  small latency cost.
+- `tmux.exe display-message` measures p95 32.2 ms (process start to exit, ReleaseFast, idle machine) against a 30 ms goal;
+  the process-creation floor here is about 21 ms. `load-buffer -w` was not run against the real clipboard in the acceptance
+  (it needs a text clipboard; unit-tested).
+
+### Acceptance
+
+| Check | Result |
+| --- | --- |
+| Unit: `test-tmux-shim`, `tmux shim `, `win32 tmux ` (3 runs), `SplitTree`, `stream: tmux` (lib-vt), `win32 ipc` | pass (33, 106, 159 on the first of three runs (the other two exit 0), 104, 73, 104 tests; 1 skipped in four of them as before) |
+| Builds | Debug, ReleaseFast, `-Demit-lib-vt`, Linux recipe, `aarch64-windows-gnu`: pass |
+| e2e `-Milestone M4` (tmux-cli, tmux-env, tmux-replay, tmux-send-keys, tmux-labels) | 5 of 5 on Debug and on ReleaseFast |
+| Real Claude Code 2.1.312 agent-team run (`test/windows/claude-team.ps1`, sonnet) | 2 of 2 passed (3 panes, leader 30.0 %, titles, inbox messages, clean exit, trace equals the fixture) |
+| RAM (ReleaseFast): one surface; team; 30 s after killing the team | 72.0 MB (M3 acceptance build, same day: 72.1); 84.1 MB; 78.2 MB (+5.9 %) |
+| `tmux.exe` peak private: `display-message` / `load-buffer` 512 KiB / `__idle` | 0.6 MB / 3.9 MB / 0.5 MB |
+| `tmux.exe` process wall p95: display-message / split-window / respawn-pane | 32.2 ms (goal 30) / 35.5 ms / 114.6 ms |
+| Key-echo (Ghostty-owned p95, 6 interleaved runs each) | 2.14 ms median against 1.63 ms for the M3 acceptance build (+0.5 ms; single runs 1.3-11.6 ms under 7-13 % background load) |

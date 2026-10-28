@@ -152,3 +152,6 @@ date,commit,optimize,adapter,scenario,private_mb,ws_mb
 2026-10-28,828171e44-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-one-surface,72.3,100.3
 2026-10-28,828171e44-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-one-surface,72,99.9
 2026-10-28,828171e44-dirty,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-one-surface,71.8,99.7
+2026-10-28,29852c64e,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-base-m3acc-one-surface,72,102.6
+2026-10-28,29852c64e,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-base-m3acc-one-surface,72.1,102.1
+2026-10-28,29852c64e,ReleaseFast,Intel(R) Arc(TM) Graphics,m4-base-m3acc-one-surface,72.2,102.2

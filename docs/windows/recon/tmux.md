@@ -328,6 +328,16 @@ matches 2.1.311. Live trace: `src/apprt/win32/tmux/testdata/claude-spawn.jsonl` 
 In the whole run (a short one: startup, two spawns, `/exit`) the Debug log of Ghostty holds no `unknown DCS hook` line and no `desktop_notification` line: Claude emitted no `ESC P tmux;` that reached the core. Plain OSC 0/2 titles did arrive (`changing title "Claude Code"`, then the task title). The notification path (OSC 9/777, DCS-wrapped when `TMUX` is set) needs a finished turn while the window is unfocused, which this run never produced, so the DCS verdict is "not observed", not "dropped". The deterministic DCS probe (M4 Task 2) stays the authority.
 - Claude's own debug log: `tmux images: kitty no, iTerm2 no (TMUX is set, but the terminal did not answer as tmux ...)` and `DECSTBM: gated (TMUX=set ...)`: cosmetic, as predicted in section 10.
 
+### Re-check through the built shim (G1 and M4 Task 15, 2026-10-28, Claude Code 2.1.312)
+
+Two real runs (sonnet, ReleaseFast Ghostty) and the G1 run (Debug) went through the real `tmux.exe`, not the fake. The leader's
+calls have exactly the shapes of `testdata/claude-spawn.jsonl` (pane and window ids, the pipe name and the respawn command
+line masked): the `show -gv focus-events` / `show -Av mouse` probes, the `display-message` probes, the spawn sequence,
+`select-layout main-vertical`, `resize-pane -x 30%`, then `kill-pane` of both teammates after `/exit`. Only the repetition
+counts of the probes and `list-panes` vary (31 or 32 leader calls) and the two parallel `show` probes arrive in either order.
+All calls exit 0 (G1: 38 calls); the teammates' own claude processes add `show -Av mouse`, `show -gv focus-events` and one
+`display-message` each under their own `TMUX_PANE`. No new probe, flag or format variable appeared.
+
 ### Differences -> plan impact
 
 1. `TeamCreate` does not exist: every plan, brief and prompt that names it needs the note above (driver prompt already uses the `Agent` tool with `name`).

@@ -92,7 +92,16 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Window chrome: custom frame, Mica, snap layouts, macOS-style title and tab rows, proxy icon | M2 / M3 | e2e/frame-hittest, e2e/chrome-paint, e2e/chrome-macos, e2e/chrome-proxy-icon | done |
 | Owned popups follow the window (overlay host) | M3 | e2e/overlay-follow | done |
 | Export terminal IO (`export_terminal_io`) | M3 | e2e/export-io; the real save dialog is the owner's check | done |
-| tmux shim + Claude Code agent teams | M4 | none yet | pending -> M4 |
+| tmux shim: `tmux.exe` (kernel32/ntdll only) and its pipe (`-V`, no server, trace, stats, limits) | M4 | e2e/tmux-cli; unit: src/tmux_shim/run.zig, pipe.zig, protocol.zig | done |
+| tmux commands on Ghostty splits/tabs: split-window, respawn-pane, kill-pane, select-layout (main-vertical, tiled), resize-pane, select-pane -T, set-option, show-options, display-message, list-panes/windows, show-environment | M4 | e2e/tmux-replay (live and static recording); unit: tmux/commands.zig, layout.zig, Registry.zig | done |
+| tmux send-keys (post-resize gate) and capture-pane (visible screen) | M4 | e2e/tmux-send-keys; unit: tmux/keys.zig, pane_io.zig | done |
+| tmux `load-buffer -w` sets the Windows clipboard | M4 | unit: tmux/commands.zig; e2e/tmux-replay step needs a text clipboard | manual (owner-run: needs a text clipboard) |
+| `TMUX`, `TMUX_PANE`, `tmux.exe` first on PATH in every pane | M4 | e2e/tmux-env; unit: tmux/env.zig | done |
+| `windows-tmux-shim = false` opt-out (inherited `TMUX` kept, PATH unchanged) | M4 | e2e/tmux-env (second Ghostty); unit: win32 config | done |
+| `remain-on-exit`, kill-pane behind a close dialog, 7 parallel kill-pane, nothing left after Ghostty dies | M4 | e2e/tmux-replay | done |
+| Pane border labels (`pane-border-status/format/style`) | M4 | e2e/tmux-labels (screenshots); unit: tmux/labels.zig | done |
+| Claude Code agent teams through the shim (2 teammates, titles, labels, clean exit) | M4 | test/windows/claude-team.ps1: 2 of 2 runs passed (Claude Code 2.1.312, ReleaseFast); G1 report | done (owner manual check pending) |
+| DCS `tmux;` passthrough | M4 | unit: stream tests in src/terminal/stream.zig; ConPTY drops ST-terminated inner sequences (Task 2) | gap (partial) |
 
 ## Notes
 
