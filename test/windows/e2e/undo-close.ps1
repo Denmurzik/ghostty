@@ -67,7 +67,7 @@ Invoke-E2eScenario 'undo-close' {
     if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-Undo).parked.windows -eq 0 -and [GhosttyE2e.Win]::IsWindowVisible($g.Hwnd) })) { throw 'undo did not show the window again' }
     $r1 = New-Object GhosttyE2e.Win+RECT
     [void][GhosttyE2e.Win]::GetWindowRect($g.Hwnd, [ref]$r1)
-    if ($r0.Left -ne $r1.Left -or $r0.Top -ne $r1.Top -or $r0.Right -ne $r1.Right -or $r0.Bottom -ne $r1.Bottom) { throw 'the restored window has another rect' }
+    if ($r0.Left -ne $r1.Left -or $r0.Top -ne $r1.Top -or $r0.Right -ne $r1.Right -or $r0.Bottom -ne $r1.Bottom) { throw "the restored window has another rect: $($r0.Left),$($r0.Top),$($r0.Right),$($r0.Bottom) -> $($r1.Left),$($r1.Top),$($r1.Right),$($r1.Bottom)" }
 
     # 6. The palette lists Undo.
     [void](Set-ForegroundSafe -Hwnd $g.Hwnd)

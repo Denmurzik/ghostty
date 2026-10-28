@@ -352,7 +352,8 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
     const hc = theme.highContrast();
     const look = Look.of(config);
-    for (app.windows.items) |window| {
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
         if (window.tearing_down) continue;
         decide(window);
         window.composition.toggled_opaque = false;
@@ -363,7 +364,8 @@ pub fn configChanged(app: *App, config: *const configpkg.Config) void {
             // config so that the renderer's premultiplied colours are
             // composed over the solid background instead of being shown dim.
             const want = wantComposition(config, hc);
-            for (window.tabs.items) |tab| {
+            var all_tabs = window.allTabs();
+            while (all_tabs.next()) |tab| {
                 var it = tab.tree.iterator();
                 while (it.next()) |entry| syncSurface(entry.view, want);
             }

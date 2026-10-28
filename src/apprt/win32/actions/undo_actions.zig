@@ -55,6 +55,20 @@ pub fn enabled(app: *const App) bool {
     return timeoutMs(app) > 0;
 }
 
+/// What decides whether a close of a surface the user asked for is parked as
+/// a tab (or window). Splits are Task 15b.
+pub const SurfaceClose = struct {
+    split: bool,
+    child_exited: bool,
+    /// The close came from a non-undoable source (the tmux shim).
+    final: bool,
+    window_parked: bool,
+};
+
+pub fn surfaceCloseUndoable(c: SurfaceClose) bool {
+    return !c.split and !c.child_exited and !c.final and !c.window_parked;
+}
+
 // -- Registering -------------------------------------------------------------
 
 /// Pushes `e`; what the push displaced (parked redo entries) is closed for
@@ -80,7 +94,7 @@ pub fn closeTab(window: *Window, tab: *Tab) bool {
     const index = window.parkTab(tab) orelse return false;
     if (push(app, .{ .kind = .close_tab, .expires_ms = nowMs() + timeoutMs(app), .window = window, .tab = tab, .index = index })) return true;
     // Could not record it: put it back and let the caller close it.
-    window.unparkTab(tab, index);
+    _ = window.unparkTab(tab, index);
     return false;
 }
 
@@ -104,7 +118,7 @@ pub fn closeTabs(window: *Window, targets: []const *Tab) bool {
         // Undo what was parked, newest first, so the indexes are right again.
         while (n > 0) {
             n -= 1;
-            window.unparkTab(members[n].tab.?, members[n].index);
+            _ = window.unparkTab(members[n].tab.?, members[n].index);
         }
         alloc.free(members);
         return false;
@@ -120,7 +134,7 @@ pub fn closeWindow(window: *Window) bool {
     if (app.closingQuits(window)) return false;
     if (!app.parkWindow(window)) return false;
     if (push(app, .{ .kind = .close_window, .expires_ms = nowMs() + timeoutMs(app), .window = window })) return true;
-    app.unparkWindow(window);
+    _ = app.unparkWindow(window);
     return false;
 }
 
@@ -130,8 +144,8 @@ pub fn closeWindows(app: *App, windows: []const *Window) bool {
     if (!enabled(app)) return false;
     if (windows.len == 1) return closeWindow(windows[0]);
     for (windows) |w| if (w.kind != .normal) return false;
-    // `close_all_windows` ends the session of a quitting app.
-    if (app.config.@"quit-after-last-window-closed") return false;
+    // `close_all_windows` ends the session of an app that quits with its last window.
+    if (app.endsOnLastWindow()) return false;
 
     const alloc = app.core_app.alloc;
     const members = alloc.alloc(Entry, windows.len) catch return false;
@@ -145,7 +159,7 @@ pub fn closeWindows(app: *App, windows: []const *Window) bool {
     if (n < windows.len or !push(app, .{ .kind = .group, .expires_ms = expires, .group = members })) {
         while (n > 0) {
             n -= 1;
-            app.unparkWindow(members[n].window.?);
+            _ = app.unparkWindow(members[n].window.?);
         }
         alloc.free(members);
         return false;
@@ -160,7 +174,10 @@ pub fn undo(app: *App, target: apprt.Target, value: void) !bool {
     _ = value;
     const entry = app.undo.stack.popUndo(nowMs()) orelse return false;
     defer schedule(app);
-    return restore(app, entry);
+    if (restore(app, entry)) return true;
+    // Could not bring it back (out of memory): the item is still parked, keep its entry.
+    app.undo.stack.undo.append(app.core_app.alloc, entry) catch log.warn("an undo entry was lost", .{});
+    return false;
 }
 
 /// Task 15b.
@@ -176,18 +193,17 @@ fn restore(app: *App, entry: Entry) bool {
         .close_tab => {
             const window = entry.window orelse return false;
             const tab = entry.tab orelse return false;
-            window.unparkTab(tab, entry.index);
+            if (!window.unparkTab(tab, entry.index)) return false;
             window.activate();
             return true;
         },
         .close_window => {
             const window = entry.window orelse return false;
-            app.unparkWindow(window);
+            if (!app.unparkWindow(window)) return false;
             window.activate();
             return true;
         },
         .group => {
-            defer app.core_app.alloc.free(entry.group);
             // Newest first: each tab goes back to the index it was taken from.
             var i = entry.group.len;
             var ok = false;
@@ -198,18 +214,19 @@ fn restore(app: *App, entry: Entry) bool {
                     .close_tab => {
                         const window = m.window orelse continue;
                         const tab = m.tab orelse continue;
-                        window.unparkTab(tab, m.index);
+                        if (!window.unparkTab(tab, m.index)) continue;
                         window.activate();
                     },
                     .close_window => {
                         const window = m.window orelse continue;
-                        app.unparkWindow(window);
+                        if (!app.unparkWindow(window)) continue;
                         window.activate();
                     },
                     else => continue,
                 }
                 ok = true;
             }
+            if (ok) app.core_app.alloc.free(entry.group);
             return ok;
         },
         // Task 15b.
@@ -222,21 +239,42 @@ fn restore(app: *App, entry: Entry) bool {
 /// Closes parked items for real: tabs first, then windows, so that a tab
 /// never outlives (or is freed after) its window.
 fn closeAll(app: *App, entries: []const Entry) void {
-    for ([_]bool{ false, true }) |windows_pass| {
-        for (entries) |e| closeEntry(app, e, windows_pass);
-    }
-    for (entries) |e| if (e.kind == .group) app.core_app.alloc.free(e.group);
+    closeAllWith(RealCloser{ .app = app }, entries);
 }
 
-fn closeEntry(app: *App, e: Entry, windows_pass: bool) void {
+const RealCloser = struct {
+    app: *App,
+
+    fn closeTab(self: RealCloser, window: *Window, tab: *Tab) void {
+        _ = self;
+        window.releaseParkedTab(tab);
+    }
+
+    fn closeWindow(self: RealCloser, window: *Window) void {
+        self.app.releaseParkedWindow(window);
+    }
+
+    fn freeGroup(self: RealCloser, group: []Entry) void {
+        self.app.core_app.alloc.free(group);
+    }
+};
+
+fn closeAllWith(closer: anytype, entries: []const Entry) void {
+    for ([_]bool{ false, true }) |windows_pass| {
+        for (entries) |e| closeEntry(closer, e, windows_pass);
+    }
+    for (entries) |e| if (e.kind == .group) closer.freeGroup(e.group);
+}
+
+fn closeEntry(closer: anytype, e: Entry, windows_pass: bool) void {
     switch (e.kind) {
         .close_tab => if (!windows_pass) {
-            if (e.window) |w| if (e.tab) |t| w.releaseParkedTab(t);
+            if (e.window) |w| if (e.tab) |t| closer.closeTab(w, t);
         },
         .close_window => if (windows_pass) {
-            if (e.window) |w| app.releaseParkedWindow(w);
+            if (e.window) |w| closer.closeWindow(w);
         },
-        .group => for (e.group) |m| closeEntry(app, m, windows_pass),
+        .group => for (e.group) |m| closeEntry(closer, m, windows_pass),
         else => {},
     }
 }
@@ -374,35 +412,80 @@ test "win32 undo: timeout 0 disables, milliseconds otherwise" {
     try testing.expectEqual(@as(u64, 0), durationMs(0));
     try testing.expectEqual(@as(u64, 5000), durationMs(5 * std.time.ns_per_s));
     try testing.expectEqual(@as(u64, 0), durationMs(999_999));
+    // `enabled` is `timeoutMs > 0`: a zero duration never parks.
+    try testing.expect(!(durationMs(0) > 0));
 }
 
 test "win32 undo: expired entries close tabs before windows" {
-    var closed: std.ArrayList(u8) = .empty;
-    defer closed.deinit(testing.allocator);
     const Rec = struct {
-        fn run(out: *std.ArrayList(u8), entries: []const Entry) !void {
-            for ([_]bool{ false, true }) |windows_pass| {
-                for (entries) |e| try each(out, e, windows_pass);
-            }
+        out: *std.ArrayList(u8),
+        freed: *usize,
+
+        fn closeTab(self: @This(), window: *Window, tab: *Tab) void {
+            _ = window;
+            _ = tab;
+            self.out.append(testing.allocator, 't') catch unreachable;
         }
-        fn each(out: *std.ArrayList(u8), e: Entry, windows_pass: bool) !void {
-            switch (e.kind) {
-                .close_tab => if (!windows_pass) try out.append(testing.allocator, 't'),
-                .close_window => if (windows_pass) try out.append(testing.allocator, 'w'),
-                .group => for (e.group) |m| try each(out, m, windows_pass),
-                else => {},
-            }
+        fn closeWindow(self: @This(), window: *Window) void {
+            _ = window;
+            self.out.append(testing.allocator, 'w') catch unreachable;
+        }
+        fn freeGroup(self: @This(), group: []Entry) void {
+            _ = group;
+            self.freed.* += 1;
         }
     };
+    var closed: std.ArrayList(u8) = .empty;
+    defer closed.deinit(testing.allocator);
+    var freed: usize = 0;
     var members = [_]Entry{
         .{ .kind = .close_tab, .expires_ms = 1, .window = fakeWindow(1), .tab = fakeTab(1) },
         .{ .kind = .close_tab, .expires_ms = 1, .window = fakeWindow(1), .tab = fakeTab(2) },
     };
-    try Rec.run(&closed, &.{
+    closeAllWith(Rec{ .out = &closed, .freed = &freed }, &.{
         .{ .kind = .close_window, .expires_ms = 1, .window = fakeWindow(1) },
         .{ .kind = .group, .expires_ms = 1, .group = &members },
     });
     try testing.expectEqualStrings("ttw", closed.items);
+    try testing.expectEqual(@as(usize, 1), freed);
+}
+
+test "win32 undo: a tmux or exited-child close is never undoable" {
+    const base: SurfaceClose = .{ .split = false, .child_exited = false, .final = false, .window_parked = false };
+    try testing.expect(surfaceCloseUndoable(base));
+    var c = base;
+    c.final = true; // tmux kill-pane
+    try testing.expect(!surfaceCloseUndoable(c));
+    c = base;
+    c.child_exited = true;
+    try testing.expect(!surfaceCloseUndoable(c));
+    c = base;
+    c.split = true;
+    try testing.expect(!surfaceCloseUndoable(c));
+    c = base;
+    c.window_parked = true;
+    try testing.expect(!surfaceCloseUndoable(c));
+}
+
+test "win32 undo: sweeps reach parked tabs" {
+    var w: Window = undefined;
+    w.tabs = .empty;
+    w.parked_tabs = .empty;
+    defer w.tabs.deinit(testing.allocator);
+    defer w.parked_tabs.deinit(testing.allocator);
+    try w.tabs.append(testing.allocator, fakeTab(1));
+    try w.parked_tabs.append(testing.allocator, fakeTab(2));
+    var it = w.allTabs();
+    try testing.expectEqual(fakeTab(1), it.next().?);
+    try testing.expectEqual(fakeTab(2), it.next().?);
+    try testing.expect(it.next() == null);
+}
+
+test "win32 undo: a process that cannot be reached again parks nothing" {
+    // closingQuits/endsOnLastWindow follow lastWindowAction.
+    try testing.expect(App.lastWindowAction(false, null, false) == .quit_now);
+    try testing.expect(App.lastWindowAction(false, null, true) == .stay);
+    try testing.expect(App.lastWindowAction(true, null, true) != .stay);
 }
 
 test "win32 undo: forgetting a window drops its entries and group members" {

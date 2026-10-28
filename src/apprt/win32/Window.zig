@@ -612,16 +612,17 @@ fn parkedIndex(self: *const Window, tab: *const Tab) ?usize {
 }
 
 /// Bring a parked tab back at `index` and select it.
-pub fn unparkTab(self: *Window, tab: *Tab, index: usize) void {
-    const at = self.parkedIndex(tab) orelse return;
+pub fn unparkTab(self: *Window, tab: *Tab, index: usize) bool {
+    const at = self.parkedIndex(tab) orelse return false;
     self.tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1) catch |err| {
         log.warn("unable to restore a tab err={}", .{err});
-        return;
+        return false;
     };
     _ = self.parked_tabs.orderedRemove(at);
     tab.unpark();
+    // Selects it; the keyboard focus follows with `activate`.
     self.insertTab(tab, index);
-    self.selectTab(self.tabIndex(tab) orelse return);
+    return true;
 }
 
 /// A parked tab closes for real (expiry, quit, its shell exited).
@@ -655,20 +656,17 @@ pub fn park(self: *Window) void {
         tab.parkSurfaces();
         tab.setVisible(false);
     }
+    // Owned popups (palette, search, badges) are not hidden with the owner.
+    overlay_mod.windowParkChanged(self);
 }
 
 /// Show a parked window again (`App.unparkWindow` listed it).
 pub fn unpark(self: *Window) void {
     self.parked = false;
+    overlay_mod.windowParkChanged(self);
     theme.applyToWindow(self);
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_SHOW);
     self.selectTabFocus(self.active_tab, false);
-}
-
-/// Close tabs the user asked to close: parked when undo is on, else closed.
-/// `targets` never covers every tab of the window.
-fn closeTabsUndoable(self: *Window, targets: []const *Tab) bool {
-    return undo_actions.closeTabs(self, targets);
 }
 
 /// Take a tab out of the window without destroying it (it goes to another
@@ -1338,7 +1336,12 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
     }
     // A surface the user closes is undoable as a tab (or window); one whose
     // child exited is not. Splits are Task 15b.
-    if (!surface.tab.tree.isSplit() and !surface.core_surface.child_exited and !self.parked) {
+    if (undo_actions.surfaceCloseUndoable(.{
+        .split = surface.tab.tree.isSplit(),
+        .child_exited = surface.core_surface.child_exited,
+        .final = surface.final_close,
+        .window_parked = self.parked,
+    })) {
         const tab = surface.tab;
         const ok = if (self.tabs.items.len == 1)
             undo_actions.closeWindow(self)
@@ -1394,7 +1397,7 @@ fn handleCloseTab(self: *Window, mode: CloseTabMode, anchor_id: u32) void {
             const handled = if (targets.items.len == self.tabs.items.len)
                 undo_actions.closeWindow(self)
             else
-                self.closeTabsUndoable(targets.items);
+                undo_actions.closeTabs(self, targets.items);
             if (handled) return;
         }
     }

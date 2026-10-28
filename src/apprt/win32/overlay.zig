@@ -267,7 +267,7 @@ fn reposition(p: *Popup) void {
 /// what the window and tab allow.
 fn apply(p: *Popup) void {
     const hwnd = p.hwnd orelse return;
-    const hidden = p.tab_hidden or user32.IsIconic(p.window.hwnd) != 0;
+    const hidden = p.tab_hidden or p.window.parked or user32.IsIconic(p.window.hwnd) != 0;
     if (!p.visible or hidden) {
         if (user32.IsWindowVisible(hwnd) != 0) _ = user32.ShowWindow(hwnd, user32.SW_HIDE);
         return;
@@ -515,6 +515,11 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         },
         else => return null,
     }
+}
+
+/// The window was parked or brought back: its popups follow.
+pub fn windowParkChanged(window: *Window) void {
+    for (window.overlays.popups.items) |p| apply(p);
 }
 
 pub fn windowChanged(window: *Window, change: hooks.WindowChange) void {

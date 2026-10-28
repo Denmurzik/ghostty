@@ -160,8 +160,10 @@ fn refreshTabWith(tab: *Tab, config: *const configpkg.Config) void {
 }
 
 pub fn configChanged(app: *App, config: *const configpkg.Config) void {
-    for (app.windows.items) |window| {
-        for (window.tabs.items) |tab| refreshTabWith(tab, config);
+    var windows = app.forEachWindow(true);
+    while (windows.next()) |window| {
+        var tabs = window.allTabs();
+        while (tabs.next()) |tab| refreshTabWith(tab, config);
     }
 }
 

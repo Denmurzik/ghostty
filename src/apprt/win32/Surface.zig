@@ -108,6 +108,10 @@ shell_kind: drop.ShellKind,
 /// Set once `core_surface` is initialized and cleared before it is torn
 /// down. Window messages arriving outside that span never reach core.
 initialized: bool,
+
+/// The close that is posted for this surface is final: set by the tmux
+/// shim for a pane it killed, so that the close-undo does not park it.
+final_close: bool = false,
 id: u32,
 /// The tmux pane number (`%N`): the next number of the app's counter (like tmux,
 /// never derived from `id`) unless `CreateOptions.pane_id` says otherwise (a respawn).

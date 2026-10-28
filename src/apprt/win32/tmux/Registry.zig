@@ -578,7 +578,10 @@ pub fn run(app: *App, req: protocol.Request, arena: Allocator) Reply {
     capOptions(&app.tmux.options, app.core_app.alloc);
 
     if (host.deferred_close) |id| {
-        if (surfaceOf(app, id)) |s| s.close(false);
+        if (surfaceOf(app, id)) |s| {
+            s.final_close = true;
+            s.close(false);
+        }
     }
     return .{
         .code = if (out.code == 0) .ok else .failed,

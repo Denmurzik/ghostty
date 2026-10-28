@@ -455,12 +455,22 @@ pub fn unregisterWindow(self: *App, window: *Window) bool {
 /// Whether closing `window` ends the session (`quit-after-last-window-closed`
 /// with no other window open): such a close is not undoable.
 pub fn closingQuits(self: *App, window: *Window) bool {
-    if (!self.config.@"quit-after-last-window-closed") return false;
     for (self.windows.items) |w| {
         if (w == window) continue;
         if (w.kind == .normal or self.quick.shown) return false;
     }
-    return true;
+    return self.endsOnLastWindow();
+}
+
+/// Whether the app ends when its last window goes (the rule of
+/// `lastWindowCheck`): a process that cannot be reached again, or one with
+/// `quit-after-last-window-closed`. Nothing is parked then.
+pub fn endsOnLastWindow(self: *App) bool {
+    return lastWindowAction(
+        self.config.@"quit-after-last-window-closed",
+        quitDelayMs(&self.config),
+        self.serving() and self.tray.hwnd != null,
+    ) != .stay;
 }
 
 /// Hide `window` for the close-undo: it leaves `windows` (tray, hotkeys,
@@ -475,18 +485,19 @@ pub fn parkWindow(self: *App, window: *Window) bool {
 }
 
 /// Bring a parked window back.
-pub fn unparkWindow(self: *App, window: *Window) void {
+pub fn unparkWindow(self: *App, window: *Window) bool {
     for (self.parked_windows.items, 0..) |w, i| {
         if (w != window) continue;
         self.windows.ensureUnusedCapacity(self.core_app.alloc, 1) catch |err| {
             log.warn("unable to restore a window err={}", .{err});
-            return;
+            return false;
         };
         _ = self.parked_windows.orderedRemove(i);
         self.windows.appendAssumeCapacity(window);
         window.unpark();
-        return;
+        return true;
     }
+    return false;
 }
 
 /// A parked window closes for real.
@@ -501,6 +512,8 @@ pub fn windowDestroyed(self: *App, window: *Window) void {
     for (self.parked_windows.items, 0..) |w, i| {
         if (w != window) continue;
         _ = self.parked_windows.orderedRemove(i);
+        // Nothing can be left behind invisible: the rule runs as for any window.
+        self.lastWindowCheck();
         return;
     }
     _ = self.unregisterWindow(window);
