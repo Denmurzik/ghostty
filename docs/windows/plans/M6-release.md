@@ -209,8 +209,7 @@ Over budget: DONE_WITH_CONCERNS with numbers. If the `-Dstrip=false` build does 
      - owner checklist (the real installer).
 2. **Install, upgrade or uninstall while Ghostty runs.** Cases: a window with shells; tray only; a Claude Code team using `tmux.exe` from the install dir.
    - Expected:
-     - the Restart Manager page lists Ghostty, and "close automatically" ends it through `WM_QUERYENDSESSION`/`WM_ENDSESSION`;
-     - if the user declines, `PrepareToInstall` stops Setup cleanly while the `GhosttyTray` window exists, so Setup never offers Ignore on a locked exe;
+     - Setup asks to close Ghostty (Retry/Cancel) while the `GhosttyTray` window exists — `PrepareToInstall` runs before the Restart Manager step (Inno 6.7 help; Task 5 review I1), so the Restart Manager page is not where Ghostty is closed; Retry after closing continues, Cancel stops Setup cleanly, a silent install fails with that message, and Setup never offers Ignore on a locked exe;
      - uninstall asks to close Ghostty before `[UninstallRun]` runs (R-M6-4);
      - an upgrade keeps the Explorer verbs and the remembered tasks, and removes themes and shell-integration files the new version no longer ships.
    - Known limit: a second Ghostty process without a pipe (`windows-single-instance = false`) has no tray window; only Restart Manager sees it.
@@ -330,7 +329,7 @@ The owner's M6 decisions (binding, not re-asked):
     - Unticking it on an upgrade does not remove existing verbs; the uninstaller does.
   - **Running Ghostty** (pre-flight I5). The tray window class `GhosttyTray` is defined once as `#define TrayClass`; `package.ps1` checks it against `src/apprt/win32/tray.zig` as it does for the AUMID.
     - `CloseApplications=yes`, `RestartApplications=no`.
-    - `PrepareToInstall`: if `FindWindowByClassName('{#TrayClass}')` still finds a window after the Restart Manager step, return `Ghostty is still running. Close it (including the tray icon) and run Setup again.` Setup stops cleanly; it never reaches a per-file Ignore.
+    - `PrepareToInstall` (runs before the Restart Manager step): while `FindWindowByClassName('{#TrayClass}')` finds a window, ask Retry/Cancel (`Ghostty is running. Close all Ghostty windows (and the tray icon), then click Retry.`); Cancel or a silent install returns that text and Setup stops cleanly; it never reaches a per-file Ignore. (Amended after Task 5 review I1.)
     - `InitializeUninstall`: while that window exists, show `Close Ghostty (including the tray icon) to continue.` with Retry/Cancel. Cancel aborts before `[UninstallRun]` runs.
   - **Uninstall.**
     - `[UninstallRun]` always runs `{app}\ghostty.exe +uninstall-explorer-integration --all --only-this-exe` (hidden, waits, `RunOnceId: "ExplorerRevert"`), whether or not the task was ticked. `--all` also removes the AUMID key and toast icon the app creates at runtime (SPEC §13). `--only-this-exe` (R-M6-5) keeps a portable copy's verbs.
