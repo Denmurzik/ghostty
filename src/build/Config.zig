@@ -61,15 +61,15 @@ emit_lib_vt: bool = false,
 emit_macos_app: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
-
-/// Path to the `tic` binary used to compile terminfo for Windows targets.
-/// Null means: look it up on PATH, then in Git for Windows.
-tic: ?[]const u8 = null,
 emit_test_exe: bool = false,
 emit_themes: bool = false,
 emit_xcframework: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
+
+/// Path to the `tic` binary used to compile terminfo for Windows targets.
+/// Null means: look it up on PATH, then in Git for Windows.
+tic: ?[]const u8 = null,
 
 /// Feature gates for libghostty-vt artifacts (-Dvt-features). The full
 /// Ghostty application ignores this and always enables everything.
