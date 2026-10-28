@@ -306,7 +306,7 @@ The owner's M6 decisions (binding, not re-asked):
     - `share/ghostty/themes` (non-empty) and `share/ghostty/shell-integration`;
     - `share/terminfo/ghostty.terminfo` (the resources sentinel of `resourcesdir.zig`);
     - `share/terminfo/78/xterm-ghostty` (compiled, R-M5-7). Only a non-release local run may waive it with `-AllowNoTic`; `release.ps1` never does.
-  - **Release build flags:** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dversion-string=<v> -Dconpty-dir=<the arch's dir>`, with `-Dtarget=x86_64-windows-msvc` or `-Dtarget=aarch64-windows-gnu` (`msvc` optional, R-M6-11), `-j4`, and `ZIG_GLOBAL_CACHE_DIR` set (privacy).
+  - **Release build flags:** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dversion-string=<v> -Dconpty-dir=<the ConPTY root that holds x64 and arm64>`, with `-Dtarget=x86_64-windows-msvc` or `-Dtarget=aarch64-windows-gnu` (`msvc` optional, R-M6-11), `-j4`, and `ZIG_GLOBAL_CACHE_DIR` set (privacy).
   - **Why `-Dstrip=false`:** it yields the PDBs for the M5 crash dumps, shipped only in `-symbols.zip`. Its runtime effect is frame pointers; unwind tables are kept anyway since `7f5ff2096`. Its build cost is measured in G1 (pre-flight I8).
   - Cost if wrong (G1 or the Task 11 RAM/latency rows): the default strip, and no symbols.
 - **R-M6-4 Installer** (`dist/windows/installer/ghostty.iss`).
@@ -443,7 +443,7 @@ The owner's M6 decisions (binding, not re-asked):
   - **What ships.** `conpty.dll` and `OpenConsole.exe` from NuGet `Microsoft.Windows.Console.ConPTY` **1.25.260930003** (MIT, signed by Microsoft), next to `ghostty.exe`, per arch.
   - **Install.** They are installed and uninstalled like the other files; the stage is the installer's source.
   - **Source.**
-    - `release.ps1 -ConptyPackage <nupkg or extracted dir>` (required) gives each build `-Dconpty-dir=<arch dir>`. A `.nupkg` is extracted (it is a zip) into `<OutDir>\conpty\`.
+    - `release.ps1 -ConptyPackage <nupkg or extracted dir>` (required) gives each build `-Dconpty-dir=<root holding x64 and arm64>`. A `.nupkg` is extracted (it is a zip) into `<OutDir>\conpty\`.
     - No network: the owner downloads the package once (RELEASING step 1).
     - `package.ps1` copies both files from `<Prefix>\bin`.
   - **Integrity.**
@@ -471,7 +471,7 @@ The owner's M6 decisions (binding, not re-asked):
 | W5 | 11 release candidate, v1.0 acceptance, owner sign-off (lead + owner) | 10 |
 
 **G1 (lead batch):**
-1. `RFS -Dversion-string=<zon>-win.0 -Dconpty-dir=<x64 dir>` with a sampler running alongside. The sampler records, every second, the summed working set of `zig.exe`, `clang*.exe` and `lld*.exe` (`Get-Process`), and the lowest `FreePhysicalMemory`. Record the peak and the size of `zig-out\rfs\bin\ghostty.pdb` (pre-flight I8). Over what the machine can give → take R-M6-3's fallback before W3.
+1. `RFS -Dversion-string=<zon>-win.0 -Dconpty-dir=<conpty root, holds x64>` with a sampler running alongside. The sampler records, every second, the summed working set of `zig.exe`, `clang*.exe` and `lld*.exe` (`Get-Process`), and the lowest `FreePhysicalMemory`. Record the peak and the size of `zig-out\rfs\bin\ghostty.pdb` (pre-flight I8). Over what the machine can give → take R-M6-3's fallback before W3.
 2. `PS dist/windows/package.ps1 -Prefix zig-out\rfs -Version <zon>-win.0 -Arch x64 -OutDir zig-out\g1 -Symbols -Installer`. The privacy check runs on a real `-Dstrip=false` PDB.
 3. `GHOSTTY_E2E_PACKAGE=<that zip>` `E2E -Only explorer-cli,package-portable,dpi-sim`. A SKIP of a scenario whose input the lead provided counts as FAIL (pre-flight MINOR 21).
 4. The test setup via `package.ps1 -FromZip … -Installer -Test`, then `GHOSTTY_E2E_SETUP=<…-setup-test.exe>` `E2E -Only installer-test` once Task 7 has landed (else in G2).
@@ -823,7 +823,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
      - with `-Arm64Abi msvc` only: the VS ARM64 component;
      - free memory ≥ the gate (G1's number, a constant in the script with the G1 date in a comment).
   2. **Unit tests:** the three groups of R-M6-6, then `test-tmux-shim`, each `zig build test -j6 --summary all …` through the lock, with a 1500 s timeout and the RAM gate before it. The pass/skip/fail counts are parsed from the `--summary all` lines and written to `tests.txt`.
-  3. **Build x64:** `zig build -j4` with the R-M6-3 flags, `--prefix <OutDir>\prefix-x64`, `-Dconpty-dir=<the package's x64 dir>`.
+  3. **Build x64:** `zig build -j4` with the R-M6-3 flags, `--prefix <OutDir>\prefix-x64`, `-Dconpty-dir=<the package root, which holds x64 and arm64>`.
   4. **Build arm64:** the same with `aarch64-windows-<abi>`, `--prefix <OutDir>\prefix-arm64` and the arm64 dir. With `-Arm64TestExe`, then the ARM64 test exe of R-M6-6, zipped as `ghostty-<v>-windows-arm64-tests.zip`, which is not in `SHA256SUMS.txt` or `publish.txt`.
   5. **Package:** `package.ps1 -Prefix … -Installer -Symbols [-SignCommand …]` per arch, into `<OutDir>`.
   6. **Check:** `<OutDir>\prefix-x64\bin\ghostty.exe +version` prints the version.

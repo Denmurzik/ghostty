@@ -191,8 +191,10 @@ function Invoke-ReleaseSelfTest {
     if (Test-CachedRun $fresh) { $fail += 'fresh text taken as cached' }
     if ($null -ne (Get-TestCounts $cached)) { $fail += 'cached text has counts' }
     if (-not (Test-CachedRun $cached)) { $fail += 'cached text not detected' }
+    $ba = Get-BuildArgs 'x86_64-windows-msvc' 'P' 'B'
+    if ($ba -notcontains "-Dconpty-dir=B") { $fail += "conpty-dir is not the root passed in" }
     if ($fail.Count -gt 0) { Write-Host ('release self-test FAIL: ' + ($fail -join '; ')); return $false }
-    Write-Host 'release self-test: 4 checks passed'
+    Write-Host 'release self-test: 5 checks passed'
     return $true
 }
 
@@ -237,6 +239,7 @@ function Show-ZigCommand([string[]]$zigArgs, [int]$timeoutSec) {
     Write-Host ('  $ ' + (Format-Cmd $c.Exe $c.Args))
 }
 
+# -Dconpty-dir is the root that holds <arch>\<file> (what Initialize-Conpty lays out), not an arch folder.
 function Get-BuildArgs([string]$target, [string]$prefix, [string]$conptyDir) {
     return @('build', '-j4', '-Doptimize=ReleaseFast', '-Demit-themes=true', '-Demit-terminfo=true', '-Dstrip=false',
         "-Dtic=$tic", "-Dversion-string=$verStr", "-Dconpty-dir=$conptyDir", "-Dtarget=$target", '--prefix', $prefix)
@@ -609,7 +612,7 @@ try {
 
     # ---- step 3: build x64 --------------------------------------------------
     Start-Step 3
-    $ba = Get-BuildArgs 'x86_64-windows-msvc' $prefX64 (Join-Path $conptyBase 'x64')
+    $ba = Get-BuildArgs 'x86_64-windows-msvc' $prefX64 $conptyBase
     if ($DryRun) { Show-ZigCommand $ba 3000 } else {
         $r = Invoke-Zig 'build x64' $ba 3000
         if ($r.Code -ne 0) { throw "x64 build failed (exit $($r.Code)); see release.log" }
@@ -620,7 +623,7 @@ try {
 
     # ---- step 4: build arm64 ------------------------------------------------
     Start-Step 4
-    $ba = Get-BuildArgs $armTarget $prefArm (Join-Path $conptyBase 'arm64')
+    $ba = Get-BuildArgs $armTarget $prefArm $conptyBase
     $noPdb = $false
     if ($DryRun) { Show-ZigCommand $ba 3000 } else {
         $r = Invoke-Zig 'build arm64' $ba 3000
