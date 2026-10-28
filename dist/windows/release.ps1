@@ -5,7 +5,7 @@
 #               [-OutDir <dir>] [-Force] [-SignCommand '<cmd with {file}>']
 #               [-Arm64Abi gnu|msvc] [-Arm64TestExe] [-Arm64Result <text>]
 #               [-SkipTests] [-DryRun] [-Zig <path>] [-Lock <path>]
-#               [-MinFreeGB <n>]
+#               [-MinFreeGB <n>] [-Jobs <n>]
 #
 # Steps (each prints "== n/9 name", appends to <OutDir>\release.log, and the
 # first failure stops the run naming the step):
@@ -36,7 +36,11 @@ param(
     # Free physical memory required before each heavy step. G1 measured a
     # 4.9 GB peak for the -Dstrip=false x64 build (-j4); 7 GB is that peak
     # plus 2 GB, rounded up.
-    [double]$MinFreeGB = 7
+    [double]$MinFreeGB = 7,
+    # Parallel jobs for every zig build and test step. 2 keeps the test
+    # groups (which link several test exes) inside 16 GB machines; the
+    # first rehearsal with -j6 ran out of memory.
+    [ValidateRange(1, 64)][int]$Jobs = 2
 )
 
 Set-StrictMode -Version Latest
@@ -241,7 +245,7 @@ function Show-ZigCommand([string[]]$zigArgs, [int]$timeoutSec) {
 
 # -Dconpty-dir is the root that holds <arch>\<file> (what Initialize-Conpty lays out), not an arch folder.
 function Get-BuildArgs([string]$target, [string]$prefix, [string]$conptyDir) {
-    return @('build', '-j4', '-Doptimize=ReleaseFast', '-Demit-themes=true', '-Demit-terminfo=true', '-Dstrip=false',
+    return @('build', "-j$Jobs", '-Doptimize=ReleaseFast', '-Demit-themes=true', '-Demit-terminfo=true', '-Dstrip=false',
         "-Dtic=$tic", "-Dversion-string=$verStr", "-Dconpty-dir=$conptyDir", "-Dtarget=$target", '--prefix', $prefix)
 }
 
@@ -572,7 +576,7 @@ try {
         if (-not $DryRun) { [IO.File]::WriteAllText((Join-Path $OutDir 'tests.txt'), "tests: skipped (-SkipTests, rehearsal)`r`n") }
     } else {
         foreach ($g in $groups) {
-            $za = @('build', $g.Step, '-j6', '--summary', 'all') + $g.Filters
+            $za = @('build', $g.Step, "-j$Jobs", '--summary', 'all') + $g.Filters
             if ($DryRun) { Show-ZigCommand $za 1500; continue }
             Write-Host "  $($g.Id): $($g.Label)"
             $r = Invoke-Zig "tests $($g.Id)" $za 1500
@@ -642,7 +646,7 @@ try {
     }
     $armTestZip = "ghostty-$verStr-windows-arm64-tests.zip"
     if ($Arm64TestExe) {
-        $ta = @('build', 'test', '-j4', '-Demit-test-exe', "-Dtarget=$armTarget") + $testFiltersG1 + $testFiltersG2 + @('--prefix', $prefArmTests)
+        $ta = @('build', 'test', "-j$Jobs", '-Demit-test-exe', "-Dtarget=$armTarget") + $testFiltersG1 + $testFiltersG2 + @('--prefix', $prefArmTests)
         if ($DryRun) {
             Show-ZigCommand $ta 3000
             Write-Host "  zip $prefArmTests\bin -> $(Join-Path $OutDir $armTestZip) (local only, not in SHA256SUMS.txt or publish.txt)"
