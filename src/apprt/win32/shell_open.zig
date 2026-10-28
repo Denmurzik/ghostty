@@ -90,7 +90,10 @@ const dangerous_extensions = [_][]const u8{
     ".py",              ".pyw",                ".pyz",               ".pyzw",       ".sh",         ".bash",
     ".rb",              ".pl",                 ".jnlp",              ".rdp",        ".wsb",        ".appinstaller",
     ".ms-appinstaller", ".mht",                ".mhtml",             ".vb",         ".ws",         ".shb",
-    ".shs",             ".hlp",                ".cer",               ".crt",        ".ppkg",
+    ".shs",             ".hlp",                ".cer",               ".crt",        ".ppkg",       ".pfx",
+    ".p12",             ".p7b",                ".p7c",               ".der",        ".sst",        ".stl",
+    ".psc1",            ".iqy",                ".slk",               ".xla",        ".xlam",       ".msu",
+    ".one",             ".onepkg",             ".vsto",              ".xbap",
 };
 
 pub fn isDangerousExtension(ext: []const u8) bool {
@@ -142,13 +145,26 @@ pub fn validate(alloc: Allocator, kind: apprt.action.OpenUrl.Kind, url: []const 
         }
         if (std.ascii.eqlIgnoreCase(scheme, "file")) return fileVerdict(alloc, rest, env);
         // Known exploit vectors: no question is worth asking.
-        if (std.ascii.eqlIgnoreCase(scheme, "ms-msdt") or std.ascii.eqlIgnoreCase(scheme, "search-ms")) {
+        if (isExploitScheme(scheme)) {
             return .{ .refuse = "scheme is an exploit vector" };
         }
         return .{ .confirm = try alloc.dupe(u8, url) };
     };
 
     return pathVerdict(alloc, url, env);
+}
+
+/// Schemes whose handlers are known exploit vectors.
+const exploit_schemes = [_][]const u8{
+    "ms-msdt",         "search-ms", "search", "ms-officecmd", "ms-cxh", "ms-cxh-full",
+    "ms-appinstaller", "mk",        "its",    "ms-its",
+};
+
+fn isExploitScheme(scheme: []const u8) bool {
+    for (exploit_schemes) |d| {
+        if (std.ascii.eqlIgnoreCase(scheme, d)) return true;
+    }
+    return false;
 }
 
 /// Control characters (C0, DEL and C1), quotes and bidi controls.
@@ -324,7 +340,17 @@ fn judge(alloc: Allocator, a: Allocator, path_in: []const u8, env: Env, resolve:
         const wide_ext = toWide(a, ext) orelse return .{ .refuse = "path is not valid text" };
         dangerous = env.is_dangerous(wide_ext);
     }
-    if (dangerous) return .{ .reveal = try alloc.dupe(u8, path) };
+    if (dangerous) {
+        // Revealing a link makes the shell touch its target: judge where it
+        // really points (a symlink to a share), as for a file that is opened.
+        if (resolve) if (toWide(a, path)) |wide_path| if (env.exists(wide_path)) {
+            if (env.final_path(a, wide_path)) |wide_final| {
+                const final = std.unicode.utf16LeToUtf8Alloc(a, wide_final) catch return .{ .refuse = "path is not valid text" };
+                if (!std.ascii.eqlIgnoreCase(final, path)) return judge(alloc, a, final, env, false);
+            } else |_| {}
+        };
+        return .{ .reveal = try alloc.dupe(u8, path) };
+    }
 
     const wide_path = toWide(a, path) orelse return .{ .refuse = "path is not valid text" };
     if (!env.exists(wide_path)) return .{ .refuse = "path does not exist" };
@@ -616,7 +642,9 @@ pub fn submit(app: *App, surface_id: u32, kind: apprt.action.OpenUrl.Kind, url: 
     const pwd: ?[]u8 = if (surface) |s| if (s.getPwd()) |p| alloc.dupe(u8, p) catch null else null else null;
     const job: Job = .{
         .alloc = alloc,
-        .window = if (surface) |s| s.window.hwnd else null,
+        // The message window outlives every top-level window and is drained
+        // at `appStopping`; the surface is looked up again when it arrives.
+        .window = if (surface != null) app.msg_hwnd else null,
         .surface_id = surface_id,
         .kind = kind,
         .url = copy,
@@ -640,6 +668,9 @@ fn enqueue(state: *State, job: Job) void {
     };
 }
 
+/// How long quitting waits for a link that is being handed to the shell.
+const worker_wait_ms = 2000;
+
 /// Stops the worker; called at the start of `App.terminate`.
 pub fn appStopping(app: *App) void {
     const state = &app.shell_open;
@@ -649,11 +680,22 @@ pub fn appStopping(app: *App) void {
     state.cond.broadcast(io);
     state.mutex.unlock(io);
     state.clear();
-    if (state.thread) |t| t.join();
+    if (state.thread) |t| {
+        // The worker may be inside `ShellExecuteEx` or a slow handler: wait
+        // a little, then leave it (the process is about to end).
+        if (win32.kernel32.WaitForSingleObjectEx(t.getHandle(), worker_wait_ms, 0) == win32.kernel32.WAIT_OBJECT_0) {
+            t.join();
+        } else {
+            log.warn("the link worker is busy, not waiting for it", .{});
+            t.detach();
+        }
+    }
     state.thread = null;
 }
 
 fn run(state: *State) void {
+    // An empty removable drive fails the check instead of raising a dialog.
+    _ = win32.kernel32.SetThreadErrorMode(win32.kernel32.SEM_FAILCRITICALERRORS, null);
     _ = win32.ole32.CoInitializeEx(null, win32.ole32.COINIT_APARTMENTTHREADED);
     defer win32.ole32.CoUninitialize();
 
@@ -1145,4 +1187,23 @@ pub fn fillQueueForTest(state: *State, alloc: Allocator) !void {
 
 pub fn clearForTest(state: *State) void {
     state.clear();
+}
+
+test "win32 shell_open: revealing a program that is a link to a share is refused" {
+    fake.exists_result = true;
+    try check(.osc8, "C:\\x\\remote-link.exe", .refuse, null);
+    // A program that is not a link is still revealed, a missing one too.
+    try check(.osc8, "C:\\x\\tool.exe", .reveal, "C:\\x\\tool.exe");
+    fake.exists_result = false;
+    try check(.osc8, "C:\\x\\remote-link.exe", .reveal, "C:\\x\\remote-link.exe");
+    fake.exists_result = true;
+}
+
+test "win32 shell_open: more exploit schemes and certificate or macro extensions" {
+    for ([_][]const u8{ "search:query=x", "ms-officecmd:x", "ms-cxh:x", "ms-cxh-full:x", "ms-appinstaller:?source=x", "mk:@MSITStore:x", "its:x", "ms-its:x" }) |url| {
+        try check(.osc8, url, .refuse, null);
+    }
+    for ([_][]const u8{ ".pfx", ".p12", ".p7b", ".der", ".iqy", ".slk", ".xlam", ".msu", ".one", ".vsto", ".xbap" }) |ext| {
+        try std.testing.expect(isDangerousExtension(ext));
+    }
 }

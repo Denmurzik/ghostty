@@ -248,7 +248,7 @@ function Test-PasteDialog([string]$Theme, [bool]$Keys) {
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+v'
         $dlg = Get-DialogFor $g 'multi-line paste'
         $title = [GhosttyE2e.Win]::TextOf($dlg)
-        $btns = Assert-Dialog $g $dlg 'paste' $Theme @('&Allow', 'Cancel') $title
+        $btns = Assert-Dialog $g $dlg 'paste' $Theme @('Allow', 'Cancel') $title
         $body = [GhosttyE2e.DlgWin]::Text([GhosttyE2e.Win]::GetDlgItem($dlg, 900))
         if ($body -notmatch 'echo a') { throw "paste: the text is not in the dialog: '$body'" }
         # Newlines show as symbols, not as line breaks of the pasted text.
@@ -258,8 +258,14 @@ function Test-PasteDialog([string]$Theme, [bool]$Keys) {
         if ($Keys) {
             Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+v'
             $dlg = Get-DialogFor $g 'second paste'
+            # Allow has no mnemonic (a user who keeps typing must not accept it):
+            # Alt+A does nothing, Left then Enter presses it.
             Send-DlgAlt $dlg 'A'
-            Wait-DlgGone $dlg 'Alt+A (Allow)'
+            Start-Sleep -Milliseconds 300
+            if (-not [GhosttyE2e.Win]::IsWindow($dlg)) { throw 'paste: Alt+A pressed a button that has no mnemonic' }
+            Send-DlgKey $dlg $script:VK_LEFT
+            Send-DlgKey $dlg $script:VK_RETURN
+            Wait-DlgGone $dlg 'Left, Enter (Allow)'
         }
     } finally {
         Restore-ClipboardText $saved
@@ -289,7 +295,7 @@ function Test-UrlDialog([string]$Theme) {
     if (-not $dlg) { throw 'no URL confirmation dialog for the ms-settings: link' }
     $title = [GhosttyE2e.Win]::TextOf($dlg)
     if ($title -ne 'Open Link') { throw "url: window text is '$title'" }
-    [void](Assert-Dialog $g $dlg 'url' $Theme @('&Allow', 'Cancel') 'Open Link')
+    [void](Assert-Dialog $g $dlg 'url' $Theme @('Allow', 'Cancel') 'Open Link')
     $body = [GhosttyE2e.DlgWin]::Text([GhosttyE2e.Win]::GetDlgItem($dlg, 900))
     if ($body -notmatch 'ms-settings:') { throw "url: the link is not in the dialog: '$body'" }
     Send-DlgKey $dlg $script:VK_ESCAPE

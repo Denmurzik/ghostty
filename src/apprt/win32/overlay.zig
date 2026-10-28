@@ -566,6 +566,8 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
         reown(p, to) catch |err| {
             log.warn("unable to move an overlay to its new window err={}", .{err});
             p.destroy();
+            // The popup is reusable: it must not keep pointing at `from`.
+            p.window = to;
         };
     }
 }

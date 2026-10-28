@@ -108,6 +108,9 @@ tab_anim: tab_anim_mod.State = .{},
 tab_anim_dpi: u32 = 0,
 /// The text of the title row: what the caption shows.
 chrome_title: ?[:0]u8 = null,
+/// The title debounce timer is running: a stream of titles must not keep
+/// re-arming it (a fixed window refreshes at least every `debounce_ms`).
+title_timer_armed: bool = false,
 /// The folder icon of the title row (`proxy_icon.zig`).
 proxy: proxy_icon.State = .{},
 frame: frame_mod.State = .{},
@@ -827,13 +830,17 @@ pub fn refreshTitle(self: *Window) void {
 /// the title twice in a row does not flicker.
 pub fn surfaceTitleChanged(self: *Window, surface: *Surface) void {
     _ = surface;
+    if (self.title_timer_armed) return;
     if (win32.user32.SetTimer(self.hwnd, messages.timers.window.title_debounce, title_rules.debounce_ms, null) == 0) {
         self.titleDebounced();
+    } else {
+        self.title_timer_armed = true;
     }
 }
 
 /// `WM_TIMER` of `surfaceTitleChanged`: show the titles as they are now.
 fn titleDebounced(self: *Window) void {
+    self.title_timer_armed = false;
     _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.title_debounce);
     self.refreshTitle();
 }

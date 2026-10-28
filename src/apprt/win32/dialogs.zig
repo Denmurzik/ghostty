@@ -22,7 +22,9 @@ const dtext = @import("dialog/text.zig");
 const IDYES = 6;
 const MB_DEFBUTTON2 = 0x00000100;
 
-/// Id of the affirmative custom button ("&Close", "&Allow").
+/// Id of the affirmative custom button ("&Close", "Allow"). "Allow" has no
+/// mnemonic: the question appears asynchronously, and a user who keeps
+/// typing must not accept it by accident.
 const button_accept = 100;
 
 /// Id of the cancelling button, and the answer of Esc and the close button.
@@ -83,6 +85,11 @@ fn closeBody(kind: CloseKind) []const u8 {
     };
 }
 
+const confirm_buttons = [_]ListButton{
+    .{ .id = button_accept, .text = "Allow" },
+    .{ .id = button_cancel, .text = "Cancel" },
+};
+
 /// Show a question on top of `owner`. True for "Allow". "Cancel" is the
 /// default button: every question asked here is about something that is
 /// hard to undo. The text is shown in full (it scrolls when it is long);
@@ -93,11 +100,7 @@ pub fn confirm(
     title: []const u8,
     body: []const u8,
 ) bool {
-    const buttons = [_]ListButton{
-        .{ .id = button_accept, .text = "&Allow" },
-        .{ .id = button_cancel, .text = "Cancel" },
-    };
-    const answer = show(owner, title, title, body, "", &buttons, button_cancel) orelse
+    const answer = show(owner, title, title, body, "", &confirm_buttons, button_cancel) orelse
         return fallbackBox(owner, title, body);
     return answer == button_accept;
 }
@@ -321,4 +324,10 @@ test "win32 comdlg32: OPENFILENAMEW size" {
     try std.testing.expectEqual(152, @sizeOf(win32.comdlg32.OPENFILENAMEW));
     try std.testing.expectEqual(96, @offsetOf(win32.comdlg32.OPENFILENAMEW, "Flags"));
     try std.testing.expectEqual(148, @offsetOf(win32.comdlg32.OPENFILENAMEW, "FlagsEx"));
+}
+
+test "win32 dialogs: the link confirmation has no mnemonic on Allow" {
+    for (confirm_buttons) |b| {
+        try std.testing.expect(std.mem.indexOfScalar(u8, b.text, '&') == null);
+    }
 }

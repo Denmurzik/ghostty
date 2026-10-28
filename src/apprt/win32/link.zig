@@ -65,6 +65,16 @@ pub fn discard(lparam: win32.foundation.LPARAM) void {
     payload.destroy();
 }
 
+/// The same, posted to the message window by the link worker: the surface
+/// may have moved to another window since, so look for it everywhere.
+pub fn postedApp(app: *App, lparam: win32.foundation.LPARAM) void {
+    const payload: *shell_open.ConfirmPayload = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    for (app.windows.items) |w| {
+        if (w.findSurface(payload.surface_id) != null) return postedDialog(w, lparam);
+    }
+    discard(lparam);
+}
+
 /// `WM_GHOSTTY_POSTED_DIALOG` of kind `url_confirm`: the worker met a link
 /// that needs the user's consent.
 pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {

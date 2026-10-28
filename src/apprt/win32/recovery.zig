@@ -258,13 +258,10 @@ fn sweep(app: *App, now_ms: u64) void {
     }
 }
 
-/// Whether the config of the surface names custom shaders. Read under the
-/// draw mutex, the render thread writes the renderer state.
+/// Whether the surface renders with custom shaders. An atomic read: the
+/// draw mutex is not taken, render threads may be inside a reset frame.
 fn customShadersConfigured(s: *Surface) bool {
-    const r = &s.core_surface.renderer;
-    r.draw_mutex.lockUncancelable(global.io());
-    defer r.draw_mutex.unlock(global.io());
-    return r.has_custom_shaders;
+    return @atomicLoad(bool, &s.core_surface.renderer.has_custom_shaders, .monotonic);
 }
 
 fn isLost(s: *Surface) bool {

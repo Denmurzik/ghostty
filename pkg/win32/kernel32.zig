@@ -170,6 +170,11 @@ pub const FILE_NAME_NORMALIZED = 0x0;
 
 /// `INVALID_FILE_ATTRIBUTES` when the path does not exist.
 pub extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(.winapi) u32;
+pub const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+pub const SEM_FAILCRITICALERRORS = 0x0001;
+/// Per thread: with `SEM_FAILCRITICALERRORS` an empty drive fails instead of
+/// raising the system "No disk" dialog.
+pub extern "kernel32" fn SetThreadErrorMode(mode: u32, old: ?*u32) callconv(.winapi) i32;
 /// `DRIVE_*` of the root (`C:\`).
 pub extern "kernel32" fn GetDriveTypeW(root: [*:0]const u16) callconv(.winapi) u32;
 /// Returns the length without the NUL; with a too small buffer the length needed, with the NUL.

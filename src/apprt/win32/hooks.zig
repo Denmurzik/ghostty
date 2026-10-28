@@ -110,9 +110,11 @@ pub fn appMessage(app: *App, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESULT 
         },
         messages.WM_GHOSTTY_POSTED_DIALOG => {
             // Posted before any window existed (start-up config errors).
-            if (std.enums.fromInt(DialogKind, wparam) == .config_errors) {
-                config_errors.postedApp(app, lparam);
-            } else discardDialog(wparam, lparam);
+            switch (std.enums.fromInt(DialogKind, wparam) orelse .export_io) {
+                .config_errors => config_errors.postedApp(app, lparam),
+                .url_confirm => link.postedApp(app, lparam),
+                .export_io => discardDialog(wparam, lparam),
+            }
             return 0;
         },
         else => return null,

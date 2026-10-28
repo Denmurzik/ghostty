@@ -131,7 +131,7 @@ fn safeSegment(seg: []const u8) bool {
 
 /// CON, PRN, AUX, NUL, CONIN$, CONOUT$, CLOCK$, COM1-9, LPT1-9 and the
 /// superscript forms COM¹-³, LPT¹-³, with or without an extension.
-fn isDeviceName(seg: []const u8) bool {
+pub fn isDeviceName(seg: []const u8) bool {
     const dot = std.mem.indexOfScalar(u8, seg, '.') orelse seg.len;
     const stem = std.mem.trimEnd(u8, seg[0..dot], " ");
     var buf: [8]u8 = undefined;

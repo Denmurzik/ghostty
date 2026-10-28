@@ -109,6 +109,17 @@
 - FreeType `Face.name`: UTF-16 family names are converted (Windows `+list-fonts`).
 - `src/font/*`, `pkg/spirv-cross`, `pkg/dcimgui`: Windows-gated additions (DirectWrite discovery, HLSL backend, imgui
   Win32/DX11 backends).
+- `src/termio/Exec.zig` (Windows arms): the resize prime (Task 26.4); `PWD` is no longer exported to children; a
+  `ReadFile` that completes synchronously takes its byte count from `GetOverlappedResult`.
+- `src/termio/stream_handler.zig`: OSC 7 on Windows is translated through `pwd_path`, and a non-local path resets the
+  pwd. The `resetPwd` refactor touches every platform.
+- `src/os/hostname.zig`: NetBIOS and DNS names are accepted, compared case-insensitively. `src/os/pwd_path.zig` is new.
+- `src/renderer/Thread.zig`: `recoverDevice` runs on every render callback, and animation `.draw` ticks call
+  `waitFrameSlot`; both are no-ops off D3D11. `generic.zig` also stores `has_custom_shaders` atomically.
+- `src/config/Config.zig`: `background-blur` defaults to `true` on Windows, and `shell-integration` gains `pwsh` and
+  `cmd` (comptime-gated).
+- `src/font/face/freetype.zig`: names on the Unicode platform (`TT_PLATFORM_APPLE_UNICODE`) are decoded as UTF-16BE.
+  This changes behaviour on every platform and is an upstream candidate.
 
 ### Known limitations
 
@@ -128,8 +139,10 @@
   0 of 36 (window, split, tab) after; cmd.exe and pwsh unchanged. Under heavy load (one run lost 2 of 36) the
   window now starts at conhost's first output after the resize (cap 2 s): 36/36 under 12 CPU-burner threads. Root cause in MSYS2/conhost not proven; an msys2-runtime report is
   a follow-up.
-- Over the RAM budget (owner to decide, see `docs/windows/m3/acceptance.md`): custom shader (+1.3 MB at the default
-  size), overlays (+1.1 MB), inspector memory after close (+1.6 MB), quick terminal (+10.1 MB first toggle).
+- Over or at the RAM budget (owner to decide, see `docs/windows/m3/acceptance.md`): custom shader (+1.3 MB at the
+  default size), quick terminal (+10.1 MB first toggle). After Task 26.5 the inspector after close is borderline (about
+  +1.9 MB mean over the pre-open value, 2 of 5 samples over +2) and the overlays pass when the shared text state is
+  warm (+0.4 MB); the first paint of a cold window still costs about +2 MB.
 - The latency gates are relative (+0.5 ms): the absolute 6 ms Ghostty-owned p95 is not reached while the machine has
   10 % background CPU, see the acceptance record.
 - Ligatures, the Kitty keyboard protocol end to end, `open_config`, IME composition and the real toast have no

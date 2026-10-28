@@ -70,7 +70,7 @@ pub const timers = struct {
     pub const surface = struct {
         /// Applies the coalesced size of a live resize to core.
         pub const resize: usize = 1;
-        /// Expiry of the bell border (`decor.zig`).
+        /// Reserved (nothing arms it: the bell border clears on key and focus, `decor.zig`).
         pub const decor: usize = 2;
         /// End of the wait for a first title; the ghost shows after it.
         pub const title_grace: usize = 3;

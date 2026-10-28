@@ -948,7 +948,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.shaders = shaders;
             // A backend may skip a shader it cannot compile; without any
             // post pipeline the frame must go straight to the target.
-            self.has_custom_shaders = has_custom_shaders and shaders.post_pipelines.len > 0;
+            // Atomic: the Windows apprt reads it from the UI thread without the draw mutex.
+            @atomicStore(bool, &self.has_custom_shaders, has_custom_shaders and shaders.post_pipelines.len > 0, .monotonic);
         }
 
         /// Callback called by renderer.Thread when it begins.

@@ -1571,16 +1571,17 @@ pub const StreamHandler = struct {
         const is_windows = comptime builtin.target.os.tag == .windows;
         const host = if (is_windows and (uri.host == null or uri.host.?.isEmpty()))
             std.Io.net.HostName{ .bytes = "localhost" }
-        else std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
-            error.UriMissingHost => {
-                log.warn("OSC 7 uri must contain a hostname: {}", .{err});
-                return;
-            },
-            error.NameTooLong, error.InvalidHostName => {
-                log.warn("OSC 7 uri contains an invalid hostname: {}", .{err});
-                return;
-            },
-        };
+        else
+            std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
+                error.UriMissingHost => {
+                    log.warn("OSC 7 uri must contain a hostname: {}", .{err});
+                    return;
+                },
+                error.NameTooLong, error.InvalidHostName => {
+                    log.warn("OSC 7 uri contains an invalid hostname: {}", .{err});
+                    return;
+                },
+            };
 
         // OSC 7 is a little sketchy because anyone can send any value from
         // any host (such an SSH session). The best practice terminals follow

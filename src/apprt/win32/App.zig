@@ -128,6 +128,10 @@ const QuitGate = struct {
 pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     _ = opts;
 
+    // An empty drive (a card reader) makes a path check fail instead of
+    // raising the system "No disk" dialog on this thread.
+    _ = win32.kernel32.SetThreadErrorMode(win32.kernel32.SEM_FAILCRITICALERRORS, null);
+
     // Before anything can spawn a child process.
     ipc.ops.cacheTestOps(core_app.alloc);
 

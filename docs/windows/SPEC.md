@@ -620,7 +620,7 @@ removed (macOS has none); the native always-visible scrollbar stays an interim, 
 look polish is an M3 task; full recovery after a GPU device loss is M3 (§18.19); the Git Bash cwd inheritance waits for M5 OSC 7 translation; tab
 context menu and tab tooltips are M3; the +80 MB after a 16-pane open/close cycle is accepted as pre-existing and flagged for M3 RAM work.
 
-**M3 (done, accepted with concerns: `docs/windows/m3/acceptance.md`; commit `docs(windows): M3 acceptance — RAM, latency, screenshots, feature checklist`) — feature parity.**
+**M3 (done, accepted with concerns: `docs/windows/m3/acceptance.md`; acceptance commit `docs(windows): M3 acceptance — RAM, latency, screenshots, feature checklist`; final review `docs/windows/m3/final-review.md`; closing commit: TBD-by-lead) — feature parity.**
 Quick terminal (`RegisterHotKey`, slide, owned tool window), global keybinds, command palette, search bar,
 notifications (WinRT toasts, AUMID self-registered under HKCU, R-M3-5), URL hover/open with untrusted-URL validation
 (R-M3-8), inspector (imgui win32 + dx11), config-errors dialog, export-terminal-io save dialog, custom shaders (GLSL to
@@ -631,8 +631,8 @@ tab context menu and tooltip, text drops, overlay scrollbar, the owner's macOS-s
 row, proxy icon), OSC 7 path translation (pulled forward from M5), vt-smoke screenshots and the feature checklist
 (`docs/windows/feature-checklist.md`). Exit: the checklist is closed except the recorded gaps (Kitty graphics and SGR 58
 underline colour: the inbox ConPTY drops them, §18.33; ligatures, Kitty keyboard end to end, IME: owner checks); RAM and
-latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the numbers over budget and the open
-Git Bash input-loss item are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
+latency rows in `docs/windows/ram-baseline.csv` / `latency-baseline.csv`; the numbers over budget and the Git
+Bash input-loss workaround (Task 26.4) are listed in the acceptance record and the changelog for the owner. Plan: `docs/windows/plans/M3-feature-parity.md`.
 
 **M4 — tmux shim + IPC + Claude Code e2e.** `tmux.exe`, IPC server, registry, all §12 semantics, DCS tmux unwrap,
 `SplitTree.replace`, PATH prepend + TMUX/TMUX_PANE in every surface. Exit: replay test green; real Claude Code agent-team

@@ -96,7 +96,7 @@ pub const Face = struct {
             return err;
         };
         face.handle.*.generic = .{
-            .data = @constCast(@ptrCast(mapped.view)),
+            .data = @ptrCast(@constCast(mapped.view)),
             .finalizer = unmapFinalizer,
         };
         errdefer face.deinit();
@@ -205,7 +205,8 @@ pub const Face = struct {
                 // but this is one we've seen "in the wild" so far.
                 // Both the Microsoft Unicode and the Unicode platform store UTF-16BE.
                 if ((entry.platform_id == freetype.c.TT_PLATFORM_MICROSOFT and entry.encoding_id == freetype.c.TT_MS_ID_UNICODE_CS) or
-                    entry.platform_id == freetype.c.TT_PLATFORM_APPLE_UNICODE) skip: {
+                    entry.platform_id == freetype.c.TT_PLATFORM_APPLE_UNICODE)
+                skip: {
                     if (string.len % 2 != 0) break :skip;
                     if (string.len > 1024) break :skip;
                     if (string.len / 2 * 3 > buf.len) break :skip;

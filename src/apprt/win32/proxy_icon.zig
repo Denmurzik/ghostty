@@ -32,8 +32,9 @@ const HRESULT = win32.foundation.HRESULT;
 
 const log = std.log.scoped(.win32_proxy_icon);
 
-/// `GetDriveTypeW` results that are local to the machine.
-const drive_removable = 2;
+/// `GetDriveTypeW` result of a disk that is always there. Removable drives
+/// are skipped: an empty card reader would raise the "No disk" dialog or
+/// stall the UI thread.
 const drive_fixed = 3;
 
 /// Longest directory the icon is made for.
@@ -140,7 +141,21 @@ fn widePath(alloc: Allocator, path: []const u8) ?[:0]u16 {
 fn onLocalDrive(wide: []const u16) bool {
     const root = [4:0]u16{ wide[0], ':', '\\', 0 };
     const kind = kernel32.GetDriveTypeW(&root);
-    return kind == drive_fixed or kind == drive_removable;
+    return kind == drive_fixed;
+}
+
+/// True when `wide` or one of its parent folders is a link, junction or
+/// mount point: the shell would follow it, maybe to a share.
+fn throughReparsePoint(alloc: Allocator, wide: []const u16) bool {
+    var end: usize = 3;
+    while (end <= wide.len) : (end += 1) {
+        if (end != wide.len and wide[end] != '\\') continue;
+        const prefix = alloc.dupeSentinel(u16, wide[0..end], 0) catch return true;
+        defer alloc.free(prefix);
+        const attrs = kernel32.GetFileAttributesW(prefix.ptr);
+        if (attrs != kernel32.INVALID_FILE_ATTRIBUTES and attrs & kernel32.FILE_ATTRIBUTE_REPARSE_POINT != 0) return true;
+    }
+    return false;
 }
 
 /// The shell's icon of the folder at `path`, `px` square, as a bitmap with
@@ -150,6 +165,7 @@ fn folderIcon(alloc: Allocator, path: []const u8, px: i32) ?gdi32.HBITMAP {
     const wide = widePath(alloc, path) orelse return null;
     defer alloc.free(wide);
     if (wide.len < 3 or !onLocalDrive(wide)) return null;
+    if (throughReparsePoint(alloc, wide)) return null;
 
     var out: ?*anyopaque = null;
     const hr = shell32.SHCreateItemFromParsingName(wide.ptr, null, &shell32.IID_IShellItemImageFactory, &out);

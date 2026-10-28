@@ -2,6 +2,7 @@
 //! from terminal output, which any program controls.
 const std = @import("std");
 const apprt = @import("../../apprt.zig");
+const internal_os = @import("../../os/main.zig");
 
 pub const max_len = 2048;
 
@@ -92,21 +93,22 @@ pub fn hasBidiControl(path: []const u8) bool {
     return std.mem.indexOf(u8, path, "\xd8\x9c") != null or std.mem.indexOf(u8, path, "\xc2\x85") != null;
 }
 
-/// CON, PRN, AUX, NUL, CONIN$, CONOUT$, CLOCK$, COM1-9, LPT1-9 with any extension.
-pub fn isDeviceName(part: []const u8) bool {
-    const dot = std.mem.indexOfScalar(u8, part, '.') orelse part.len;
-    const stem = std.mem.trimEnd(u8, part[0..dot], " ");
-    const names = [_][]const u8{ "con", "prn", "aux", "nul", "conin$", "conout$", "clock$" };
-    for (names) |n| if (std.ascii.eqlIgnoreCase(stem, n)) return true;
-    if (stem.len == 4 and stem[3] >= '1' and stem[3] <= '9') {
-        if (std.ascii.eqlIgnoreCase(stem[0..3], "com") or std.ascii.eqlIgnoreCase(stem[0..3], "lpt")) return true;
-    }
-    return false;
-}
+/// A reserved device name (`CON`, `COM1`, `LPT¹`, ...) with any extension;
+/// one definition for the links and the OSC 7 paths.
+pub const isDeviceName = internal_os.pwd_path.isDeviceName;
 
 test "win32 link policy: only terminal-controlled kinds are checked" {
     try std.testing.expect(isTrusted(.text));
     try std.testing.expect(isTrusted(.html));
     try std.testing.expect(!isTrusted(.unknown));
     try std.testing.expect(!isTrusted(.osc8));
+}
+
+test "win32 link policy: device names include the superscript forms" {
+    try std.testing.expect(isDeviceName("COM1"));
+    try std.testing.expect(isDeviceName("lpt9.txt"));
+    try std.testing.expect(isDeviceName("COM\u{b9}"));
+    try std.testing.expect(isDeviceName("LPT\u{b2}.log"));
+    try std.testing.expect(!isDeviceName("COM10"));
+    try std.testing.expect(!isDeviceName("comet"));
 }

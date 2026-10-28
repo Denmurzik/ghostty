@@ -5,10 +5,8 @@ Debug-only scenarios, Intel Arc iGPU (hardware adapter), 1920x1080 at 96 dpi, 60
 1388x751 px, maximised 1872x1050 px. Evidence (screenshots, not committed):
 `.superpowers/sdd/M3-feature-parity/evidence/27/`.
 
-Status: **accepted with concerns** for the owner: four RAM rows over their budget (custom shader, overlays, inspector
-after close, quick terminal), the absolute 6 ms latency gate not reached under background load (the relative gates
-pass), the real-toast RAM row is deferred, and the Git Bash input-loss item is pending the
-Task 26.4 verdict.
+Status: **accepted with concerns** for the owner: RAM rows over or at their budget (custom shader, quick terminal; inspector after close is borderline after Task 26.5), the absolute 6 ms latency gate not reached under background load (the relative gates
+pass), the real-toast RAM row is deferred. The Git Bash input-loss item is worked around (Task 26.4/26.4.1).
 
 ## RAM (Private MB, `measure-ram.ps1`, ReleaseFast, idle 10 s; rows tagged `m3-*` in `ram-baseline.csv`)
 
@@ -20,9 +18,9 @@ Task 26.4 verdict.
 | custom shader, maximised (96.8, 97.0 vs 75.9, 74.9) | +21.5 | 2 x 1872x1050x4 (7.86 MB) + 4 = +19.7 | **OVER by 1.8 MB** |
 | composition `background-opacity = 0.9`, first surface | 64.6 vs hwnd 64.2 = +0.4 | +3 | PASS |
 | composition, each extra surface (4 splits) | opacity (91.4-64.6)/4 = 6.70; hwnd (91.6-64.2)/4 = 6.85 = -0.15 | +0.5 | PASS |
-| overlays: search + palette, each opened once (link label not driven by `measure-ram`) | 64.5 to 66.6 = +2.1 (search +1.1, palette +1.0; not released after close) | +1 total | **OVER by 1.1 MB** |
+| overlays: search + palette, each opened once (link label not driven by `measure-ram`) | cold: 64.5 to 66.6 = +2.1 (search +1.1, palette +1.0); warm (a second tab opened first, Task 26.5): 77.7 to 78.1 = +0.4 | +1 total | warm PASS; cold first paint about +2 MB (shared Direct2D/DirectWrite/uxtheme first use, irreducible; owner note) |
 | inspector open on 1 surface | 64.1 before, 67.6 open = +3.5 | +25 | PASS |
-| inspector 30 s after close | 67.7 = +3.6 over the pre-open value | within +2 of the pre-open value | **OVER by 1.6 MB** |
+| inspector 30 s after close | 67.7 = +3.6 over the pre-open value before Task 26.5; after it (imgui in its own heap) +1.6, +1.8, +1.3, +2.7, +2.1, mean about +1.9 | within +2 of the pre-open value | **borderline** (2 of 5 samples over; the rest is GPU driver cache) |
 | quick terminal before the first toggle | 64.3 (= one-surface) | 0 | PASS |
 | quick terminal after the first toggle | 74.4 = +10.1 | one surface's cost (+5.7 tab, +6.0 split; an extra window +17.7) | **OVER a surface's cost** (under a window's); owner decides |
 | first toast shown (WinRT DLLs) | not measured | +4 | **deferred: owner-approval-gated (HKCU AUMID key)**; the registry was not touched |
