@@ -140,6 +140,8 @@ pub const Command = struct {
     flags: std.StaticBitSet(128),
     values: [128]?[]const u8,
     positional: []const []const u8,
+    /// Every `-e VAR=val` in order (`values['e']` is only the last one).
+    env_values: []const []const u8 = &.{},
 
     pub fn has(self: *const Command, f: u8) bool {
         return f < 128 and self.flags.isSet(f);
@@ -286,7 +288,7 @@ fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
     return error.Usage;
 }
 
-fn parseOne(argv: []const []const u8, diag: *Diag) error{Usage}!Command {
+fn parseOne(arena: Allocator, argv: []const []const u8, diag: *Diag) error{ Usage, OutOfMemory }!Command {
     const id = try resolve(argv[0], diag);
     const cmd_name = commandName(id);
     const tmpl = template(id);
@@ -296,6 +298,7 @@ fn parseOne(argv: []const []const u8, diag: *Diag) error{Usage}!Command {
         .values = @splat(null),
         .positional = &.{},
     };
+    var env_values: std.ArrayList([]const u8) = .empty;
     var i: usize = 1;
     while (i < argv.len) {
         const arg = argv[i];
@@ -321,11 +324,13 @@ fn parseOne(argv: []const []const u8, diag: *Diag) error{Usage}!Command {
                     diag.print("command {s}: -{c} expects an argument", .{ cmd_name, c });
                     return error.Usage;
                 }
+                if (c == 'e') try env_values.append(arena, cmd.values[c].?);
                 break;
             }
         }
     }
     cmd.positional = argv[i..];
+    cmd.env_values = env_values.items;
     return cmd;
 }
 
@@ -341,7 +346,7 @@ pub fn parseCommands(
     var i: usize = 0;
     while (i <= argv.len) : (i += 1) {
         if (i < argv.len and !std.mem.eql(u8, argv[i], ";")) continue;
-        if (i > start) try out.append(arena, try parseOne(argv[start..i], diag));
+        if (i > start) try out.append(arena, try parseOne(arena, argv[start..i], diag));
         start = i + 1;
     }
     if (out.items.len == 0) {
@@ -535,4 +540,17 @@ test "tmux shim cli: unsupported real commands, -h and templates" {
     try std.testing.expect((try parseCommands(a, &.{ "capture-pane", "-M" }, &d))[0].has('M'));
     try expectUsage(&.{ "list-windows", "-r" }, "command list-windows: unknown flag -r");
     try expectUsage(&.{ "list-panes", "-O", "x" }, "command list-panes: unknown flag -O");
+}
+
+test "tmux shim cli: repeated -e accumulates" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var d: Diag = .{};
+    const cmds = try parseCommands(arena_state.allocator(), &.{ "split-window", "-e", "A=1", "-eB=2", "-h", "--", "cat" }, &d);
+    try std.testing.expectEqual(@as(usize, 2), cmds[0].env_values.len);
+    try std.testing.expectEqualStrings("A=1", cmds[0].env_values[0]);
+    try std.testing.expectEqualStrings("B=2", cmds[0].env_values[1]);
+    try std.testing.expectEqualStrings("B=2", cmds[0].value('e').?);
+    const none = try parseCommands(arena_state.allocator(), &.{ "split-window", "-h" }, &d);
+    try std.testing.expectEqual(@as(usize, 0), none[0].env_values.len);
 }

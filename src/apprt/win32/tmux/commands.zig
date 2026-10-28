@@ -32,7 +32,7 @@ pub const Spawn = struct {
     command: ?[]const u8,
     cwd: []const u8,
     client_env: []const []const u8,
-    /// -e (one entry: the shim parser keeps only the last -e).
+    /// Every -e VAR=val, in order.
     extra_env: []const []const u8,
     /// -c
     start_dir: ?[]const u8,
@@ -426,10 +426,7 @@ fn Env(comptime Host: type) type {
         }
 
         fn spawnOf(self: Self, cmd: *const cli.Command) Allocator.Error!Spawn {
-            const extra: []const []const u8 = if (cmd.value('e')) |e|
-                try self.arena.dupe([]const u8, &.{e})
-            else
-                &.{};
+            const extra = cmd.env_values;
             return .{
                 .command = try self.joinCommand(cmd),
                 .cwd = self.ctx.cwd,

@@ -77,7 +77,7 @@ fn build(alloc: Allocator, kind: Kind, args: []const []const u8) !Resolved {
     return .{ .kind = kind, .argv = argv };
 }
 
-fn findGitBash(
+pub fn findGitBash(
     alloc: Allocator,
     env: *const std.process.Environ.Map,
     probe: Probe,

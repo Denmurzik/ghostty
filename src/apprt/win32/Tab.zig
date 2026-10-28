@@ -23,6 +23,8 @@ const theme = @import("theme.zig");
 const composition = @import("composition.zig");
 const messages = @import("messages.zig");
 const taskbar = @import("taskbar.zig");
+const tmux_spawn = @import("tmux/spawn.zig");
+const renderer = @import("../../renderer.zig");
 
 const log = std.log.scoped(.win32_tab);
 
@@ -45,6 +47,11 @@ tree: Surface.Tree,
 /// reference for which leaves changed visibility. Pointers in it are only
 /// compared, never dereferenced.
 split_layout: ?SplitLayout.Layout(Surface.Tree) = null,
+
+/// The content rectangle of the last layout that had room. While the window
+/// is minimized nothing is laid out and `split_layout` is gone; `leafRects`
+/// computes the pane rectangles from this.
+last_content: geom.Rect = .{},
 
 /// The surface that has (or last had) keyboard focus. Not a reference: it
 /// is only trusted while it is still in `tree` (see `focusedSurface`).
@@ -296,6 +303,8 @@ pub fn layout(self: *Tab) void {
         win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
     );
 
+    self.last_content = .{ .w = rect.w, .h = rect.h };
+
     if (self.tree.isEmpty()) return;
     const new = Layout.compute(
         alloc,
@@ -397,12 +406,77 @@ pub fn handleOf(self: *const Tab, s: *const Surface) ?Surface.Tree.Node.Handle {
     return self.tree.locate(s);
 }
 
+pub const SplitOptions = struct {
+    /// The share of the existing pane.
+    ratio: f16 = 0.5,
+    /// Whether the new pane takes the focus.
+    focus: bool = true,
+    /// The tmux pane number of the new surface; null: its own id.
+    pane_id: ?u32 = null,
+    /// A tmux pane: command, directory and environment.
+    tmux: ?*const tmux_spawn.Plan = null,
+};
+
+/// The pure part of `leafRects`: the cached layout copied, else a fresh one
+/// over `content`.
+fn leafRectsOf(
+    comptime Tree: type,
+    alloc: Allocator,
+    tree: *const Tree,
+    cached: ?SplitLayout.Layout(Tree),
+    content: geom.Rect,
+    gap: i32,
+) Allocator.Error!SplitLayout.Layout(Tree) {
+    const L = SplitLayout.Layout(Tree);
+    if (cached) |c| {
+        const leaves = try alloc.dupe(L.Leaf, c.leaves);
+        errdefer alloc.free(leaves);
+        return .{ .leaves = leaves, .dividers = try alloc.dupe(L.Divider, c.dividers) };
+    }
+    return L.compute(alloc, tree, .{ .w = content.w, .h = content.h }, gap);
+}
+
+/// The pane rectangles: the applied layout, or (a minimized window has none)
+/// one computed over the last content rectangle. Never null; the caller owns
+/// the result (`deinit` with the app allocator).
+pub fn leafRects(self: *Tab, alloc: Allocator) Allocator.Error!Layout {
+    return leafRectsOf(
+        Surface.Tree,
+        alloc,
+        &self.tree,
+        self.split_layout,
+        self.last_content,
+        SplitLayout.gapPx(self.window.dpi),
+    );
+}
+
+/// Sizes `s` from `leafRects` when the window is minimized: nothing was laid
+/// out, and the surface would otherwise start at the stale full-tab size.
+fn sizeFromLeafRects(self: *Tab, s: *Surface) void {
+    if (win32.user32.IsIconic(self.window.hwnd) == 0) return;
+    const alloc = self.window.app.core_app.alloc;
+    var rects = self.leafRects(alloc) catch return;
+    defer rects.deinit(alloc);
+    const leaf = rects.leafFor(s) orelse return;
+    if (leaf.rect.w <= 0 or leaf.rect.h <= 0) return;
+    s.size.store(renderer.D3D11.packSize(@intCast(leaf.rect.w), @intCast(leaf.rect.h)), .release);
+}
+
 /// Split the pane `at`: the new surface (inheriting from it) takes the
 /// other half and gets the focus.
 pub fn split(
     self: *Tab,
     at: *Surface,
     direction: Surface.Tree.Split.Direction,
+) SplitError!*Surface {
+    return self.splitWith(at, direction, .{});
+}
+
+pub fn splitWith(
+    self: *Tab,
+    at: *Surface,
+    direction: Surface.Tree.Split.Direction,
+    opts: SplitOptions,
 ) SplitError!*Surface {
     const alloc = self.window.app.core_app.alloc;
     const handle = self.handleOf(at) orelse return error.SurfaceNotInTab;
@@ -412,6 +486,8 @@ pub fn split(
     const surface = Surface.create(self, .{
         .parent = &at.core_surface,
         .context = .split,
+        .pane_id = opts.pane_id,
+        .tmux = opts.tmux,
     }) catch |err| {
         log.warn("unable to create a split surface err={}", .{err});
         return error.CreateFailed;
@@ -423,13 +499,53 @@ pub fn split(
     // Drops the creator's reference; the new tree holds its own.
     defer single.deinit();
 
-    const new_tree = try self.tree.split(alloc, handle, direction, 0.5, &single);
+    const new_tree = try self.tree.split(alloc, handle, direction, opts.ratio, &single);
     self.replaceTree(new_tree);
+    self.sizeFromLeafRects(surface);
     surface.applySize(surface.size.load(.acquire));
 
-    self.focused = surface;
+    if (opts.focus) self.focused = surface;
     hooks_mod.tabLayoutChanged(self);
-    if (self.window.activeTab() == self) self.focus();
+    if (opts.focus and self.window.activeTab() == self) self.focus();
+    return surface;
+}
+
+/// Puts a new surface (same pane number, same place) where `old` is and
+/// releases `old`, whose pseudo console closes. The focus moves along.
+pub fn replaceSurface(
+    self: *Tab,
+    old: *Surface,
+    plan: *const tmux_spawn.Plan,
+) SplitError!*Surface {
+    const alloc = self.window.app.core_app.alloc;
+    const handle = self.handleOf(old) orelse return error.SurfaceNotInTab;
+
+    const surface = Surface.create(self, .{
+        .parent = &old.core_surface,
+        .context = .split,
+        .pane_id = old.pane_id,
+        .tmux = plan,
+    }) catch |err| {
+        log.warn("unable to create the replacement surface err={}", .{err});
+        return error.CreateFailed;
+    };
+    // The new tree references the new surface itself.
+    const new_tree = self.tree.replace(alloc, handle, surface) catch |err| {
+        surface.destroy();
+        return err;
+    };
+
+    const was_focused = self.focused == old;
+    title_edit.cancelForSurface(self.window, old);
+    // Hidden first: the old surface's threads take a moment to join.
+    _ = win32.user32.ShowWindow(old.hwnd, win32.user32.SW_HIDE);
+    if (was_focused) self.focused = surface;
+    self.replaceTree(new_tree);
+    self.sizeFromLeafRects(surface);
+    surface.applySize(surface.size.load(.acquire));
+
+    hooks_mod.tabLayoutChanged(self);
+    if (was_focused and self.window.activeTab() == self) self.focus();
     return surface;
 }
 
@@ -882,4 +998,38 @@ test "win32 tab: focus is taken only inside the active top-level" {
     try std.testing.expect(mayTakeFocus(a, a));
     try std.testing.expect(!mayTakeFocus(b, a));
     try std.testing.expect(!mayTakeFocus(null, a));
+}
+
+test "win32 tab: leaf rects while minimized" {
+    const alloc = std.testing.allocator;
+    const TestTree = SplitTree(TestView);
+    const TestLayout = SplitLayout.Layout(TestTree);
+
+    var va: TestView = .{ .label = "A" };
+    var vb: TestView = .{ .label = "B" };
+    var ta: TestTree = try .init(alloc, &va);
+    defer ta.deinit();
+    var tb: TestTree = try .init(alloc, &vb);
+    defer tb.deinit();
+    var tree = try ta.split(alloc, .root, .right, 0.5, &tb);
+    defer tree.deinit();
+
+    const content: geom.Rect = .{ .w = 800, .h = 600 };
+    // No applied layout (minimized): computed over the stored content.
+    var fresh = try leafRectsOf(TestTree, alloc, &tree, null, content, 4);
+    defer fresh.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), fresh.leaves.len);
+    for (fresh.leaves) |l| {
+        try std.testing.expect(l.visible);
+        try std.testing.expect(l.rect.w > 0 and l.rect.h == 600);
+    }
+    try std.testing.expectEqual(@as(i32, 800), fresh.leaves[0].rect.w + 4 + fresh.leaves[1].rect.w);
+
+    // An applied layout is copied, not recomputed.
+    var applied = try TestLayout.compute(alloc, &tree, .{ .w = 400, .h = 300 }, 4);
+    defer applied.deinit(alloc);
+    var copy = try leafRectsOf(TestTree, alloc, &tree, applied, content, 4);
+    defer copy.deinit(alloc);
+    try std.testing.expectEqual(applied.leaves[0].rect.w, copy.leaves[0].rect.w);
+    try std.testing.expect(copy.leaves.ptr != applied.leaves.ptr);
 }

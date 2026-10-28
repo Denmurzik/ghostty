@@ -32,7 +32,8 @@ const dialogs = @import("dialogs.zig");
 const dpi = @import("dpi.zig");
 const drop = @import("drop.zig");
 const hooks_mod = @import("hooks.zig");
-const tmux_env = @import("tmux/env.zig");
+const tmux_env_mod = @import("tmux/env.zig");
+const tmux_spawn = @import("tmux/spawn.zig");
 const ime = @import("ime.zig");
 const key_state_mod = @import("key_state.zig");
 const keyboard = @import("keyboard.zig");
@@ -59,6 +60,15 @@ pub const CreateOptions = struct {
     context: apprt.surface.NewSurfaceContext,
     /// The tmux pane number (`%N`) this surface answers to; null: its `id`.
     pane_id: ?u32 = null,
+    /// A tmux pane: what it runs, where, and the environment it gets.
+    tmux: ?*const tmux_spawn.Plan = null,
+};
+
+/// Owned copy of the environment of a tmux pane, for `defaultTermioEnv`.
+const TmuxEnv = struct {
+    arena: std.heap.ArenaAllocator,
+    client: []const []const u8,
+    extra: []const []const u8,
 };
 
 /// Sent to a child window after its parent's DPI changed (winuser.h).
@@ -103,6 +113,8 @@ id: u32,
 pane_id: u32,
 /// What `defaultTermioEnv` put into TMUX_PANE (test state only).
 env_tmux_pane: ?u32 = null,
+/// Set for a pane created by the tmux shim; freed by `deinit`.
+tmux_env: ?*TmuxEnv = null,
 
 /// Physical client size packed with `renderer.D3D11.packSize`. Written on
 /// the UI thread, read by the renderer thread through the present target.
@@ -175,6 +187,10 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     defer config.deinit();
     try normalizeWorkingDirectory(&config);
     try opts.overrides.apply(&config);
+    if (opts.tmux) |plan| {
+        try applyTmuxPlan(&config, plan);
+        try normalizeWorkingDirectory(&config);
+    }
     if (opts.parent) |parent| {
         if (app.config.@"window-inherit-font-size") {
             config.@"font-size" = parent.font_size.points;
@@ -184,6 +200,8 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     const self = try alloc.create(Surface);
     errdefer alloc.destroy(self);
     const id = next_id.fetchAdd(1, .monotonic);
+    const tmux_env: ?*TmuxEnv = if (opts.tmux) |plan| try cloneTmuxEnv(alloc, plan) else null;
+    errdefer if (tmux_env) |e| freeTmuxEnv(alloc, e);
     self.* = .{
         .hwnd = undefined,
         .window = window,
@@ -195,6 +213,7 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
         .scrollbar = .{ .enabled = config.scrollbar == .system },
         .id = id,
         .pane_id = opts.pane_id orelse id,
+        .tmux_env = tmux_env,
         .size = .init(0),
         .content_scale = dpi.contentScale(window.dpi),
         .title = null,
@@ -333,6 +352,7 @@ pub fn deinit(self: *Surface) void {
     if (self.title) |t| alloc.free(t);
     if (self.title_user) |t| alloc.free(t);
     if (self.pwd) |p| alloc.free(p);
+    if (self.tmux_env) |e| freeTmuxEnv(alloc, e);
     alloc.destroy(self);
 }
 
@@ -377,6 +397,40 @@ pub fn setPwd(self: *Surface, pwd: []const u8) Allocator.Error!void {
 /// `newConfig` inherits the directory the terminal stored: the path core
 /// already translated to a drive path. A configured `working-directory`
 /// that is an MSYS path (`/c/work`) is translated the same way.
+/// The command, directory and `wait-after-command` of a tmux pane. The
+/// strings live in the config's arena.
+fn applyTmuxPlan(config: *configpkg.Config, plan: *const tmux_spawn.Plan) !void {
+    const alloc = config.arenaAlloc();
+    if (plan.argv) |argv| {
+        const copy = try alloc.alloc([:0]const u8, argv.len);
+        for (argv, copy) |a, *c| c.* = try alloc.dupeSentinel(u8, a, 0);
+        config.command = .{ .direct = copy };
+    }
+    if (plan.cwd.len > 0) config.@"working-directory" = .{ .path = try alloc.dupe(u8, plan.cwd) };
+    // R-M4-5: `remain-on-exit` decides in `show_child_exited`.
+    config.@"wait-after-command" = true;
+}
+
+fn cloneTmuxEnv(alloc: Allocator, plan: *const tmux_spawn.Plan) Allocator.Error!*TmuxEnv {
+    const env = try alloc.create(TmuxEnv);
+    errdefer alloc.destroy(env);
+    env.arena = .init(alloc);
+    errdefer env.arena.deinit();
+    const a = env.arena.allocator();
+    const client = try a.alloc([]const u8, plan.client_env.len);
+    for (plan.client_env, client) |s, *c| c.* = try a.dupe(u8, s);
+    const extra = try a.alloc([]const u8, plan.extra_env.len);
+    for (plan.extra_env, extra) |s, *c| c.* = try a.dupe(u8, s);
+    env.client = client;
+    env.extra = extra;
+    return env;
+}
+
+fn freeTmuxEnv(alloc: Allocator, env: *TmuxEnv) void {
+    env.arena.deinit();
+    alloc.destroy(env);
+}
+
 fn normalizeWorkingDirectory(config: *configpkg.Config) !void {
     const wd = config.@"working-directory" orelse return;
     const path = switch (wd) {
@@ -476,12 +530,14 @@ pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
     errdefer map.deinit();
     const enabled = self.app.config.@"windows-tmux-shim";
     const st = &self.app.tmux_server;
-    try tmux_env.apply(&map, .{
+    try tmux_env_mod.apply(&map, .{
         .enabled = enabled,
         .pipe = st.pipe,
         .server_pid = win32.kernel32.GetCurrentProcessId(),
         .pane_id = self.pane_id,
         .exe_dir = st.exe_dir,
+        .client_env = if (self.tmux_env) |e| e.client else &.{},
+        .extra = if (self.tmux_env) |e| e.extra else &.{},
     });
     // Test state only: what this pane was told.
     const mutable: *Surface = @constCast(self);
