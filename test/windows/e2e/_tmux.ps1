@@ -26,7 +26,7 @@ function Get-TmuxPanes($G) {
 # Starts `tmux.exe -S <pipe of $G> <TmuxArgs>` without waiting. $Pane is the
 # TMUX_PANE of the caller ("%N"); $Pipe overrides the pipe of $G (a Ghostty
 # that is gone). $StdinText is sent to stdin (UTF-8, no BOM) when given.
-function Start-TmuxProc($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [string]$Pane = '', [string]$Pipe = '') {
+function Start-TmuxProc($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [string]$Pane = '', [string]$Pipe = '', [hashtable]$Env = @{}) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:TmuxExe
     $psi.UseShellExecute = $false
@@ -45,6 +45,7 @@ function Start-TmuxProc($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [st
         [void]$psi.EnvironmentVariables.Remove($n)
     }
     if ($Pane) { $psi.EnvironmentVariables['TMUX_PANE'] = $Pane }
+    foreach ($k in $Env.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Env[$k] }
     $p = [System.Diagnostics.Process]::Start($psi)
     if ($null -ne $StdinText) {
         $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($StdinText)
@@ -68,8 +69,8 @@ function Wait-TmuxProc($Run, [int]$TimeoutMs = 15000) {
 }
 
 # Runs `tmux.exe -S <pipe of $G> <TmuxArgs>`; returns Code, Stdout, Stderr.
-function Invoke-Tmux($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [int]$TimeoutMs = 15000, [string]$Pane = '', [string]$Pipe = '') {
-    Wait-TmuxProc (Start-TmuxProc $G $TmuxArgs $StdinText $Pane $Pipe) $TimeoutMs
+function Invoke-Tmux($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [int]$TimeoutMs = 15000, [string]$Pane = '', [string]$Pipe = '', [hashtable]$Env = @{}) {
+    Wait-TmuxProc (Start-TmuxProc $G $TmuxArgs $StdinText $Pane $Pipe $Env) $TimeoutMs
 }
 
 # C:\a\b -> /c/a/b, the form Git Bash prints for a Windows path.

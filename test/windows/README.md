@@ -332,6 +332,40 @@ palette, composition, hotkeys, health, opened, inspector, export_io, config_erro
 - RAM rows of the M3 features: `measure-ram.ps1 -Tag m3-<feature> [-ExtraConfig ...] [-Actions ...] [-Sample ...]` (see
   the section below); the acceptance numbers and method are in `docs/windows/m3/acceptance.md`.
 
+## M4 scenarios, the tmux helpers and the real-run driver
+
+`e2e.ps1 -Milestone M4` (orders 700..740), all through the real `tmux.exe` from `zig-out\bin` (or next to
+`GHOSTTY_E2E_EXE`) and the pipe of the scenario's own Ghostty:
+
+- `tmux-cli` (700, no window): `-V`, "no server", 50 x `-V` with `GHOSTTY_TMUX_STATS=1` (own wall p95 and peak
+  private), the import table is exactly a subset of kernel32/ntdll, `GHOSTTY_TMUX_TRACE` lines are whole under 8
+  parallel runs.
+- `tmux-replay` (720): the recorded Claude Code calls (`src/apprt/win32/tmux/testdata/claude-spawn.jsonl`, the live
+  recording; `GHOSTTY_E2E_TMUX_FIXTURE=static` picks `claude-spawn.static.jsonl`, which also carries the expected
+  stdout) with fake teammates, 30 % leader, titles, leader typing (no lost line), a minimized window, `remain-on-exit
+  failed`, `kill-pane` behind the close dialog, 7 parallel kills, `load-buffer -w` (needs a text clipboard: the
+  clipboard steps are skipped when it holds anything else; the owner's clipboard is saved and restored in a
+  `finally`), and nothing left after Ghostty is killed.
+- `tmux-env` (710), `tmux-send-keys` (730, the R-M4-6 gate: 20 rounds of `split-window` + `send-keys`), `tmux-labels` (740).
+- Helpers: `e2e/_tmux.ps1` (`Invoke-Tmux`, `Start-TmuxProc`/`Wait-TmuxProc`, `Get-TmuxPanes`, `ConvertTo-MsysPath`).
+  `Invoke-Tmux` removes `TMUX`, `TMUX_PANE`, `GHOSTTY_TMUX_TRACE` and `GHOSTTY_TMUX_STATS` from the environment it
+  passes, always passes `-S` with the pipe of the scenario's own Ghostty and never puts `tmux.exe` on `PATH`. A pane
+  gets the client's environment (tmux semantics), so name files by their sandbox path, not by `$TEMP`. The pipe
+  adds a 3 byte BOM to a redirected stdin: stay under the 512 KiB cap by a few bytes.
+- `lib/ClaudeRun.psm1` and `claude-team.ps1` (not an e2e scenario): real Claude Code agent-team runs (SPEC 15.6b),
+  `-Runs 2` in a row. Owner safety: the driver starts one Ghostty with the REAL `USERPROFILE`/`HOME` (Claude finds the
+  owner's login), `XDG_CONFIG_HOME`/`APPDATA`/`LOCALAPPDATA` stay sandboxed, credentials are never copied or read,
+  `CLAUDE_*` session variables are removed from the child, the model is `sonnet`, the time box is 10 minutes and the
+  run stops at the first auth error. `Stop-ClaudeRun` deletes only the files this run created under
+  `~/.claude/projects/<key of the work dir>`; the `~/.claude/tasks/<team>` dir and the `~/.claude.json` entry of the
+  work dir are reported as residue (the script removes the former). Pass: 3 panes with the leader at 30 %, titles,
+  teammates' messages in the inbox files, only the leader after `/exit`, no stray processes, trace shapes equal to
+  the fixture. Never run it unattended against a login that must not be used.
+- `measure-tmux.ps1`: RAM and latency rows of the shim (`-Part team-ram|tmux-exe|latency|all`, `-Record` appends to
+  the tracked CSVs; ReleaseFast build). Rows `m4-tmux-*` in `ram-baseline.csv`, `m4-tmux` rows in
+  `latency-baseline.csv`. Latency is `tmux.exe`'s process wall (kernel start to exit) next to the driver's own stopwatch
+  (which includes the PowerShell process spawn); background CPU load matters, it is printed.
+
 ## Latency probes: options
 
 `input-latency.ps1` takes `-ExtraConfig "k = v;k = v"` (config lines appended to

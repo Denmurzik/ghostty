@@ -46,13 +46,20 @@ src/apprt/win32/                 App.zig Window.zig Surface.zig key.zig keyboard
                                  dialogs.zig dpi.zig
                                  M2+: Tab.zig TabStrip.zig SplitLayout.zig Chrome.zig (D2D) theme.zig scrollbar.zig
                                  M3+: QuickTerminal.zig CommandPalette.zig SearchBar.zig notify.zig inspector/
-                                 M4:  tmux/{Server.zig,Registry.zig,commands.zig,layout.zig}
-src/tmux_shim/                   main.zig (tmux.exe), protocol.zig (wire format, shared), cli.zig (tmux argv parser,
-                                 shared), format.zig (#{var} expansion), sh_command.zig (POSIX one-liner parser, R2)
-src/build/GhosttyTmuxShim.zig    builds/installs tmux.exe (M4)
+                                 M4:  tmux/{Server.zig (pipe, routing), env.zig (TMUX/TMUX_PANE/PATH), Registry.zig (real host,
+                                      remain-on-exit), commands.zig (semantics over a duck-typed Host), FakeHost.zig (headless
+                                      host for the replay test), layout.zig (main-vertical, tiled, ratios), spawn.zig (R-M4-5),
+                                      pane_io.zig + keys.zig (send-keys gate, capture-pane), labels.zig (pane border labels)}
+                                      ipc/protocol.zig carries the tmux wire fields (module `ipc_protocol` for tmux.exe)
+src/tmux_shim/                   tmux.exe: main.zig (entry), run.zig (testable logic), pipe.zig (client transport), win.zig
+                                 (own kernel32 externs); cli.zig (tmux argv parser), format.zig (#{var} expansion),
+                                 sh_command.zig (POSIX one-liner parser, R2): the last three are std only and also compiled
+                                 into the main test exe
+src/build/GhosttyTmuxShim.zig    builds/installs tmux.exe next to ghostty.exe, step test-tmux-shim (M4)
 src/os/windows_shell.zig         default shell resolver (Git Bash → pwsh → cmd)
 src/os/windows_console.zig       console attach for CLI actions
-test/windows/                    PowerShell harness: launch.ps1 capture-window.ps1 send-input.ps1 measure-ram.ps1 (+README)
+test/windows/                    PowerShell harness: launch.ps1 capture-window.ps1 send-input.ps1 measure-ram.ps1 measure-tmux.ps1
+                                 claude-team.ps1 (real Claude Code runs, lib/ClaudeRun.psm1) (+README)
 dist/windows/                    ghostty.rc/.manifest/.ico (exist), installer/ghostty.iss (M6), portable layout (M6)
 ```
 
@@ -405,8 +412,14 @@ FreeType + HarfBuzz.
 - `TERM`: Windows default `xterm-256color` (config default changed on Windows only) until the compiled terminfo ships
   (M5); `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`, `TERM_PROGRAM_VERSION`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`
   unchanged from core.
-- PATH: core appends the exe dir today. Windows (M4): **prepend** the exe dir (shim dir = exe dir, DECISIONS) and set
-  `TMUX=\\.\pipe\ghostty-tmux-<pid>,<pid>,0`, `TMUX_PANE=%<n>` per surface (§12). Before M4 PATH behaviour is unchanged.
+- PATH: core appends the exe dir. Windows (M4, `windows-tmux-shim = true`, the default, R-M4-11): the exe dir is **moved
+  to the front** of PATH (shim dir = exe dir, DECISIONS; a login shell such as Git Bash may reorder PATH in its profile: check
+  `command -v tmux`) and every surface gets `TMUX=\\.\pipe\ghostty-tmux-<pid>-<16 hex nonce>,<pid>,0` and `TMUX_PANE=%<n>` (§12).
+  Order: Ghostty's environment, the tmux client's environment (split-window/respawn-pane send theirs; `=C:`-style and
+  non-UTF-8 entries are dropped, `TMUX`, `TMUX_PANE`, `GHOSTTY_SURFACE_ID`, `GHOSTTY_LOG` are never taken from it), then `TMUX`,
+  `TMUX_PANE`, PATH, then the command's own `env K=V`. The nonce is 64 random bits per process, so a stale `TMUX` never
+  meets a later Ghostty with the same pid. With `windows-tmux-shim = false` neither is set or removed (an inherited `TMUX`
+  stays) and PATH is not changed; the key is app-wide and read when a surface starts.
 - Git Bash: `CHERE_INVOKING=1` (§8.3). MSYS-facing path vars use forward slashes from M5.
 
 ## 11. Logging and console (D10)
@@ -427,23 +440,38 @@ FreeType + HarfBuzz.
 ## 12. Built-in tmux shim (M4)
 
 ### 12.1 Processes and transport
-- `tmux.exe` (console subsystem, no SharedDeps, target startup < 50 ms, private bytes < 5 MB). Steps: parse global flags
-  (`-S <path>`, `-L <name>`, `-V`); `-V` → print `tmux 3.5a\n`, exit 0 (no IPC); `load-buffer … -` → read all stdin; resolve
-  the pipe: `-S` value, else first field of `TMUX`, else (external mode) the per-user pipe named by §18.5
-  (`ghostty-<user SID>-<session>-<class>[-admin]`, M5); connect with `WaitNamedPipeW` ≤ 1000 ms; send one request; print `stdout`/`stderr` verbatim (LF only, no BOM);
-  exit with `code`. Connection failure → stderr `no server running on <path>\n`, exit 1.
-- Server (`src/apprt/win32/tmux/Server.zig`): pipe `\\.\pipe\ghostty-tmux-<ghostty pid>`, `PIPE_TYPE_BYTE`,
-  `PIPE_REJECT_REMOTE_CLIENTS`, `PIPE_UNLIMITED_INSTANCES`, DACL `D:P(A;;GA;;;<current user SID>)`. One IPC thread
-  with overlapped accept; each request is posted to the UI thread (`WM_GHOSTTY_IPC`), executed there, and the reply is
-  written back by the IPC thread. Concurrent clients are queued in arrival order (Claude's parallel `kill-pane` at exit).
-- Wire format (`src/tmux_shim/protocol.zig`): frame = `u32` little-endian byte length + UTF-8 JSON, max 16 MiB.
-  Request `{"v":1,"argv":[…],"cwd":"C:\\…","env":["K=V",…],"stdin":"…"|null}` (env = full client environment, for R1).
-  Response `{"code":0,"stdout":"…","stderr":"…"}`. Unknown `v` → code 1, stderr `protocol version mismatch`.
+- `tmux.exe` (console subsystem, no SharedDeps, no libc; imports only kernel32 and ntdll; measured: -V p95 21 ms, peak
+  private 0.6 MB). Steps: parse global flags (`-S <path>`, `-L <name>`, `-V`); `-V` → print `tmux 3.5a\n`, exit 0 (no IPC);
+  resolve the pipe: `-S` value, else the first field of `TMUX`, else `no server running on default` (exit 1). Only
+  `\\.\pipe\ghostty-tmux-<pid>-<16 hex>` is accepted (anything else: `not a Ghostty tmux socket`; a file or UNC path never gets the
+  request); `-L` without `-S` and every external-mode form is M5. `load-buffer … -` reads stdin (≤ 512 KiB, valid UTF-8, else
+  `ghostty: request too large` / `invalid UTF-8 on stdin`). Connect: `CreateFileW` with `SECURITY_SQOS_PRESENT |
+  SECURITY_IDENTIFICATION`; `ERROR_PIPE_BUSY` → `WaitNamedPipeW` with a 50…1000 ms backoff until the deadline (10 s client
+  timeout, request deadline 250 ms earlier); `ERROR_FILE_NOT_FOUND` → `no server running on <pipe>`; the handle must be a pipe and
+  `GetNamedPipeServerProcessId` must equal the pid in the name. Output is printed verbatim (LF only, no BOM; `WriteConsoleW` on a console,
+  raw UTF-8 otherwise); exit 0 for code 0, else 1. `tmux.exe __idle` (the `cat` placeholder) waits on its own process handle and
+  ignores Ctrl+C. `GHOSTTY_TMUX_TRACE=<file>` appends one JSON line per call (`{t,argv,cwd,pane,code,ms,stdout_len,stdin_len}`,
+  `FILE_APPEND_DATA`, one `WriteFile`); `GHOSTTY_TMUX_STATS=1` prints `tmux-stats peak_private_kb=… wall_ms=… build=…` to stderr.
+- Server (R-M4-1): a second instance of the M2 `ipc/Server.zig` on `\\.\pipe\ghostty-tmux-<pid>-<nonce>`, claimed by every
+  non-forwarding Ghostty process after the forward check and before the first window, with the same hardening as the M2
+  pipe (`FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`, DACL `D:P(A;;GA;;;<current user SID>)`, plus the
+  High-integrity label when elevated, peer user/elevation check). Per-pipe fields: `post_tag` 1 (`WM_GHOSTTY_IPC` wparam, routed
+  before the main-server guard so a standalone process answers), `max_request` 4 MiB, `io_timeout_ms` 500, `close_wait_ms` 200
+  (a silent client frees the queue in 600 ms). It answers only `op: "tmux"`; the per-user M2 pipe never does. One IPC
+  thread, requests posted to the UI thread, executed there, replies written by the IPC thread; clients are queued in arrival
+  order (Claude's parallel `kill-pane` at exit). The server also refuses stdin > 512 KiB (a hostile client does not run `tmux.exe`).
+- Wire format (`src/apprt/win32/ipc/protocol.zig`, §18.5): frame = `u32` little-endian byte length + UTF-8 JSON, max 16 MiB.
+  Request `{"v":1,"op":"tmux","args":[…],"cwd":"C:\\…","env":["K=V",…],"stdin":"…"|null,"pane":"%N","deadline_ms":…}` (`args` = the
+  command line after the global flags, `env` = the client environment, `pane` = the caller's `TMUX_PANE`). Response
+  `{"v":1,"code":0,"stdout":"…","stderr":"…","data":null}`. Unknown `v` → code 3, stderr `protocol version mismatch`; an expired
+  `deadline_ms` is not acted on.
 
 ### 12.2 Registry and semantics
-- Pane ids `%N` monotonic per Ghostty process (never reused), assigned to every surface at creation (so `TMUX_PANE` is
-  valid in every shell, including non-tmux-created ones). Window ids `@N` = Ghostty **tab** (tmux window ≙ tab).
-  Session = the Ghostty process (`session_name` = `0`).
+- Pane ids `%N` (R-M4-2): `Surface.pane_id` from a monotonic counter in `Registry.State` (never derived from the surface id),
+  taken at creation by every surface, so `TMUX_PANE` is valid in every shell, including non-tmux-created ones. A respawn keeps
+  its pane's number and takes none; numbers of closed panes are not reused. Window ids `@N` = Ghostty **tab** (`Tab.id`, kept
+  by tear-off; tmux window ≙ tab). Session = the Ghostty process (`session_name` = `0`). Targets: `%N`, `@N`, `@N.%M`;
+  `session:window.pane` forms fail with `can't find pane/window`.
 - Command table = [tmux §4] rows 1-15 + [tmux §9] startup calls, implemented exactly as specified there (argv shapes,
   stdout format, exit codes, error texts `can't find pane: %N`, `no space for new pane`, `create pane failed: pane too small`).
   Ghostty mapping:
@@ -474,9 +502,16 @@ FreeType + HarfBuzz.
   `[cd W &&] [env (NAME=W)*] W+` with POSIX single/double-quote rules and `'"'"'` escapes, no expansions → direct argv,
   cwd from `cd`, env overrides; parse failure → exit 1, stderr `ghostty: unsupported pane command`.
 ### 12.4 Other
-- DCS passthrough `ESC P tmux; … ESC \` is unwrapped by core and re-fed to the parser (notifications/titles from Claude).
+- DCS passthrough `ESC P tmux; … ESC \` (R-M4-10): core's parser already dispatches the inner sequence as a normal OSC (stream
+  tests `stream: tmux …`, no unwrap code). The inbox ConPTY does not forward the DCS itself (Task 2): an OSC 9 wrapped with a BEL
+  terminator arrives as a bare OSC 9, an OSC 777 with an ST terminator is **dropped**. Documented gap: ST-terminated
+  inner sequences (Claude notifications that use them) are lost while `TMUX` is set; no `dcs-tmux` e2e.
 - XTVERSION is not spoofed (images stay disabled under TMUX; accepted).
-- External mode (`TMUX` unset, `-L`) and the `claude-swarm` session namespace: M5.
+- External mode (`TMUX` unset, `-L`), `new-session`/`attach` and the `claude-swarm` session namespace: M5.
+- Pane border labels (§12.2, Task 13): a click-through overlay pill in the pane's top-right or bottom-right corner while the
+  window option `pane-border-status` is `top`/`bottom`, showing the expanded `pane-border-format` (`#[…]` runs stripped, the first
+  `fg=` of the template or of `pane-border-style` colours it, the text is sanitised); hidden when the pane is narrower than the
+  label + 2 cells.
 ### 12.5 Contract tests
 `src/tmux_shim/*` unit tests (argv parser, format expansion, sh_command grammar incl. the [tmux §6] Windows example) and an
 apprt-level replay test that runs the exact spawn sequence of [tmux §4 notes] against a headless registry and asserts
