@@ -10,6 +10,7 @@ const Window = @import("../Window.zig");
 const hooks = @import("../hooks.zig");
 const shell_open = @import("../shell_open.zig");
 const messages = @import("../messages.zig");
+const undo_actions = @import("undo_actions.zig");
 const theme = @import("../theme.zig");
 const tray = @import("../tray.zig");
 const util = @import("../util.zig");
@@ -53,6 +54,7 @@ pub fn new_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.ne
     };
     window.show();
     window.activate();
+    undo_actions.newWindow(window);
     return true;
 }
 

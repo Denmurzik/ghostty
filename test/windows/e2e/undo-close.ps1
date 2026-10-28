@@ -5,7 +5,8 @@
 # surface id and the same ping pid; closing it again and waiting out
 # undo-timeout (12 s here) ends the process tree. Closing the window (WM_CLOSE,
 # like Alt+F4) parks the window, undo shows it again at the same rect. The
-# palette lists "Undo". Keep this file ASCII only.
+# palette lists "Undo". A split closed and undone returns with its old ratio; a new tab
+# undone is parked and redo brings it back. Keep this file ASCII only.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_splits.ps1')
 
@@ -68,6 +69,32 @@ Invoke-E2eScenario 'undo-close' {
     $r1 = New-Object GhosttyE2e.Win+RECT
     [void][GhosttyE2e.Win]::GetWindowRect($g.Hwnd, [ref]$r1)
     if ($r0.Left -ne $r1.Left -or $r0.Top -ne $r1.Top -or $r0.Right -ne $r1.Right -or $r0.Bottom -ne $r1.Bottom) { throw "the restored window has another rect: $($r0.Left),$($r0.Top),$($r0.Right),$($r0.Bottom) -> $($r1.Left),$($r1.Top),$($r1.Right),$($r1.Bottom)" }
+
+    # 5b. A split: close it, undo brings it back with the old ratio.
+    [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+    function Get-Widths { @((Get-SplitState $g).Surfaces | ForEach-Object { ConvertTo-Box $_ } | Sort-Object L | ForEach-Object { $_.W }) }
+    Invoke-SplitAction $g 'new_split:right'
+    [void](Wait-SurfaceCount $g 2)
+    Invoke-SplitAction $g 'resize_split:right,100'
+    Start-Sleep -Milliseconds 500
+    $w0 = @(Get-Widths)
+    Invoke-SplitAction $g 'close_surface'
+    [void](Wait-SurfaceCount $g 1)
+    if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-Undo).parked.splits -eq 1 })) { throw "the split was not parked: $((Get-Undo) | ConvertTo-Json -Compress)" }
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+z'
+    [void](Wait-SurfaceCount $g 2)
+    Start-Sleep -Milliseconds 500
+    $w1 = @(Get-Widths)
+    if ((Get-Undo).parked.splits -ne 0) { throw 'the split is still parked after undo' }
+    if ([Math]::Abs($w0[0] - $w1[0]) -gt 2 -or [Math]::Abs($w0[1] - $w1[1]) -gt 2) { throw "the ratio changed: $($w0 -join ',') -> $($w1 -join ',')" }
+
+    # 5c. A new tab: undo parks it, redo brings it back.
+    [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_tab')
+    if (-not (Wait-Until -TimeoutSec 10 -PollMs 100 -Condition { @((Get-Data).windows)[0].tabs.Count -eq 2 })) { throw 'no new tab' }
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+z'
+    if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-Undo).parked.tabs -eq 1 -and @(Get-TabIds).Count -eq 1 })) { throw "undo did not park the new tab: $((Get-Undo) | ConvertTo-Json -Compress)" }
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+y'
+    if (-not (Wait-Until -TimeoutSec 8 -PollMs 100 -Condition { (Get-Undo).parked.tabs -eq 0 -and @(Get-TabIds).Count -eq 2 })) { throw "redo did not bring the tab back: $((Get-Undo) | ConvertTo-Json -Compress)" }
 
     # 6. The palette lists Undo.
     [void](Set-ForegroundSafe -Hwnd $g.Hwnd)

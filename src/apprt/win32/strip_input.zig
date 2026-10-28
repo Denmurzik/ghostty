@@ -35,6 +35,7 @@ const MK_LBUTTON = 0x0001;
 const tooltip_delay_ms = 500;
 /// Widest tooltip, DIP; longer titles wrap.
 const tooltip_max_width = 600;
+const undo_actions = @import("actions/undo_actions.zig");
 
 /// A tab drag through `tab_drag.Machine`, from the press to the outcome.
 pub const Session = struct {
@@ -611,9 +612,11 @@ fn addTab(window: *Window) void {
         if (tab.focusedSurface()) |s| &s.core_surface else null
     else
         null;
-    _ = window.addTab(.{ .parent = parent, .context = .tab }) catch |err| {
+    const tab = window.addTab(.{ .parent = parent, .context = .tab }) catch |err| {
         log.warn("unable to create a tab err={}", .{err});
+        return;
     };
+    undo_actions.newTab(window, tab);
 }
 
 /// Keyboard focus belongs to the active surface after any strip click.

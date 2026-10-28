@@ -6,6 +6,7 @@ const App = @import("../App.zig");
 const Window = @import("../Window.zig");
 const clipboard = @import("../clipboard.zig");
 const messages = @import("../messages.zig");
+const undo_actions = @import("undo_actions.zig");
 const secure_input = @import("../secure_input.zig");
 
 const log = std.log.scoped(.win32_actions);
@@ -39,16 +40,19 @@ pub fn new_tab(app: *App, target: apprt.Target, value: apprt.Action.Value(.new_t
     switch (target) {
         .surface => |core| {
             const window = app.windowFor(core) orelse return false;
-            _ = try window.addTab(.{ .parent = core, .context = .tab });
+            const tab = try window.addTab(.{ .parent = core, .context = .tab });
+            undo_actions.newTab(window, tab);
         },
         .app => if (app.last_active) |window| {
-            _ = try window.addTab(.{ .context = .tab });
+            const tab = try window.addTab(.{ .context = .tab });
+            undo_actions.newTab(window, tab);
         } else {
             const window = Window.create(app, .{}) catch |err| {
                 log.warn("unable to create a window err={}", .{err});
                 return false;
             };
             window.show();
+            undo_actions.newWindow(window);
         },
     }
     return true;

@@ -34,6 +34,12 @@ pub fn Stack(comptime Entry: type) type {
             self.undo.appendAssumeCapacity(e);
         }
 
+        /// Puts an entry back on the undo stack without touching redo (a
+        /// failed undo, or a redo that brings an item back).
+        pub fn restoreUndo(self: *Self, gpa: Allocator, e: Entry) !void {
+            try self.undo.append(gpa, e);
+        }
+
         pub fn pushRedo(self: *Self, gpa: Allocator, e: Entry) !void {
             try self.redo.append(gpa, e);
         }

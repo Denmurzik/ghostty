@@ -25,6 +25,8 @@ const messages = @import("messages.zig");
 const taskbar = @import("taskbar.zig");
 const tmux_spawn = @import("tmux/spawn.zig");
 const renderer = @import("../../renderer.zig");
+const undo_actions = @import("actions/undo_actions.zig");
+const Inspector = @import("inspector/Inspector.zig");
 
 const log = std.log.scoped(.win32_tab);
 
@@ -258,14 +260,17 @@ pub fn focus(self: *Tab) void {
 /// Core must not see a parked surface as the focused one.
 pub fn parkSurfaces(self: *Tab) void {
     var it = self.tree.iterator();
-    while (it.next()) |entry| {
-        const s = entry.view;
-        if (!s.initialized) continue;
+    while (it.next()) |entry| parkOne(entry.view);
+}
+
+fn parkOne(s: *Surface) void {
+    if (s.initialized) {
         s.core_surface.focusCallback(false) catch |err|
             log.warn("focus callback failed err={}", .{err});
         const core_app = s.app.core_app;
         if (core_app.focused_surface == &s.core_surface) core_app.focused_surface = null;
     }
+    Inspector.parkSync(s);
 }
 
 /// Hide the tab for the close-undo; its shells keep running.
@@ -277,6 +282,53 @@ pub fn park(self: *Tab) void {
 
 pub fn unpark(self: *Tab) void {
     self.parked = false;
+    var it = self.tree.iterator();
+    while (it.next()) |entry| Inspector.parkSync(entry.view);
+}
+
+/// The tree of the tab before and after a split was taken out.
+pub const SplitSnapshot = struct { before: Surface.Tree, after: Surface.Tree };
+
+/// Takes the split `s` out of the tab without closing it: the surface stays
+/// alive (the `before` tree holds it), hidden and unfocused. Null (nothing
+/// changed) when the tab has no split or memory runs out.
+pub fn parkSurface(self: *Tab, s: *Surface) ?SplitSnapshot {
+    const alloc = self.window.app.core_app.alloc;
+    if (!self.tree.isSplit() or self.tree.locate(s) == null) return null;
+    var before = self.tree.clone(alloc) catch return null;
+    self.removeSurfaceRaw(s);
+    if (self.tree.locate(s) != null) {
+        before.deinit();
+        return null;
+    }
+    const after = self.tree.clone(alloc) catch {
+        // No snapshot to come back to: put the surface back.
+        self.swapTree(before, s, true);
+        return null;
+    };
+    s.split_parked = true;
+    parkOne(s);
+    return .{ .before = before, .after = after };
+}
+
+/// Makes `tree` the tree of the tab (undo or redo of a split); `s` is the
+/// surface that comes or goes with it, shown when `show_s`.
+pub fn swapTree(self: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void {
+    self.replaceTree(tree);
+    if (show_s) {
+        s.split_parked = false;
+        Inspector.parkSync(s);
+        _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_SHOW);
+        self.focused = s;
+    } else {
+        s.split_parked = true;
+        _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_HIDE);
+        parkOne(s);
+    }
+    const active = self.window.activeTab() == self;
+    self.applyOcclusion(active);
+    hooks_mod.tabLayoutChanged(self);
+    if (active) self.focus();
 }
 
 pub fn setVisible(self: *Tab, visible: bool) void {
@@ -602,6 +654,14 @@ pub fn replaceTree(self: *Tab, tree: Surface.Tree) void {
 /// Take a surface out of the tab. Focus moves to a neighbour; a tab left
 /// without surfaces is removed from its window.
 pub fn removeSurface(self: *Tab, s: *Surface) void {
+    // Undo entries about the surface are void once it is gone.
+    undo_actions.forgetSurface(self.window.app, s);
+    self.removeSurfaceRaw(s);
+}
+
+/// `removeSurface` without touching the undo entries (the close-undo takes
+/// a surface out of the tree and keeps it).
+fn removeSurfaceRaw(self: *Tab, s: *Surface) void {
     const alloc = self.window.app.core_app.alloc;
     const at = self.tree.locate(s) orelse return;
     self.cancelDrag();

@@ -5,6 +5,7 @@ const App = @import("../App.zig");
 const SplitLayout = @import("../SplitLayout.zig");
 const Surface = @import("../Surface.zig");
 
+const undo_actions = @import("undo_actions.zig");
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
     return switch (target) {
         .app => null,
@@ -20,7 +21,15 @@ pub fn new_split(app: *App, target: apprt.Target, value: apprt.Action.Value(.new
         .left => .left,
         .up => .up,
     };
-    _ = try surface.tab.split(surface, direction);
+    const before = undo_actions.beginSplit(surface.tab);
+    const created = surface.tab.split(surface, direction) catch |err| {
+        if (before) |b| {
+            var t = b;
+            t.deinit();
+        }
+        return err;
+    };
+    undo_actions.newSplit(surface.tab, created, before);
     return true;
 }
 

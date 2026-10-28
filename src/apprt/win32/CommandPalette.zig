@@ -440,7 +440,6 @@ fn supported(action: input.Binding.Action) bool {
     return switch (action) {
         .toggle_secure_input,
         .check_for_updates,
-        .redo,
         => false,
         else => true,
     };
@@ -1443,7 +1442,7 @@ test "win32 palette: target closed while open" {
     const cmds = [_]input.Command{
         .{ .action = .{ .new_split = .right }, .title = "Split Right", .description = "Split the terminal to the right." },
         .{ .action = .{ .text = "hi" }, .title = "Send Text", .description = "" },
-        .{ .action = .redo, .title = "Redo", .description = "" },
+        .{ .action = .check_for_updates, .title = "Check for Updates", .description = "" },
     };
 
     const panel = try begin(window, 42, &cmds, &.{}, &.{}, "", null);
@@ -1451,7 +1450,7 @@ test "win32 palette: target closed while open" {
     const hwnd = panel.popup.hwnd.?;
     try std.testing.expect(window.palette.popup != null);
     try std.testing.expectEqual(@as(?u32, 42), window.palette.target_id);
-    // Sorted by title, the unsupported "Redo" left out.
+    // Sorted by title, the unsupported "Check for Updates" left out.
     try std.testing.expectEqual(@as(usize, 2), window.palette.rows.len);
     try std.testing.expectEqualStrings("Send Text", panel.items[window.palette.rows[0]].title);
 

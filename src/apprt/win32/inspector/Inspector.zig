@@ -450,6 +450,13 @@ pub fn surfaceDestroying(surface: *Surface) void {
     if (surface.inspector) |insp| insp.close();
 }
 
+/// The surface was parked or brought back by the close-undo: its inspector
+/// window follows (a window of its own is not hidden with the owner).
+pub fn parkSync(surface: *Surface) void {
+    const insp = surface.inspector orelse return;
+    _ = user32.ShowWindow(insp.window.hwnd, if (surface.parked()) user32.SW_HIDE else user32.SW_SHOWNA);
+}
+
 /// Task 24: the shared device was replaced.
 pub fn deviceChanged(app: *App) void {
     _ = app;

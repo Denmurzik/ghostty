@@ -455,22 +455,36 @@ pub fn unregisterWindow(self: *App, window: *Window) bool {
 /// Whether closing `window` ends the session (`quit-after-last-window-closed`
 /// with no other window open): such a close is not undoable.
 pub fn closingQuits(self: *App, window: *Window) bool {
+    var others_open = false;
     for (self.windows.items) |w| {
         if (w == window) continue;
-        if (w.kind == .normal or self.quick.shown) return false;
+        if (w.kind == .normal or self.quick.shown) others_open = true;
     }
-    return self.endsOnLastWindow();
+    return closeEndsSession(
+        others_open,
+        self.config.@"quit-after-last-window-closed",
+        quitDelayMs(&self.config),
+        self.serving() and self.tray.hwnd != null,
+    );
+}
+
+/// Whether closing a window ends the session: it is the last one and the
+/// last-window rule does not let the process stay.
+pub fn closeEndsSession(others_open: bool, quit_after: bool, delay_ms: ?u32, pipe_owner: bool) bool {
+    if (others_open) return false;
+    return lastWindowAction(quit_after, delay_ms, pipe_owner) != .stay;
 }
 
 /// Whether the app ends when its last window goes (the rule of
 /// `lastWindowCheck`): a process that cannot be reached again, or one with
 /// `quit-after-last-window-closed`. Nothing is parked then.
 pub fn endsOnLastWindow(self: *App) bool {
-    return lastWindowAction(
+    return closeEndsSession(
+        false,
         self.config.@"quit-after-last-window-closed",
         quitDelayMs(&self.config),
         self.serving() and self.tray.hwnd != null,
-    ) != .stay;
+    );
 }
 
 /// Hide `window` for the close-undo: it leaves `windows` (tray, hotkeys,

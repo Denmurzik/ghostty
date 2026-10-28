@@ -35,6 +35,7 @@ const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
 const title_edit = @import("title_edit.zig");
 const undo_actions = @import("actions/undo_actions.zig");
+const Inspector = @import("inspector/Inspector.zig");
 const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 
@@ -546,6 +547,7 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     self.tearing_down = true;
     defer self.tearing_down = was;
 
+    undo_actions.forgetTab(self.app, tab);
     if (!self.unlinkTab(tab)) {
         // Hidden first, like `beginTeardown`: the thread joins take a while.
         _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
@@ -612,22 +614,22 @@ fn parkedIndex(self: *const Window, tab: *const Tab) ?usize {
 }
 
 /// Bring a parked tab back at `index` and select it.
-pub fn unparkTab(self: *Window, tab: *Tab, index: usize) bool {
-    const at = self.parkedIndex(tab) orelse return false;
+pub fn unparkTab(self: *Window, tab: *Tab, index: usize) error{ OutOfMemory, NotParked }!void {
+    const at = self.parkedIndex(tab) orelse return error.NotParked;
     self.tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1) catch |err| {
         log.warn("unable to restore a tab err={}", .{err});
-        return false;
+        return error.OutOfMemory;
     };
     _ = self.parked_tabs.orderedRemove(at);
     tab.unpark();
     // Selects it; the keyboard focus follows with `activate`.
     self.insertTab(tab, index);
-    return true;
 }
 
 /// A parked tab closes for real (expiry, quit, its shell exited).
 pub fn releaseParkedTab(self: *Window, tab: *Tab) void {
     const at = self.parkedIndex(tab) orelse return;
+    undo_actions.forgetTab(self.app, tab);
     _ = self.parked_tabs.orderedRemove(at);
     const was = self.tearing_down;
     self.tearing_down = true;
@@ -656,6 +658,7 @@ pub fn park(self: *Window) void {
         tab.parkSurfaces();
         tab.setVisible(false);
     }
+    // (`parkSurfaces` also hid their inspectors: the window is marked parked.)
     // Owned popups (palette, search, badges) are not hidden with the owner.
     overlay_mod.windowParkChanged(self);
 }
@@ -664,6 +667,10 @@ pub fn park(self: *Window) void {
 pub fn unpark(self: *Window) void {
     self.parked = false;
     overlay_mod.windowParkChanged(self);
+    for (self.tabs.items) |tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| Inspector.parkSync(entry.view);
+    }
     theme.applyToWindow(self);
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_SHOW);
     self.selectTabFocus(self.active_tab, false);
@@ -1317,6 +1324,8 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
             self.closeParkedSurface(s);
             return;
         }
+        // Or while it was a split the undo keeps.
+        if (undo_actions.surfaceExited(self.app, id)) return;
         for (self.app.windows.items) |w| {
             if (w == self or w.findSurface(id) == null) continue;
             _ = win32.user32.PostMessageW(w.hwnd, messages.WM_GHOSTTY_CLOSE_SURFACE, id, @intFromBool(process_active));
@@ -1337,13 +1346,14 @@ fn handleCloseSurface(self: *Window, id: u32, process_active: bool) void {
     // A surface the user closes is undoable as a tab (or window); one whose
     // child exited is not. Splits are Task 15b.
     if (undo_actions.surfaceCloseUndoable(.{
-        .split = surface.tab.tree.isSplit(),
         .child_exited = surface.core_surface.child_exited,
         .final = surface.final_close,
         .window_parked = self.parked,
     })) {
         const tab = surface.tab;
-        const ok = if (self.tabs.items.len == 1)
+        const ok = if (tab.tree.isSplit())
+            undo_actions.closeSplit(tab, surface)
+        else if (self.tabs.items.len == 1)
             undo_actions.closeWindow(self)
         else
             undo_actions.closeTab(self, tab);

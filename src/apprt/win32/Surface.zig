@@ -112,6 +112,9 @@ initialized: bool,
 /// The close that is posted for this surface is final: set by the tmux
 /// shim for a pane it killed, so that the close-undo does not park it.
 final_close: bool = false,
+
+/// A split the close-undo took out of its tab's tree and keeps alive.
+split_parked: bool = false,
 id: u32,
 /// The tmux pane number (`%N`): the next number of the app's counter (like tmux,
 /// never derived from `id`) unless `CreateOptions.pane_id` says otherwise (a respawn).
@@ -367,7 +370,7 @@ pub fn core(self: *Surface) *CoreSurface {
 
 /// Whether the surface sits in a parked (hidden, undoable) window or tab.
 pub fn parked(self: *const Surface) bool {
-    return self.tab.parked or self.window.parked;
+    return self.split_parked or self.tab.parked or self.window.parked;
 }
 
 pub fn rtApp(self: *const Surface) *App {
