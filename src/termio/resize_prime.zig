@@ -10,9 +10,11 @@
 //! and otherwise every reader ignores it (Cygwin drops key-ups, and
 //! cooked-mode readers never see them).
 //!
-//! A write that comes very soon after the resize can reach the pseudo
-//! console before the resize does, so the prefix goes on every write until
-//! one comes `settle_ns` or more after the last resize.
+//! A write can reach the pseudo console before conhost has handled the
+//! resize (it does so on its own thread, late on a busy machine), so the
+//! prefix goes on every write until one comes `settle_ns` or more after
+//! conhost's first output following the resize (its repaint). A resize
+//! that gets no output stays armed for `cap_ns` at most.
 //!
 //! Only a conhost that knows win32-input-mode parses the sequence (an older
 //! one could show it as text), so nothing is armed until the pseudo console
@@ -23,9 +25,12 @@ pub const ResizePrime = struct {
     /// win32-input-mode: Vk=VK_SHIFT (16), Sc=42, Uc=0, Kd=0 (up), Cs=0, Rc=1.
     pub const sequence = "\x1b[16;42;0;0;0;1_";
 
-    /// Measured: the lost-input state forms within ~10 ms of a resize, and
-    /// a prompt shell answers the resize within ~35 ms.
+    /// Measured: the lost-input state forms within ~10 ms of conhost
+    /// handling a resize, and a prompt shell answers within ~35 ms.
     pub const settle_ns: i96 = 50 * std.time.ns_per_ms;
+
+    /// The longest a resize stays armed without output from conhost.
+    pub const cap_ns: i96 = 2 * std.time.ns_per_s;
 
     const Grid = struct { columns: u16, rows: u16 };
 
@@ -38,6 +43,11 @@ pub const ResizePrime = struct {
     grid: ?Grid = null,
     pending: bool = false,
     resized_ns: i96 = 0,
+
+    /// Set by the IO thread on a resize, cleared by the read thread at the
+    /// first output after it, which stores the time in `answered_ns`.
+    awaiting: std.atomic.Value(bool) = .init(false),
+    answered_ns: std.atomic.Value(i64) = .init(0),
 
     /// Set by the read thread once `request` was seen.
     win32_input: std.atomic.Value(bool) = .init(false),
@@ -72,6 +82,13 @@ pub const ResizePrime = struct {
         }
     }
 
+    /// Pseudo console output at `now_ns`, read thread, only while
+    /// `awaiting` (one atomic load per read otherwise).
+    pub fn answered(self: *ResizePrime, now_ns: i96) void {
+        self.answered_ns.store(@intCast(now_ns), .release);
+        self.awaiting.store(false, .release);
+    }
+
     /// The pseudo console was given this grid at `now_ns`. The first grid
     /// (the spawn size) and a pixel-only resize arm nothing.
     pub fn resized(self: *ResizePrime, columns: u16, rows: u16, now_ns: i96) void {
@@ -83,12 +100,20 @@ pub const ResizePrime = struct {
         if (!self.win32_input.load(.acquire)) return;
         self.pending = true;
         self.resized_ns = now_ns;
+        self.answered_ns.store(0, .release);
+        self.awaiting.store(true, .release);
     }
 
     /// Whether a write at `now_ns` must start with `sequence`.
     pub fn take(self: *ResizePrime, now_ns: i96) bool {
         if (!self.pending) return false;
-        if (now_ns - self.resized_ns >= settle_ns) self.pending = false;
+        const settled = settled: {
+            if (now_ns - self.resized_ns >= cap_ns) break :settled true;
+            if (self.awaiting.load(.acquire)) break :settled false;
+            const a = self.answered_ns.load(.acquire);
+            break :settled a != 0 and now_ns - a >= settle_ns;
+        };
+        if (settled) self.pending = false;
         return true;
     }
 };
@@ -108,6 +133,7 @@ test "ResizePrime: one prefix for a write after the settle time" {
     p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
+    p.answered(1000 * ms);
     try std.testing.expect(p.take(2500 * ms));
     try std.testing.expect(!p.take(2501 * ms));
 }
@@ -117,6 +143,7 @@ test "ResizePrime: writes inside the settle time keep the prefix armed" {
     p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
+    p.answered(1000 * ms);
     try std.testing.expect(p.take(1000 * ms));
     try std.testing.expect(p.take(1020 * ms));
     try std.testing.expect(p.take(1049 * ms));
@@ -129,8 +156,10 @@ test "ResizePrime: a later resize re-arms and restarts the settle time" {
     p.noteOutput(ResizePrime.request);
     p.resized(80, 24, 0);
     p.resized(100, 30, 1000 * ms);
+    p.answered(1000 * ms);
     try std.testing.expect(p.take(1040 * ms));
     p.resized(90, 30, 1045 * ms);
+    p.answered(1045 * ms);
     try std.testing.expect(p.take(1080 * ms));
     try std.testing.expect(p.take(1095 * ms));
     try std.testing.expect(!p.take(1096 * ms));
@@ -179,4 +208,40 @@ test "ResizePrime: no request, no win32 input" {
     p.noteOutput("\x1b[?900");
     p.noteOutput("2h");
     try std.testing.expect(!p.win32_input.load(.acquire));
+}
+
+test "ResizePrime: the window starts at conhost's first output, not at the resize" {
+    var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
+    p.resized(80, 24, 0);
+    p.resized(100, 30, 1000 * ms);
+    // No output yet: a write long after the resize keeps the prefix armed.
+    try std.testing.expect(p.take(1300 * ms));
+    try std.testing.expect(p.take(1900 * ms));
+    // conhost answers late; the window runs from there.
+    p.answered(2000 * ms);
+    try std.testing.expect(p.take(2040 * ms));
+    try std.testing.expect(p.take(2050 * ms));
+    try std.testing.expect(!p.take(2051 * ms));
+}
+
+test "ResizePrime: a resize with no output stays armed until the cap" {
+    var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
+    p.resized(80, 24, 0);
+    p.resized(100, 30, 1000 * ms);
+    try std.testing.expect(p.take(2999 * ms));
+    try std.testing.expect(p.take(3000 * ms));
+    try std.testing.expect(!p.take(3001 * ms));
+}
+
+test "ResizePrime: an answer to an older resize does not settle a newer one" {
+    var p: ResizePrime = .{};
+    p.noteOutput(ResizePrime.request);
+    p.resized(80, 24, 0);
+    p.resized(100, 30, 1000 * ms);
+    p.answered(1010 * ms);
+    p.resized(90, 30, 1020 * ms);
+    try std.testing.expect(p.take(1200 * ms));
+    try std.testing.expect(p.take(1300 * ms));
 }

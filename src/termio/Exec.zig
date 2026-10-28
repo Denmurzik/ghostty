@@ -1905,10 +1905,12 @@ pub const ReadThread = struct {
 
             fn onData(self: @This(), buf: []const u8) void {
                 latency.markOutput(buf.len);
+                const prime = &self.io.backend.exec.resize_prime;
                 if (self.prime_scan.* > 0) {
                     self.prime_scan.* -|= buf.len;
-                    self.io.backend.exec.resize_prime.noteOutput(buf);
+                    prime.noteOutput(buf);
                 }
+                if (prime.awaiting.load(.acquire)) prime.answered(std.Io.Timestamp.now(global.io(), .awake).nanoseconds);
                 processSlicedWindows(self.quit, self, buf, process);
             }
         };
