@@ -2314,8 +2314,8 @@ keybind: Keybinds = .{},
 @"window-save-state": WindowSaveState = .default,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
-/// If this is disabled, surfaces are resized in pixel increments. Currently
-/// only supported on macOS.
+/// If this is disabled, surfaces are resized in pixel increments. Supported on macOS and
+/// Windows (the content area stays a whole number of cells plus its padding).
 @"window-step-resize": bool = false,
 
 /// The position where new tabs are created. Valid values:
@@ -2701,7 +2701,9 @@ keybind: Keybinds = .{},
 /// is run. Note that if `quit-after-last-window-closed` is `true` and
 /// `quit-after-last-window-closed-delay` is set, setting `initial-window` to
 /// `false` will mean that Ghostty will quit after the configured delay if no
-/// window is ever created. Only implemented on Linux and macOS.
+/// window is ever created. Implemented on Linux, macOS
+/// and Windows (a window opens on the first new-window request from the tray,
+/// or the jump list).
 @"initial-window": bool = true,
 
 /// The duration that undo operations remain available. After this
@@ -3357,6 +3359,9 @@ keybind: Keybinds = .{},
 /// If `audio` is an enabled bell feature, this is the volume to play the audio
 /// file at (relative to the system volume). This is a floating point number
 /// ranging from 0.0 (silence) to 1.0 (as loud as possible). The default is 0.5.
+///
+/// On Windows only 8 and 16 bit PCM WAV files are scaled; other sample formats
+/// play at full volume.
 ///
 /// Available since: 1.2.0 on GTK, 1.3.0 on macOS.
 @"bell-audio-volume": f64 = 0.5,
@@ -4110,6 +4115,9 @@ term: []const u8 = default_term,
 ///
 /// Changing this configuration requires a full restart of
 /// Ghostty to take effect.
+///
+/// On Windows `stable` skips GitHub pre-releases in the update check and
+/// `tip` also offers them.
 ///
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
