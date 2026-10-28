@@ -7,6 +7,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const cli = @import("../../../tmux_shim/cli.zig");
 const format = @import("../../../tmux_shim/format.zig");
+const namespaces = @import("namespaces.zig");
 
 pub const Context = struct {
     /// The pane the calling `tmux.exe` runs in (`TMUX_PANE`), if any.
@@ -82,6 +83,8 @@ pub const Vars = struct {
     pane_pid: u32,
     pane_dead: bool,
     pane_current_path: []const u8,
+    /// External mode shows the namespace's session; `0` otherwise.
+    session_name: []const u8 = "0",
 };
 
 pub const Map = std.StringArrayHashMapUnmanaged([]const u8);
@@ -233,12 +236,13 @@ pub fn execute(
         return failOut(out, arena, "ghostty: server timed out", .{});
     }
     var diag: cli.Diag = .{};
-    const cmds = cli.parseCommands(arena, argv, &diag) catch |err| switch (err) {
+    const cmds = cli.parseCommandsFor(arena, argv, &diag, ctx.namespace != null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Usage => return failOut(out, arena, "{s}", .{diag.message()}),
     };
     for (cmds) |*cmd| {
         const env: Env(Host) = .{ .host = host, .arena = arena, .ctx = ctx, .out = out };
+        env.prune();
         try env.run(cmd);
         if (out.code != 0) return;
     }
@@ -296,10 +300,10 @@ const Fmt = struct {
         if (eql(u8, name, "pane_pid")) return self.print("{d}", .{v.pane_pid});
         if (eql(u8, name, "pane_dead")) return flag(v.pane_dead);
         if (eql(u8, name, "pane_current_path")) return v.pane_current_path;
+        if (eql(u8, name, "session_name")) return v.session_name;
         // Fixed answers (Claude's startup probes, recon section 9).
         // They shadow Options: set-option of these names does not change the answer.
         const fixed = [_][2][]const u8{
-            .{ "session_name", "0" },
             .{ "session_id", "$0" },
             .{ "client_termtype", "xterm-ghostty" },
             .{ "client_termname", "xterm-ghostty" },
@@ -357,6 +361,11 @@ fn Env(comptime Host: type) type {
                 .load_buffer => try self.loadBuffer(cmd),
                 .send_keys => try self.sendKeys(cmd),
                 .capture_pane => try self.capturePane(cmd),
+                .has_session => try self.hasSession(cmd),
+                .new_session => try self.newSession(cmd),
+                .new_window => try self.newWindow(cmd),
+                .kill_session => try self.killSession(cmd),
+                .kill_server => try self.killServer(cmd),
             }
         }
 
@@ -403,7 +412,238 @@ fn Env(comptime Host: type) type {
             return true;
         }
 
+        // ---- external mode (R-M5-14) ------------------------------------
+
+        fn external(self: Self) bool {
+            return self.ctx.namespace != null;
+        }
+
+        fn nsPtr(self: Self) ?*namespaces.Namespace {
+            const name = self.ctx.namespace orelse return null;
+            return self.host.namespaces().get(name);
+        }
+
+        /// Inside mode owns everything; an external client only its tabs.
+        fn owns(self: Self, tab_id: u32) bool {
+            if (!self.external()) return true;
+            const ns = self.nsPtr() orelse return false;
+            return ns.hasTab(tab_id);
+        }
+
+        /// Forgets the tabs that were closed in the meantime; a session
+        /// without a tab is gone.
+        fn prune(self: Self) void {
+            const name = self.ctx.namespace orelse return;
+            const table = self.host.namespaces();
+            const ns = table.get(name) orelse return;
+            const gpa = self.host.gpa();
+            const Alive = struct {
+                fn alive(h: *Host, id: u32) bool {
+                    return h.findWindow(id) != null;
+                }
+            };
+            ns.prune(gpa, self.host, Alive.alive);
+            if (ns.session != null and ns.tab_names.count() == 0) table.drop(gpa, name);
+        }
+
+        fn firstTab(self: Self) ?Window {
+            const ns = self.nsPtr() orelse return null;
+            for (ns.tab_names.values()) |id| if (self.host.findWindow(id)) |w| return w;
+            return null;
+        }
+
+        /// The windows a command may list.
+        fn visibleWindows(self: Self) Allocator.Error![]Window {
+            const all = try self.host.windows(self.arena);
+            if (!self.external()) return all;
+            const ns = self.nsPtr() orelse return &.{};
+            var out: std.ArrayList(Window) = .empty;
+            for (ns.tab_names.values()) |id| {
+                const w = self.host.findWindow(id) orelse continue;
+                try out.append(self.arena, w);
+            }
+            return out.items;
+        }
+
+        fn sessionNameOf(target: []const u8) []const u8 {
+            const t = if (target.len > 0 and target[0] == '=') target[1..] else target;
+            return if (std.mem.indexOfScalar(u8, t, ':')) |c| t[0..c] else t;
+        }
+
+        /// `session`, `session:window-name`, `session:index`, `session:@N` or a
+        /// bare window name of the caller's namespace. Reports a miss.
+        fn sessionWindow(self: Self, target: []const u8) Allocator.Error!?Window {
+            const ns = self.nsPtr() orelse {
+                try self.fail("can't find session: {s}", .{sessionNameOf(target)});
+                return null;
+            };
+            const t = if (target.len > 0 and target[0] == '=') target[1..] else target;
+            var sess: []const u8 = t;
+            var win: ?[]const u8 = null;
+            if (std.mem.indexOfScalar(u8, t, ':')) |c| {
+                sess = t[0..c];
+                win = t[c + 1 ..];
+            }
+            const session_ok = if (ns.session) |s| std.mem.eql(u8, s, sess) else false;
+            if (win == null and !session_ok) {
+                // A bare word that is no session: a window name.
+                if (ns.tabByName(sess)) |id| if (self.host.findWindow(id)) |w| return w;
+                try self.fail("can't find window: {s}", .{target});
+                return null;
+            }
+            if (sess.len > 0 and !session_ok) {
+                try self.fail("can't find session: {s}", .{sess});
+                return null;
+            }
+            var w = win orelse "";
+            if (w.len == 0) {
+                if (self.firstTab()) |first| return first;
+                try self.fail("can't find window: {s}", .{target});
+                return null;
+            }
+            if (ns.tabByName(w)) |id| if (self.host.findWindow(id)) |found| return found;
+            // "name.pane" and "@N.pane": the pane part is not used.
+            if (std.mem.indexOfScalar(u8, w, '.')) |dot| w = w[0..dot];
+            if (ns.tabByName(w)) |id| if (self.host.findWindow(id)) |found| return found;
+            switch (cli.parseTarget(w)) {
+                .window => |id| {
+                    if (ns.hasTab(id)) if (self.host.findWindow(id)) |found| return found;
+                },
+                else => if (std.fmt.parseInt(usize, w, 10) catch null) |index| {
+                    const all = try self.visibleWindows();
+                    if (index < all.len) return all[index];
+                },
+            }
+            try self.fail("can't find window: {s}", .{w});
+            return null;
+        }
+
+        fn nsError(self: Self, err: anyerror) Allocator.Error!void {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            if (err == error.InvalidName) return self.fail("bad namespace name", .{});
+            if (err == error.TooManyNamespaces) {
+                return self.fail("ghostty: too many tmux namespaces (at most {d})", .{namespaces.max_namespaces});
+            }
+            if (err == error.TooManyTabs) {
+                return self.fail("ghostty: too many windows (at most {d})", .{namespaces.max_tabs});
+            }
+            return self.fail("ghostty: {s}", .{@errorName(err)});
+        }
+
+        /// The tmux default: the basename of the command, else a shell.
+        fn defaultWindowName(cmd: *const cli.Command) []const u8 {
+            if (cmd.positional.len == 0) return "shell";
+            const first = cmd.positional[0];
+            const word = if (std.mem.indexOfAny(u8, first, " \t")) |sp| first[0..sp] else first;
+            const slash = std.mem.lastIndexOfAny(u8, word, "\\/");
+            const base = if (slash) |s| word[s + 1 ..] else word;
+            return if (base.len == 0) "shell" else base;
+        }
+
+        fn windowNameOk(self: Self, name: []const u8) Allocator.Error!bool {
+            if (name.len == 0 or name.len > 128) {
+                try self.fail("ghostty: window name must be 1 to 128 bytes", .{});
+                return false;
+            }
+            return true;
+        }
+
+        fn hasSession(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.counts(cmd, 0, 0)) return;
+            const want = sessionNameOf(cmd.value('t') orelse "");
+            if (self.nsPtr()) |n| if (n.session) |s| if (std.mem.eql(u8, s, want)) return;
+            return self.fail("can't find session: {s}", .{want});
+        }
+
+        fn newSession(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.reject(cmd, "DEXtf")) return;
+            if (!cmd.has('d')) {
+                return self.fail("ghostty: new-session needs -d (there is no terminal to attach to)", .{});
+            }
+            const ns_name = self.ctx.namespace orelse return self.fail("ghostty: no namespace", .{});
+            const name = cmd.value('s') orelse "0";
+            if (!namespaces.validName(name)) return self.fail("bad session name: {s}", .{name});
+            const wname = cmd.value('n') orelse defaultWindowName(cmd);
+            if (!try self.windowNameOk(wname)) return;
+
+            const gpa = self.host.gpa();
+            const table = self.host.namespaces();
+            if (self.nsPtr()) |existing| if (existing.session) |s| {
+                if (!std.mem.eql(u8, s, name)) {
+                    return self.fail("ghostty: a namespace holds one session ({s})", .{s});
+                }
+                if (cmd.has('A')) return;
+                return self.fail("duplicate session: {s}", .{name});
+            };
+
+            const ns = table.ensure(gpa, ns_name) catch |err| return self.nsError(err);
+            const spawn = try self.spawnOf(cmd);
+            const pane = self.host.newSessionWindow(ns, wname, spawn) catch |err| {
+                if (ns.session == null and ns.tab_names.count() == 0) table.drop(gpa, ns_name);
+                return self.hostError(err);
+            };
+            try ns.setSession(gpa, name);
+            ns.setTab(gpa, wname, self.windowIdOf(pane)) catch |err| return self.nsError(err);
+            if (cmd.has('P')) try self.emitLine(cmd.value('F') orelse "#{session_name}:", pane);
+        }
+
+        fn newWindow(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            const asked = sessionNameOf(cmd.value('t') orelse "");
+            const ns = self.nsPtr() orelse return self.fail("can't find session: {s}", .{asked});
+            const session = ns.session orelse return self.fail("can't find session: {s}", .{asked});
+            if (cmd.value('t') != null and !std.mem.eql(u8, asked, session)) {
+                return self.fail("can't find session: {s}", .{asked});
+            }
+            const wname = cmd.value('n') orelse defaultWindowName(cmd);
+            if (!try self.windowNameOk(wname)) return;
+            const fmt = cmd.value('F') orelse "#{session_name}:#{window_index}.#{pane_index}";
+
+            // -S: the window of that name, when there is one.
+            if (cmd.has('S')) if (ns.tabByName(wname)) |id| if (self.host.findWindow(id)) |w| {
+                if (cmd.has('P')) try self.emitLine(fmt, self.host.activePane(w));
+                return;
+            };
+            if (ns.tab_names.count() >= namespaces.max_tabs and ns.tabByName(wname) == null) {
+                return self.fail("ghostty: too many windows (at most {d})", .{namespaces.max_tabs});
+            }
+            const window_id = ns.window_id orelse return self.fail("can't find session: {s}", .{session});
+            const spawn = try self.spawnOf(cmd);
+            const pane = self.host.newTabIn(window_id, wname, spawn, !cmd.has('d')) catch |err| return self.hostError(err);
+            ns.setTab(self.host.gpa(), wname, self.windowIdOf(pane)) catch |err| return self.nsError(err);
+            if (cmd.has('P')) try self.emitLine(fmt, pane);
+        }
+
+        /// Closes the namespace's windows without asking and forgets it.
+        fn closeNamespace(self: Self) void {
+            const name = self.ctx.namespace orelse return;
+            const table = self.host.namespaces();
+            const ns = table.get(name) orelse return;
+            self.host.closeNamespace(ns);
+            table.drop(self.host.gpa(), name);
+        }
+
+        fn killSession(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.counts(cmd, 0, 0)) return;
+            const asked = sessionNameOf(cmd.value('t') orelse "");
+            const ns = self.nsPtr() orelse return self.fail("can't find session: {s}", .{asked});
+            const session = ns.session orelse return self.fail("can't find session: {s}", .{asked});
+            if (cmd.value('t') != null and !std.mem.eql(u8, asked, session)) {
+                return self.fail("can't find session: {s}", .{asked});
+            }
+            self.closeNamespace();
+        }
+
+        fn killServer(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.counts(cmd, 0, 0)) return;
+            self.closeNamespace();
+        }
+
         fn currentPane(self: Self) ?Pane {
+            // An external client has no pane of its own: its session's first window.
+            if (self.external()) {
+                const w = self.firstTab() orelse return null;
+                return self.host.activePane(w);
+            }
             if (self.ctx.caller_pane) |id| if (self.host.findPane(id)) |p| return p;
             return self.host.fallbackPane();
         }
@@ -415,14 +655,20 @@ fn Env(comptime Host: type) type {
                     try self.fail("no current target", .{});
                 },
                 .pane => |id| {
-                    if (self.host.findPane(id)) |p| return p;
+                    if (self.host.findPane(id)) |p| if (self.owns(self.windowIdOf(p))) return p;
                     try self.fail("can't find pane: {s}", .{t.?});
                 },
                 .window => |id| {
-                    if (self.host.findWindow(id)) |w| return self.host.activePane(w);
+                    if (self.host.findWindow(id)) |w| if (self.owns(self.host.windowId(w))) return self.host.activePane(w);
                     try self.fail("can't find window: {s}", .{t.?});
                 },
-                .invalid => |s| try self.fail("can't find pane: {s}", .{s}),
+                .invalid => |s| {
+                    if (self.external()) {
+                        const w = (try self.sessionWindow(s)) orelse return null;
+                        return self.host.activePane(w);
+                    }
+                    try self.fail("can't find pane: {s}", .{s});
+                },
             }
             return null;
         }
@@ -434,14 +680,17 @@ fn Env(comptime Host: type) type {
                     try self.fail("no current target", .{});
                 },
                 .pane => |id| {
-                    if (self.host.findPane(id)) |p| return self.host.windowOf(p);
+                    if (self.host.findPane(id)) |p| if (self.owns(self.windowIdOf(p))) return self.host.windowOf(p);
                     try self.fail("can't find pane: {s}", .{t.?});
                 },
                 .window => |id| {
-                    if (self.host.findWindow(id)) |w| return w;
+                    if (self.host.findWindow(id)) |w| if (self.owns(self.host.windowId(w))) return w;
                     try self.fail("can't find window: {s}", .{t.?});
                 },
-                .invalid => |s| try self.fail("can't find window: {s}", .{s}),
+                .invalid => |s| {
+                    if (self.external()) return self.sessionWindow(s);
+                    try self.fail("can't find window: {s}", .{s});
+                },
             }
             return null;
         }
@@ -453,9 +702,14 @@ fn Env(comptime Host: type) type {
         /// Appends `fmt` expanded for `pane` plus a newline to stdout.
         fn emitLine(self: Self, fmt: []const u8, pane: Pane) Allocator.Error!void {
             const win = self.host.windowOf(pane);
+            var vars = self.host.vars(pane);
+            if (self.nsPtr()) |ns| {
+                vars.session_name = ns.session orelse "0";
+                if (ns.nameOf(vars.window_id)) |n| vars.window_name = n;
+            }
             var f: Fmt = .{
                 .arena = self.arena,
-                .vars = self.host.vars(pane),
+                .vars = vars,
                 .window_panes = (try self.host.panes(self.arena, win)).len,
                 .options = self.host.options(),
                 .budget = max_output -| self.out.stdout.items.len,
@@ -611,6 +865,11 @@ fn Env(comptime Host: type) type {
                 window_id = self.windowIdOf(p);
             }
 
+            // The global options are shared with the panes of this Ghostty.
+            if (self.external() and scope == .global) {
+                return self.fail("ghostty: global options cannot be changed from an external tmux client", .{});
+            }
+
             const gpa = self.host.gpa();
             const opts = self.host.options();
             if (cmd.has('u')) {
@@ -648,7 +907,7 @@ fn Env(comptime Host: type) type {
             if (!try self.counts(cmd, 0, 0)) return;
             const fmt = cmd.value('F') orelse "#{pane_index}: [#{pane_width}x#{pane_height}] #{pane_id}";
             if (cmd.has('a') or cmd.has('s')) {
-                for (try self.host.windows(self.arena)) |w| {
+                for (try self.visibleWindows()) |w| {
                     for (try self.host.panes(self.arena, w)) |p| {
                         try self.emitLine(fmt, p);
                         if (self.out.code != 0) return;
@@ -668,7 +927,14 @@ fn Env(comptime Host: type) type {
             if (!try self.counts(cmd, 0, 0)) return;
             const fmt = cmd.value('F') orelse "#{window_index}: #{window_name} (#{window_panes} panes) #{window_id}";
             // tmux lists the target's session (-a: all sessions): every window here.
-            for (try self.host.windows(self.arena)) |w| {
+            if (self.external()) {
+                if (cmd.value('t')) |t| {
+                    if (cli.parseTarget(t) == .invalid) {
+                        if ((try self.sessionWindow(t)) == null) return;
+                    }
+                }
+            }
+            for (try self.visibleWindows()) |w| {
                 try self.emitLine(fmt, self.host.activePane(w));
                 if (self.out.code != 0) return;
             }
@@ -747,6 +1013,8 @@ fn Env(comptime Host: type) type {
         }
 
         fn loadBuffer(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            // The buffer and the clipboard are the user's, not a namespace's.
+            if (self.external()) return self.fail("ghostty: load-buffer is not available to an external tmux client", .{});
             if (!try self.counts(cmd, 1, 1)) return;
             const data = self.ctx.stdin;
             if (!std.mem.eql(u8, cmd.positional[0], "-") or data == null) {
@@ -1383,4 +1651,201 @@ test "win32 tmux commands: load-buffer -w keeps the buffer when clipboard-write 
     try testing.expectEqual(@as(u8, 0), out.code);
     try testing.expectEqualStrings("secret", rig.host.opts.buffer.?);
     try testing.expect(rig.host.clipboard == null);
+}
+
+// External mode (R-M5-14)
+
+const external_fixture = @embedFile("testdata/claude-external.jsonl");
+
+const ExtLine = struct {
+    argv: []const []const u8,
+    stdout: ?[]const u8 = null,
+    stderr: ?[]const u8 = null,
+    code: u8 = 0,
+};
+
+fn extCtx(namespace: []const u8) Context {
+    return .{
+        .caller_pane = null,
+        .cwd = "C:\\work",
+        .env = &.{},
+        .stdin = null,
+        .now_ms = 0,
+        .deadline_ms = 1000,
+        .namespace = namespace,
+    };
+}
+
+fn runIn(rig: *Rig, namespace: []const u8, args: []const []const u8) !Output {
+    return rig.runCtx(extCtx(namespace), args);
+}
+
+fn okIn(rig: *Rig, namespace: []const u8, args: []const []const u8) ![]const u8 {
+    const out = try runIn(rig, namespace, args);
+    if (out.code != 0) std.debug.print("unexpected failure: {s}\n", .{out.stderr.items});
+    try testing.expectEqual(@as(u8, 0), out.code);
+    return out.stdout.items;
+}
+
+fn badIn(rig: *Rig, namespace: []const u8, args: []const []const u8, needle: []const u8) !void {
+    const out = try runIn(rig, namespace, args);
+    try testing.expectEqual(@as(u8, 1), out.code);
+    if (std.mem.indexOf(u8, out.stderr.items, needle) == null) {
+        std.debug.print("stderr {s} lacks {s}\n", .{ out.stderr.items, needle });
+        return error.TestExpectedEqual;
+    }
+}
+
+test "win32 tmux external: replay of the recon §5 sequence" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const arena = rig.arena();
+
+    var ids: IdMap = .{};
+    var lines_run: usize = 0;
+    var it = std.mem.splitScalar(u8, external_fixture, '\n');
+    while (it.next()) |raw| {
+        if (std.mem.trim(u8, raw, " \r\t").len == 0) continue;
+        const line = try std.json.parseFromSliceLeaky(ExtLine, arena, raw, .{ .ignore_unknown_fields = true });
+        var argv = line.argv;
+        if (argv.len > 0 and std.mem.eql(u8, argv[0], "tmux")) argv = argv[1..];
+
+        var diag: cli.Diag = .{};
+        const g = try cli.parseGlobal(argv, &diag);
+        const rest = try arena.alloc([]const u8, g.rest.len);
+        for (g.rest, rest) |s, *d| d.* = (try ids.rewrite(arena, s)) orelse s;
+
+        if (std.mem.eql(u8, rest[0], "kill-server")) try expectTiledThree(&rig);
+
+        const out = try runIn(&rig, g.socket_name orelse "default", rest);
+        if (out.code != line.code) std.debug.print("line failed: {s}\nstderr: {s}\n", .{ raw, out.stderr.items });
+        try testing.expectEqual(line.code, out.code);
+        if (line.stderr) |want| {
+            try testing.expectEqualStrings(want, out.stderr.items);
+        } else {
+            try testing.expectEqual(@as(usize, 0), out.stderr.items.len);
+        }
+        if (line.stdout) |want| {
+            if (!try ids.matches(arena, want, out.stdout.items)) {
+                std.debug.print("line: {s}\nwant: {s}\ngot:  {s}\n", .{ raw, want, out.stdout.items });
+                return error.TestExpectedEqual;
+            }
+        } else {
+            try testing.expectEqual(@as(usize, 0), out.stdout.items.len);
+        }
+        lines_run += 1;
+    }
+    try testing.expect(lines_run >= 15);
+    // kill-server took the namespace's window; the leader window is left.
+    try testing.expectEqual(@as(usize, 1), rig.host.windowCount());
+}
+
+/// The namespace's window holds three panes in a grid (`tiled`).
+fn expectTiledThree(rig: *Rig) !void {
+    const arena = rig.arena();
+    var found = false;
+    for (rig.host.windows_list.items, 0..) |w, wi| {
+        if (w.owner == 0) continue;
+        found = true;
+        const ids = try rig.host.paneIds(arena, wi);
+        try testing.expectEqual(@as(usize, 3), ids.len);
+        var grid = try rig.host.computeLayout(wi);
+        defer grid.deinit(rig.host.alloc);
+        var lefts: std.AutoArrayHashMapUnmanaged(i32, void) = .empty;
+        var tops: std.AutoArrayHashMapUnmanaged(i32, void) = .empty;
+        for (grid.leaves) |leaf| {
+            try lefts.put(arena, leaf.rect.x, {});
+            try tops.put(arena, leaf.rect.y, {});
+        }
+        // A 2x2 grid with one cell missing, not a column or a row.
+        try testing.expectEqual(@as(usize, 2), lefts.count());
+        try testing.expectEqual(@as(usize, 2), tops.count());
+    }
+    try testing.expect(found);
+}
+
+test "win32 tmux external: has-session before and after new-session" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    try badIn(&rig, "ns", &.{ "has-session", "-t", "s" }, "can't find session: s");
+    try badIn(&rig, "ns", &.{ "kill-session", "-t", "s" }, "can't find session: s");
+    try badIn(&rig, "ns", &.{ "new-window", "-t", "s", "-n", "w" }, "can't find session: s");
+
+    _ = try okIn(&rig, "ns", &.{ "new-session", "-d", "-s", "s", "-n", "w" });
+    _ = try okIn(&rig, "ns", &.{ "has-session", "-t", "s" });
+    try badIn(&rig, "ns", &.{ "has-session", "-t", "other" }, "can't find session: other");
+    // Another namespace has no such session.
+    try badIn(&rig, "ns2", &.{ "has-session", "-t", "s" }, "can't find session: s");
+
+    try badIn(&rig, "ns", &.{ "new-session", "-d", "-s", "s" }, "duplicate session: s");
+    _ = try okIn(&rig, "ns", &.{ "new-session", "-d", "-A", "-s", "s" });
+    try badIn(&rig, "ns", &.{ "new-session", "-d", "-s", "t" }, "one session");
+    try badIn(&rig, "ns2", &.{ "new-session", "-s", "s" }, "needs -d");
+    try badIn(&rig, "ns2", &.{ "new-session", "-d", "-s", "a:b" }, "bad session name");
+
+    _ = try okIn(&rig, "ns", &.{ "kill-session", "-t", "s" });
+    try badIn(&rig, "ns", &.{ "has-session", "-t", "s" }, "can't find session: s");
+
+    // A window the user closed ends the session too.
+    _ = try okIn(&rig, "ns3", &.{ "new-session", "-d", "-s", "u" });
+    const win = rig.host.windows_list.items[rig.host.windows_list.items.len - 1];
+    rig.host.kill(.{ .id = win.active });
+    try badIn(&rig, "ns3", &.{ "has-session", "-t", "u" }, "can't find session: u");
+}
+
+test "win32 tmux external: session:window-name target" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const first = try okIn(&rig, "ns", &.{ "new-session", "-d", "-s", "swarm", "-n", "view", "-P", "-F", "#{pane_id}", "--", "cat" });
+    const second = try okIn(&rig, "ns", &.{ "new-window", "-t", "swarm", "-n", "logs", "-P", "-F", "#{pane_id}", "--", "cat" });
+    try testing.expect(!std.mem.eql(u8, first, second));
+
+    try testing.expectEqualStrings("view\nlogs\n", try okIn(&rig, "ns", &.{ "list-windows", "-t", "swarm", "-F", "#{window_name}" }));
+    try testing.expectEqualStrings(second, try okIn(&rig, "ns", &.{ "list-panes", "-t", "swarm:logs", "-F", "#{pane_id}" }));
+    try testing.expectEqualStrings(first, try okIn(&rig, "ns", &.{ "list-panes", "-t", "swarm:view", "-F", "#{pane_id}" }));
+    try testing.expectEqualStrings(first, try okIn(&rig, "ns", &.{ "list-panes", "-t", "swarm:0", "-F", "#{pane_id}" }));
+    try testing.expectEqualStrings("swarm logs\n", try okIn(&rig, "ns", &.{ "display-message", "-p", "-t", "swarm:logs", "#{session_name} #{window_name}" }));
+    try badIn(&rig, "ns", &.{ "list-panes", "-t", "swarm:nope", "-F", "#{pane_id}" }, "can't find window: nope");
+    try badIn(&rig, "ns", &.{ "list-panes", "-t", "wrong:view", "-F", "#{pane_id}" }, "can't find session: wrong");
+
+    // -S reuses the window of that name.
+    const again = try okIn(&rig, "ns", &.{ "new-window", "-S", "-t", "swarm", "-n", "logs", "-P", "-F", "#{pane_id}" });
+    try testing.expectEqualStrings(second, again);
+    try testing.expectEqual(@as(usize, 3), rig.host.windowCount());
+}
+
+test "win32 tmux external: kill-server closes only its namespace" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    _ = try okIn(&rig, "a", &.{ "new-session", "-d", "-s", "x", "-n", "w1" });
+    _ = try okIn(&rig, "a", &.{ "new-window", "-t", "x", "-n", "w2" });
+    _ = try okIn(&rig, "b", &.{ "new-session", "-d", "-s", "x", "-n", "w1" });
+    // The leader window of the fake host plus three.
+    try testing.expectEqual(@as(usize, 4), rig.host.windowCount());
+
+    // Panes of the leader and of the other namespace are out of reach.
+    try badIn(&rig, "a", &.{ "kill-pane", "-t", "%1" }, "can't find pane: %1");
+    try badIn(&rig, "a", &.{ "send-keys", "-t", "@1", "x" }, "can't find window: @1");
+    try badIn(&rig, "a", &.{ "set-option", "-g", "mouse", "on" }, "global options");
+    try badIn(&rig, "a", &.{ "load-buffer", "-" }, "not available");
+    try testing.expectEqual(@as(usize, 4), rig.host.windowCount());
+
+    _ = try okIn(&rig, "a", &.{"kill-server"});
+    try testing.expectEqual(@as(usize, 2), rig.host.windowCount());
+    try badIn(&rig, "a", &.{ "has-session", "-t", "x" }, "can't find session: x");
+    _ = try okIn(&rig, "b", &.{ "has-session", "-t", "x" });
+    // Nothing to kill is not an error.
+    _ = try okIn(&rig, "a", &.{"kill-server"});
+    try testing.expect(rig.host.findPane(1) != null);
+
+    _ = try okIn(&rig, "b", &.{ "kill-session", "-t", "x" });
+    try testing.expectEqual(@as(usize, 1), rig.host.windowCount());
+}
+
+test "win32 tmux external: inside mode keeps the commands unsupported" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    try rig.bad(&.{ "has-session", "-t", "x" }, "has-session: unsupported by Ghostty");
+    try rig.bad(&.{ "new-session", "-d" }, "new-session: unsupported by Ghostty");
+    try rig.bad(&.{"kill-server"}, "kill-server: unsupported by Ghostty");
 }

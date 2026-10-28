@@ -21,6 +21,8 @@ const labels = @import("labels.zig");
 const layout = @import("layout.zig");
 const pane_io = @import("pane_io.zig");
 const spawn = @import("spawn.zig");
+const ns_mod = @import("namespaces.zig");
+const GhosttyWindow = @import("../Window.zig");
 
 const log = std.log.scoped(.win32_tmux_registry);
 
@@ -35,6 +37,8 @@ pub const State = struct {
     /// The next pane number. Like tmux's: it only goes up, and a respawn
     /// keeps its pane's number without taking one.
     next_pane: u32 = 1,
+    /// External mode (R-M5-14): one namespace per `-L` name.
+    namespaces: ns_mod.Table = .{},
 
     pub fn takePane(self: *State) u32 {
         const n = self.next_pane;
@@ -458,53 +462,92 @@ pub const Host = struct {
         const s = surfaceOf(self.app, pane.id) orelse return;
         try pane_io.capture(s, req, w);
     }
+
+    // ---- external mode (R-M5-14) ------------------------------------
+
+    pub fn namespaces(self: *Host) *ns_mod.Table {
+        return &self.state().namespaces;
+    }
+
+    /// The first surface of a new window or tab is a plain shell; it is
+    /// replaced by the pane's command (the pane keeps its number).
+    fn runInFirstSurface(self: *Host, tab: *Tab, spawn_req: commands.Spawn) commands.SplitError!Pane {
+        const old = tab.focusedSurface() orelse return error.SpawnFailed;
+        var plan = try self.planOf(spawn_req);
+        const created = tab.replaceSurface(old, &plan) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.SpawnFailed,
+        };
+        self.state().shim_panes.put(self.app.core_app.alloc, created.pane_id, {}) catch {};
+        labels.optionsChanged(self.app, tab.id);
+        return .{ .id = created.pane_id };
+    }
+
+    /// A new Ghostty window for the namespace, shown without taking the
+    /// activation from whatever the user is doing.
+    pub fn newSessionWindow(self: *Host, ns: *ns_mod.Namespace, name: []const u8, spawn_req: commands.Spawn) commands.SplitError!Pane {
+        _ = name;
+        const window = GhosttyWindow.create(self.app, .{}) catch return error.SpawnFailed;
+        const tab = window.activeTab() orelse {
+            window.destroy();
+            return error.SpawnFailed;
+        };
+        const pane = self.runInFirstSurface(tab, spawn_req) catch |err| {
+            window.destroy();
+            return err;
+        };
+        ns.window_id = window.id;
+        _ = win32.user32.ShowWindow(window.hwnd, win32.user32.SW_SHOWNOACTIVATE);
+        return pane;
+    }
+
+    /// A new tab in the namespace's Ghostty window `window_id`; with
+    /// `select` false the active tab stays.
+    pub fn newTabIn(self: *Host, window_id: u32, name: []const u8, spawn_req: commands.Spawn, select: bool) commands.SplitError!Pane {
+        _ = name;
+        const window = windowById(self.app, window_id) orelse return error.SpawnFailed;
+        const previous = window.activeTab();
+        const tab = window.addTab(.{}) catch return error.SpawnFailed;
+        const pane = self.runInFirstSurface(tab, spawn_req) catch |err| {
+            window.removeTab(tab);
+            return err;
+        };
+        if (!select) {
+            if (previous) |p| if (window.tabIndex(p)) |i| window.selectTab(i);
+        }
+        return pane;
+    }
+
+    /// Closes every pane of the namespace's tabs without asking: the last
+    /// pane of the last tab takes the window with it.
+    pub fn closeNamespace(self: *Host, ns: *ns_mod.Namespace) void {
+        var ids: std.ArrayList(u32) = .empty;
+        for (ns.tab_names.values()) |tab_id| {
+            const win: Window = .{ .id = tab_id };
+            if (self.findWindow(tab_id) == null) continue;
+            const list = self.panes(self.arena, win) catch continue;
+            for (list) |p| ids.append(self.arena, p.id) catch {};
+        }
+        for (ids.items) |id| self.kill(.{ .id = id });
+    }
 };
+
+fn windowById(app: *App, id: u32) ?*GhosttyWindow {
+    for (app.windows.items) |w| {
+        if (w.id == id) return w;
+    }
+    return null;
+}
 
 const layout_mod = layout;
 
-/// Runs one request of the external (user) pipe, R-M5-14. Until the session
-/// commands exist (Task 18) no namespace has a session: `has-session` says so
-/// and every other command is unknown, so a same-user process can not drive
-/// the inside-mode panes through this pipe.
-pub fn runExternal(req: protocol.Request, arena: Allocator) Allocator.Error!Reply {
-    const name: []const u8 = if (req.args.len > 0) req.args[0] else "";
-    if (std.mem.eql(u8, name, "has-session") or std.mem.eql(u8, name, "has")) {
-        var target: []const u8 = "";
-        var i: usize = 1;
-        while (i < req.args.len) : (i += 1) {
-            const a = req.args[i];
-            if (std.mem.eql(u8, a, "-t") and i + 1 < req.args.len) {
-                target = req.args[i + 1];
-                break;
-            }
-            if (std.mem.startsWith(u8, a, "-t") and a.len > 2) {
-                target = a[2..];
-                break;
-            }
-        }
-        const session = target[0 .. std.mem.indexOfScalar(u8, target, ':') orelse target.len];
-        return .{
-            .code = .failed,
-            .stdout = "",
-            .stderr = try std.fmt.allocPrint(arena, "can't find session: {s}\n", .{session}),
-        };
+/// Runs one request of the external (user) pipe, R-M5-14. The namespace
+/// confines it: `commands.zig` lets it reach only the tabs of its own session.
+pub fn runExternal(app: *App, req: protocol.Request, arena: Allocator) Allocator.Error!Reply {
+    if (req.namespace == null) {
+        return .{ .code = .failed, .stdout = "", .stderr = "ghostty: request without a namespace\n" };
     }
-    return .{
-        .code = .failed,
-        .stdout = "",
-        .stderr = try std.fmt.allocPrint(arena, "unknown command: {s}\n", .{name}),
-    };
-}
-
-test "win32 tmux external: interim answers" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const has = try runExternal(.{ .v = 1, .op = "tmux", .args = &.{ "has-session", "-t", "claude-swarm:main" }, .namespace = "w" }, a);
-    try std.testing.expectEqual(protocol.Code.failed, has.code);
-    try std.testing.expectEqualStrings("can't find session: claude-swarm\n", has.stderr);
-    const other = try runExternal(.{ .v = 1, .op = "tmux", .args = &.{ "kill-pane", "-t", "%1" }, .namespace = "w" }, a);
-    try std.testing.expectEqualStrings("unknown command: kill-pane\n", other.stderr);
+    return run(app, req, arena);
 }
 
 /// Runs one request of the tmux pipe on the UI thread. All allocations of the
@@ -514,7 +557,8 @@ pub fn run(app: *App, req: protocol.Request, arena: Allocator) Reply {
     if (app.tmux_labels.options == null) labels.attachOptions(app, &app.tmux.options);
     app.tmux_keys.used = true;
 
-    var host: Host = .{ .app = app, .arena = arena, .caller = parseCaller(req.pane) };
+    // An external client has no pane of its own.
+    var host: Host = .{ .app = app, .arena = arena, .caller = if (req.namespace == null) parseCaller(req.pane) else null };
     var out: commands.Output = .{};
     commands.execute(Host, &host, arena, req.args, .{
         .caller_pane = host.caller,

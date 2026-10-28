@@ -7,7 +7,9 @@
 # (exit 1); a raw request without a namespace is refused (code 2) and so is
 # one with a namespace on the per-process pipe; a reload to false releases the
 # pipe ("no server running on ..."); with the key false (the default) there is
-# no pipe at all. Keep this file ASCII only.
+# no pipe at all. Task 18 adds fake teammates: new-session -d makes a Ghostty
+# window without taking the foreground, two splits and `tiled` give 3 panes,
+# kill-server closes the window. Keep this file ASCII only.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_tmux.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
@@ -82,9 +84,9 @@ Invoke-E2eScenario 'tmux-external' {
     # -L wins even when TMUX is set (to a pipe that does not exist).
     $r = Invoke-TmuxExt $g @('-L', 'w', 'has-session', '-t', 'x') @{ TMUX = '\\.\pipe\ghostty-tmux-1-0000000000000000,1,0' }
     Assert-Failed $r "can't find session: x*" '-L with TMUX set'
-    # Until the session commands exist nothing else is served.
+    # No session yet: nothing to target.
     $r = Invoke-TmuxExt $g @('-L', 'w', 'list-panes')
-    Assert-Failed $r 'unknown command: list-panes*' 'list-panes on the user pipe'
+    Assert-Failed $r 'no current target*' 'list-panes without a session'
 
     # Raw requests: the user pipe needs a namespace, the per-process pipe refuses one.
     $r1 = Send-RawTmux $user '{"v":1,"op":"tmux","args":["has-session"]}'
@@ -93,6 +95,40 @@ Invoke-E2eScenario 'tmux-external' {
     if ($r2.code -ne 2) { throw "per-process pipe with a namespace: code $($r2.code), expected 2" }
     $r3 = Send-RawTmux $user '{"v":1,"op":"state"}'
     if ($r3.code -ne 2) { throw "user pipe with op state: code $($r3.code), expected 2" }
+
+    # --- Session commands (Task 18): fake teammates in a namespace. ------------
+    $ns = 'claude-swarm-4242'
+    $nWin = { @((Get-GhosttyState -Class $g.Class).windows).Count }
+    $before = & $nWin
+    $fgBefore = [GhosttyE2e.Win]::GetForegroundWindow()
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'new-session', '-d', '-s', 'claude-swarm', '-n', 'swarm-view', '-P', '-F', '#{pane_id}', '--', 'cat')
+    if ($r.Code -ne 0) { throw "new-session: exit $($r.Code): $($r.Stderr)" }
+    $p1 = $r.Stdout.Trim()
+    if ($p1 -notmatch '^%\d+$') { throw "new-session printed '$p1'" }
+    if (-not (Wait-Until -TimeoutSec 10 -PollMs 150 -Condition { (& $nWin) -eq $before + 1 })) { throw 'no new Ghostty window for the session' }
+    if ([GhosttyE2e.Win]::GetForegroundWindow() -ne $fgBefore) { throw 'the new window took the foreground' }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'has-session', '-t', 'claude-swarm')
+    if ($r.Code -ne 0) { throw "has-session after new-session: exit $($r.Code): $($r.Stderr)" }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'list-windows', '-t', 'claude-swarm', '-F', '#{window_name}')
+    if ($r.Stdout.Trim() -ne 'swarm-view') { throw "list-windows printed '$($r.Stdout.Trim())'" }
+    # Two teammates: split like Claude Code does, then tile.
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'split-window', '-d', '-t', $p1, '-v', '-P', '-F', '#{pane_id}', '--', 'cat')
+    if ($r.Code -ne 0) { throw "split 1: $($r.Stderr)" }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'split-window', '-d', '-t', $p1, '-h', '-P', '-F', '#{pane_id}', '--', 'cat')
+    if ($r.Code -ne 0) { throw "split 2: $($r.Stderr)" }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'select-layout', '-t', 'claude-swarm:swarm-view', 'tiled')
+    if ($r.Code -ne 0) { throw "select-layout: $($r.Stderr)" }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'list-panes', '-t', 'claude-swarm:swarm-view', '-F', '#{pane_id}')
+    $panes = @($r.Stdout -split "`r?`n" | Where-Object { $_ })
+    if ($panes.Count -ne 3) { throw "the session has $($panes.Count) panes, expected 3: $($r.Stdout)" }
+    # The leader window of this Ghostty is out of reach of the namespace.
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'kill-pane', '-t', '%1')
+    Assert-Failed $r "can't find pane: %1*" 'kill-pane of a pane outside the namespace'
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'kill-server')
+    if ($r.Code -ne 0) { throw "kill-server: exit $($r.Code): $($r.Stderr)" }
+    if (-not (Wait-Until -TimeoutSec 10 -PollMs 150 -Condition { (& $nWin) -eq $before })) { throw 'kill-server did not close the namespace window' }
+    $r = Invoke-TmuxExt $g @('-L', $ns, 'has-session', '-t', 'claude-swarm')
+    Assert-Failed $r "can't find session: claude-swarm*" 'has-session after kill-server'
 
     # --- A reload to false releases the pipe. ---------------------------------
     $path = Join-Path $script:Sbx.Home '.config\ghostty\config.ghostty'

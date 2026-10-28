@@ -1,0 +1,18 @@
+{"argv":["tmux","-L","claude-swarm-4242","has-session","-t","claude-swarm"],"code":1,"stderr":"can't find session: claude-swarm\n"}
+{"argv":["tmux","-L","claude-swarm-4242","new-session","-d","-s","claude-swarm","-n","swarm-view","-P","-F","#{pane_id}","--","cat"],"stdout":"%1\n"}
+{"argv":["tmux","-L","claude-swarm-4242","has-session","-t","claude-swarm"]}
+{"argv":["tmux","-L","claude-swarm-4242","list-windows","-t","claude-swarm","-F","#{window_name}"],"stdout":"swarm-view\n"}
+{"argv":["tmux","-L","claude-swarm-4242","list-panes","-t","claude-swarm:swarm-view","-F","#{pane_id}"],"stdout":"%1\n"}
+{"argv":["tmux","-L","claude-swarm-4242","set-option","-w","-t","claude-swarm:swarm-view","pane-border-status","top"]}
+{"argv":["tmux","-L","claude-swarm-4242","list-panes","-t","claude-swarm:swarm-view","-F","#{pane_id}"],"stdout":"%1\n"}
+{"argv":["tmux","-L","claude-swarm-4242","split-window","-d","-t","%1","-v","-P","-F","#{pane_id}","--","cat"],"stdout":"%2\n"}
+{"argv":["tmux","-L","claude-swarm-4242","set-option","-p","-t","%2","remain-on-exit","failed"]}
+{"argv":["tmux","-L","claude-swarm-4242","respawn-pane","-k","-t","%2","--","echo teammate-one"]}
+{"argv":["tmux","-L","claude-swarm-4242","list-panes","-t","claude-swarm:swarm-view","-F","#{pane_id}"],"stdout":"%1\n%2\n"}
+{"argv":["tmux","-L","claude-swarm-4242","split-window","-d","-t","%1","-h","-P","-F","#{pane_id}","--","cat"],"stdout":"%3\n"}
+{"argv":["tmux","-L","claude-swarm-4242","set-option","-p","-t","%3","remain-on-exit","failed"]}
+{"argv":["tmux","-L","claude-swarm-4242","respawn-pane","-k","-t","%3","--","echo teammate-two"]}
+{"argv":["tmux","-L","claude-swarm-4242","select-layout","-t","claude-swarm:swarm-view","tiled"]}
+{"argv":["tmux","-L","claude-swarm-4242","list-panes","-t","claude-swarm:swarm-view","-F","#{pane_id}"],"stdout":"%1\n%3\n%2\n"}
+{"argv":["tmux","-L","claude-swarm-4242","kill-server"]}
+{"argv":["tmux","-L","claude-swarm-4242","has-session","-t","claude-swarm"],"code":1,"stderr":"can't find session: claude-swarm\n"}

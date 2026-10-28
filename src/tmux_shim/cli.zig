@@ -95,6 +95,12 @@ pub const CommandId = enum {
     load_buffer,
     send_keys,
     capture_pane,
+    // External mode only (R-M5-14): inside Ghostty these stay unsupported.
+    has_session,
+    new_session,
+    new_window,
+    kill_session,
+    kill_server,
 };
 
 pub fn commandName(id: CommandId) []const u8 {
@@ -114,6 +120,11 @@ pub fn commandName(id: CommandId) []const u8 {
         .load_buffer => "load-buffer",
         .send_keys => "send-keys",
         .capture_pane => "capture-pane",
+        .has_session => "has-session",
+        .new_session => "new-session",
+        .new_window => "new-window",
+        .kill_session => "kill-session",
+        .kill_server => "kill-server",
     };
 }
 
@@ -135,6 +146,11 @@ fn template(id: CommandId) []const u8 {
         .load_buffer => "b:t:w",
         .send_keys => "c:FHKlMN:Rt:X",
         .capture_pane => "ab:CeE:JMNpPqS:Tt:",
+        .has_session => "t:",
+        .new_session => "Ac:dDe:EF:f:n:Ps:t:x:Xy:",
+        .new_window => "abc:de:F:kn:PSt:",
+        .kill_session => "aCt:",
+        .kill_server => "",
     };
 }
 
@@ -156,7 +172,13 @@ pub const Command = struct {
     }
 };
 
-const Entry = struct { name: []const u8, alias: ?[]const u8 = null, id: ?CommandId = null };
+const Entry = struct {
+    name: []const u8,
+    alias: ?[]const u8 = null,
+    id: ?CommandId = null,
+    /// The id in external mode, where the command exists.
+    ext_id: ?CommandId = null,
+};
 
 /// Every tmux 3.5a command, in tmux's (alphabetical) order. Only the 15
 /// supported ones carry an id.
@@ -182,12 +204,12 @@ const table = [_]Entry{
     .{ .name = "display-panes", .alias = "displayp" },
     .{ .name = "display-popup", .alias = "popup" },
     .{ .name = "find-window", .alias = "findw" },
-    .{ .name = "has-session", .alias = "has" },
+    .{ .name = "has-session", .alias = "has", .ext_id = .has_session },
     .{ .name = "if-shell", .alias = "if" },
     .{ .name = "join-pane", .alias = "joinp" },
     .{ .name = "kill-pane", .alias = "killp", .id = .kill_pane },
-    .{ .name = "kill-server" },
-    .{ .name = "kill-session" },
+    .{ .name = "kill-server", .ext_id = .kill_server },
+    .{ .name = "kill-session", .ext_id = .kill_session },
     .{ .name = "kill-window", .alias = "killw" },
     .{ .name = "link-window", .alias = "linkw" },
     .{ .name = "list-buffers", .alias = "lsb" },
@@ -203,8 +225,8 @@ const table = [_]Entry{
     .{ .name = "lock-session", .alias = "locks" },
     .{ .name = "move-pane", .alias = "movep" },
     .{ .name = "move-window", .alias = "movew" },
-    .{ .name = "new-session", .alias = "new" },
-    .{ .name = "new-window", .alias = "neww" },
+    .{ .name = "new-session", .alias = "new", .ext_id = .new_session },
+    .{ .name = "new-window", .alias = "neww", .ext_id = .new_window },
     .{ .name = "next-layout", .alias = "nextl" },
     .{ .name = "next-window", .alias = "next" },
     .{ .name = "paste-buffer", .alias = "pasteb" },
@@ -253,7 +275,7 @@ const table = [_]Entry{
 
 /// Mirrors tmux's `cmd_find`: an exact alias or name wins, otherwise a unique
 /// name prefix. Resolving to a command outside the supported 15 is "unknown".
-fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
+fn resolve(name: []const u8, diag: *Diag, external: bool) error{Usage}!CommandId {
     var found: ?*const Entry = null;
     var ambiguous = false;
     for (&table) |*e| {
@@ -284,6 +306,7 @@ fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
     }
     if (found) |e| {
         if (e.id) |id| return id;
+        if (external) if (e.ext_id) |id| return id;
         diag.print("{s}: unsupported by Ghostty", .{e.name});
         return error.Usage;
     }
@@ -291,8 +314,8 @@ fn resolve(name: []const u8, diag: *Diag) error{Usage}!CommandId {
     return error.Usage;
 }
 
-fn parseOne(arena: Allocator, argv: []const []const u8, diag: *Diag) error{ Usage, OutOfMemory }!Command {
-    const id = try resolve(argv[0], diag);
+fn parseOne(arena: Allocator, argv: []const []const u8, diag: *Diag, external: bool) error{ Usage, OutOfMemory }!Command {
+    const id = try resolve(argv[0], diag, external);
     const cmd_name = commandName(id);
     const tmpl = template(id);
     var cmd: Command = .{
@@ -344,12 +367,23 @@ pub fn parseCommands(
     argv: []const []const u8,
     diag: *Diag,
 ) error{ Usage, OutOfMemory }![]Command {
+    return parseCommandsFor(arena, argv, diag, false);
+}
+
+/// `parseCommands`; with `external` the session commands exist too (the
+/// namespaces of R-M5-14).
+pub fn parseCommandsFor(
+    arena: Allocator,
+    argv: []const []const u8,
+    diag: *Diag,
+    external: bool,
+) error{ Usage, OutOfMemory }![]Command {
     var out: std.ArrayList(Command) = .empty;
     var start: usize = 0;
     var i: usize = 0;
     while (i <= argv.len) : (i += 1) {
         if (i < argv.len and !std.mem.eql(u8, argv[i], ";")) continue;
-        if (i > start) try out.append(arena, try parseOne(arena, argv[start..i], diag));
+        if (i > start) try out.append(arena, try parseOne(arena, argv[start..i], diag, external));
         start = i + 1;
     }
     if (out.items.len == 0) {
@@ -556,4 +590,38 @@ test "tmux shim cli: repeated -e accumulates" {
     try std.testing.expectEqualStrings("B=2", cmds[0].value('e').?);
     const none = try parseCommands(arena_state.allocator(), &.{ "split-window", "-h" }, &d);
     try std.testing.expectEqual(@as(usize, 0), none[0].env_values.len);
+}
+
+test "tmux shim cli: external commands parse" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var d: Diag = .{};
+
+    const ns = (try parseCommandsFor(a, &.{
+        "new-session", "-d", "-s",         "claude-swarm", "-n",  "swarm-view", "-x", "200", "-y", "50",
+        "-P",          "-F", "#{pane_id}", "--",           "cat",
+    }, &d, true))[0];
+    try std.testing.expectEqual(CommandId.new_session, ns.id);
+    try std.testing.expect(ns.has('d') and ns.has('P'));
+    try std.testing.expectEqualStrings("claude-swarm", ns.value('s').?);
+    try std.testing.expectEqualStrings("swarm-view", ns.value('n').?);
+    try std.testing.expectEqualStrings("200", ns.value('x').?);
+    try std.testing.expectEqualStrings("50", ns.value('y').?);
+    try std.testing.expectEqualStrings("cat", ns.positional[0]);
+
+    const nw = try parseCommandsFor(a, &.{ "neww", "-t", "claude-swarm", "-n", "w", "-dP" }, &d, true);
+    try std.testing.expectEqual(CommandId.new_window, nw[0].id);
+    try std.testing.expect(nw[0].has('d') and nw[0].has('P'));
+
+    const seq = try parseCommandsFor(a, &.{ "has", "-t", "claude-swarm", ";", "kill-session", "-t", "claude-swarm", ";", "kill-server" }, &d, true);
+    try std.testing.expectEqual(CommandId.has_session, seq[0].id);
+    try std.testing.expectEqual(CommandId.kill_session, seq[1].id);
+    try std.testing.expectEqual(CommandId.kill_server, seq[2].id);
+    try std.testing.expectEqual(@as(usize, 3), seq.len);
+
+    // Inside Ghostty the same words stay unsupported (R-M4-4).
+    try expectUsage(&.{"kill-server"}, "kill-server: unsupported by Ghostty");
+    try expectUsage(&.{ "new-window", "-t", "x" }, "new-window: unsupported by Ghostty");
+    try expectUsage(&.{ "kill-session", "-t", "x" }, "kill-session: unsupported by Ghostty");
 }

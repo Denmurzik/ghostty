@@ -236,7 +236,7 @@ pub fn handle(app: *App, pending: *ipc.Server.Pending, external: bool) void {
         app: *App,
         external: bool,
         pub fn run(self: @This(), arena: Allocator, req: protocol.Request) Registry.Reply {
-            if (self.external) return Registry.runExternal(req, arena) catch
+            if (self.external) return Registry.runExternal(self.app, req, arena) catch
                 .{ .code = .failed, .stdout = "", .stderr = "ghostty: out of memory\n" };
             return Registry.run(self.app, req, arena);
         }

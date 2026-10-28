@@ -12,6 +12,7 @@ const SplitLayout = @import("../SplitLayout.zig");
 const geom = @import("../geom.zig");
 const layout_mod = @import("layout.zig");
 const commands = @import("commands.zig");
+const ns_mod = @import("namespaces.zig");
 
 pub const View = struct {
     id: u32,
@@ -52,6 +53,8 @@ const WindowState = struct {
     id: u32,
     tree: Tree,
     active: u32,
+    /// The fake Ghostty window of a namespace (0: none).
+    owner: u32 = 0,
 };
 
 pub const SpawnKind = enum { initial, split, respawn };
@@ -72,6 +75,8 @@ opts: commands.Options = .{},
 spawns: std.ArrayList(SpawnRecord) = .empty,
 next_pane: u32 = 1,
 next_window: u32 = 1,
+next_owner: u32 = 100,
+ns_table: ns_mod.Table = .{},
 focused: u32 = 0,
 
 /// Test hooks: errors the next split/respawn returns.
@@ -119,6 +124,7 @@ pub fn deinit(self: *FakeHost) void {
     }
     self.pane_states.deinit(a);
     self.opts.deinit(a);
+    self.ns_table.deinit(a);
     for (self.spawns.items) |s| freeRecord(a, s);
     self.spawns.deinit(a);
     self.options_changed.deinit(a);
@@ -529,4 +535,59 @@ pub fn addWindow(self: *FakeHost) !u32 {
     try self.windows_list.append(self.alloc, .{ .id = self.next_window, .tree = t, .active = id });
     self.next_window += 1;
     return id;
+}
+
+// External mode (R-M5-14).
+
+pub fn namespaces(self: *FakeHost) *ns_mod.Table {
+    return &self.ns_table;
+}
+
+fn addOwnedWindow(self: *FakeHost, owner: u32, spawn: commands.Spawn) commands.SplitError!Pane {
+    const id = try self.newPane(.initial, spawn);
+    errdefer self.dropPaneState(id);
+    var view: View = .{ .id = id };
+    var t = try Tree.init(self.alloc, &view);
+    errdefer t.deinit();
+    try self.windows_list.append(self.alloc, .{ .id = self.next_window, .tree = t, .active = id, .owner = owner });
+    self.next_window += 1;
+    return .{ .id = id };
+}
+
+/// A new fake Ghostty window for the namespace, with one window (tab).
+pub fn newSessionWindow(self: *FakeHost, ns: *ns_mod.Namespace, name: []const u8, spawn: commands.Spawn) commands.SplitError!Pane {
+    _ = name;
+    const owner = self.next_owner;
+    const pane = try self.addOwnedWindow(owner, spawn);
+    self.next_owner += 1;
+    ns.window_id = owner;
+    return pane;
+}
+
+/// A new window (tab) in the Ghostty window `owner`.
+pub fn newTabIn(self: *FakeHost, owner: u32, name: []const u8, spawn: commands.Spawn, select: bool) commands.SplitError!Pane {
+    _ = name;
+    _ = select;
+    return self.addOwnedWindow(owner, spawn);
+}
+
+/// Closes every window of the namespace, no questions asked.
+pub fn closeNamespace(self: *FakeHost, ns: *ns_mod.Namespace) void {
+    const owner = ns.window_id orelse return;
+    var i = self.windows_list.items.len;
+    while (i > 0) {
+        i -= 1;
+        const w = &self.windows_list.items[i];
+        if (w.owner != owner) continue;
+        const ids = self.paneIds(self.alloc, i) catch &[_]u32{};
+        defer if (ids.len > 0) self.alloc.free(ids);
+        const wid = w.id;
+        w.tree.deinit();
+        _ = self.windows_list.orderedRemove(i);
+        self.opts.dropWindow(self.alloc, wid);
+        for (ids) |p| {
+            if (self.focused == p) self.focused = 0;
+            self.dropPaneState(p);
+        }
+    }
 }
