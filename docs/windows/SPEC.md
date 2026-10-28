@@ -253,7 +253,8 @@ M3 shipped (amended by the rulings of §18, R-M3-1..12):
   re-uploaded on a device generation change (platform-neutral hook in `generic.zig`/`image.zig`).
 - imgui inspector (`imgui_impl_win32` + `imgui_impl_dx11` in `pkg/dcimgui`, R-M3-4); background image verified on D3D11
   (`vt-smoke/bg-image`).
-- Kitty graphics could not be verified end to end: the inbox ConPTY drops APC sequences (§18.33).
+- Kitty graphics could not be verified end to end in M3: the inbox ConPTY drops APC sequences (§18.33; the bundled ConPTY
+  of M5 forwards them).
 
 ## 7. Apprt `src/apprt/win32`
 
@@ -897,6 +898,22 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     **owner-approved provisional gaps** (the vt-smoke cases `kitty-image` and `underline-colors` SKIP and carry no reference)
     until a newer `conpty.dll` + OpenConsole is bundled (an owner question: needs a download approval, selectable with
     `GHOSTTY_WIN32_CONPTY_DLL`). Not gating: with flag 8 a Debug run showed key-echo whole-path p95 18.8 ms against 50 ms with flag 0.
+    **Update (M5, owner-approved download):** a headless probe (`conpty-probe/headless.ps1`, `RESULT.md` "Bundled ConPTY")
+    ran `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (`conpty.dll` + `OpenConsole.exe`, MIT, signed by Microsoft).
+    It forwards Kitty APC, SGR 58 and OSC 133/7/8/52/9 byte-identical and in place, unlike the inbox console, which
+    rewrites OSC 8 and moves OSC 7/52/9. Resize works, and its key-echo p95 is below 1 ms (inbox: 0.6 to 15 ms).
+    - **Decision:** `windows-conpty = bundled` is the default. Every win32 build installs the pair for x64/arm64 from
+      `vendor/conpty` (committed: `zig fetch` cannot unpack a `.nupkg`; `-Dconpty-dir` overrides) next to
+      `ghostty.exe`, with `THIRD_PARTY_NOTICES.md`.
+    - **Loading:** `LoadLibraryExW("conpty.dll", APPLICATION_DIR | SYSTEM32)` once both files are found in the exe
+      directory. Missing files or a failed load mean one log line and the inbox console; `windows-conpty = inbox` forces
+      it. A pty keeps the ConPTY it was created with.
+    - **Flags:** 0. Flag 8 means `GLYPH_WIDTH_GRAPHEMES` in this package, which has no passthrough flag; it changed
+      nothing measured.
+    - **Terminal duties:** the bundled console forwards the application's `CSI 6 n` to the terminal and resyncs its
+      cursor from the reply, so Ghostty's grapheme widths win. At start it sends DA1 and `CSI 1 t`.
+    - **Gaps:** the Kitty graphics and SGR 58 gaps become pending GUI checks (vt-smoke `kitty-image`,
+      `underline-colors` references).
 34. Execution rulings of M3 (lead, recorded for the owner):
     - Task 7: a failing custom post shader drops all custom shaders (as Metal/OpenGL do); `generic.zig` `has_custom_shaders`
       requires `post_pipelines.len > 0` (also fixes a latent Metal/OpenGL bug: candidate upstream PR). Task 7.1: shader passes
