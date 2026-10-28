@@ -4103,9 +4103,9 @@ term: []const u8 = default_term,
 /// Available since: 1.2.0
 @"async-backend": AsyncBackend = .auto,
 
-/// Control the auto-update functionality of Ghostty. This is only supported
-/// on macOS currently, since Linux builds are distributed via package
-/// managers that are not centrally controlled by Ghostty.
+/// Control the auto-update functionality of Ghostty. This is supported on
+/// macOS and Windows; Linux builds are distributed via package managers
+/// that are not centrally controlled by Ghostty.
 ///
 /// Checking or downloading an update does not send any information to
 /// the project beyond standard network information mandated by the
@@ -4122,8 +4122,13 @@ term: []const u8 = default_term,
 ///  * `download` - Check for updates, automatically download the update,
 ///    notify the user, but do not automatically install the update.
 ///
-/// If unset, we defer to Sparkle's default behavior, which respects the
-/// preference stored in the standard user defaults (`defaults(1)`).
+/// If unset, on macOS we defer to Sparkle's default behavior, which respects
+/// the preference stored in the standard user defaults (`defaults(1)`).
+///
+/// On Windows there is no installer-side updater: Ghostty only checks the
+/// project's GitHub releases for a newer `win-` release and shows a
+/// notification (`check`; `download` behaves like `check`). If unset it
+/// checks once a day with a single anonymous GET; `off` disables it.
 ///
 /// Changing this value at runtime works after a small delay.
 @"auto-update": ?AutoUpdate = null,
@@ -4147,10 +4152,10 @@ term: []const u8 = default_term,
 /// Changing this configuration requires a full restart of
 /// Ghostty to take effect.
 ///
-/// On Windows `stable` skips GitHub pre-releases in the update check and
-/// `tip` also offers them.
-///
-/// This only works on macOS since only macOS has an auto-update feature.
+/// This works on macOS and Windows. On Windows every `win-` release is
+/// published as a GitHub pre-release, and the pre-release flag is ignored:
+/// `stable` counts every `win-` release except those tagged rc, alpha, beta
+/// or pre, and `tip` counts those as well.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
 /// This is set by the CLI parser for deinit.

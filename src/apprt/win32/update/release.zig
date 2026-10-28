@@ -66,9 +66,24 @@ pub fn currentN(version: []const u8) ?u32 {
     return windows_version.winN(version);
 }
 
+/// Whether the zon part of a tag carries an rc/alpha/beta/pre marker after its
+/// version core (`1.4.0-rc.1`). The permanent `-dev` of the zon is not one.
+fn tipOnly(zon: []const u8) bool {
+    const dash = std.mem.indexOfScalar(u8, zon, '-') orelse return false;
+    var it = std.mem.tokenizeAny(u8, zon[dash + 1 ..], "-.");
+    while (it.next()) |seg| {
+        inline for (.{ "rc", "alpha", "beta", "pre" }) |m| {
+            if (std.ascii.startsWithIgnoreCase(seg, m)) return true;
+        }
+    }
+    return false;
+}
+
 /// The non-draft release with a valid tag and url and the highest N.
-/// With `stable_only` (`auto-update-channel = stable`) GitHub pre-releases are
-/// skipped; the `tip` channel counts them.
+/// Every `win-` release is published as a GitHub pre-release, so that flag is
+/// ignored: a `win-` tag counts as `stable`. With `stable_only`
+/// (`auto-update-channel = stable`) only tags whose zon has an rc/alpha/beta/pre
+/// marker are skipped; the `tip` channel counts them too.
 pub fn newest(arena: Allocator, body: []const u8, stable_only: bool) ParseError!Release {
     if (nestingDepth(body) > max_depth) return error.NotJson;
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch |err| switch (err) {
@@ -83,14 +98,10 @@ pub fn newest(arena: Allocator, body: []const u8, stable_only: bool) ParseError!
         if (item.object.get("draft")) |d| {
             if (d != .bool or d.bool) continue;
         }
-        if (stable_only) {
-            if (item.object.get("prerelease")) |p| {
-                if (p != .bool or p.bool) continue;
-            }
-        }
         const tag = str(item.object.get("tag_name")) orelse continue;
         const url = str(item.object.get("html_url")) orelse continue;
         const parsed = parseTag(tag) orelse continue;
+        if (stable_only and tipOnly(parsed.zon)) continue;
         if (!isReleaseUrl(url)) continue;
         if (!std.mem.eql(u8, url[release_prefix.len..], tag["win-".len..])) continue;
         if (best) |b| if (b.n >= parsed.n) continue;
@@ -264,12 +275,28 @@ test "win32 update: release url tail is restricted" {
     try std.testing.expect(parseTag("win-1.0?a-1") == null);
 }
 
-test "win32 update: stable channel skips pre-releases, tip counts them" {
+test "win32 update: stable channel counts win- tags despite the pre-release flag" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const body = @embedFile("testdata/prerelease-newer.json");
     try std.testing.expectEqual(@as(u32, 7), (try newest(arena.allocator(), body, false)).n);
-    try std.testing.expectEqual(@as(u32, 6), (try newest(arena.allocator(), body, true)).n);
+    try std.testing.expectEqual(@as(u32, 7), (try newest(arena.allocator(), body, true)).n);
+}
+
+test "win32 update: stable skips rc tags, tip accepts them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body =
+        \\[{"tag_name":"win-1.4.0-rc.1-9","html_url":"https://github.com/Denmurzik/ghostty/releases/tag/win-1.4.0-rc.1-9","draft":false,"prerelease":true},
+        \\ {"tag_name":"win-1.3.2-dev-8","html_url":"https://github.com/Denmurzik/ghostty/releases/tag/win-1.3.2-dev-8","draft":false,"prerelease":true}]
+    ;
+    try std.testing.expectEqual(@as(u32, 9), (try newest(a, body, false)).n);
+    try std.testing.expectEqual(@as(u32, 8), (try newest(a, body, true)).n);
+    try std.testing.expect(tipOnly("1.4.0-rc.1"));
+    try std.testing.expect(tipOnly("1.4.0-beta2"));
+    try std.testing.expect(!tipOnly("1.3.2-dev"));
+    try std.testing.expect(!tipOnly("1.3.2"));
 }
 
 test "win32 update: N is capped at 65535 like the build" {

@@ -3,6 +3,12 @@ const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
 const global = @import("../global.zig");
+const builtin = @import("builtin");
+
+/// The Explorer actions only exist on Windows; other hosts do not list them.
+fn windowsOnly(comptime field: []const u8) bool {
+    return comptime std.mem.endsWith(u8, field, "-explorer-integration");
+}
 
 // Note that this options struct doesn't implement the `help` decl like other
 // actions. That is because the help command is special and wants to handle its
@@ -64,6 +70,7 @@ pub fn run(alloc: Allocator) !u8 {
     );
 
     inline for (@typeInfo(Action).@"enum".field_names) |field| {
+        if (comptime windowsOnly(field) and builtin.os.tag != .windows) continue;
         try stdout.print("  +{s}\n", .{field});
     }
 

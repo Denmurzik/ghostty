@@ -268,7 +268,8 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   tray and the pipe only (the jump list or a second launch opens the first window); `window-subtitle = working-directory`
   shows `title - pwd` in the title row.
 - **Sound and updates.** `bell-audio-volume` scales the WAV bell; `auto-update-channel = stable` makes the update check skip
-  GitHub pre-releases (`tip` also offers them; unset follows the build's release channel). `win-` tags are pre-releases.
+  rc/alpha/beta/pre tags (`tip` also offers them; unset follows the build's release channel). Every `win-` release is a GitHub
+  pre-release, and that flag is ignored: `win-` releases count as `stable`.
 - **External tmux and tmux pipe fixes.** An external `new-window` opens in the namespace's window while it lives (else in the
   first live tab's window); the tmux user-pipe drain keeps every foreign message and answers `ghostty: busy` to a request it
   cannot store.
