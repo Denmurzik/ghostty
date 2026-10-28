@@ -140,6 +140,15 @@ fn plain(s: []const u8, comptime set: []const u8) bool {
     return true;
 }
 
+/// The path as Explorer shows it: `\\?\C:\x` -> `C:\x`,
+/// `\\?\UNC\srv\share` -> `\\srv\share`.
+fn plainWinPath(alloc: Allocator, path: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, path, "\\\\?\\UNC\\"))
+        return std.mem.concat(alloc, u8, &.{ "\\\\", path["\\\\?\\UNC\\".len..] });
+    if (std.mem.startsWith(u8, path, "\\\\?\\")) return alloc.dupe(u8, path["\\\\?\\".len..]);
+    return alloc.dupe(u8, path);
+}
+
 /// Space-joined paths quoted for `kind`, without a trailing space.
 pub fn quote(alloc: Allocator, kind: ShellKind, paths: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -148,9 +157,12 @@ pub fn quote(alloc: Allocator, kind: ShellKind, paths: []const []const u8) ![]u8
         if (i > 0) try out.append(alloc, ' ');
         switch (kind) {
             .msys, .cygwin, .wsl => {
+                // Git Bash and Cygwin take Windows paths as they are (the
+                // owner's choice: what Explorer shows, ready for native
+                // tools); single quotes keep the backslashes. WSL cannot
+                // open `C:\`, so it gets its `/mnt/c` form.
                 const conv = switch (kind) {
-                    .msys => try msysPath(alloc, path),
-                    .cygwin => try convert(alloc, path, "/cygdrive/"),
+                    .msys, .cygwin => try plainWinPath(alloc, path),
                     else => try wslPath(alloc, path),
                 };
                 defer alloc.free(conv);
@@ -598,19 +610,19 @@ test "win32 drop: shell kind of the resolved default shell" {
     try testing.expectEqual(ShellKind.wsl, shellKindFor(wsl));
 }
 
-test "win32 drop: msys and wsl paths and quoting" {
-    try expectQuoted(.msys, &.{"C:\\a b\\c.txt"}, "'/c/a b/c.txt'");
-    try expectQuoted(.msys, &.{"D:\\x\\y.txt"}, "/d/x/y.txt");
-    try expectQuoted(.msys, &.{"\\\\?\\C:\\long"}, "/c/long");
-    try expectQuoted(.msys, &.{"\\\\srv\\share\\f"}, "//srv/share/f");
-    try expectQuoted(.msys, &.{"\\\\?\\UNC\\srv\\share\\x"}, "//srv/share/x");
-    try expectQuoted(.msys, &.{"C:\\it's.txt"}, "'/c/it'\\''s.txt'");
+test "win32 drop: msys gets Windows paths, wsl gets /mnt paths" {
+    try expectQuoted(.msys, &.{"C:\\a b\\c.txt"}, "'C:\\a b\\c.txt'");
+    try expectQuoted(.msys, &.{"D:\\x\\y.txt"}, "'D:\\x\\y.txt'");
+    try expectQuoted(.msys, &.{"\\\\?\\C:\\long"}, "'C:\\long'");
+    try expectQuoted(.msys, &.{"\\\\srv\\share\\f"}, "'\\\\srv\\share\\f'");
+    try expectQuoted(.msys, &.{"\\\\?\\UNC\\srv\\share\\x"}, "'\\\\srv\\share\\x'");
+    try expectQuoted(.msys, &.{"C:\\it's.txt"}, "'C:\\it'\\''s.txt'");
     try expectQuoted(.wsl, &.{"C:\\a b"}, "'/mnt/c/a b'");
     try expectQuoted(.wsl, &.{"C:\\x\\y"}, "/mnt/c/x/y");
     try expectQuoted(.wsl, &.{"\\\\srv\\share\\x"}, "//srv/share/x");
-    try expectQuoted(.msys, &.{ "C:\\a", "C:\\b c" }, "/c/a '/c/b c'");
-    try expectQuoted(.msys, &.{"C:\\Рабочая\\ф.txt"}, "'/c/Рабочая/ф.txt'");
-    try expectQuoted(.msys, &.{"C:\\a&b %x !y"}, "'/c/a&b %x !y'");
+    try expectQuoted(.msys, &.{ "C:\\a", "C:\\b c" }, "'C:\\a' 'C:\\b c'");
+    try expectQuoted(.msys, &.{"C:\\Рабочая\\ф.txt"}, "'C:\\Рабочая\\ф.txt'");
+    try expectQuoted(.msys, &.{"C:\\a&b %x !y"}, "'C:\\a&b %x !y'");
 }
 
 test "win32 drop: pwsh quoting" {
@@ -771,5 +783,5 @@ test "win32 drop: System32 bash is WSL, Cygwin bash has /cygdrive" {
     const cyg: configpkg.Command = .{ .direct = &.{"C:\\cygwin64\\bin\\bash.exe"} };
     try testing.expectEqual(ShellKind.wsl, shellKindFor(wsl_bash));
     try testing.expectEqual(ShellKind.cygwin, shellKindFor(cyg));
-    try expectQuoted(.cygwin, &.{"C:\\a b"}, "'/cygdrive/c/a b'");
+    try expectQuoted(.cygwin, &.{"C:\\a b"}, "'C:\\a b'");
 }

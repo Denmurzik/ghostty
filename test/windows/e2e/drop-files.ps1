@@ -1,6 +1,6 @@
 # e2e: milestone=M2 timeout=120 order=470
 # drop-files: files and folders dragged from an OLE source onto a surface are
-# pasted as shell-quoted, space-separated paths: msys paths in Git Bash, the
+# pasted as shell-quoted, space-separated paths: Windows paths in Git Bash, the
 # Windows paths in pwsh and cmd. There is no highlight (as on macOS);
 # the drop never presses Enter; in a two-split tab the text lands
 # in the split under the pointer, which becomes focused; the tab strip refuses
@@ -35,12 +35,12 @@ function New-DropFiles([string]$Root) {
     @($a, $b, $c, $d, $e)
 }
 
-# What Git Bash should receive for one Windows path: C:\a\b -> /c/a/b,
-# a \\?\ prefix dropped.
+# What Git Bash should receive for one Windows path: the Windows path itself,
+# a \\?\ prefix dropped (\\?\UNC\ becomes \\).
 function ConvertTo-MsysPath([string]$p) {
-    if ($p.StartsWith('\\?\')) { $p = $p.Substring(4) }
-    if ($p -match '^([A-Za-z]):(.*)$') { $p = '/' + $Matches[1].ToLowerInvariant() + $Matches[2] }
-    $p.Replace('\', '/')
+    if ($p.StartsWith('\\?\UNC\')) { return '\\' + $p.Substring(8) }
+    if ($p.StartsWith('\\?\')) { return $p.Substring(4) }
+    $p
 }
 
 
@@ -95,7 +95,7 @@ Invoke-E2eScenario 'drop-files' {
     $files = New-DropFiles $tmp
     $ran = 0
 
-    # --- Git Bash: msys paths ---------------------------------------------------
+    # --- Git Bash: Windows paths ---------------------------------------------------
     if (Find-GitBash) {
         $g = Start-BashE2e 'unsafe-paste'
         if (-not (Set-ForegroundSafe -Hwnd $g.Hwnd)) { throw 'E2E-SKIP: could not take the foreground' }
