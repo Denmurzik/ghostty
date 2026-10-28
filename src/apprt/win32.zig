@@ -50,6 +50,7 @@ test {
     _ = @import("win32/config_errors.zig");
     _ = @import("win32/export_io.zig");
     _ = @import("win32/tab_menu.zig");
+    _ = @import("win32/context_menu.zig");
     _ = @import("win32/recovery.zig");
     _ = @import("win32/inspector/Inspector.zig");
     _ = @import("../tmux_shim/cli.zig");

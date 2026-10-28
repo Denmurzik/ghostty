@@ -8,6 +8,7 @@ const input = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
 const scrollbar = @import("scrollbar.zig");
+const context_menu = @import("context_menu.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.win32_mouse);
@@ -309,8 +310,22 @@ fn handleButton(
     // stale (touch, pen, a click right after a focus change).
     sendPos(surface, lparam, mods);
 
-    _ = surface.core_surface.mouseButtonCallback(state, button, mods) catch |err|
+    const consumed = surface.core_surface.mouseButtonCallback(state, button, mods) catch |err| c: {
         log.warn("mouse button callback failed err={}", .{err});
+        break :c true;
+    };
+
+    // Core leaves a right press unconsumed only for `context-menu` (and
+    // when no app has mouse reporting on). The menu loop needs the mouse
+    // free, so the capture ends first; like macOS, no release follows.
+    if (button == .right and state == .press and !consumed and
+        surface.core_surface.config.right_click_action == .@"context-menu")
+    {
+        ms.captured_buttons &= ~buttonBit(button);
+        if (ms.captured_buttons == 0) _ = user32.ReleaseCapture();
+        context_menu.show(surface, user32.getXLparam(lparam), user32.getYLparam(lparam));
+        return;
+    }
 
     // Releasing a drag outside the window: no WM_MOUSELEAVE is coming for
     // a pointer that was already out, so clear the stale hover here.
