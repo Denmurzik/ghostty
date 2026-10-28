@@ -427,6 +427,7 @@ function Start-E2eGhostty {
         foreach ($n in $vars.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
     }
     Register-OwnGhostty -ProcessId $proc.Id
+    if (Test-ConfigTranslucent (($ConfigText, ($ExtraArgs -join "`n")) -join "`n")) { Set-CaptureSeeThrough ([uint32]$proc.Id) }
 
     # No scenario may run on the default class.
     $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)").CommandLine
@@ -985,6 +986,9 @@ function Start-Launch([string]$Class, [string[]]$LaunchArgs) {
     }
     $null = $proc.Handle
     Register-OwnGhostty -ProcessId $proc.Id
+    $cfgFile = Join-Path $sbx.Home '.config\ghostty\config.ghostty'
+    $cfgText = if (Test-Path -LiteralPath $cfgFile) { Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 } else { '' }
+    if (Test-ConfigTranslucent (($cfgText, ($LaunchArgs -join "`n")) -join "`n")) { Set-CaptureSeeThrough ([uint32]$proc.Id) }
     $proc
 }
 
@@ -1042,23 +1046,65 @@ function Test-OwnCaptureProcess([uint32]$ProcessId) {
     $ok
 }
 
-# Exact z-order check: walking the top-level windows from the top, a window
-# that is not ours and intersects the rect is a hit when it is above any of
-# our windows that intersect the rect, or when none of ours does (the capture
-# would show the owner's desktop).
-function Test-CaptureZOrderClear([int]$X, [int]$Y, [int]$W, [int]$H) {
+# Processes whose windows let what is behind them show: a Ghostty started with
+# a translucent config (background-opacity / background-blur mentioned). Such a
+# window does not hide a foreign window below it; only an opaque window of
+# ours (a backdrop form, an opaque Ghostty) does.
+$script:CaptureSeeThrough = @{}
+
+function Set-CaptureSeeThrough([uint32]$ProcessId, [bool]$On = $true) {
+    if ($On) { $script:CaptureSeeThrough[$ProcessId] = $true } else { $script:CaptureSeeThrough.Remove($ProcessId) }
+}
+
+# Whether a config (file text and command line) can make the window translucent.
+# Any mention counts, whatever the value: a reload or a toggle changes it later.
+function Test-ConfigTranslucent([string]$Text) {
+    [bool]($Text -match '(?im)^\s*(--)?background-(opacity|blur)\b')
+}
+
+# The pure part of the z-order guard. $Wins are top-level windows, topmost
+# first, each with L T R B (screen rect), Own (ours) and SeeThrough (ours, but
+# translucent). A window that is not ours and intersects the rect is hidden
+# only when a single opaque window of ours above it covers the part of it
+# that lies in the rect; otherwise it shows in the capture (above ours, or
+# through a translucent window of ours). At least one window of ours must
+# intersect the rect. Returns $null when clear, else why not.
+function Get-CaptureZOrderProblem($Wins, [int]$X, [int]$Y, [int]$W, [int]$H) {
     $r = $X + $W
     $b = $Y + $H
-    $foreign = $false
-    $ownBelow = $false
+    $opaque = New-Object Collections.ArrayList
     $seenOwn = $false
-    $list = [GhosttyE2e.Capture]::ZOrder()
-    foreach ($win in $list) {
+    foreach ($win in $Wins) {
         if ($win.L -ge $r -or $win.R -le $X -or $win.T -ge $b -or $win.B -le $Y) { continue }
-        if (Test-OwnCaptureProcess $win.Pid) { $seenOwn = $true; if ($foreign) { $script:CaptureForeign = "pid $($foreign) above ours"; return $false } }
-        elseif (-not $foreign) { $foreign = $win.Pid }
+        if ($win.Own) {
+            $seenOwn = $true
+            if (-not $win.SeeThrough) { [void]$opaque.Add($win) }
+            continue
+        }
+        $il = [Math]::Max($win.L, $X); $it = [Math]::Max($win.T, $Y)
+        $ir = [Math]::Min($win.R, $r); $ib = [Math]::Min($win.B, $b)
+        $hidden = $false
+        foreach ($o in $opaque) {
+            if ($o.L -le $il -and $o.T -le $it -and $o.R -ge $ir -and $o.B -ge $ib) { $hidden = $true; break }
+        }
+        if (-not $hidden) { return "pid $($win.Pid) shows in the rect" }
     }
-    if (-not $seenOwn) { $script:CaptureForeign = "none of our windows in the rect"; return $false }
+    if (-not $seenOwn) { return 'none of our windows in the rect' }
+    $null
+}
+
+# Exact z-order check over the live top-level windows (see Get-CaptureZOrderProblem).
+function Test-CaptureZOrderClear([int]$X, [int]$Y, [int]$W, [int]$H) {
+    $wins = foreach ($win in [GhosttyE2e.Capture]::ZOrder()) {
+        $own = Test-OwnCaptureProcess $win.Pid
+        [pscustomobject]@{
+            L = $win.L; T = $win.T; R = $win.R; B = $win.B; Pid = $win.Pid
+            Own = $own
+            SeeThrough = ($own -and $script:CaptureSeeThrough.ContainsKey([uint32]$win.Pid))
+        }
+    }
+    $why = Get-CaptureZOrderProblem @($wins) $X $Y $W $H
+    if ($why) { $script:CaptureForeign = $why; return $false }
     $true
 }
 
