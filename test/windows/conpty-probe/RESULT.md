@@ -110,3 +110,78 @@ ST-terminated OSC 777 wrapper is lost entirely (not mangled into anything
 Ghostty logs). So ConPTY gives no usable `ESC P tmux;` passthrough channel in
 either mode; tmux-style DCS-wrapped payloads cannot be relied on to reach
 the terminal.
+
+## Bundled ConPTY: `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (M5, headless)
+
+Question: does the newer ConPTY (`conpty.dll` + `OpenConsole.exe` from the
+official NuGet package, MIT, microsoft/terminal; Authenticode-signed by
+Microsoft) forward what the inbox one drops?
+
+Package files (x64 were probed; arm64 ship the same way, not run here):
+
+| File | SHA-256 |
+|---|---|
+| `runtimes/win-x64/native/conpty.dll` | `feeef341d891643c62d30b6b07800bc70f0bc148f44cb8c3bee84aa557ae805a` |
+| `build/native/runtimes/x64/OpenConsole.exe` | `3d66b23d0a71bb8eed2b77edc8b9df9bf54ce6c8fb74c863a30e760997f80586` |
+| `runtimes/win-arm64/native/conpty.dll` | `151a02355227710c20c9f8f1eaf68ac4668aa09cdc921adc7ec661804d8eb1bf` |
+| `build/native/runtimes/arm64/OpenConsole.exe` | `4313825a3ba634d113cc6ed3bc8ce735e3c19d360cecd985794787479469f91f` |
+
+Method: `headless.ps1 -DllDir <dir with conpty.dll + OpenConsole.exe> -Repeat 2
+-Samples 200` (Windows 11 10.0.26300). No window and no Ghostty: the script is
+the terminal. It creates the pseudo console (kernel32, or the three functions
+from the bundled `conpty.dll` loaded with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+SYSTEM32`), runs `cases/headless-seqs.sh` in Git Bash on it and reads the raw
+output bytes, which are what Ghostty's parser would get. Every sequence sits
+between text markers. The host answers DA1 (`ESC [ ?62;22c`, Ghostty's reply)
+and `CSI 6 n` (with `24;77`) like a terminal. The child-process check confirms
+which console ran: `conhost.exe` for inbox, `OpenConsole.exe` for bundled. Flag 8 means
+`PSEUDOCONSOLE_PASSTHROUGH_MODE` to the inbox console, but
+`PSEUDOCONSOLE_GLYPH_WIDTH_GRAPHEMES` to the bundled one (its `conpty.h` has no
+passthrough flag any more).
+
+| Sequence | inbox 0 | inbox 8 | bundled 0 | bundled 8 |
+|---|---|---|---|---|
+| Kitty graphics APC (`a=q` + `a=T`) | dropped x2 | dropped x2 | arrived x2, byte-identical | arrived x2 |
+| SGR 58 (`4:3;58:2::r:g:b`, `4;58;5;n`, `4:1;58;2;r;g;b`) | mangled x2 (1 of 3; `58;5;196` turns into `\e[5m` blink) | same | arrived x2, byte-identical | arrived x2 |
+| OSC 133 A/B/C/D | arrived x2 | arrived x2 | arrived x2 | arrived x2 |
+| OSC 7 | arrived x2, moved (flushed later) | same | arrived x2, in place | arrived x2 |
+| OSC 8 | arrived x2, rewritten (`id=<pid>-1` added) | same | arrived x2, byte-identical | arrived x2 |
+| OSC 52 | arrived x2, moved | same | arrived x2, in place | arrived x2 |
+| OSC 9 | arrived x2, moved | same | arrived x2, in place | arrived x2 |
+| `stty size` after resize to 100x30 | `30 100` x2 | x2 | `30 100` x2 | x2 |
+| app's `CSI 6 n` after a ZWJ emoji | answered by conhost (`9;6`: emoji counted 5 cells wide) | same | forwarded to the terminal | forwarded |
+
+Key echo (cmd.exe cooked echo, write to echoed byte, 200 samples each, one
+run per variant, desktop shared with other agents):
+
+| | inbox 0 | inbox 8 | bundled 0 | bundled 8 |
+|---|---|---|---|---|
+| p50 | 0.27 ms | 0.34 ms | 0.29 ms | 0.24 ms |
+| p95 | 15.20 ms | 15.00 ms | 0.66 ms | 0.91 ms |
+| max | 16.41 ms | 16.46 ms | 0.81 ms | 4.25 ms |
+
+The inbox p95 swings between about 0.6 and 15 ms from run to run (conhost's
+16 ms paint timer). The bundled one stayed below 1 ms in all three trial runs.
+
+What the bundled console sends that the inbox one does not, and what a terminal
+must therefore answer:
+- At start: `ESC [ 1 t`, `ESC [ c` (DA1), `ESC [ ? 1004 h`, `ESC [ ? 9001 h`. It
+  waits for the DA1 reply. Ghostty answers DA1, and ignores `CSI 1 t`.
+- `CSI 6 n`: it forwards the application's query to the terminal, and sends its
+  own queries to resync its cursor after output it passed through. It then moves the
+  cursor to whatever the terminal answered (`ESC [ 24;77 H` here). Ghostty answers from
+  its own grid, so the cursor follows Ghostty's widths (grapheme clusters)
+  instead of conhost's guess.
+
+Unrelated to the console: once in 4 runs per console (inbox 8 and bundled 8,
+same trial), the `g` of `go\r` typed 400 ms after a resize was lost before
+MSYS `read` saw it. This is the known MSYS2 first-input-record-after-resize loss (feature
+checklist, Task 26.4), which Ghostty works around.
+
+Reading: the bundled ConPTY forwards Kitty graphics and SGR 58 unchanged, and
+keeps OSC 7/8/52/9 in place and unrewritten. Resize works, and key echo is not slower
+(p95 below 1 ms against the inbox console's timer-bound up to 15 ms). Flags: 0. The
+grapheme-width flag (8) changes nothing the probe measures, and the bundled
+console forwards cursor queries to Ghostty, so Ghostty's widths win either way.
+A GUI check in Ghostty itself is still owed: `vt-smoke/kitty-image`,
+`vt-smoke/underline-colors`.
