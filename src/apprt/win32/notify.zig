@@ -299,6 +299,10 @@ fn writeIcon(alloc: Allocator) ?[]u8 {
         alloc.free(path);
         return null;
     };
+    // The icon of earlier builds is not used any more; once per start is enough.
+    const legacy = std.fmt.allocPrint(alloc, "{s}\\" ++ explorer.legacy_toast_icon_name, .{dir}) catch return path;
+    defer alloc.free(legacy);
+    cwd.deleteFile(io, legacy) catch {};
     return path;
 }
 

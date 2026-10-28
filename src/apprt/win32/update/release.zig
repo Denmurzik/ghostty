@@ -27,10 +27,30 @@ pub fn parseTag(tag: []const u8) ?Tag {
     const rest = std.mem.cutPrefix(u8, tag, "win-") orelse return null;
     const dash = std.mem.lastIndexOfScalar(u8, rest, '-') orelse return null;
     if (dash == 0) return null;
+    if (!safeZon(rest[0..dash])) return null;
     const digits = rest[dash + 1 ..];
     if (!canonicalN(digits)) return null;
     const n = std.fmt.parseUnsigned(u32, digits, 10) catch return null;
     return .{ .zon = rest[0..dash], .n = n };
+}
+
+/// `[0-9A-Za-z.-]+`: nothing that could change a URL path, query or fragment.
+fn safeZon(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| switch (c) {
+        '0'...'9', 'a'...'z', 'A'...'Z', '.', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Whether `url` is a release page of this fork: the fixed prefix and a tail
+/// `[0-9A-Za-z.-]+-[0-9]+` (no `/`, `..` as a path step, `?`, `#`).
+pub fn isReleaseUrl(url: []const u8) bool {
+    const tail = std.mem.cutPrefix(u8, url, release_prefix) orelse return false;
+    const dash = std.mem.lastIndexOfScalar(u8, tail, '-') orelse return false;
+    if (!safeZon(tail[0..dash])) return false;
+    return canonicalN(tail[dash + 1 ..]);
 }
 
 /// Digits only, no sign, no leading zero (except "0" itself).
@@ -65,7 +85,7 @@ pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
         const tag = str(item.object.get("tag_name")) orelse continue;
         const url = str(item.object.get("html_url")) orelse continue;
         const parsed = parseTag(tag) orelse continue;
-        if (!std.mem.startsWith(u8, url, release_prefix)) continue;
+        if (!isReleaseUrl(url)) continue;
         if (!std.mem.eql(u8, url[release_prefix.len..], tag["win-".len..])) continue;
         if (best) |b| if (b.n >= parsed.n) continue;
         best = .{
@@ -217,4 +237,18 @@ fn brackets(comptime n: usize, comptime c: []const u8) *const [n]u8 {
         const out = buf;
         return &out;
     }
+}
+
+test "win32 update: release url tail is restricted" {
+    const p = release_prefix;
+    try std.testing.expect(isReleaseUrl(p ++ "1.3.2-dev-4"));
+    try std.testing.expect(!isReleaseUrl(p ++ "x/../../../../attacker/repo-1"));
+    try std.testing.expect(!isReleaseUrl(p ++ "1.3.2-dev-4?x=1"));
+    try std.testing.expect(!isReleaseUrl(p ++ "1.3.2-dev-4#f"));
+    try std.testing.expect(!isReleaseUrl(p ++ "1.3.2%2Fdev-4"));
+    try std.testing.expect(!isReleaseUrl(p ++ "-4"));
+    try std.testing.expect(!isReleaseUrl(p ++ "1.3.2-dev-04"));
+    try std.testing.expect(!isReleaseUrl("https://evil.example/" ++ "1.3.2-dev-4"));
+    try std.testing.expect(parseTag("win-x/../y-1") == null);
+    try std.testing.expect(parseTag("win-1.0?a-1") == null);
 }

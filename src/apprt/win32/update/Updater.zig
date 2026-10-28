@@ -69,11 +69,38 @@ pub const Result = struct {
     }
 };
 
-pub const State = struct {
-    worker: ?std.Thread = null,
+/// What the UI thread and one worker share. Heap block, two references (the
+/// app's and the worker's); whoever drops the last frees it. The worker
+/// touches nothing but this block, so a worker that outlives `stop` (and the
+/// app) cannot reach freed memory.
+pub const Shared = struct {
+    alloc: Allocator,
+    refs: std.atomic.Value(u32) = .init(2),
     /// The WinHTTP request handle of the check that runs; whoever swaps it
     /// to zero closes it.
     request: std.atomic.Value(usize) = .init(0),
+    manual: std.atomic.Value(bool) = .init(false),
+    timed_out: std.atomic.Value(bool) = .init(false),
+    /// The worker is out of everything it does (set last, before its release).
+    done: std.atomic.Value(bool) = .init(false),
+    /// The app is quitting: the worker skips the module unload wait.
+    stopping: std.atomic.Value(bool) = .init(false),
+
+    fn create(alloc: Allocator, manual: bool) Allocator.Error!*Shared {
+        const s = try alloc.create(Shared);
+        s.* = .{ .alloc = alloc };
+        s.manual.store(manual, .seq_cst);
+        return s;
+    }
+
+    fn release(self: *Shared) void {
+        if (self.refs.fetchSub(1, .seq_cst) == 1) self.alloc.destroy(self);
+    }
+};
+
+pub const State = struct {
+    /// The running (or last) check's shared block; this is the app's reference.
+    shared: ?*Shared = null,
     deadline_ms: u64 = 0,
     /// The last result that was handled (the worker's arena moves in).
     last: ?Result = null,
@@ -84,11 +111,9 @@ pub const State = struct {
     env_url: ?[]u8 = null,
     store: persist.State = .{},
     phase: Phase = .idle,
-    /// A manual check was asked for while one ran (or starts one).
-    manual: std.atomic.Value(bool) = .init(false),
-    timed_out: std.atomic.Value(bool) = .init(false),
-    worker_done: std.atomic.Value(bool) = .init(true),
-    stopping: std.atomic.Value(bool) = .init(false),
+    /// A manual check was asked for while one ran: its result answers it.
+    manual_pending: bool = false,
+    stopping: bool = false,
     /// The release page of the last newer release, owned by the app allocator.
     open_url: ?[]u8 = null,
     warned_download: bool = false,
@@ -215,7 +240,7 @@ fn closeReal(h: usize) void {
 /// GET `url` and return the body (at most `max_body` bytes). The request
 /// handle is published in `handle_out` so that another thread can abort the
 /// call by closing it.
-pub fn fetch(arena: Allocator, url: []const u8, max_bytes: usize, handle_out: *std.atomic.Value(usize)) FetchError![]u8 {
+pub fn fetch(arena: Allocator, url: []const u8, max_bytes: usize, handle_out: *std.atomic.Value(usize), stopping: *const std.atomic.Value(bool)) FetchError![]u8 {
     const parts = parseUrl(url) orelse return error.BadUrl;
     const api = winhttp.Api.load() orelse return error.NoWinHttp;
     g_close.store(@intFromPtr(api.closeHandle), .seq_cst);
@@ -230,13 +255,17 @@ pub fn fetch(arena: Allocator, url: []const u8, max_bytes: usize, handle_out: *s
         if (left != 0) _ = api.closeHandle(@ptrFromInt(left));
         if (connection) |c| _ = api.closeHandle(c);
         if (session) |s| _ = api.closeHandle(s);
-        unloadWhenSafe(api, event, notify_set);
+        unloadWhenSafe(api, event, notify_set, stopping);
     }
 
     const agent = util.utf16z(arena, std.fmt.allocPrint(arena, "Ghostty/{s} (Windows)", .{build_config.version_string}) catch return error.OutOfMemory) catch return error.OutOfMemory;
-    session = api.open(agent, winhttp.WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null, null, 0) orelse
-        api.open(agent, winhttp.WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, null, null, 0) orelse
-        return netError();
+    // The loopback override (plain http) never asks a proxy or runs WPAD.
+    session = if (!parts.secure)
+        api.open(agent, winhttp.WINHTTP_ACCESS_TYPE_NO_PROXY, null, null, 0) orelse return netError()
+    else
+        api.open(agent, winhttp.WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null, null, 0) orelse
+            api.open(agent, winhttp.WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, null, null, 0) orelse
+            return netError();
     if (event) |e| {
         var handle: win32.foundation.HANDLE = e;
         notify_set = api.setOption(session, winhttp.WINHTTP_OPTION_UNLOAD_NOTIFY_EVENT, @ptrCast(&handle), @sizeOf(win32.foundation.HANDLE)) != 0;
@@ -249,6 +278,9 @@ pub fn fetch(arena: Allocator, url: []const u8, max_bytes: usize, handle_out: *s
     const flags: u32 = if (parts.secure) winhttp.WINHTTP_FLAG_SECURE else 0;
     const request = api.openRequest(connection.?, std.unicode.utf8ToUtf16LeStringLiteral("GET"), path, null, null, null, flags) orelse return netError();
     handle_out.store(@intFromPtr(request), .seq_cst);
+    // A redirect would take the request off the address that was checked: any 3xx fails.
+    var policy: u32 = winhttp.WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    if (api.setOption(request, winhttp.WINHTTP_OPTION_REDIRECT_POLICY, @ptrCast(&policy), @sizeOf(u32)) == 0) return netError();
 
     const headers = std.unicode.utf8ToUtf16LeStringLiteral("Accept: application/vnd.github+json\r\n");
     if (api.sendRequest(request, headers, @intCast(headers.len), null, 0, 0, 0) == 0) return netError();
@@ -257,6 +289,7 @@ pub fn fetch(arena: Allocator, url: []const u8, max_bytes: usize, handle_out: *s
     var status: u32 = 0;
     var status_len: u32 = @sizeOf(u32);
     if (api.queryHeaders(request, winhttp.WINHTTP_QUERY_STATUS_CODE | winhttp.WINHTTP_QUERY_FLAG_NUMBER, null, &status, &status_len, null) == 0) return netError();
+    log.info("update: {s} answered HTTP {d}", .{ url, status });
     if (status != 200) {
         fetch_detail = status;
         return error.Status;
@@ -282,14 +315,20 @@ fn netError() error{Network} {
 /// Gives the module back once WinHTTP signalled that nothing of it runs
 /// (≤ 2 s) and the UI thread is not inside a close call. When the signal
 /// does not come the module stays loaded.
-fn unloadWhenSafe(api: winhttp.Api, event: ?win32.foundation.HANDLE, notify_set: bool) void {
+fn unloadWhenSafe(api: winhttp.Api, event: ?win32.foundation.HANDLE, notify_set: bool, stopping: *const std.atomic.Value(bool)) void {
     g_close.store(0, .seq_cst);
     while (g_closing.load(.seq_cst)) std.atomic.spinLoopHint();
     if (event) |e| {
         defer _ = win32.kernel32.CloseHandle(e);
-        if (notify_set and win32.kernel32.WaitForSingleObjectEx(e, 2000, 0) == 0) {
-            api.unload();
-            return;
+        // Quitting: the process is going, the module stays loaded and the worker is out at once.
+        if (notify_set) {
+            var waited: u32 = 0;
+            while (waited < 2000 and !stopping.load(.seq_cst)) : (waited += 50) {
+                if (win32.kernel32.WaitForSingleObjectEx(e, 50, 0) == 0) {
+                    api.unload();
+                    return;
+                }
+            }
         }
     }
     log.warn("winhttp.dll stays loaded, no unload notification", .{});
@@ -297,8 +336,10 @@ fn unloadWhenSafe(api: winhttp.Api, event: ?win32.foundation.HANDLE, notify_set:
 
 // -- Worker ----------------------------------------------------------------------
 
-fn workerMain(st: *State, hwnd: HWND, url: []u8, current_n: ?u32) void {
-    defer st.worker_done.store(true, .seq_cst);
+fn workerMain(shared: *Shared, hwnd: HWND, url: []u8, current_n: ?u32) void {
+    // Last: after `done` and the release the worker owns nothing any more.
+    defer shared.release();
+    defer shared.done.store(true, .seq_cst);
     defer std.heap.smp_allocator.free(url);
 
     var result = std.heap.smp_allocator.create(Result) catch return;
@@ -306,17 +347,17 @@ fn workerMain(st: *State, hwnd: HWND, url: []u8, current_n: ?u32) void {
     const arena = result.arena.?.allocator();
 
     log.info("update: fetching {s}", .{url});
-    result.outcome = check(arena, st, url, current_n);
-    result.manual = st.manual.load(.seq_cst);
+    result.outcome = check(arena, shared, url, current_n);
+    result.manual = shared.manual.load(.seq_cst);
     post(hwnd, result);
 }
 
-fn check(arena: Allocator, st: *State, url: []const u8, current_n: ?u32) Outcome {
-    const body = fetch(arena, url, max_body, &st.request) catch |err| {
+fn check(arena: Allocator, shared: *Shared, url: []const u8, current_n: ?u32) Outcome {
+    const body = fetch(arena, url, max_body, &shared.request, &shared.stopping) catch |err| {
         const text = switch (err) {
             error.BadUrl => "the update address is invalid",
             error.NoWinHttp => "WinHTTP is not available",
-            error.Network => if (st.timed_out.load(.seq_cst))
+            error.Network => if (shared.timed_out.load(.seq_cst))
                 "no answer within 10 seconds"
             else
                 std.fmt.allocPrint(arena, "network error {d}", .{fetch_detail}) catch "network error",
@@ -365,29 +406,35 @@ pub fn start(app: *App) void {
     evaluate(app, &app.config);
 }
 
+/// How long `stop` waits for a worker that is still out in WinHTTP.
+const stop_budget_ms = 2000;
+
+/// Asks the worker to leave and waits up to `budget_ms` for it, then drops the
+/// app's reference. A worker that is late finishes on its own heap block and
+/// frees it; it never touches anything of the app. True when it was out in time.
+fn stopShared(slot: *?*Shared, budget_ms: u32) bool {
+    const shared = slot.* orelse return true;
+    slot.* = null;
+    shared.stopping.store(true, .seq_cst);
+    // Closing the request aborts the blocking call; ask again until the worker is out.
+    var waited: u32 = 0;
+    while (!shared.done.load(.seq_cst) and waited < budget_ms) : (waited += 20) {
+        _ = closeShared(&shared.request);
+        win32.kernel32.Sleep(20);
+    }
+    const in_time = shared.done.load(.seq_cst);
+    if (!in_time) log.warn("the update worker did not stop in time", .{});
+    shared.release();
+    return in_time;
+}
+
 pub fn stop(app: *App) void {
     const st = &app.update;
     const hwnd = app.msg_hwnd;
     _ = win32.user32.KillTimer(hwnd, messages.timers.msg_window.update);
     st.phase = .idle;
-    st.stopping.store(true, .seq_cst);
-
-    if (st.worker) |thread| {
-        // Closing the request aborts the blocking call; ask again until the
-        // worker is out (≤ 2 s), then join.
-        var waited: u32 = 0;
-        while (!st.worker_done.load(.seq_cst) and waited < 2000) : (waited += 20) {
-            _ = closeShared(&st.request);
-            win32.kernel32.Sleep(20);
-        }
-        if (st.worker_done.load(.seq_cst)) {
-            thread.join();
-        } else {
-            log.warn("the update worker did not stop in time", .{});
-            thread.detach();
-        }
-        st.worker = null;
-    }
+    st.stopping = true;
+    _ = stopShared(&st.shared, stop_budget_ms);
 
     // Results nobody will handle any more.
     var msg: win32.user32.MSG = undefined;
@@ -458,15 +505,21 @@ pub fn checkNow(app: *App, target: apprt.Target, value: void) !bool {
 
 fn startCheck(app: *App, manual: bool) void {
     const st = &app.update;
-    if (manual) st.manual.store(true, .seq_cst);
+    if (st.stopping) return;
 
-    if (st.worker != null) {
-        // One check at a time; a manual ask joins the one that runs.
-        if (!st.worker_done.load(.seq_cst)) return;
-        st.worker.?.join();
-        st.worker = null;
+    if (st.shared) |running| {
+        // One check at a time; a manual ask joins the one that runs. Its worker may
+        // have read `manual` already, so the result handler answers it as well.
+        if (!running.done.load(.seq_cst)) {
+            if (manual) {
+                running.manual.store(true, .seq_cst);
+                st.manual_pending = true;
+            }
+            return;
+        }
+        running.release();
+        st.shared = null;
     }
-    if (st.stopping.load(.seq_cst)) return;
 
     const url = urlForRun(st.env_url, testMode()) orelse {
         // Test mode without a loopback override: nothing leaves the machine.
@@ -475,19 +528,21 @@ fn startCheck(app: *App, manual: bool) void {
     };
     const copy = std.heap.smp_allocator.dupe(u8, url) catch return;
 
-    st.manual.store(manual, .seq_cst);
-    st.timed_out.store(false, .seq_cst);
-    st.worker_done.store(false, .seq_cst);
+    const shared = Shared.create(std.heap.smp_allocator, manual) catch {
+        std.heap.smp_allocator.free(copy);
+        return;
+    };
     st.deadline_ms = win32.kernel32.GetTickCount64() + deadline_ms;
     st.fetches += 1;
-    st.worker = std.Thread.spawn(.{}, workerMain, .{ st, app.msg_hwnd, copy, st.current_n }) catch |err| {
+    const thread = std.Thread.spawn(.{}, workerMain, .{ shared, app.msg_hwnd, copy, st.current_n }) catch |err| {
         log.warn("unable to start the update worker err={}", .{err});
         std.heap.smp_allocator.free(copy);
-        st.worker_done.store(true, .seq_cst);
-        st.worker = null;
+        std.heap.smp_allocator.destroy(shared);
         postFailed(app, "unable to start the check");
         return;
     };
+    thread.detach();
+    st.shared = shared;
     arm(app, .fetching, poll_ms);
 }
 
@@ -507,19 +562,21 @@ fn postFailed(app: *App, text: []const u8) void {
 
 /// Whether the deadline of the running check has passed; closes its request
 /// then (once).
-fn deadlineExpired(st: *State, now_ms: u64) bool {
+fn deadlineExpired(st: *State, shared: *Shared, now_ms: u64) bool {
     if (now_ms < st.deadline_ms) return false;
     st.deadline_ms = std.math.maxInt(u64);
-    st.timed_out.store(true, .seq_cst);
-    return closeShared(&st.request);
+    shared.timed_out.store(true, .seq_cst);
+    return closeShared(&shared.request);
 }
 
 pub fn onTimer(app: *App) void {
     const st = &app.update;
     switch (st.phase) {
         .idle => _ = win32.user32.KillTimer(app.msg_hwnd, messages.timers.msg_window.update),
-        .fetching => if (!st.worker_done.load(.seq_cst) and deadlineExpired(st, win32.kernel32.GetTickCount64())) {
-            log.warn("update check: deadline passed, request closed", .{});
+        .fetching => if (st.shared) |shared| {
+            if (!shared.done.load(.seq_cst) and deadlineExpired(st, shared, win32.kernel32.GetTickCount64())) {
+                log.warn("update check: deadline passed, request closed", .{});
+            }
         },
         .waiting => {
             _ = win32.user32.KillTimer(app.msg_hwnd, messages.timers.msg_window.update);
@@ -533,7 +590,7 @@ pub fn onResult(app: *App, lparam: LPARAM) void {
     const posted: *Result = @ptrFromInt(@as(usize, @bitCast(lparam)));
     const st = &app.update;
     // The result is ours now; the shell it was allocated in goes.
-    const result = posted.*;
+    var result = posted.*;
     std.heap.smp_allocator.destroy(posted);
 
     st.results += 1;
@@ -559,7 +616,10 @@ pub fn onResult(app: *App, lparam: LPARAM) void {
         saveStore(app);
     }
 
-    const decided = plan(result.manual, std.meta.activeTag(result.outcome), announce);
+    const manual = result.manual or st.manual_pending;
+    st.manual_pending = false;
+    result.manual = manual;
+    const decided = plan(manual, std.meta.activeTag(result.outcome), announce);
     if (decided.toast) {
         const r = result.outcome.newer;
         if (std.fmt.allocPrint(alloc, "Ghostty {s} is available", .{r.version})) |title| {
@@ -586,7 +646,7 @@ fn setOpenUrl(app: *App, url: []const u8) void {
 /// it is one of this fork's.
 pub fn openReleasePage(app: *App) void {
     const url = app.update.open_url orelse return;
-    if (!std.mem.startsWith(u8, url, release.release_prefix)) {
+    if (!release.isReleaseUrl(url)) {
         log.warn("refusing to open a release page outside the fork's releases", .{});
         return;
     }
@@ -647,6 +707,8 @@ fn showDialog(app: *App, kind: DialogKind) void {
 
 // -- State file ---------------------------------------------------------------------
 
+var save_counter: std.atomic.Value(u32) = .init(0);
+
 fn statePath(alloc: Allocator) ?[]u8 {
     const base = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch return null;
     defer alloc.free(base);
@@ -665,6 +727,7 @@ fn loadStore(app: *App) void {
 }
 
 /// Through a temp file and a move, so a crash never leaves half a file.
+/// The temp name carries the process id and a counter, so two instances never share one.
 fn saveStore(app: *App) void {
     const alloc = app.core_app.alloc;
     const path = statePath(alloc) orelse return;
@@ -679,7 +742,7 @@ fn saveStore(app: *App) void {
         log.warn("unable to create the state directory err={}", .{err});
         return;
     };
-    const temp = std.fmt.allocPrint(alloc, "{s}.tmp", .{path}) catch return;
+    const temp = std.fmt.allocPrint(alloc, "{s}.{d}-{d}.tmp", .{ path, win32.kernel32.GetCurrentProcessId(), save_counter.fetchAdd(1, .monotonic) }) catch return;
     defer alloc.free(temp);
     cwd.writeFile(io, .{ .sub_path = temp, .data = w.buffered() }) catch |err| {
         log.warn("unable to write the update state err={}", .{err});
@@ -809,17 +872,52 @@ test "win32 update: deadline closes the request" {
     closed_calls = 0;
 
     var st: State = .{};
-    st.request.store(0x1234, .seq_cst);
+    const shared = try Shared.create(testing.allocator, false);
+    defer {
+        shared.release();
+        shared.release();
+    }
+    shared.request.store(0x1234, .seq_cst);
     st.deadline_ms = 10_000;
 
     // Before the deadline nothing happens.
-    try testing.expect(!deadlineExpired(&st, 9_999));
+    try testing.expect(!deadlineExpired(&st, shared, 9_999));
     try testing.expectEqual(@as(u32, 0), closed_calls);
     // After it the handle is closed once, however often the timer fires.
-    try testing.expect(deadlineExpired(&st, 10_000));
-    try testing.expect(!deadlineExpired(&st, 10_250));
+    try testing.expect(deadlineExpired(&st, shared, 10_000));
+    try testing.expect(!deadlineExpired(&st, shared, 10_250));
     try testing.expectEqual(@as(u32, 1), closed_calls);
     try testing.expectEqual(@as(usize, 0x1234), closed_handle);
-    try testing.expect(st.timed_out.load(.seq_cst));
-    try testing.expectEqual(@as(usize, 0), st.request.load(.seq_cst));
+    try testing.expect(shared.timed_out.load(.seq_cst));
+    try testing.expectEqual(@as(usize, 0), shared.request.load(.seq_cst));
+}
+
+fn lateWorker(shared: *Shared, delay_ms: u32) void {
+    win32.kernel32.Sleep(delay_ms);
+    // Like the real worker: only its own block, `done` then the release.
+    shared.done.store(true, .seq_cst);
+    shared.release();
+}
+
+test "win32 update: a late worker outlives stop and frees its block" {
+    var slot: ?*Shared = try Shared.create(testing.allocator, false);
+    const shared = slot.?;
+    const thread = try std.Thread.spawn(.{}, lateWorker, .{ shared, 400 });
+
+    // The budget runs out long before the worker is done.
+    try testing.expect(!stopShared(&slot, 40));
+    try testing.expect(slot == null);
+    try testing.expect(shared.stopping.load(.seq_cst));
+    // The app's side is gone; the worker still has the block and then frees
+    // it (the testing allocator reports a leak or a double free).
+    try testing.expect(!shared.done.load(.seq_cst));
+    thread.join();
+}
+
+test "win32 update: a worker that is out in time" {
+    var slot: ?*Shared = try Shared.create(testing.allocator, false);
+    const thread = try std.Thread.spawn(.{}, lateWorker, .{ slot.?, 0 });
+    thread.join();
+    try testing.expect(stopShared(&slot, 100));
+    try testing.expect(slot == null);
 }

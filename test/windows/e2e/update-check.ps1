@@ -3,7 +3,7 @@
 # (GHOSTTY_WIN32_UPDATE_URL, honoured in test mode only). Every check is the
 # `check_for_updates` action. Cases: a newer release (one recorded toast, a
 # second check adds none, the dialog is dismissed through the test message),
-# the same release, an HTML body, HTTP 403, a server that never answers
+# the same release, an HTML body, HTTP 403, a 302 to api.github.com (failed, not followed), a server that never answers
 # (failed within 11 s), a stopped server, a quit during a silent check (<= 3 s),
 # a build without -win.N (the "local build" outcome), and a test-mode Ghostty
 # without the override (no `update: fetching` line, not even after 70 s).
@@ -93,6 +93,14 @@ Invoke-E2eScenario 'update-check' {
         $r = Invoke-Check $g '403'
         if ($r.State.last.kind -ne 'failed' -or $r.State.last.error -notmatch '403') { throw "403: last is $($r.State.last | ConvertTo-Json -Compress)" }
 
+        # A redirect to the real host is never followed: failed, one request, none outbound.
+        Set-FakeRelease $srv -Body (Get-Fixture 'newer') -Status 302 -Location 'https://api.github.com/repos/Denmurzik/ghostty/releases'
+        $before = @($srv.Requests.ToArray()).Count
+        $r = Invoke-Check $g 'redirect'
+        if ($r.State.last.kind -ne 'failed' -or $r.State.last.error -notmatch '302') { throw "redirect: last is $($r.State.last | ConvertTo-Json -Compress)" }
+        if (@($srv.Requests.ToArray()).Count -ne $before + 1) { throw 'redirect: the check made more than one request' }
+        if ($r.State.toasts -ne 1) { throw 'redirect: a toast was shown' }
+
         # A server that accepts and never answers: failed within 11 s.
         Set-FakeRelease $srv -Silent
         $r = Invoke-Check $g 'silent' 14
@@ -107,7 +115,7 @@ Invoke-E2eScenario 'update-check' {
         if ($r.State.toasts -ne 1) { throw 'stopped: a toast was shown' }
 
         $fetchLines = @(Get-FetchLines $g)
-        if ($fetchLines.Count -lt 7) { throw "expected a fetching line per check (7), got $($fetchLines.Count)" }
+        if ($fetchLines.Count -lt 8) { throw "expected a fetching line per check (8), got $($fetchLines.Count)" }
         Invoke-GhosttyAction -Class $g.Class -Action 'quit' | Out-Null
         [void](Wait-ProcessExit $g 10)
 

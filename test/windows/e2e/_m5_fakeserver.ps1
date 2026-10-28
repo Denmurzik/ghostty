@@ -8,6 +8,7 @@
 #   Get-FakeAccepted $srv          count of accepted connections (-Silent too)
 #   Stop-FakeRelease $srv
 #
+#   -Location <url> adds a Location header (use with -Status 302).
 # -Silent accepts the connection and never answers (the request is still
 # logged); the held sockets are closed by Stop-FakeRelease.
 
@@ -15,6 +16,7 @@ function Start-FakeRelease {
     param(
         [Parameter(Mandatory)][string]$Body,
         [int]$Status = 200,
+        [string]$Location,
         [switch]$Silent
     )
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -25,6 +27,7 @@ function Start-FakeRelease {
             Stop     = $false
             Body     = $Body
             Status   = $Status
+            Location = $Location
             Silent   = [bool]$Silent
             Accepted = 0
         })
@@ -63,7 +66,8 @@ function Start-FakeRelease {
                     try {
                         $bytes = [IO.File]::ReadAllBytes($ctl.Body)
                         $reason = if ($ctl.Status -eq 200) { 'OK' } else { 'Error' }
-                        $hdr = "HTTP/1.1 $($ctl.Status) $reason`r`nContent-Type: application/json`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n"
+                        $loc = if ($ctl.Location) { "Location: $($ctl.Location)`r`n" } else { '' }
+                        $hdr = "HTTP/1.1 $($ctl.Status) $reason`r`nContent-Type: application/json`r`n$loc" + "Content-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n"
                         $h = [Text.Encoding]::ASCII.GetBytes($hdr)
                         $stream.Write($h, 0, $h.Length)
                         $stream.Write($bytes, 0, $bytes.Length)
@@ -94,10 +98,12 @@ function Set-FakeRelease {
         [Parameter(Mandatory)]$Server,
         [string]$Body,
         [int]$Status = 200,
+        [string]$Location,
         [switch]$Silent
     )
     if ($Body) { $Server.Ctl.Body = $Body }
     $Server.Ctl.Status = $Status
+    $Server.Ctl.Location = $Location
     $Server.Ctl.Silent = [bool]$Silent
 }
 
