@@ -56,9 +56,9 @@ const terminal = struct {
 
 const log = std.log.scoped(.config);
 
-/// The default for `term`. Windows has no compiled `xterm-ghostty` terminfo
-/// entry yet, so it uses the widely available `xterm-256color`.
-const default_term = if (builtin.target.os.tag == .windows) "xterm-256color" else "xterm-ghostty";
+/// The default for `term`. On Windows Exec falls back to `xterm-256color` when
+/// the compiled terminfo is not shipped, and for WSL.
+const default_term = "xterm-ghostty";
 
 /// Used on Unixes for some defaults.
 const c = @import("posix_c");
@@ -4026,8 +4026,8 @@ else
 /// keyprotocol=ghostty:kitty`, however a bug in the implementation prevents it
 /// from working properly. https://github.com/vim/vim/pull/13211 fixes this.
 ///
-/// On Windows the default is `xterm-256color` because no compiled terminfo
-/// entry is shipped yet.
+/// On Windows the default is still `xterm-ghostty`; the terminal falls back to
+/// `xterm-256color` when the compiled entry is missing, and for WSL.
 term: []const u8 = default_term,
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are
@@ -11531,14 +11531,11 @@ test "compatibility: window new-window" {
     }
 }
 
-test "windows config: TERM defaults to xterm-256color" {
+test "windows config: TERM defaults to xterm-ghostty" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    const expected = if (builtin.target.os.tag == .windows)
-        "xterm-256color"
-    else
-        "xterm-ghostty";
+    const expected = "xterm-ghostty";
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();

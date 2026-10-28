@@ -712,7 +712,11 @@ const Subprocess = struct {
         //
         // For now, we just look up a bundled dir but in the future we should
         // also load the terminfo database and look for it.
-        if (cfg.resources_dir) |base| {
+        if (comptime is_windows) {
+            // TERM and TERMINFO are settled once the command is known (WSL
+            // needs argv0).
+            try env.put("COLORTERM", "truecolor");
+        } else if (cfg.resources_dir) |base| {
             try env.put("TERM", cfg.term);
             try env.put("COLORTERM", "truecolor");
 
@@ -920,6 +924,30 @@ const Subprocess = struct {
             // This logs on its own, this is a bad error.
             error.SystemError => return err,
         };
+
+        if (comptime is_windows) {
+            // A TERM from `env` wins over everything.
+            if (cfg.env_override.map.get("TERM") == null) {
+                var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const terminfo_dir: ?[]const u8 = if (cfg.resources_dir) |base|
+                    std.mem.print(&buf, "{s}/terminfo", .{std.fs.path.dirname(base) orelse base}) catch null
+                else
+                    null;
+                // Forward slashes: MSYS ncurses reads a mixed path badly.
+                if (terminfo_dir) |d| std.mem.replaceScalar(u8, buf[0..d.len], 0x5c, '/');
+                const choice = windowsTerm(
+                    cfg.term,
+                    terminfo_dir,
+                    if (args.len > 0) args[0] else "",
+                    &terminfoEntryExists,
+                );
+                try env.put("TERM", choice.term);
+                if (choice.terminfo) |dir| {
+                    var pbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                    try env.put("TERMINFO", msysTerminfo(&pbuf, dir, if (args.len > 0) args[0] else ""));
+                }
+            }
+        }
 
         // We have to copy the cwd because there is no guarantee that
         // pointers in full_config remain valid.
@@ -2666,6 +2694,128 @@ test "windows tokenize: execCommand splits a quoted shell value" {
     try testing.expectEqualStrings("C:\\Program Files\\Git\\bin\\bash.exe", result[0]);
     try testing.expectEqualStrings("--login", result[1]);
     try testing.expectEqualStrings("-i", result[2]);
+}
+
+const xterm_ghostty = "xterm-ghostty";
+
+/// What TERM and TERMINFO a Windows child gets. `xterm-ghostty` needs the
+/// compiled entry shipped next to the resources and a program that can read
+/// it, so WSL (its own Linux terminfo) and a missing entry get
+/// `xterm-256color`. Any other configured term is kept as is.
+fn windowsTerm(
+    cfg_term: []const u8,
+    terminfo_dir: ?[]const u8,
+    argv0: []const u8,
+    exists: *const fn ([]const u8) bool,
+) struct { term: []const u8, terminfo: ?[]const u8 } {
+    const fallback = "xterm-256color";
+    const dir = terminfo_dir orelse return .{
+        .term = if (std.mem.eql(u8, cfg_term, xterm_ghostty)) fallback else cfg_term,
+        .terminfo = null,
+    };
+
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const has_entry = inline for (.{ "78", "x" }) |sub| {
+        const path = std.mem.print(&buf, "{s}/{s}/" ++ xterm_ghostty, .{ dir, sub }) catch break false;
+        if (exists(path)) break true;
+    } else false;
+
+    if (!std.mem.eql(u8, cfg_term, xterm_ghostty)) return .{
+        .term = cfg_term,
+        .terminfo = if (has_entry) dir else null,
+    };
+    if (!has_entry or isWslArgv0(argv0)) return .{ .term = fallback, .terminfo = null };
+    return .{ .term = cfg_term, .terminfo = dir };
+}
+
+/// MSYS ncurses splits TERMINFO at `:`, so a POSIX shell gets `/c/g/terminfo`
+/// instead of `C:/g/terminfo`. Native programs keep the drive path.
+fn msysTerminfo(buf: []u8, dir: []const u8, argv0: []const u8) []const u8 {
+    if (dir.len < 3 or dir[1] != ':' or !isPosixShell(argv0)) return dir;
+    return std.mem.print(buf, "/{c}{s}", .{ std.ascii.toLower(dir[0]), dir[2..] }) catch dir;
+}
+
+fn isPosixShell(argv0: []const u8) bool {
+    const seps = [_]u8{ 0x5c, '/' };
+    var name = if (std.mem.lastIndexOfAny(u8, argv0, &seps)) |i| argv0[i + 1 ..] else argv0;
+    if (std.ascii.endsWithIgnoreCase(name, ".exe")) name = name[0 .. name.len - 4];
+    inline for (.{ "bash", "sh", "zsh", "fish", "dash", "ksh" }) |s| {
+        if (std.ascii.eqlIgnoreCase(name, s)) return true;
+    }
+    return false;
+}
+
+fn terminfoEntryExists(path: []const u8) bool {
+    std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
+    return true;
+}
+
+/// `wsl`, `wsl.exe` or the System32 `bash.exe` launcher.
+fn isWslArgv0(argv0: []const u8) bool {
+    const seps = [_]u8{ 0x5c, '/' };
+    const sep = std.mem.lastIndexOfAny(u8, argv0, &seps);
+    const name = if (sep) |i| argv0[i + 1 ..] else argv0;
+    if (std.ascii.eqlIgnoreCase(name, "wsl") or std.ascii.eqlIgnoreCase(name, "wsl.exe")) return true;
+    if (!std.ascii.eqlIgnoreCase(name, "bash.exe")) return false;
+    const parent = argv0[0 .. sep orelse return false];
+    const psep = std.mem.lastIndexOfAny(u8, parent, &seps) orelse return false;
+    const dirname = parent[psep + 1 ..];
+    inline for (.{ "system32", "sysnative", "syswow64" }) |d| {
+        if (std.ascii.eqlIgnoreCase(dirname, d)) return true;
+    }
+    return false;
+}
+
+fn probeYes(_: []const u8) bool {
+    return true;
+}
+
+fn probeNo(_: []const u8) bool {
+    return false;
+}
+
+test "Exec: windows TERM falls back without the compiled entry" {
+    const r = windowsTerm("xterm-ghostty", "C:/g/share/terminfo", "bash.exe", &probeNo);
+    try std.testing.expectEqualStrings("xterm-256color", r.term);
+    try std.testing.expect(r.terminfo == null);
+    const none = windowsTerm("xterm-ghostty", null, "bash.exe", &probeYes);
+    try std.testing.expectEqualStrings("xterm-256color", none.term);
+    try std.testing.expect(none.terminfo == null);
+}
+
+test "Exec: windows TERM keeps a user-set term" {
+    const r = windowsTerm("foo", "C:/g/share/terminfo", "bash.exe", &probeYes);
+    try std.testing.expectEqualStrings("foo", r.term);
+    const n = windowsTerm("foo", null, "bash.exe", &probeNo);
+    try std.testing.expectEqualStrings("foo", n.term);
+}
+
+test "Exec: wsl gets xterm-256color" {
+    for ([_][]const u8{
+        "C:\\Windows\\System32\\wsl.exe",
+        "wsl",
+        "WSL.EXE",
+        "D:/tools/wsl.exe",
+        "c:/windows/sysnative/bash.exe",
+    }) |argv0| {
+        const r = windowsTerm("xterm-ghostty", "C:/g/share/terminfo", argv0, &probeYes);
+        try std.testing.expectEqualStrings("xterm-256color", r.term);
+        try std.testing.expect(r.terminfo == null);
+    }
+    const git = windowsTerm("xterm-ghostty", "C:/g/share/terminfo", "C:/Program Files/Git/bin/bash.exe", &probeYes);
+    try std.testing.expectEqualStrings("xterm-ghostty", git.term);
+}
+
+test "Exec: git bash gets a POSIX TERMINFO" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/c/g/share/terminfo", msysTerminfo(&buf, "C:/g/share/terminfo", "C:/Program Files/Git/bin/bash.exe"));
+    try std.testing.expectEqualStrings("C:/g/share/terminfo", msysTerminfo(&buf, "C:/g/share/terminfo", "pwsh.exe"));
+}
+
+test "Exec: windows TERMINFO points at the share dir" {
+    const r = windowsTerm("xterm-ghostty", "C:/g/share/terminfo", "bash.exe", &probeYes);
+    try std.testing.expectEqualStrings("xterm-ghostty", r.term);
+    try std.testing.expectEqualStrings("C:/g/share/terminfo", r.terminfo.?);
 }
 
 test "init frees the env when it fails" {

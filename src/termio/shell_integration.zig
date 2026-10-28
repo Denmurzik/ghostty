@@ -616,10 +616,15 @@ fn setupBash(
     if (comptime builtin.target.os.tag == .windows) {
         // Git Bash (MSYS) reads these as paths, and a bare `C:\a\b` loses its
         // backslashes there; the mixed form `C:/a/b` works everywhere.
-        inline for (.{ "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR", "TERMINFO" }) |name| {
+        inline for (.{ "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR" }) |name| {
             if (env.get(name)) |v| {
                 if (isDrivePath(v)) try env.put(name, try msysPath(alloc, v));
             }
+        }
+        // ncurses splits TERMINFO at `:`, so `C:/g/terminfo` is read as `C`
+        // and `/g/terminfo`; only the POSIX form `/c/g/terminfo` is found.
+        if (env.get("TERMINFO")) |v| {
+            if (isDrivePath(v)) try env.put("TERMINFO", try msysPosixPath(alloc, v));
         }
     }
 
@@ -632,6 +637,13 @@ fn msysPath(alloc: Allocator, path: []const u8) ![]u8 {
     const out = try alloc.dupe(u8, path);
     std.mem.replaceScalar(u8, out, '\\', '/');
     return out;
+}
+
+/// A drive path in the POSIX form MSYS understands: `C:/a/b` becomes `/c/a/b`.
+fn msysPosixPath(alloc: Allocator, path: []const u8) ![]u8 {
+    const mixed = try msysPath(alloc, path);
+    mixed[0] = std.ascii.toLower(mixed[0]);
+    return std.mem.concat(alloc, u8, &.{ "/", mixed[0..1], mixed[2..] });
 }
 
 /// Whether the path starts with a drive letter and a separator (`C:\` or `C:/`).
@@ -1472,7 +1484,7 @@ test "windows: bash on msys gets forward-slash paths" {
     const git: config.Command = .{ .direct = &.{"C:\\Program Files\\Git\\bin\\bash.exe"} };
     try testing.expect(try setupBash(alloc, git, res.path, &env) != null);
     try testing.expectEqualStrings("C:/g/share/ghostty", env.get("GHOSTTY_RESOURCES_DIR").?);
-    try testing.expectEqualStrings("C:/g/share/terminfo", env.get("TERMINFO").?);
+    try testing.expectEqualStrings("/c/g/share/terminfo", env.get("TERMINFO").?);
     try testing.expectEqualStrings("D:/g/bin", env.get("GHOSTTY_BIN_DIR").?);
 
     // Not a Windows path: unchanged.
@@ -1481,6 +1493,7 @@ test "windows: bash on msys gets forward-slash paths" {
     try testing.expectEqualStrings("/usr/share/terminfo", env.get("TERMINFO").?);
 
     try testing.expectEqualStrings("C:/a/b", try msysPath(alloc, "C:\\a\\b"));
+    try testing.expectEqualStrings("/c/a/b", try msysPosixPath(alloc, "C:/a/b"));
 }
 
 test "windows: pwsh integration script carries OSC 133" {
