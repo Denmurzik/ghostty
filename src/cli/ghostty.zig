@@ -23,6 +23,8 @@ const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
 const new_tab = @import("new_tab.zig");
 const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
+const install_explorer_integration = @import("install_explorer_integration.zig");
+const uninstall_explorer_integration = @import("uninstall_explorer_integration.zig");
 const global = @import("../global.zig");
 
 /// Special commands that can be invoked via CLI flags. These are all
@@ -85,6 +87,12 @@ pub const Action = enum {
 
     // Use IPC to tell the running Ghostty to toggle the quick terminal.
     @"toggle-quick-terminal",
+
+    // Add "Open Ghostty here" to the Windows Explorer context menu.
+    @"install-explorer-integration",
+
+    // Remove the Windows Explorer context menu entries.
+    @"uninstall-explorer-integration",
 
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
@@ -171,6 +179,8 @@ pub const Action = enum {
             .@"new-window" => try new_window.run(alloc),
             .@"new-tab" => try new_tab.run(alloc),
             .@"toggle-quick-terminal" => try toggle_quick_terminal.run(alloc),
+            .@"install-explorer-integration" => try install_explorer_integration.run(alloc),
+            .@"uninstall-explorer-integration" => try uninstall_explorer_integration.run(alloc),
         };
     }
 
@@ -214,6 +224,8 @@ pub const Action = enum {
                 .@"new-window" => new_window.Options,
                 .@"new-tab" => new_tab.Options,
                 .@"toggle-quick-terminal" => toggle_quick_terminal.Options,
+                .@"install-explorer-integration" => install_explorer_integration.Options,
+                .@"uninstall-explorer-integration" => uninstall_explorer_integration.Options,
             };
         }
     }
