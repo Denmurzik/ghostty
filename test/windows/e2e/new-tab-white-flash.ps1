@@ -73,6 +73,14 @@ public class WhiteFlashProbe {
 "@ -CompilerParameters (New-Object System.CodeDom.Compiler.CompilerParameters (,[string[]]@("System.dll","System.Drawing.dll")) -Property @{ CompilerOptions = "/unsafe" })
 }
 
+if (-not ('GhosttyE2e.FlashZ' -as [type])) {
+    Add-Type -Namespace GhosttyE2e -Name FlashZ -MemberDefinition @"
+[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+"@
+}
+
 # The terminal area of the first window (below the tab strip), in screen pixels.
 function Get-TerminalRect($G) {
     $st = @((Get-GhosttyState -Class $G.Class).windows)[0]
@@ -185,6 +193,21 @@ Invoke-E2eScenario 'new-tab-white-flash' {
             } {
                 if (@((Get-GhosttyState -Class $g.Class).windows).Count -eq 2) { $true }
             }
+            # The phase means something only if the new window was what the
+            # probe saw: it must contain the sampled rect and be on top there.
+            $nw = @(@((Get-GhosttyState -Class $g.Class).windows) | Where-Object { [Convert]::ToInt64(([string]$_.hwnd).Substring(2), 16) -ne $g.Hwnd.ToInt64() })
+            if ($nw.Count -ne 1) { throw "window: expected one new window, found $($nw.Count)" }
+            $nh = [IntPtr][Convert]::ToInt64(([string]$nw[0].hwnd).Substring(2), 16)
+            $wr = New-Object GhosttyE2e.Win+RECT
+            [void][GhosttyE2e.Win]::GetWindowRect($nh, [ref]$wr)
+            if ($wr.Left -gt $rect.X -or $wr.Top -gt $rect.Y -or $wr.Right -lt $rect.X + $rect.W -or $wr.Bottom -lt $rect.Y + $rect.H) {
+                throw "window: the new window ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom)) does not cover the sampled rect ($($rect.X),$($rect.Y)) $($rect.W)x$($rect.H)"
+            }
+            $centre = New-Object GhosttyE2e.FlashZ+POINT
+            $centre.X = $rect.X + [int]($rect.W / 2)
+            $centre.Y = $rect.Y + [int]($rect.H / 2)
+            $top = [GhosttyE2e.FlashZ]::GetAncestor([GhosttyE2e.FlashZ]::WindowFromPoint($centre), 2)
+            if ($top -ne $nh) { throw "window: the sampled rect shows window 0x$('{0:x}' -f $top.ToInt64()), not the new window 0x$('{0:x}' -f $nh.ToInt64())" }
         } finally {
             Stop-FlashGhostty $g
         }
