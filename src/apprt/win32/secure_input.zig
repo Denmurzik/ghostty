@@ -181,7 +181,8 @@ pub fn badgeMessage(
 const explainer =
     "While Secure Input is on, Ghostty's windows are hidden from screen capture " ++
     "and screen sharing, and text you copy in Ghostty is kept out of Windows " ++
-    "clipboard history and the cloud clipboard.\n\n" ++
+    "clipboard history and the cloud clipboard. Other programs can still read " ++
+    "copied text while it is on the clipboard.\n\n" ++
     "Windows cannot hide your keystrokes from other programs running as you, " ++
     "so this does not protect against keyloggers or malware. Ghostty also " ++
     "cannot detect password prompts on Windows: Secure Input is on only when " ++
