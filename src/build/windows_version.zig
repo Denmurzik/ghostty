@@ -15,7 +15,7 @@ pub fn tagKind(tag: []const u8) TagKind {
 }
 
 /// Digits only, no sign, no leading zero (except "0" itself).
-fn canonicalDigits(s: []const u8) bool {
+pub fn canonicalDigits(s: []const u8) bool {
     if (s.len == 0 or (s.len > 1 and s[0] == '0')) return false;
     for (s) |c| if (c < '0' or c > '9') return false;
     return true;
@@ -148,4 +148,16 @@ test "windows version: rc header" {
     try std.testing.expect(std.mem.indexOf(u8, b, "#define GHOSTTY_FILEFLAGS 0x1L\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, b, "\"Ghostty tmux shim\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, b, "\"tmux.exe\"") != null);
+}
+
+test "windows version: edge cases" {
+    try checkVersionString("1.3.2-win.0");
+    try checkVersionString("1.3.2-win.65535");
+    try std.testing.expectError(error.NTooLarge, checkVersionString("1.3.2-win.4294967296"));
+    try std.testing.expectError(error.NTooLarge, checkVersionString("1.3.2-win.99999999999999999999"));
+    try std.testing.expectError(error.BadWinSuffix, checkVersionString("1.3.2-win.5-rc"));
+    try std.testing.expectError(error.BadWinSuffix, checkVersionString("1.3.2-win.1-win.x"));
+    try checkVersionString("1.3.2-win.1-win.2");
+    try std.testing.expectEqual(@as(?u32, 2), winN("1.3.2-win.1-win.2"));
+    try std.testing.expectEqual(@as(?u32, null), winN("1.3.2-win.5-rc"));
 }

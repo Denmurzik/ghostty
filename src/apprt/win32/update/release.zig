@@ -30,8 +30,8 @@ pub fn parseTag(tag: []const u8) ?Tag {
     if (dash == 0) return null;
     if (!safeZon(rest[0..dash])) return null;
     const digits = rest[dash + 1 ..];
-    if (!canonicalN(digits)) return null;
-    const n = std.fmt.parseUnsigned(u32, digits, 10) catch return null;
+    if (!windows_version.canonicalDigits(digits)) return null;
+    const n = std.fmt.parseUnsigned(u16, digits, 10) catch return null;
     return .{ .zon = rest[0..dash], .n = n };
 }
 
@@ -51,13 +51,13 @@ pub fn isReleaseUrl(url: []const u8) bool {
     const tail = std.mem.cutPrefix(u8, url, release_prefix) orelse return false;
     const dash = std.mem.lastIndexOfScalar(u8, tail, '-') orelse return false;
     if (!safeZon(tail[0..dash])) return false;
-    return canonicalN(tail[dash + 1 ..]);
+    return validN(tail[dash + 1 ..]);
 }
 
-/// Digits only, no sign, no leading zero (except "0" itself).
-fn canonicalN(s: []const u8) bool {
-    if (s.len == 0 or (s.len > 1 and s[0] == '0')) return false;
-    for (s) |c| if (c < '0' or c > '9') return false;
+/// Canonical digits with N <= 65535, the build's FILEVERSION limit.
+fn validN(s: []const u8) bool {
+    if (!windows_version.canonicalDigits(s)) return false;
+    _ = std.fmt.parseUnsigned(u16, s, 10) catch return false;
     return true;
 }
 
@@ -270,4 +270,11 @@ test "win32 update: stable channel skips pre-releases, tip counts them" {
     const body = @embedFile("testdata/prerelease-newer.json");
     try std.testing.expectEqual(@as(u32, 7), (try newest(arena.allocator(), body, false)).n);
     try std.testing.expectEqual(@as(u32, 6), (try newest(arena.allocator(), body, true)).n);
+}
+
+test "win32 update: N is capped at 65535 like the build" {
+    try std.testing.expectEqual(@as(u32, 65535), parseTag("win-1.0-65535").?.n);
+    try std.testing.expect(parseTag("win-1.0-65536") == null);
+    try std.testing.expect(!isReleaseUrl(release_prefix ++ "1.0-65536"));
+    try std.testing.expect(isReleaseUrl(release_prefix ++ "1.0-65535"));
 }
