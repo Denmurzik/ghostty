@@ -11,23 +11,33 @@ pub const max_namespaces = 8;
 pub const max_name = 64;
 pub const max_tabs = 64;
 
+/// Panes of one namespace, over all its tabs.
+pub const max_panes = 64;
+
+pub const Tab = struct {
+    /// The tab id (`@N`).
+    id: u32,
+    /// The tmux window name; owned. Names may repeat, like in tmux.
+    name: []const u8,
+};
+
 pub const Namespace = struct {
     /// The `-L` name (`default` without `-L`).
     name: []const u8,
     /// The session name; null until `new-session`.
     session: ?[]const u8 = null,
-    /// The Ghostty window (`Window.id`) that shows the session.
+    /// The Ghostty window (`Window.id`) that shows the session, as last seen.
     window_id: ?u32 = null,
-    /// tmux window name -> tab id (`@N`), in creation order. A second window
-    /// of the same name replaces the first entry (the first stays reachable
-    /// by id).
-    tab_names: std.StringArrayHashMapUnmanaged(u32) = .empty,
+    /// The tabs the client owns, in creation order. This list (at most
+    /// `max_tabs`) is what ownership, `kill-server` and the limit are about;
+    /// the names are a lookup on it.
+    tabs: std.ArrayList(Tab) = .empty,
 
     pub fn deinit(self: *Namespace, gpa: Allocator) void {
         gpa.free(self.name);
         if (self.session) |s| gpa.free(s);
-        for (self.tab_names.keys()) |k| gpa.free(k);
-        self.tab_names.deinit(gpa);
+        for (self.tabs.items) |t| gpa.free(t.name);
+        self.tabs.deinit(gpa);
     }
 
     pub fn setSession(self: *Namespace, gpa: Allocator, name: []const u8) Allocator.Error!void {
@@ -36,45 +46,47 @@ pub const Namespace = struct {
         self.session = copy;
     }
 
-    pub fn setTab(self: *Namespace, gpa: Allocator, name: []const u8, tab_id: u32) error{ OutOfMemory, TooManyTabs }!void {
-        if (self.tab_names.getPtr(name)) |v| {
-            v.* = tab_id;
-            return;
-        }
-        if (self.tab_names.count() >= max_tabs) return error.TooManyTabs;
-        const key = try gpa.dupe(u8, name);
-        errdefer gpa.free(key);
-        try self.tab_names.put(gpa, key, tab_id);
+    pub fn addTab(self: *Namespace, gpa: Allocator, name: []const u8, tab_id: u32) error{ OutOfMemory, TooManyTabs }!void {
+        if (self.hasTab(tab_id)) return;
+        if (self.tabs.items.len >= max_tabs) return error.TooManyTabs;
+        const copy = try gpa.dupe(u8, name);
+        errdefer gpa.free(copy);
+        try self.tabs.append(gpa, .{ .id = tab_id, .name = copy });
     }
 
+    pub fn count(self: *const Namespace) usize {
+        return self.tabs.items.len;
+    }
+
+    /// The newest tab of that name.
     pub fn tabByName(self: *const Namespace, name: []const u8) ?u32 {
-        return self.tab_names.get(name);
+        var i = self.tabs.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.tabs.items[i].name, name)) return self.tabs.items[i].id;
+        }
+        return null;
     }
 
-    /// The name of tab `tab_id`, the newest of several with one id.
     pub fn nameOf(self: *const Namespace, tab_id: u32) ?[]const u8 {
-        var found: ?[]const u8 = null;
-        for (self.tab_names.keys(), self.tab_names.values()) |k, v| {
-            if (v == tab_id) found = k;
-        }
-        return found;
+        for (self.tabs.items) |t| if (t.id == tab_id) return t.name;
+        return null;
     }
 
     pub fn hasTab(self: *const Namespace, tab_id: u32) bool {
-        for (self.tab_names.values()) |v| if (v == tab_id) return true;
-        return false;
+        return self.nameOf(tab_id) != null;
     }
 
     /// Forgets the tabs for which `alive(ctx, id)` is false.
     pub fn prune(self: *Namespace, gpa: Allocator, ctx: anytype, comptime alive: fn (@TypeOf(ctx), u32) bool) void {
         var i: usize = 0;
-        while (i < self.tab_names.count()) {
-            if (alive(ctx, self.tab_names.values()[i])) {
+        while (i < self.tabs.items.len) {
+            if (alive(ctx, self.tabs.items[i].id)) {
                 i += 1;
                 continue;
             }
-            gpa.free(self.tab_names.keys()[i]);
-            self.tab_names.orderedRemoveAt(i);
+            gpa.free(self.tabs.items[i].name);
+            _ = self.tabs.orderedRemove(i);
         }
     }
 };
@@ -134,7 +146,7 @@ test "win32 tmux namespaces: ensure, get, drop" {
     try std.testing.expectEqual(a, try t.ensure(gpa, "claude-swarm-1"));
     try std.testing.expectEqualStrings("claude-swarm-1", a.name);
     try a.setSession(gpa, "claude-swarm");
-    try a.setTab(gpa, "swarm-view", 7);
+    try a.addTab(gpa, "swarm-view", 7);
     try std.testing.expectEqual(@as(?u32, 7), a.tabByName("swarm-view"));
     try std.testing.expectEqualStrings("swarm-view", a.nameOf(7).?);
     try std.testing.expect(a.hasTab(7) and !a.hasTab(8));
@@ -159,15 +171,18 @@ test "win32 tmux namespaces: names and limits" {
     try std.testing.expectError(error.TooManyNamespaces, t.ensure(gpa, "one-more"));
 }
 
-test "win32 tmux namespaces: prune and tab limit" {
+test "win32 tmux namespaces: duplicate names keep every tab, prune, limit" {
     const gpa = std.testing.allocator;
     var t: Table = .{};
     defer t.deinit(gpa);
     const ns = try t.ensure(gpa, "n");
-    try ns.setTab(gpa, "a", 1);
-    try ns.setTab(gpa, "b", 2);
-    try ns.setTab(gpa, "a", 3); // same name: replaced
-    try std.testing.expectEqual(@as(usize, 2), ns.tab_names.count());
+    try ns.addTab(gpa, "a", 1);
+    try ns.addTab(gpa, "b", 2);
+    try ns.addTab(gpa, "a", 3); // the same name again: a second tab
+    try std.testing.expectEqual(@as(usize, 3), ns.count());
+    try std.testing.expectEqual(@as(?u32, 3), ns.tabByName("a"));
+    try std.testing.expect(ns.hasTab(1));
+    try std.testing.expectEqualStrings("a", ns.nameOf(1).?);
 
     const Alive = struct {
         fn f(keep: u32, id: u32) bool {
@@ -175,10 +190,10 @@ test "win32 tmux namespaces: prune and tab limit" {
         }
     };
     ns.prune(gpa, @as(u32, 2), Alive.f);
-    try std.testing.expectEqual(@as(usize, 1), ns.tab_names.count());
+    try std.testing.expectEqual(@as(usize, 1), ns.count());
     try std.testing.expectEqual(@as(?u32, 2), ns.tabByName("b"));
 
     var buf: [16]u8 = undefined;
-    for (0..max_tabs - 1) |i| try ns.setTab(gpa, try std.fmt.bufPrint(&buf, "t{d}", .{i}), @intCast(i + 10));
-    try std.testing.expectError(error.TooManyTabs, ns.setTab(gpa, "overflow", 1));
+    for (0..max_tabs - 1) |i| try ns.addTab(gpa, try std.fmt.bufPrint(&buf, "t{d}", .{i}), @intCast(i + 10));
+    try std.testing.expectError(error.TooManyTabs, ns.addTab(gpa, "overflow", 1000));
 }

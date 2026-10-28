@@ -571,20 +571,22 @@ pub fn newTabIn(self: *FakeHost, owner: u32, name: []const u8, spawn: commands.S
     return self.addOwnedWindow(owner, spawn);
 }
 
-/// Closes every window of the namespace, no questions asked.
+/// The fake Ghostty window that shows the tab.
+pub fn ghosttyWindowOf(self: *FakeHost, win: Window) u32 {
+    return self.windows_list.items[self.windowIndex(win.id).?].owner;
+}
+
+/// Closes the namespace's tabs, no questions asked (by tab, not by window:
+/// a torn-out tab is still the client's).
 pub fn closeNamespace(self: *FakeHost, ns: *ns_mod.Namespace) void {
-    const owner = ns.window_id orelse return;
-    var i = self.windows_list.items.len;
-    while (i > 0) {
-        i -= 1;
-        const w = &self.windows_list.items[i];
-        if (w.owner != owner) continue;
-        const ids = self.paneIds(self.alloc, i) catch &[_]u32{};
+    for (ns.tabs.items) |t| {
+        const wi = self.windowIndex(t.id) orelse continue;
+        const ids = self.paneIds(self.alloc, wi) catch &[_]u32{};
         defer if (ids.len > 0) self.alloc.free(ids);
-        const wid = w.id;
+        const w = &self.windows_list.items[wi];
         w.tree.deinit();
-        _ = self.windows_list.orderedRemove(i);
-        self.opts.dropWindow(self.alloc, wid);
+        _ = self.windows_list.orderedRemove(wi);
+        self.opts.dropWindow(self.alloc, t.id);
         for (ids) |p| {
             if (self.focused == p) self.focused = 0;
             self.dropPaneState(p);

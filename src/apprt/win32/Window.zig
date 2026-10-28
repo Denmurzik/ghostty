@@ -84,6 +84,8 @@ pub const CreateOptions = struct {
     overrides: Overrides = .none,
     first_tab: bool = true,
     kind: Kind = .normal,
+    /// A tmux pane: the first tab starts this plan instead of the shell.
+    first_tab_tmux: ?*const @import("tmux/spawn.zig").Plan = null,
 };
 
 hwnd: win32.foundation.HWND,
@@ -225,6 +227,7 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
             .parent = opts.parent,
             .overrides = opts.overrides,
             .context = .window,
+            .tmux = opts.first_tab_tmux,
         }) catch |err| {
             log.err("unable to create the first tab err={}", .{err});
             self.destroy();

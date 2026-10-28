@@ -469,30 +469,32 @@ pub const Host = struct {
         return &self.state().namespaces;
     }
 
-    /// The first surface of a new window or tab is a plain shell; it is
-    /// replaced by the pane's command (the pane keeps its number).
-    fn runInFirstSurface(self: *Host, tab: *Tab, spawn_req: commands.Spawn) commands.SplitError!Pane {
-        const old = tab.focusedSurface() orelse return error.SpawnFailed;
-        var plan = try self.planOf(spawn_req);
-        const created = tab.replaceSurface(old, &plan) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.SpawnFailed,
-        };
-        self.state().shim_panes.put(self.app.core_app.alloc, created.pane_id, {}) catch {};
-        labels.optionsChanged(self.app, tab.id);
-        return .{ .id = created.pane_id };
+    /// The Ghostty window (`Window.id`) that shows the tab.
+    pub fn ghosttyWindowOf(self: *Host, win: Window) u32 {
+        const tab = tabOf(self.app, win.id) orelse return 0;
+        return tab.window.id;
     }
 
-    /// A new Ghostty window for the namespace, shown without taking the
-    /// activation from whatever the user is doing.
+    /// The pane of the first surface of a tab made with a tmux plan.
+    fn firstPane(self: *Host, tab: *Tab) commands.SplitError!Pane {
+        const s = tab.focusedSurface() orelse return error.SpawnFailed;
+        self.state().shim_panes.put(self.app.core_app.alloc, s.pane_id, {}) catch {};
+        labels.optionsChanged(self.app, tab.id);
+        return .{ .id = s.pane_id };
+    }
+
+    /// A new Ghostty window for the namespace whose first surface runs the
+    /// command at once, shown without taking the activation from whatever
+    /// the user is doing.
     pub fn newSessionWindow(self: *Host, ns: *ns_mod.Namespace, name: []const u8, spawn_req: commands.Spawn) commands.SplitError!Pane {
         _ = name;
-        const window = GhosttyWindow.create(self.app, .{}) catch return error.SpawnFailed;
+        var plan = try self.planOf(spawn_req);
+        const window = GhosttyWindow.create(self.app, .{ .first_tab_tmux = &plan }) catch return error.SpawnFailed;
         const tab = window.activeTab() orelse {
             window.destroy();
             return error.SpawnFailed;
         };
-        const pane = self.runInFirstSurface(tab, spawn_req) catch |err| {
+        const pane = self.firstPane(tab) catch |err| {
             window.destroy();
             return err;
         };
@@ -507,8 +509,9 @@ pub const Host = struct {
         _ = name;
         const window = windowById(self.app, window_id) orelse return error.SpawnFailed;
         const previous = window.activeTab();
-        const tab = window.addTab(.{}) catch return error.SpawnFailed;
-        const pane = self.runInFirstSurface(tab, spawn_req) catch |err| {
+        var plan = try self.planOf(spawn_req);
+        const tab = window.addTab(.{ .tmux = &plan }) catch return error.SpawnFailed;
+        const pane = self.firstPane(tab) catch |err| {
             window.removeTab(tab);
             return err;
         };
@@ -518,13 +521,14 @@ pub const Host = struct {
         return pane;
     }
 
-    /// Closes every pane of the namespace's tabs without asking: the last
-    /// pane of the last tab takes the window with it.
+    /// Closes every pane of the namespace's tabs without asking (also splits
+    /// the user made in them): the last pane of the last tab takes the
+    /// window with it.
     pub fn closeNamespace(self: *Host, ns: *ns_mod.Namespace) void {
         var ids: std.ArrayList(u32) = .empty;
-        for (ns.tab_names.values()) |tab_id| {
-            const win: Window = .{ .id = tab_id };
-            if (self.findWindow(tab_id) == null) continue;
+        for (ns.tabs.items) |t| {
+            const win: Window = .{ .id = t.id };
+            if (self.findWindow(t.id) == null) continue;
             const list = self.panes(self.arena, win) catch continue;
             for (list) |p| ids.append(self.arena, p.id) catch {};
         }
@@ -640,6 +644,7 @@ pub fn appStopping(app: *App) void {
     st.exited.deinit(alloc);
     st.exited = .empty;
     st.shim_panes.deinit(alloc);
+    st.namespaces.deinit(alloc);
     st.shim_panes = .empty;
 }
 

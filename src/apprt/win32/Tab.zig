@@ -34,6 +34,8 @@ pub const CreateOptions = struct {
     parent: ?*CoreSurface = null,
     overrides: Overrides = .none,
     context: apprt.surface.NewSurfaceContext = .tab,
+    /// A tmux pane: the first surface runs this plan instead of the shell.
+    tmux: ?*const tmux_spawn.Plan = null,
 };
 
 /// Source of `id`, for log correlation only.
@@ -148,6 +150,7 @@ pub fn create(window: *Window, opts: CreateOptions) !*Tab {
         .parent = opts.parent,
         .overrides = opts.overrides,
         .context = opts.context,
+        .tmux = opts.tmux,
     });
     errdefer surface.destroy();
 
