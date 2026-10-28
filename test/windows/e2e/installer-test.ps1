@@ -143,7 +143,7 @@ Invoke-E2eScenario 'installer-test' {
     if ($desc -ne 'Ghostty test installer') { throw "E2E-SKIP: FileDescription is '$desc', not 'Ghostty test installer'" }
 
     # The setup's guard looks for any GhosttyTray window: a Ghostty of the owner's would block this run.
-    if (Test-TrayWindow) { throw 'E2E-SKIP: a Ghostty tray window exists already (close Ghostty, then rerun)' }
+    if (Test-TrayWindow) { throw 'a Ghostty tray window exists already: close all Ghostty instances before this scenario' }
 
     $sbx = $script:Sbx
     $script:Hive = Join-Path $sbx.Tmp 'hive.dat'
@@ -190,7 +190,9 @@ Invoke-E2eScenario 'installer-test' {
     # A Ghostty of this run (own sandbox) with its tray window.
     function Start-Blocker {
         $script:Blocker = Start-E2eGhostty
-        if (-not (Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { Test-TrayWindow })) { $lg = if (Test-Path -LiteralPath $script:Blocker.Log) { (Get-Content -LiteralPath $script:Blocker.Log -Tail 12) -join "`n" } else { '(no log)' }; $cls = @([GhosttyE2e.Win]::TopLevel([uint32]$script:Blocker.Pid, $null) | ForEach-Object { [GhosttyE2e.Win]::ClassOf($_) }) -join ","; throw "the test Ghostty has no GhosttyTray window; its windows: $cls; exited=$($script:Blocker.Process.HasExited) hwnd=$($script:Blocker.Hwnd); log:`n$lg" }
+        if (-not (Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { Test-TrayWindow })) {
+            throw "the test Ghostty (pid $($script:Blocker.Pid)) has no GhosttyTray window"
+        }
     }
     function Stop-Blocker {
         Stop-OwnGhostty
@@ -202,7 +204,7 @@ Invoke-E2eScenario 'installer-test' {
     # ---- a running Ghostty blocks a silent install, which changes nothing ----
     Start-Blocker
     $r = Invoke-Sandboxed $setup $setupArgs 120 $sbx.Root
-    if ($r.Code -eq 0) { throw 'the silent setup succeeded while Ghostty was running' }
+    if ($r.Code -ne 7) { throw "the silent setup while Ghostty runs exited $($r.Code), expected 7" }
     if (Test-Path -LiteralPath (Join-Path $inst 'ghostty.exe')) { throw 'the blocked setup installed files' }
     Write-E2eInfo "blocked silent setup exit code $($r.Code)"
     Stop-Blocker
@@ -224,7 +226,9 @@ Invoke-E2eScenario 'installer-test' {
     } finally { $script:Exe = $saveExe }
     if (-not $g.Hwnd -or $g.Hwnd -eq [IntPtr]::Zero) { throw 'the installed ghostty.exe showed no window' }
     Stop-OwnGhostty
-    $null = Wait-Until -TimeoutSec 10 -PollMs 200 -Condition { -not (Get-Process -Id $g.Pid -ErrorAction SilentlyContinue) }
+    if (-not (Wait-Until -TimeoutSec 10 -PollMs 200 -Condition { -not (Test-TrayWindow) })) {
+        throw 'the GhosttyTray window of the GUI start did not go away'
+    }
 
     # ---- upgrade: stale files in the two owned folders go, the user's file stays ----
     Set-Content -LiteralPath (Join-Path $inst 'share\ghostty\themes\zz-stale.txt') -Value x -Encoding ASCII
@@ -255,7 +259,7 @@ Invoke-E2eScenario 'installer-test' {
     $uninsArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=`"$(Join-Path $sbx.Root 'unins.log')`""
     Start-Blocker
     $r = Invoke-Sandboxed $unins $uninsArgs 60 $inst
-    if ($r.Code -eq 0) { throw 'the silent uninstall succeeded while Ghostty was running' }
+    if ($r.Code -ne 1) { throw "the silent uninstall while Ghostty runs exited $($r.Code), expected 1" }
     Start-Sleep -Seconds 2
     if (-not (Test-Path -LiteralPath $unins)) { throw 'the blocked uninstall removed unins000.exe' }
     Assert-Files 'after the blocked uninstall'
@@ -269,11 +273,16 @@ Invoke-E2eScenario 'installer-test' {
 
     # ---- uninstall ----
     $r = Invoke-Sandboxed $unins $uninsArgs 60 $inst
-    if ($r.Code -ne 0) { $ul = Join-Path $sbx.Root "unins.log"; throw "uninstall exited $($r.Code): $($r.Stdout) $($r.Stderr) log: $(($t_ = (Get-Content -LiteralPath $ul -Tail 40 -ErrorAction SilentlyContinue) -join " | ").Substring([Math]::Max(0, $t_.Length - 1500)))" }
+    if ($r.Code -ne 0) {
+        $ul = Join-Path $sbx.Root 'unins.log'
+        $tail = ''
+        if (Test-Path -LiteralPath $ul) { $tail = (Get-Content -LiteralPath $ul -Tail 12) -join ' | ' }
+        throw "uninstall exited $($r.Code): $($r.Stdout) $($r.Stderr) log: $tail"
+    }
     # It re-launches itself from %TEMP%: wait until unins000.exe is gone.
     $gone = Wait-Until -TimeoutSec 60 -PollMs 500 -Condition { -not (Test-Path -LiteralPath $unins) }
     if (-not $gone) { throw 'unins000.exe is still there after 60 s' }
-    $null = Wait-Until -TimeoutSec 15 -PollMs 250 -Condition { -not (Get-Process -Name 'unins000', '_u*' -ErrorAction SilentlyContinue) }
+    $null = Wait-Until -TimeoutSec 15 -PollMs 250 -Condition { -not (Get-Process -Name 'unins000', '_unins*' -ErrorAction SilentlyContinue) }
 
     # ---- after uninstall ----
     Use-Hive {
