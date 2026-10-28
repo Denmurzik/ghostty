@@ -30,6 +30,7 @@ const ipc = struct {
 const messages = @import("messages.zig");
 const notify_mod = @import("notify.zig");
 const profiles_mod = @import("profiles.zig");
+const Overrides = @import("Overrides.zig");
 const secure_input_mod = @import("secure_input.zig");
 const undo_actions_mod = @import("actions/undo_actions.zig");
 const Updater = @import("update/Updater.zig");
@@ -187,7 +188,9 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     // Config is owned by us; the core clones what it needs.
     try core_app.updateConfig(self, &self.config);
 
-    const window = try Window.create(self, .{});
+    var launch_arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
+    defer launch_arena.deinit();
+    const window = try Window.create(self, .{ .overrides = self.profileOverrides(launch_arena.allocator()) });
     errdefer window.destroy();
     window.show();
     renderer.Device.logPrivateUsage("first surface");
@@ -236,6 +239,7 @@ pub fn terminate(self: *App) void {
     _ = win32.uxtheme.BufferedPaintUnInit();
 
     _ = win32.user32.DestroyWindow(self.msg_hwnd);
+    profiles_mod.deinit(self);
     self.config.deinit();
     win32.ole32.OleUninitialize();
 }
@@ -273,6 +277,24 @@ fn startServer(self: *App) void {
         return;
     };
     self.server = server;
+}
+
+/// The command of `--profile=<id>` of this process's command line for the
+/// first window (the rest of the command line is the config's business). An
+/// unknown id warns once and starts the default shell.
+fn profileOverrides(self: *App, a: Allocator) Overrides {
+    var all: std.ArrayList([]const u8) = .empty;
+    var iter = cli.args.argsIterator(a, global.args()) catch return .none;
+    defer iter.deinit();
+    while (iter.next()) |arg| all.append(a, a.dupe(u8, arg) catch return .none) catch return .none;
+
+    var parsed = Overrides.parse(a, all.items) catch return .none;
+    const id = parsed.profile orelse return .none;
+    parsed.resolve(a, profiles_mod.resolver(self)) catch |err| {
+        log.warn("--profile={s} not used ({t}); starting the default shell", .{ id, err });
+        return .none;
+    };
+    return .{ .command = parsed.command };
 }
 
 /// Hands this launch to the instance that owns the pipe `name`, when

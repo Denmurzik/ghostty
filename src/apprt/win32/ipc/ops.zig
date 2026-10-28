@@ -15,6 +15,7 @@ const CoreSurface = @import("../../../Surface.zig");
 const global = @import("../../../global.zig");
 const App = @import("../App.zig");
 const Overrides = @import("../Overrides.zig");
+const profiles = @import("../profiles.zig");
 const Surface = @import("../Surface.zig");
 const Tab = @import("../Tab.zig");
 const Window = @import("../Window.zig");
@@ -37,6 +38,9 @@ const test_ops_var = "GHOSTTY_WIN32_TEST_IPC";
 
 /// Test hook: replaces the answer of `testOpsEnabled`.
 pub var test_ops_override: ?bool = null;
+
+/// Tests only: answers profile ids without an `App`.
+var test_resolver: ?Overrides.ProfileResolver = null;
 
 /// 0 not read yet, 1 off, 2 on.
 var test_ops_cache: std.atomic.Value(u8) = .init(0);
@@ -142,22 +146,31 @@ fn reply(
 
 /// The overrides of a forwarded request. A command never comes through the
 /// pipe, whatever a client sent (defence in depth).
-fn overridesOf(alloc: Allocator, arena: Allocator, req: protocol.Request) union(enum) {
+fn overridesOf(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request) union(enum) {
     ok: Overrides,
     refused: []u8,
 } {
     if (!Overrides.forwardable(req.args)) {
         return .{ .refused = reply(alloc, .failed, "", "arguments are not accepted over IPC", null) };
     }
-    const overrides = Overrides.parse(arena, req.args) catch |err| {
+    var overrides = Overrides.parse(arena, req.args) catch |err| {
         log.warn("invalid IPC arguments err={}", .{err});
         return .{ .refused = reply(alloc, .failed, "", "invalid arguments", null) };
+    };
+    const resolver = test_resolver orelse profiles.resolver(app);
+    overrides.resolve(arena, resolver) catch |err| switch (err) {
+        error.UnknownProfile => {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "unknown profile: {s}", .{overrides.profile.?}) catch "unknown profile";
+            return .{ .refused = reply(alloc, .failed, "", msg, null) };
+        },
+        error.OutOfMemory => return .{ .refused = reply(alloc, .failed, "", "out of memory", null) },
     };
     return .{ .ok = overrides };
 }
 
 fn newWindow(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, early: ?*Server.Pending) ?[]u8 {
-    const overrides = switch (overridesOf(alloc, arena, req)) {
+    const overrides = switch (overridesOf(app, alloc, arena, req)) {
         .ok => |o| o,
         .refused => |r| return r,
     };
@@ -185,7 +198,7 @@ fn openWindow(app: *App, alloc: Allocator, parent: ?*CoreSurface, overrides: Ove
 }
 
 fn newTab(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Request, early: ?*Server.Pending) ?[]u8 {
-    const overrides = switch (overridesOf(alloc, arena, req)) {
+    const overrides = switch (overridesOf(app, alloc, arena, req)) {
         .ok => |o| o,
         .refused => |r| return r,
     };
@@ -611,4 +624,24 @@ test "win32 ipc ops: crash op is a test op and needs its hook" {
     const out = handle(app, testing.allocator, "{\"v\":1,\"op\":\"crash\",\"text\":\"av\"}");
     defer testing.allocator.free(out);
     try expectCode(testing.allocator, out, .failed);
+}
+
+fn noProfiles(_: *anyopaque, _: []const u8) ?@import("../../../config.zig").Command {
+    return null;
+}
+
+test "win32 ipc: new-tab with an unknown profile" {
+    const testing = std.testing;
+    const app: *App = undefined;
+    var dummy: u8 = 0;
+    test_resolver = .{ .ctx = &dummy, .commandFor = noProfiles };
+    defer test_resolver = null;
+
+    const out = handle(app, testing.allocator, "{\"v\":1,\"op\":\"new-tab\",\"args\":[\"--profile=nope\"]}");
+    defer testing.allocator.free(out);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const resp = try protocol.parseResponse(arena.allocator(), out);
+    try testing.expectEqual(protocol.Code.failed, resp.code);
+    try testing.expectEqualStrings("unknown profile: nope", resp.stderr);
 }

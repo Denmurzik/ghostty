@@ -37,7 +37,17 @@ pub const Probe = struct {
     /// The Git for Windows install directory from the registry, allocated
     /// with `alloc`, or null if there is none.
     regGitInstallPath: *const fn (ctx: ?*anyopaque, alloc: Allocator) ?[]const u8,
+
+    /// The installed WSL distributions (read-only registry), allocated with
+    /// `alloc`. Defaulted so existing probes compile unchanged.
+    wslDistros: *const fn (ctx: ?*anyopaque, alloc: Allocator) []const WslDistro = noDistros,
 };
+
+pub const WslDistro = struct { name: []const u8, default: bool };
+
+fn noDistros(_: ?*anyopaque, _: Allocator) []const WslDistro {
+    return &.{};
+}
 
 /// Resolve the default shell. The returned argv is allocated with `alloc`
 /// (free it with `Resolved.deinit` or use an arena); all other allocations
@@ -215,9 +225,109 @@ fn join(alloc: Allocator, parts: []const []const u8) ![]u8 {
     return try buf.toOwnedSlice(alloc);
 }
 
+pub const Profile = struct {
+    /// Stable id: `default`, `git-bash`, `pwsh`, `powershell`, `cmd`,
+    /// `wsl:<distro>`.
+    id: []const u8,
+    name: []const u8,
+    kind: enum { default, git_bash, pwsh, powershell, cmd, wsl },
+
+    /// Empty for `default` without a resolved shell; else `argv[0]` is the
+    /// absolute path of the executable.
+    argv: []const [:0]const u8,
+
+    /// The executable the icon is taken from; empty for `default`.
+    icon: []const u8,
+};
+
+/// A distro name goes into a command line, so only a conservative set of
+/// characters is accepted (the ones `wsl --install` produces).
+fn validDistro(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return false;
+    }
+    // Docker's internal distros are not shells.
+    return !std.ascii.startsWithIgnoreCase(name, "docker-desktop");
+}
+
+/// The shells that can be started: `default` (the configured or resolved
+/// default shell), Git Bash, PowerShell 7, Windows PowerShell, cmd and one
+/// entry per WSL distro (the default distro first). Everything is allocated
+/// with `alloc`; pass an arena.
+pub fn profiles(
+    alloc: Allocator,
+    env: *const std.process.Environ.Map,
+    probe: Probe,
+    default_argv: ?[]const [:0]const u8,
+) ![]Profile {
+    var list: std.ArrayList(Profile) = .empty;
+
+    try list.append(alloc, .{
+        .id = "default",
+        .name = "Default",
+        .kind = .default,
+        .argv = try dupeArgv(alloc, default_argv orelse &.{}),
+        .icon = "",
+    });
+
+    if (try findGitBash(alloc, env, probe)) |bash| {
+        try list.append(alloc, try entry(alloc, "git-bash", "Git Bash", .git_bash, &.{ bash, "--login", "-i" }));
+    }
+    if (try findPwsh(alloc, env, probe)) |pwsh| {
+        try list.append(alloc, try entry(alloc, "pwsh", "PowerShell", .pwsh, &.{ pwsh, "-NoLogo" }));
+    }
+
+    const root = nonEmpty(env.get("SystemRoot")) orelse "C:\\Windows";
+    const ps = try join(alloc, &.{ root, "System32\\WindowsPowerShell\\v1.0\\powershell.exe" });
+    try list.append(alloc, try entry(alloc, "powershell", "Windows PowerShell", .powershell, &.{ ps, "-NoLogo" }));
+
+    const cmd = try findCmd(alloc, env);
+    try list.append(alloc, try entry(alloc, "cmd", "Command Prompt", .cmd, &.{cmd}));
+
+    const distros = probe.wslDistros(probe.ctx, alloc);
+    const wsl = try join(alloc, &.{ root, "System32\\wsl.exe" });
+    for ([_]bool{ true, false }) |want_default| {
+        for (distros) |d| {
+            if (d.default != want_default or !validDistro(d.name)) continue;
+            try list.append(alloc, try entry(
+                alloc,
+                try std.fmt.allocPrint(alloc, "wsl:{s}", .{d.name}),
+                d.name,
+                .wsl,
+                &.{ wsl, "-d", d.name, "--cd", "~" },
+            ));
+        }
+    }
+
+    return try list.toOwnedSlice(alloc);
+}
+
+fn entry(
+    alloc: Allocator,
+    id: []const u8,
+    name: []const u8,
+    kind: @FieldType(Profile, "kind"),
+    args: []const []const u8,
+) !Profile {
+    const argv = try alloc.alloc([:0]const u8, args.len);
+    for (args, argv) |a, *out| out.* = try alloc.dupeSentinel(u8, a, 0);
+    return .{ .id = id, .name = name, .kind = kind, .argv = argv, .icon = args[0] };
+}
+
+fn dupeArgv(alloc: Allocator, argv: []const [:0]const u8) ![]const [:0]const u8 {
+    const out = try alloc.alloc([:0]const u8, argv.len);
+    for (argv, out) |a, *o| o.* = try alloc.dupeSentinel(u8, a, 0);
+    return out;
+}
+
 /// The probe backed by the real filesystem and registry.
 pub fn systemProbe() Probe {
-    return .{ .exists = systemExists, .regGitInstallPath = systemRegGitInstallPath };
+    return .{
+        .exists = systemExists,
+        .regGitInstallPath = systemRegGitInstallPath,
+        .wslDistros = systemWslDistros,
+    };
 }
 
 fn systemExists(_: ?*anyopaque, path: []const u8) bool {
@@ -260,12 +370,124 @@ fn systemRegGitInstallPath(_: ?*anyopaque, alloc: Allocator) ?[]const u8 {
     return null;
 }
 
+extern "advapi32" fn RegOpenKeyExW(
+    hkey: windows.HKEY,
+    sub_key: windows.LPCWSTR,
+    options: windows.DWORD,
+    sam: windows.DWORD,
+    result: *windows.HKEY,
+) callconv(.winapi) windows.LSTATUS;
+extern "advapi32" fn RegEnumKeyExW(
+    hkey: windows.HKEY,
+    index: windows.DWORD,
+    name: [*]u16,
+    name_len: *windows.DWORD,
+    reserved: ?*windows.DWORD,
+    class: ?[*]u16,
+    class_len: ?*windows.DWORD,
+    last_write: ?*anyopaque,
+) callconv(.winapi) windows.LSTATUS;
+extern "advapi32" fn RegCloseKey(hkey: windows.HKEY) callconv(.winapi) windows.LSTATUS;
+
+const KEY_READ: windows.DWORD = 0x20019;
+const RRF_RT_REG_DWORD: windows.DWORD = 0x10;
+
+/// Reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` (read-only).
+fn systemWslDistros(_: ?*anyopaque, alloc: Allocator) []const WslDistro {
+    if (comptime builtin.os.tag != .windows) return &.{};
+    return readLxss(alloc) catch &.{};
+}
+
+fn readLxss(alloc: Allocator) ![]const WslDistro {
+    const lxss = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
+    var key: windows.HKEY = undefined;
+    if (RegOpenKeyExW(windows.HKEY_CURRENT_USER, lxss, 0, KEY_READ, &key) != windows.ERROR_SUCCESS) return &.{};
+    defer _ = RegCloseKey(key);
+
+    var default_guid: [64]u16 = undefined;
+    var default_len: usize = 0;
+    {
+        var size: windows.DWORD = @sizeOf(@TypeOf(default_guid));
+        const status = windows.RegGetValueW(
+            key,
+            null,
+            std.unicode.utf8ToUtf16LeStringLiteral("DefaultDistribution"),
+            windows.RRF_RT_REG_SZ,
+            null,
+            &default_guid,
+            &size,
+        );
+        if (status == windows.ERROR_SUCCESS) default_len = std.mem.sliceTo(default_guid[0 .. size / 2], 0).len;
+    }
+
+    var list: std.ArrayList(WslDistro) = .empty;
+    errdefer {
+        for (list.items) |d| alloc.free(d.name);
+        list.deinit(alloc);
+    }
+
+    var index: windows.DWORD = 0;
+    while (index < 256) : (index += 1) {
+        var sub: [256]u16 = undefined;
+        var sub_len: windows.DWORD = sub.len;
+        if (RegEnumKeyExW(key, index, &sub, &sub_len, null, null, null, null) != windows.ERROR_SUCCESS) break;
+        sub[sub_len] = 0;
+        const sub_z: [:0]const u16 = sub[0..sub_len :0];
+
+        var name_buf: [256]u16 = undefined;
+        var size: windows.DWORD = @sizeOf(@TypeOf(name_buf));
+        if (windows.RegGetValueW(
+            key,
+            sub_z,
+            std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
+            windows.RRF_RT_REG_SZ,
+            null,
+            &name_buf,
+            &size,
+        ) != windows.ERROR_SUCCESS) continue;
+
+        // State 1 is "installed"; others are being installed or removed.
+        var state: windows.DWORD = 0;
+        var state_size: windows.DWORD = @sizeOf(windows.DWORD);
+        if (windows.RegGetValueW(
+            key,
+            sub_z,
+            std.unicode.utf8ToUtf16LeStringLiteral("State"),
+            RRF_RT_REG_DWORD,
+            null,
+            &state,
+            &state_size,
+        ) == windows.ERROR_SUCCESS and state != 1) continue;
+
+        const chars = std.mem.sliceTo(name_buf[0 .. size / 2], 0);
+        if (chars.len == 0) continue;
+        const name = std.unicode.wtf16LeToWtf8Alloc(alloc, chars) catch continue;
+        errdefer alloc.free(name);
+        try list.append(alloc, .{
+            .name = name,
+            .default = default_len > 0 and std.mem.eql(u16, sub[0..sub_len], default_guid[0..default_len]),
+        });
+    }
+    return try list.toOwnedSlice(alloc);
+}
+
 const MockProbe = struct {
     existing: []const []const u8 = &.{},
     reg: ?[]const u8 = null,
+    distros: []const WslDistro = &.{},
 
     fn probe(self: *MockProbe) Probe {
-        return .{ .ctx = self, .exists = exists, .regGitInstallPath = regGitInstallPath };
+        return .{
+            .ctx = self,
+            .exists = exists,
+            .regGitInstallPath = regGitInstallPath,
+            .wslDistros = wslDistros,
+        };
+    }
+
+    fn wslDistros(ctx: ?*anyopaque, _: Allocator) []const WslDistro {
+        const self: *MockProbe = @ptrCast(@alignCast(ctx.?));
+        return self.distros;
     }
 
     fn exists(ctx: ?*anyopaque, path: []const u8) bool {
@@ -492,4 +714,90 @@ test "windows shell: systemProbe rejects a path too long for its buffer" {
     @memcpy(long[0..3], "C:\\");
     const probe = systemProbe();
     try std.testing.expect(!probe.exists(probe.ctx, &long));
+}
+
+fn profileIds(alloc: Allocator, list: []const Profile) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    for (list, 0..) |p, i| {
+        if (i > 0) try buf.append(alloc, ' ');
+        try buf.appendSlice(alloc, p.id);
+    }
+    return buf.items;
+}
+
+test "windows shell profiles: order and ids" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = try testEnv(&.{
+        .{ "ProgramFiles", "C:\\Program Files" },
+        .{ "PATH", "C:\\Program Files\\PowerShell\\7" },
+        .{ "SystemRoot", "C:\\Windows" },
+        .{ "COMSPEC", "C:\\Windows\\System32\\cmd.exe" },
+    });
+    defer env.deinit();
+    var mock: MockProbe = .{
+        .existing = &.{
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        },
+        .distros = &.{
+            .{ .name = "Debian", .default = false },
+            .{ .name = "docker-desktop", .default = false },
+            .{ .name = "Ubuntu", .default = true },
+        },
+    };
+    const list = try profiles(a, &env, mock.probe(), null);
+    try std.testing.expectEqualStrings(
+        "default git-bash pwsh powershell cmd wsl:Ubuntu wsl:Debian",
+        try profileIds(a, list),
+    );
+    const ubuntu = list[5];
+    try std.testing.expectEqual(@as(usize, 5), ubuntu.argv.len);
+    try std.testing.expectEqualStrings("--cd", ubuntu.argv[3]);
+    try std.testing.expectEqualStrings("~", ubuntu.argv[4]);
+    try std.testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", ubuntu.argv[0]);
+    try std.testing.expectEqual(@as(usize, 0), list[0].argv.len);
+}
+
+test "windows shell profiles: odd distro names skipped" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = try testEnv(&.{.{ "COMSPEC", "C:\\Windows\\System32\\cmd.exe" }});
+    defer env.deinit();
+    const long: [65]u8 = @splat('x');
+    var mock: MockProbe = .{ .distros = &.{
+        .{ .name = "a b", .default = false },
+        .{ .name = "Ü", .default = false },
+        .{ .name = &long, .default = false },
+        .{ .name = "", .default = false },
+        .{ .name = "Arch", .default = false },
+    } };
+    const list = try profiles(a, &env, mock.probe(), null);
+    try std.testing.expectEqualStrings("default powershell cmd wsl:Arch", try profileIds(a, list));
+}
+
+test "windows shell profiles: no git, no pwsh" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = try testEnv(&.{.{ "COMSPEC", "C:\\Windows\\System32\\cmd.exe" }});
+    defer env.deinit();
+    var mock: MockProbe = .{};
+    const default_argv: []const [:0]const u8 = &.{ "C:\\x\\sh.exe", "-l" };
+    const list = try profiles(a, &env, mock.probe(), default_argv);
+    try std.testing.expectEqualStrings("default powershell cmd", try profileIds(a, list));
+    try std.testing.expectEqual(@as(usize, 2), list[0].argv.len);
+    try std.testing.expectEqualStrings(
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        list[1].argv[0],
+    );
+}
+
+test "windows shell profiles: default probe has no distros" {
+    // A probe that does not set `wslDistros` (like every pre-profile caller).
+    const probe: Probe = .{ .exists = MockProbe.exists, .regGitInstallPath = MockProbe.regGitInstallPath };
+    try std.testing.expectEqual(@as(usize, 0), probe.wslDistros(null, std.testing.allocator).len);
+    _ = systemProbe();
 }
