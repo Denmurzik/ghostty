@@ -126,7 +126,10 @@ pub const Inspector = struct {
         errdefer window.destroy(alloc);
 
         ImHeap.install();
-        const ig_ctx = cimgui.c.ImGui_CreateContext(null) orelse return error.OutOfMemory;
+        const ig_ctx = cimgui.c.ImGui_CreateContext(null) orelse {
+            if (live_contexts == 0) ImHeap.release();
+            return error.OutOfMemory;
+        };
         live_contexts += 1;
         errdefer {
             cimgui.c.ImGui_DestroyContext(ig_ctx);
@@ -725,6 +728,8 @@ const ImHeap = struct {
 
     fn free(ptr: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
         if (ptr == null) return;
+        // A pointer outliving the heap would be a use after free.
+        std.debug.assert(handle != null);
         if (handle) |h| _ = HeapFree(h, 0, ptr);
     }
 
