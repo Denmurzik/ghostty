@@ -6,6 +6,7 @@
 # lists the expected ids. No WSL item is ever chosen. Keep this file ASCII only
 # (Windows PowerShell 5.1 reads a BOM-less script as ANSI).
 . (Join-Path $PSScriptRoot '_common.ps1')
+. (Join-Path $PSScriptRoot '_splits.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
@@ -45,7 +46,8 @@ Invoke-E2eScenario 'profiles-menu' {
     $c = Get-Centre @($w.strip.new_tab)
     Send-MouseClick -Hwnd $g.Hwnd -X $c[0] -Y $c[1] -Button right
     Wait-Popup '#32768' $true 'right click on the + button'
-    Save-Evidence -Tag 'profiles-menu' -G $g -Window
+    $shotDir = Get-EvidenceDir
+    if ($shotDir) { Save-WindowShot $g.Hwnd -Margin 120 (Join-Path $shotDir 'profiles-menu.png') }
 
     # The list is loaded by now; WSL items are listed but never chosen here.
     $ids = @((Get-IpcData (Get-GhosttyState -Class $g.Class)).m5.profiles.ids)

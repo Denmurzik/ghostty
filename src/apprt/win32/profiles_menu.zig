@@ -135,6 +135,9 @@ pub fn showForStrip(window: *Window, screen_x: i32, screen_y: i32) void {
     const list = profiles.refresh(app);
     if (list.len == 0) return;
     const built = buildItems(a, list) catch return;
+    // `list` belongs to the cache, which may be rebuilt while the menu runs.
+    const ids = a.alloc([]const u8, built.tab.len) catch return;
+    for (ids, 0..) |*slot, i| slot.* = a.dupe(u8, list[i].id) catch return;
 
     const menu = user32.CreatePopupMenu() orelse {
         log.warn("unable to create the profile menu err={}", .{win32.kernel32.GetLastError()});
@@ -168,8 +171,19 @@ pub fn showForStrip(window: *Window, screen_x: i32, screen_y: i32) void {
     _ = user32.PostMessageW(window.hwnd, user32.WM_NULL, 0, 0);
     if (cmd <= 0) return;
     const d = decode(@intCast(cmd)) orelse return;
-    if (d.index >= list.len) return;
-    launch(app, window, list[d.index].id, d.window);
+    if (d.index >= ids.len) return;
+
+    // The loop of the menu ran messages: the window may be gone and the
+    // profile cache rebuilt. Look both up again.
+    for (app.windows.items) |w| if (w == window) {
+        for (profiles.get(app)) |p| {
+            if (std.mem.eql(u8, p.id, ids[d.index])) {
+                launch(app, window, p.id, d.window);
+                return;
+            }
+        }
+        return;
+    };
 }
 
 /// Starts profile `id` in a new tab of `window`, or in a new window.
@@ -208,7 +222,7 @@ pub fn launch(app: *App, window: ?*Window, id: []const u8, new_window: bool) voi
 /// Appends a "New Window with Profile" submenu to the tray menu. The ids
 /// start at `first`; returns the next free id.
 pub fn appendTrayItems(app: *App, menu: user32.HMENU, first: u32) u32 {
-    const list = profiles.get(app);
+    const list = profiles.refresh(app);
     if (list.len == 0) return first;
     var arena: std.heap.ArenaAllocator = .init(app.core_app.alloc);
     defer arena.deinit();

@@ -652,7 +652,7 @@ pub fn toggle(app: *App, target: apprt.Target) !bool {
     defer if (home) |h| app.core_app.alloc.free(h);
 
     const config = &app.config;
-    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, profiles.get(app), home orelse "", &config.keybind.set);
+    const panel = try begin(window, surface.id, config.@"command-palette-entry".value.items, jumps.items, profiles.refresh(app), home orelse "", &config.keybind.set);
     errdefer close(window);
     try show(panel);
     return true;
