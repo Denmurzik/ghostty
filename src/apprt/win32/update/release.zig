@@ -305,3 +305,8 @@ test "win32 update: N is capped at 65535 like the build" {
     try std.testing.expect(!isReleaseUrl(release_prefix ++ "1.0-65536"));
     try std.testing.expect(isReleaseUrl(release_prefix ++ "1.0-65535"));
 }
+
+// The std-only build helpers have no test root of their own.
+test {
+    _ = @import("../../../build/conpty_pins.zig");
+}
