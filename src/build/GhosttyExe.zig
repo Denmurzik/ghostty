@@ -19,7 +19,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .optimize = cfg.optimize,
             .strip = cfg.strip,
             .omit_frame_pointer = cfg.omitFramePointer(),
-            .unwind_tables = if (cfg.strip) .none else .sync,
+            // Windows needs the unwind data even when stripped: without it the
+            // OS cannot walk the stack to the unhandled-exception filter, so
+            // a crash would end the process with no minidump.
+            .unwind_tables = if (cfg.strip and cfg.target.result.os.tag != .windows) .none else .sync,
         }),
         // Crashes on x86_64 self-hosted on 0.15.1
         .use_llvm = true,

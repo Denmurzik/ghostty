@@ -1,7 +1,9 @@
 //! Windows crash minidumps.
 //!
 //! An unhandled-exception filter hands the exception to a dedicated dump
-//! thread, which writes `%LOCALAPPDATA%\ghostty\crash\ghostty-<pid>-<tick>.dmp`
+//! thread, which writes `<state base>\ghostty\crash\ghostty-<pid>-<tick>.dmp`
+//! (the state base is `XDG_STATE_HOME` if set, else `%LOCALAPPDATA%`: the same
+//! rule `+crash-report` uses, see `stateBase`)
 //! with `MiniDumpWriteDump`. The thread exists because the crashing thread
 //! may be out of stack (stack overflow) or hold arbitrary locks. All the
 //! heavy state (the `dbghelp.dll` module, the dump path prefix, the events)
@@ -10,16 +12,19 @@
 //!
 //! The dump is `Normal | WithThreadInfo | WithUnloadedModules | FilterMemory`.
 //! `MiniDumpFilterMemory` reduces stack contents to the pointer values a
-//! stack walk needs, and no heap is included, so terminal output (the pty
-//! reader's buffer, the screen) never lands in a dump. Dumps stay local and
-//! are never uploaded; the 10 newest are kept.
+//! stack walk needs, and no heap is included, so the pty reader's buffer and
+//! the screen are not in a dump. Register contents of every thread are kept
+//! and can hold small fragments of recent text. Dumps stay local and are never
+//! uploaded; the 10 newest are kept. A dump is written as `.dmp.tmp` and
+//! renamed when complete, so a timeout never leaves a truncated `.dmp`.
 //!
 //! Zig's own segfault handler is disabled on Windows (see `main_ghostty.zig`),
 //! otherwise its vectored handler would print and abort before this filter
 //! ever ran.
 //!
 //! Known limit: a crash while the process heap lock is held makes
-//! `MiniDumpWriteDump` block; the filter gives up after 10 s with no dump.
+//! `MiniDumpWriteDump` block; the filter gives up after 10 s with no dump. A
+//! crash on the dump thread itself writes no dump either.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -84,6 +89,26 @@ const Exp = if (is_windows) struct {
         client_pointers: BOOL align(4),
     };
 
+    extern "kernel32" fn DeleteFileW(name: [*:0]const u16) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetFileSizeEx(h: HANDLE, size: *i64) callconv(.winapi) BOOL;
+    extern "kernel32" fn CreateFileMappingW(h: HANDLE, a: ?*anyopaque, protect: DWORD, hi: DWORD, lo: DWORD, name: ?[*:0]const u16) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn MapViewOfFile(m: HANDLE, access: DWORD, hi: DWORD, lo: DWORD, bytes: usize) callconv(.winapi) ?[*]u8;
+    extern "kernel32" fn FlushViewOfFile(base: [*]const u8, bytes: usize) callconv(.winapi) BOOL;
+    extern "kernel32" fn UnmapViewOfFile(base: [*]const u8) callconv(.winapi) BOOL;
+    extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: [*:0]const u16, flags: DWORD) callconv(.winapi) BOOL;
+
+    /// The head of `EXCEPTION_POINTERS` / `EXCEPTION_RECORD`.
+    const ExceptionRecord = extern struct {
+        code: DWORD,
+        flags: DWORD,
+        chained: ?*anyopaque,
+        address: ?*anyopaque,
+    };
+    const ExceptionPointers = extern struct {
+        record: ?*const ExceptionRecord,
+        context: ?*anyopaque,
+    };
+
     const MiniDumpWriteDumpFn = *const fn (
         process: HANDLE,
         pid: DWORD,
@@ -114,7 +139,9 @@ const State = struct {
 
     /// Exception handed over by the filter (null for the panic path).
     info: Exp.ExceptionInfo = undefined,
-    has_info: bool = false,
+
+    /// Thread id of the dump thread; a crash there must not wait for itself.
+    dump_thread_id: std.atomic.Value(u32) = .init(0),
 
     /// The first crash takes the gate; later ones just wait.
     gate: std.atomic.Value(u32) = .init(0),
@@ -125,18 +152,29 @@ var state: State = .{};
 /// 0 = not installed, 1 = installing, 2 = installed.
 var install_state: std.atomic.Value(u32) = .init(0);
 
+/// Why `install` failed, for `ensureInstalled` to log once the log is open.
+var install_error: ?[]const u8 = null;
+
 /// The ours-replaced warning is logged once.
 var replaced_logged: std.atomic.Value(bool) = .init(false);
 
-/// Install the filter and start the dump thread. `local_app_data` is the
-/// value of `%LOCALAPPDATA%` (UTF-8). Safe to call more than once. Failures
+/// The directory dumps live under: `XDG_STATE_HOME` when non-empty, else
+/// `LOCALAPPDATA`. Same rule as `os.xdg.state` on Windows, so `+crash-report`
+/// finds what this module writes.
+pub fn stateBase(xdg_state_home: []const u8, local_app_data: []const u8) []const u8 {
+    return if (xdg_state_home.len > 0) xdg_state_home else local_app_data;
+}
+
+/// Install the filter and start the dump thread. `state_base` is the state
+/// base directory (UTF-8, see `stateBase`). Safe to call more than once. Failures
 /// are logged and leave dumping disabled; they are never fatal.
-pub fn install(local_app_data: []const u8) void {
+pub fn install(state_base: []const u8) void {
     if (comptime !is_windows) return;
     if (install_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) return;
-    errdefer install_state.store(0, .release);
 
-    installInner(local_app_data) catch |err| {
+    installInner(state_base) catch |err| {
+        // The log file is usually not open yet; `ensureInstalled` reports it.
+        install_error = @errorName(err);
         log.warn("crash dumps disabled err={}", .{err});
         install_state.store(0, .release);
         return;
@@ -144,29 +182,39 @@ pub fn install(local_app_data: []const u8) void {
     install_state.store(2, .release);
 }
 
-/// `install` with `%LOCALAPPDATA%` read from the process environment.
+/// `install` with the state base read from the process environment.
 pub fn installFromEnv() void {
     if (comptime !is_windows) return;
     const GetEnvironmentVariableW = struct {
         extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buf: ?[*]u16, size: DWORD) callconv(.winapi) DWORD;
     }.GetEnvironmentVariableW;
 
-    var wbuf: [520]u16 = undefined;
-    const n = GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("LOCALAPPDATA"), &wbuf, wbuf.len);
-    if (n == 0 or n >= wbuf.len) return;
-    var utf8: [1560]u8 = undefined;
-    const len = std.unicode.utf16LeToUtf8(&utf8, wbuf[0..n]) catch return;
-    install(utf8[0..len]);
+    var xdg8: [1560]u8 = undefined;
+    var lad8: [1560]u8 = undefined;
+    const xdg = envUtf8(GetEnvironmentVariableW, "XDG_STATE_HOME", &xdg8);
+    const lad = envUtf8(GetEnvironmentVariableW, "LOCALAPPDATA", &lad8);
+    install(stateBase(xdg, lad));
 }
 
-fn installInner(local_app_data: []const u8) !void {
-    if (local_app_data.len == 0) return error.NoLocalAppData;
+fn envUtf8(get: anytype, comptime name: []const u8, out: []u8) []const u8 {
+    var wbuf: [520]u16 = undefined;
+    const n = get(std.unicode.utf8ToUtf16LeStringLiteral(name), &wbuf, wbuf.len);
+    if (n == 0 or n >= wbuf.len) return "";
+    const len = std.unicode.utf16LeToUtf8(out, wbuf[0..n]) catch return "";
+    return out[0..len];
+}
+
+fn installInner(state_base: []const u8) !void {
+    if (state_base.len == 0) return error.NoStateBase;
 
     // `<LAD>\ghostty\crash\ghostty-<pid>-` into the static prefix.
     var utf8: [1100]u8 = undefined;
     const dir8 = std.fmt.bufPrint(&utf8, "{s}\\ghostty\\crash", .{
-        std.mem.trimEnd(u8, local_app_data, "\\/"),
+        std.mem.trimEnd(u8, state_base, "\\/"),
     }) catch return error.PathTooLong;
+    // Room for the prefix tail (\ghostty-<pid>-) and the ".dmp.tmp" suffix.
+    const need = std.unicode.calcUtf16LeLen(dir8) catch return error.InvalidPath;
+    if (need + 64 > state.prefix.len) return error.PathTooLong;
     const dir_len = try std.unicode.utf8ToUtf16Le(&state.prefix, dir8);
     // Windows wants backslashes for CreateDirectoryW.
     for (state.prefix[0..dir_len]) |*c| {
@@ -191,7 +239,13 @@ fn installInner(local_app_data: []const u8) !void {
 /// Re-install the filter if another module replaced it. Logs once.
 pub fn ensureInstalled() void {
     if (comptime !is_windows) return;
-    if (install_state.load(.acquire) != 2) return;
+    if (install_state.load(.acquire) != 2) {
+        if (install_error) |e| {
+            install_error = null;
+            log.warn("crash dumps disabled err={s}", .{e});
+        }
+        return;
+    }
     const prev = Exp.SetUnhandledExceptionFilter(&filter);
     if (prev != null and prev.? == &filter) return;
     if (!replaced_logged.swap(true, .acq_rel)) {
@@ -210,6 +264,8 @@ pub fn dumpNow() void {
 /// Hand an exception (or null) to the dump thread and wait for it.
 fn request(exception_pointers: ?*anyopaque) void {
     const done = state.done orelse return;
+    // A crash on the dump thread would wait for itself: give up at once.
+    if (Exp.GetCurrentThreadId() == state.dump_thread_id.load(.acquire)) return;
     if (state.gate.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) {
         // Somebody else is already dumping; wait for them.
         _ = Exp.WaitForSingleObject(done, filter_wait_ms);
@@ -220,9 +276,10 @@ fn request(exception_pointers: ?*anyopaque) void {
         .exception_pointers = exception_pointers,
         .client_pointers = .FALSE,
     };
-    state.has_info = true;
     _ = Exp.SetEvent(state.trigger orelse return);
-    _ = Exp.WaitForSingleObject(done, filter_wait_ms);
+    if (Exp.WaitForSingleObject(done, filter_wait_ms) != 0) {
+        logCrash("crash dump timed out after {d} s, no dump", .{filter_wait_ms / 1000});
+    }
 }
 
 fn filter(exception_pointers: ?*anyopaque) callconv(.winapi) c_long {
@@ -232,6 +289,7 @@ fn filter(exception_pointers: ?*anyopaque) callconv(.winapi) c_long {
 }
 
 fn dumpThread(_: ?*anyopaque) callconv(.winapi) DWORD {
+    state.dump_thread_id.store(Exp.GetCurrentThreadId(), .release);
     prepare();
 
     const trigger = state.trigger orelse return 0;
@@ -260,40 +318,147 @@ fn prepare() void {
 }
 
 fn writeDump() void {
-    const write_dump = state.write_dump orelse return;
+    var code_buf: [48]u8 = undefined;
+    const what = describeException(&code_buf);
+
+    const write_dump = state.write_dump orelse {
+        logCrash("crash happened ({s}), no dump: dbghelp.dll unavailable", .{what});
+        return;
+    };
 
     // The directory is created lazily so a clean run never makes it.
     createDirs();
 
     var path_buf: [640]u16 = undefined;
     const path = dumpPath(&path_buf, state.prefix[0..state.prefix_len], Exp.GetTickCount64());
+    var tmp_buf: [660]u16 = undefined;
+    @memcpy(tmp_buf[0..path.len], path);
+    for (".tmp", 0..) |c, i| tmp_buf[path.len + i] = c;
+    tmp_buf[path.len + 4] = 0;
+    const tmp: [:0]const u16 = tmp_buf[0 .. path.len + 4 :0];
 
-    const GENERIC_WRITE: DWORD = 0x40000000;
+    const GENERIC_READ_WRITE: DWORD = 0xC0000000;
     const CREATE_ALWAYS: DWORD = 2;
-    const h = Exp.CreateFileW(path.ptr, GENERIC_WRITE, 0, null, CREATE_ALWAYS, 0x80, null);
+    const h = Exp.CreateFileW(tmp.ptr, GENERIC_READ_WRITE, 0, null, CREATE_ALWAYS, 0x80, null);
     if (h == win.INVALID_HANDLE_VALUE) {
-        logCrash("crash dump failed: cannot create file err={d}", .{Exp.GetLastError()});
+        logCrash("crash happened ({s}), no dump: cannot create file err={d}", .{ what, Exp.GetLastError() });
         return;
     }
-    defer _ = Exp.CloseHandle(h);
 
     const ok = write_dump(
         Exp.GetCurrentProcess(),
         Exp.GetCurrentProcessId(),
         h,
         dump_type,
-        if (state.has_info and state.info.exception_pointers != null) &state.info else null,
+        if (state.info.exception_pointers != null) &state.info else null,
         null,
         null,
     );
+    const write_err = Exp.GetLastError();
     if (ok == .FALSE) {
-        logCrash("crash dump failed: MiniDumpWriteDump err={d}", .{Exp.GetLastError()});
+        _ = Exp.CloseHandle(h);
+        logCrash("crash happened ({s}), no dump: MiniDumpWriteDump err={d}", .{ what, write_err });
+        return;
+    }
+
+    // FilterMemory leaves some live stack frames intact, so zero every
+    // non-pointer word of every thread stack ourselves. A dump we cannot
+    // scrub is deleted, never kept.
+    const scrubbed = scrubFile(h);
+    _ = Exp.CloseHandle(h);
+    if (scrubbed == null) {
+        _ = Exp.DeleteFileW(tmp.ptr);
+        logCrash("crash happened ({s}), no dump: scrub failed", .{what});
+        return;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: DWORD = 1;
+    if (Exp.MoveFileExW(tmp.ptr, path.ptr, MOVEFILE_REPLACE_EXISTING) == .FALSE) {
+        logCrash("crash happened ({s}), no dump: rename failed err={d}", .{ what, Exp.GetLastError() });
         return;
     }
 
     var out: [1300]u8 = undefined;
     const n = std.unicode.utf16LeToUtf8(&out, path) catch 0;
-    logCrash("crash dump written to {s}", .{out[0..n]});
+    logCrash("crash dump written to {s} ({s})", .{ out[0..n], what });
+}
+
+/// Map the dump file and scrub it in place (no heap). Null on any failure.
+fn scrubFile(h: HANDLE) ?usize {
+    var size: i64 = 0;
+    if (Exp.GetFileSizeEx(h, &size) == .FALSE or size <= 0) return null;
+    const PAGE_READWRITE: DWORD = 0x04;
+    const FILE_MAP_WRITE: DWORD = 0x02;
+    const map = Exp.CreateFileMappingW(h, null, PAGE_READWRITE, 0, 0, null) orelse return null;
+    defer _ = Exp.CloseHandle(map);
+    const base = Exp.MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, 0) orelse return null;
+    defer _ = Exp.UnmapViewOfFile(base);
+    const bytes = base[0..@intCast(size)];
+    const n = scrubStacks(bytes) orelse return null;
+    if (Exp.FlushViewOfFile(base, 0) == .FALSE) return null;
+    return n;
+}
+
+fn rd32(b: []const u8, off: usize) ?u32 {
+    if (off > b.len or b.len - off < 4) return null;
+    return std.mem.readInt(u32, b[off..][0..4], .little);
+}
+
+fn rd64(b: []const u8, off: usize) ?u64 {
+    if (off > b.len or b.len - off < 8) return null;
+    return std.mem.readInt(u64, b[off..][0..8], .little);
+}
+
+/// Zero every 8-byte word of every thread stack in a minidump (64-bit
+/// targets) that is not zero and does not look like a user-mode pointer.
+/// Returns the number of words zeroed, or null if the dump is not
+/// understood. Pure over `bytes`.
+pub fn scrubStacks(bytes: []u8) ?usize {
+    if (rd32(bytes, 0) != 0x504d444d) return null; // "MDMP"
+    const streams = rd32(bytes, 8) orelse return null;
+    const dir = rd32(bytes, 12) orelse return null;
+    var zeroed: usize = 0;
+    var found = false;
+    var k: usize = 0;
+    while (k < streams) : (k += 1) {
+        const e = dir + 12 * k;
+        const kind = rd32(bytes, e) orelse return null;
+        const rva = rd32(bytes, e + 8) orelse return null;
+        if (kind != 3) continue; // ThreadListStream
+        found = true;
+        const count = rd32(bytes, rva) orelse return null;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const t = rva + 4 + 48 * i;
+            const start = rd64(bytes, t + 24) orelse return null;
+            const len = rd32(bytes, t + 32) orelse return null;
+            const data = rd32(bytes, t + 36) orelse return null;
+            if (data > bytes.len or bytes.len - data < len) return null;
+            // Words are aligned in the target's address space.
+            var off: usize = @intCast((8 - (start & 7)) & 7);
+            while (off + 8 <= len) : (off += 8) {
+                const word = std.mem.readInt(u64, bytes[data + off ..][0..8], .little);
+                if (word == 0) continue;
+                if (word >= 0x10000 and word <= 0x00007FFF_FFFFFFFF) continue;
+                @memset(bytes[data + off ..][0..8], 0);
+                zeroed += 1;
+            }
+            // Unaligned head and tail bytes cannot hold a pointer.
+            @memset(bytes[data..][0..@min(len, (8 - (start & 7)) & 7)], 0);
+            const tail = (len -| @as(usize, @intCast((8 - (start & 7)) & 7))) & 7;
+            @memset(bytes[data + len - tail ..][0..tail], 0);
+        }
+    }
+    return if (found) zeroed else null;
+}
+
+/// `code=0x... addr=0x...` from the exception record, or `panic` when the
+/// dump was asked for without one. Plain reads: the crashing thread is still
+/// parked in the filter, so the record is valid.
+fn describeException(buf: []u8) []const u8 {
+    const ptrs: *const Exp.ExceptionPointers = @ptrCast(@alignCast(state.info.exception_pointers orelse return "panic"));
+    const rec = ptrs.record orelse return "code unknown";
+    return std.fmt.bufPrint(buf, "code=0x{x:0>8} addr=0x{x}", .{ rec.code, @intFromPtr(rec.address) }) catch "code unknown";
 }
 
 /// Log from the crash path: straight to the file and debugger sinks, no
@@ -341,7 +506,10 @@ pub fn dumpPath(buf: []u16, prefix: []const u16, tick: u64) [:0]const u16 {
 /// Delete all but the `keep` newest `*.dmp` files in `dir`. Returns the
 /// number deleted.
 pub fn pruneKeep(alloc: Allocator, dir: []const u8, keep: usize) !usize {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    // A private instance: this runs on the dump thread, concurrently with
+    // the main thread's use of the global one.
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
     var d = std.Io.Dir.openDirAbsolute(io, dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return 0,
         else => return err,
@@ -358,6 +526,11 @@ pub fn pruneKeep(alloc: Allocator, dir: []const u8, keep: usize) !usize {
     var it = d.iterate();
     while (try it.next(io)) |e| {
         if (e.kind != .file) continue;
+        // A leftover from a dump that timed out.
+        if (std.ascii.endsWithIgnoreCase(e.name, ".dmp.tmp")) {
+            d.deleteFile(io, e.name) catch {};
+            continue;
+        }
         if (!std.ascii.endsWithIgnoreCase(e.name, ".dmp")) continue;
         const stat = d.statFile(io, e.name, .{}) catch continue;
         const name = try alloc.dupe(u8, e.name);
@@ -392,12 +565,12 @@ pub fn testCrash(kind: []const u8) void {
     }
 }
 
-/// Unbounded recursion with a real frame so it cannot become a loop.
+/// Unbounded recursion with a multi-page frame (so the OS stack probe walks the guard page) so it cannot become a loop.
 fn overflow(n: usize) usize {
-    var pad: [1024]u8 = undefined;
-    const p: *volatile [1024]u8 = &pad;
-    p[n % 1024] = @truncate(n);
-    return overflow(n + 1) +% p[(n + 1) % 1024];
+    var pad: [8192]u8 = undefined;
+    const p: *volatile [8192]u8 = &pad;
+    p[n % 8192] = @truncate(n);
+    return overflow(n + 1) +% p[(n + 1) % 8192];
 }
 
 test "windows crash: dump type filters memory" {
@@ -454,6 +627,8 @@ test "windows crash: prune keeps the 10 newest" {
 
 test "windows crash: install twice is a no-op" {
     if (comptime !is_windows) return error.SkipZigTest;
+    // Leaves a live filter and dump thread in the test binary; harmless,
+    // the test root keeps Zig's own vectored handler.
     install("C:\\ghostty-test-nowhere");
     try std.testing.expectEqual(@as(u32, 2), install_state.load(.acquire));
     const trigger = state.trigger;
@@ -463,4 +638,51 @@ test "windows crash: install twice is a no-op" {
     try std.testing.expectEqual(trigger, state.trigger);
     try std.testing.expectEqual(done, state.done);
     ensureInstalled();
+}
+
+test "windows crash: state base follows XDG_STATE_HOME like +crash-report" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    try env.put("USERPROFILE", "C:\\Users\\t");
+    try env.put("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local");
+
+    for ([_][]const u8{ "", "D:\\state" }) |xdg| {
+        try env.put("XDG_STATE_HOME", xdg);
+        const dir = try @import("../crash/dir.zig").defaultDir(std.testing.io, alloc, &env);
+        defer alloc.free(dir.path);
+        const base = stateBase(xdg, "C:\\Users\\t\\AppData\\Local");
+        const want = try std.fmt.allocPrint(alloc, "{s}\\ghostty/crash", .{base});
+        defer alloc.free(want);
+        try std.testing.expectEqualStrings(want, dir.path);
+    }
+}
+
+test "windows crash: scrub zeroes non-pointer stack words" {
+    var buf: [512]u8 = @splat(0xAA);
+    const w = std.mem.writeInt;
+    // Header, one stream (the thread list) at 32, stack data at 128.
+    w(u32, buf[0..4], 0x504d444d, .little);
+    w(u32, buf[8..12], 1, .little);
+    w(u32, buf[12..16], 16, .little);
+    w(u32, buf[16..20], 3, .little);
+    w(u32, buf[24..28], 32, .little);
+    w(u32, buf[32..36], 1, .little); // one thread
+    const t = 36;
+    w(u64, buf[t + 24 ..][0..8], 0x1000, .little); // aligned start
+    w(u32, buf[t + 32 ..][0..4], 40, .little); // 5 words
+    w(u32, buf[t + 36 ..][0..4], 128, .little);
+    const text = "echo M5SECRETMARK";
+    @memset(buf[128..168], 0);
+    @memcpy(buf[128 .. 128 + 16], text[0..16]);
+    w(u64, buf[144..][0..8], 0x7ff612345678, .little); // a pointer: kept
+    w(u64, buf[152..][0..8], 0x1234, .little); // small int: zeroed
+    w(u64, buf[160..][0..8], 0, .little);
+
+    const n = scrubStacks(&buf).?;
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expect(std.mem.indexOf(u8, &buf, "M5SECRET") == null);
+    try std.testing.expectEqual(@as(u64, 0x7ff612345678), std.mem.readInt(u64, buf[144..][0..8], .little));
+    try std.testing.expectEqual(@as(?usize, null), scrubStacks(buf[1..]));
 }

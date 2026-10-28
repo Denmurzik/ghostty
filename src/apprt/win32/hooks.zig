@@ -51,7 +51,8 @@ const LRESULT = win32.foundation.LRESULT;
 /// What `WM_GHOSTTY_POSTED_DIALOG` (wparam) asks for.
 pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm, export_done, secure_input };
 
-/// Set by the crash handler (M5 Task 12): looks for a crash dump of the last run.
+/// Set by the crash handler (M5 Task 12): re-installs the unhandled-exception
+/// filter if another module replaced it.
 pub var crash_recheck: ?*const fn () void = null;
 
 /// The end of `App.init`.

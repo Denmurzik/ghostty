@@ -237,7 +237,7 @@ fn macosLogger(comptime scope: @TypeOf(.EnumLiteral)) *macos.os.Log {
 pub const std_options: std.Options = .{
     // Windows: Zig's vectored handler would print and abort before the
     // unhandled-exception filter of `windows_crash` could write a dump.
-    .enable_segfault_handler = builtin.os.tag != .windows,
+    .enable_segfault_handler = builtin.os.tag != .windows and std.debug.default_enable_segfault_handler,
 
     // Our log level is always at least info in every build mode.
     //
@@ -272,7 +272,8 @@ pub const std_options: std.Options = .{
 };
 
 test "windows crash: segfault handler is off on windows" {
-    try std.testing.expect(std_options.enable_segfault_handler == (builtin.os.tag != .windows));
+    try std.testing.expect(std_options.enable_segfault_handler ==
+        (builtin.os.tag != .windows and std.debug.default_enable_segfault_handler));
 }
 
 test {

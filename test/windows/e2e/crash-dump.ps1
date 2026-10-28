@@ -79,7 +79,6 @@ function Invoke-CrashCase([string]$Kind) {
     $psi.EnvironmentVariables['LOCALAPPDATA'] = $g.Sandbox.Local
     $psi.EnvironmentVariables['APPDATA'] = $g.Sandbox.Roaming
     $psi.EnvironmentVariables['USERPROFILE'] = $g.Sandbox.Home
-    [void]$psi.EnvironmentVariables.Remove('XDG_STATE_HOME')
     [void]$psi.EnvironmentVariables.Remove('GHOSTTY_WIN32_TEST_IPC')
     $p = [Diagnostics.Process]::Start($psi)
     $out = $p.StandardOutput.ReadToEndAsync()
