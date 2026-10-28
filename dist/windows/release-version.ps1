@@ -59,7 +59,7 @@ function Test-ReleaseRules {
             $maxTag = ''
             $dup = ''
             foreach ($t in $Tags) {
-                if ($t -cmatch '^win-.+-(0|[1-9][0-9]*)$') {
+                if ($t -cmatch '^win-.+-(0|[1-9][0-9]{0,4})$') {
                     $tn = [int]$Matches[1]
                     if ($tn -eq $num) { $dup = $t }
                     if ($tn -gt $max) { $max = $tn; $maxTag = $t }

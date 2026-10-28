@@ -138,6 +138,32 @@ function Get-TestCounts([string]$text) {
     return @{ Pass = [int]$m.Groups[1].Value; Total = [int]$m.Groups[2].Value; Skip = $skip; Fail = $fail }
 }
 
+# Counts of fresh test runs, per commit and group, so that a re-run that
+# comes from the zig cache can still report them. Not published.
+$countsFile = Join-Path $repo 'zig-out\release\test-counts.txt'
+
+function Get-RecordedCounts([string]$s, [string]$id) {
+    if (-not (Test-Path -LiteralPath $countsFile)) { return $null }
+    $hit = $null
+    foreach ($l in [IO.File]::ReadAllLines($countsFile)) {
+        $f = $l -split "`t"
+        if ($f.Count -eq 6 -and $f[0] -eq $s -and $f[1] -eq $id) {
+            $hit = @{ Pass = [int]$f[2]; Total = [int]$f[3]; Skip = [int]$f[4]; Fail = [int]$f[5] }
+        }
+    }
+    return $hit
+}
+
+function Set-RecordedCounts([string]$s, [string]$id, $c) {
+    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $countsFile)
+    $keep = @()
+    if (Test-Path -LiteralPath $countsFile) {
+        $keep = @([IO.File]::ReadAllLines($countsFile) | Where-Object { $_ -and -not $_.StartsWith("$s`t$id`t") })
+    }
+    $keep += ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $s, $id, $c.Pass, $c.Total, $c.Skip, $c.Fail)
+    [IO.File]::WriteAllLines($countsFile, [string[]]$keep)
+}
+
 # ---- state filled by the preflight ---------------------------------------
 
 $bash = ''
@@ -162,7 +188,8 @@ function Get-ZigCommand([string[]]$zigArgs, [int]$timeoutSec) {
         return @{ Exe = $zigExe; Args = $zigArgs; Timeout = $timeoutSec }
     }
     $a = @((ConvertTo-Posix $lockPath), '--min-gb', $MinFreeGB.ToString([Globalization.CultureInfo]::InvariantCulture), '--tail', '400', '--', 'timeout', [string]$timeoutSec, (ConvertTo-Posix $zigExe)) + $zigArgs
-    return @{ Exe = $bash; Args = $a; Timeout = $timeoutSec + 300 }
+    # No outer timeout: the lock wait must not count (the inner timeout bounds zig).
+    return @{ Exe = $bash; Args = $a; Timeout = 0 }
 }
 
 function Invoke-Zig([string]$what, [string[]]$zigArgs, [int]$timeoutSec) {
@@ -291,7 +318,7 @@ function Invoke-Preflight {
             $leaf = if ($Rehearsal) { "rehearsal-$($script:zon)" } else { $script:verStr }
             $script:OutDir = Join-Path $repo "zig-out\release\$leaf"
         } else {
-            $script:OutDir = [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $OutDir))
+            $script:OutDir = if ([IO.Path]::IsPathRooted($OutDir)) { [IO.Path]::GetFullPath($OutDir) } else { [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $OutDir)) }
         }
         $repoPrefix = $repo.TrimEnd('\') + '\'
         if (-not $script:OutDir.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -411,19 +438,22 @@ function Get-PublishLines {
     param([bool]$NoArm64Symbols)
     $names = @(Get-ArtifactNames)
     if ($NoArm64Symbols) { $names = @($names | Where-Object { $_ -notlike '*arm64-symbols.zip' }) }
-    $mark = if ($Rehearsal) { ' # REHEARSAL - do not run' } else { '' }
+    $pre = if ($Rehearsal) { '# REHEARSAL: ' } else { '' }
     $notes = Join-Path $OutDir 'release-notes.md'
     $files = @($names | ForEach-Object { Quote-Ps (Join-Path $OutDir $_) }) + @(Quote-Ps (Join-Path $OutDir 'SHA256SUMS.txt'))
     $t = Quote-Ps $tag
     $title = "Ghostty $verStr (unofficial Windows port)"
+    $chk = '; if ($LASTEXITCODE -ne 0) { throw ''failed'' }'
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('# Run in PowerShell from the repo root')
-    if ($Rehearsal) { $lines.Add('# REHEARSAL - do not run: these commands belong to a rehearsal build (N = 0)') }
-    $lines.Add("git tag -a $t $(Quote-Ps $sha) -m $(Quote-Ps "Ghostty $verStr")$mark")
-    $lines.Add("git push origin $t$mark")
-    $lines.Add("gh release create $t --repo $ghRepo --prerelease --draft --verify-tag --title $(Quote-Ps $title) --notes-file $(Quote-Ps $notes) $($files -join ' ')$mark")
+    $lines.Add('# Run in PowerShell from the repo root, one line at a time. Stop at the first failing line.')
+    if ($Rehearsal) { $lines.Add('# REHEARSAL - do not run: every command below is commented out (rehearsal build, N = 0)') }
+    $lines.Add($pre + "if (git ls-remote --tags origin $(Quote-Ps "refs/tags/$tag")) { throw 'the tag is already on origin' }")
+    $lines.Add($pre + "git tag -a $t $(Quote-Ps $sha) -m $(Quote-Ps "Ghostty $verStr")$chk")
+    $lines.Add($pre + "git push origin $t$chk")
+    $lines.Add('# the release below is created only after the push above succeeded')
+    $lines.Add($pre + "gh release create $t --repo $ghRepo --prerelease --draft --verify-tag --title $(Quote-Ps $title) --notes-file $(Quote-Ps $notes) $($files -join ' ')$chk")
     $lines.Add('# after checking the draft page')
-    $lines.Add("gh release edit $t --repo $ghRepo --draft=false$mark")
+    $lines.Add($pre + "gh release edit $t --repo $ghRepo --draft=false")
     return $lines.ToArray()
 }
 
@@ -433,6 +463,16 @@ function Get-PackageArgs([string]$arch, [string]$prefix, [bool]$noPdb) {
     if ($noPdb) { $a += '-NoPdbOk' }
     if ($SignCommand) { $a += @('-SignCommand', $SignCommand) }
     return $a
+}
+
+# The run takes hours: HEAD and the tree must still be what the preflight saw.
+function Assert-TreeUnchanged {
+    if ($Rehearsal) { return }
+    $h = Invoke-Logged -Exe 'git' -ArgList @('-C', $repo, 'rev-parse', 'HEAD') -TimeoutSec 30 -Quiet
+    if ($h.Code -ne 0 -or $h.Text -notmatch [regex]::Escape($sha)) { throw "HEAD moved since the preflight (was $sha)" }
+    $s = Invoke-Logged -Exe 'git' -ArgList @('-C', $repo, 'status', '--porcelain') -TimeoutSec 60 -Quiet
+    $dirt = @(($s.Text -split "`r?`n") | Where-Object { $_ -and $_ -notlike '> *' -and $_ -notlike '[[]exit*' })
+    if ($s.Code -ne 0 -or $dirt.Count -gt 0) { throw 'the working tree changed since the preflight (it must stay clean)' }
 }
 
 function Show-PackageCommand([string]$arch, [string]$prefix) {
@@ -449,6 +489,7 @@ $failed = $false
 try {
     if ($SkipTests -and -not $Rehearsal) { throw '-SkipTests is only allowed with -Rehearsal (a release always runs the unit tests)' }
     if ($N -eq '') { throw '-N must not be empty' }
+    if ($MinFreeGB -lt 3) { throw '-MinFreeGB must be at least 3 (the RAM gate has a 3 GB floor)' }
 
     Start-Step 1
     Invoke-Preflight
@@ -500,12 +541,27 @@ try {
             $r = Invoke-Zig "tests $($g.Id)" $za 1500
             if ($r.Code -ne 0) { throw "unit tests $($g.Id) ($($g.Label)) failed (exit $($r.Code)); see release.log" }
             $c = Get-TestCounts $r.Text
-            if ($null -eq $c) {
-                Write-Host '  WARNING: no test counts in the summary (a cached run?)'
-                Write-Log "WARNING: $($g.Id) printed no test counts"
-                $testRecords.Add(@{ Id = $g.Id; Label = $g.Label; Line = 'passed (cached run, counts not printed)' })
+            if ($c -and $c.Fail -gt 0) { throw "unit tests $($g.Id): $($c.Fail) failed" }
+            # A cached run step adds nothing to the summary: the whole group (no
+            # counts) or a part of it (a smaller total) was cached. The counts of
+            # an earlier fresh run at this sha are used instead.
+            $cachedHint = ($r.Text -match '(?mi)^.*\brun\b.*\bcached\b')
+            $rec = Get-RecordedCounts $sha $g.Id
+            if ($c -and -not $cachedHint) {
+                Set-RecordedCounts $sha $g.Id $c
+            } elseif ($rec -and (-not $c -or $rec.Total -ge $c.Total)) {
+                Write-Host "  $($g.Id): cached run; using the counts recorded for this commit"
+                Write-Log "$($g.Id): cached, recorded counts used"
+                $c = $rec
+            } elseif ($Rehearsal) {
+                Write-Host "  WARNING: $($g.Id): cached run with no recorded counts (rehearsal: the notes will say so)"
+                $c = $null
             } else {
-                if ($c.Fail -gt 0) { throw "unit tests $($g.Id): $($c.Fail) failed" }
+                throw "unit tests $($g.Id) ran from the zig cache and no counts are recorded for commit $sha; delete .zig-cache and re-run, or run the group once with fresh output"
+            }
+            if ($null -eq $c) {
+                $testRecords.Add(@{ Id = $g.Id; Label = $g.Label; Line = 'passed (cached run, counts not available)' })
+            } else {
                 $line = '{0}/{1} passed, {2} skipped, {3} failed' -f $c.Pass, $c.Total, $c.Skip, $c.Fail
                 Write-Host "  $($g.Id): $line"
                 $testRecords.Add(@{ Id = $g.Id; Label = $g.Label; Line = $line })
@@ -538,7 +594,10 @@ try {
         foreach ($f in 'ghostty.exe', 'tmux.exe', 'conpty.dll', 'OpenConsole.exe') {
             if (-not (Test-Path -LiteralPath (Join-Path $prefArm "bin\$f"))) { throw "arm64 prefix lacks bin\$f" }
         }
-        if (-not (Test-Path -LiteralPath (Join-Path $prefArm 'bin\ghostty.pdb')) -or -not (Test-Path -LiteralPath (Join-Path $prefArm 'bin\tmux.pdb'))) {
+        $pdbG = Test-Path -LiteralPath (Join-Path $prefArm 'bin\ghostty.pdb')
+        $pdbT = Test-Path -LiteralPath (Join-Path $prefArm 'bin\tmux.pdb')
+        if ($pdbG -ne $pdbT) { throw 'the arm64 build gave only one of ghostty.pdb and tmux.pdb' }
+        if (-not $pdbG) {
             $noPdb = $true
             Write-Host '  arm64 build gave no PDB: -NoPdbOk (the arm64 symbols zip is left out)'
             Write-Log 'arm64 build gave no PDB: -NoPdbOk'
@@ -573,6 +632,7 @@ try {
 
     # ---- step 5: package ----------------------------------------------------
     Start-Step 5
+    if (-not $DryRun) { Assert-TreeUnchanged }
     if ($DryRun) {
         Show-PackageCommand 'x64' $prefX64
         Show-PackageCommand 'arm64' $prefArm
@@ -649,6 +709,7 @@ try {
 
     # ---- step 9: publish commands ------------------------------------------
     Start-Step 9
+    if (-not $DryRun) { Assert-TreeUnchanged }
     $pl = Get-PublishLines ([bool]($noPdb -and -not $DryRun))
     foreach ($l in $pl) { Write-Host $l }
     if (-not $DryRun) {

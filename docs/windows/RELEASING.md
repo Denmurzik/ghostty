@@ -46,11 +46,11 @@ Do the owner part of the M6 exit checklist (`docs/windows/plans/M6-release.md`) 
 
 ## 5. Optional signing
 
-There is no certificate. To sign after the fact, repackage with `package.ps1 -FromZip` and `-SignCommand`, regenerate `SHA256SUMS.txt`, and `gh release upload --clobber`.
+There is no certificate. To sign after the fact, repackage with `package.ps1 -FromZip` and `-SignCommand`, regenerate `SHA256SUMS.txt`, `gh release upload --clobber`, and refresh the notes: they embed the checksums, so rebuild `release-notes.md` with the new sums and run `gh release edit <tag> --notes-file release-notes.md`.
 
 ## 6. Publish
 
-Open `publish.txt` and run its lines in PowerShell from the repo root, one by one:
+Open `publish.txt` and run its lines in PowerShell from the repo root, one by one. **Stop at the first failing line.** The first line fails when the tag already exists on origin (a burned N that you did not fetch); the release line must run only after the push succeeded:
 
 1. `git tag -a ...` and `git push origin ...`
 2. `gh release create ... --prerelease --draft ...`
