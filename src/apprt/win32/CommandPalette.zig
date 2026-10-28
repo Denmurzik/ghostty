@@ -885,9 +885,13 @@ fn postExecute(panel: *Panel, row: usize) void {
         return;
     }
     const item = panel.items[state.rows[row]];
-    const target = state.target_id orelse {
-        postClose(panel);
-        return;
+    // The About entry needs no surface; every other entry does.
+    const target = state.target_id orelse switch (item.run) {
+        .about => 0,
+        else => {
+            postClose(panel);
+            return;
+        },
     };
     const kind: Command.Kind = switch (item.run) {
         .action => |a| .{ .execute = .{ .serial = panel.serial, .target_id = target, .action = a } },

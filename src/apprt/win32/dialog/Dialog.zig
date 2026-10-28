@@ -212,6 +212,9 @@ edit_font: ?gdi32.HFONT = null,
 edit_brush: ?user32.HBRUSH = null,
 state: keys.State,
 hover: usize = hover_none,
+/// The app icon of `Spec.icon`, loaded by `drawIcon`.
+icon_handle: ?win32.foundation.HANDLE = null,
+icon_size: i32 = 0,
 kb_focus: bool = false,
 result: ?i32 = null,
 done: bool = false,
@@ -285,6 +288,7 @@ fn init(self: *Dialog, spec: Spec, sh: *Chrome.Shared) !void {
 fn deinit(self: *Dialog) void {
     if (self.edit_font) |f| _ = gdi32.DeleteObject(@ptrCast(f));
     if (self.edit_brush) |b| _ = gdi32.DeleteObject(@ptrCast(b));
+    if (self.icon_handle) |i| _ = user32.DestroyIcon(@ptrCast(i));
     com.release(self.rt);
     self.fonts.release();
 }
@@ -1043,10 +1047,15 @@ fn drawParent(self: *Dialog, pen: Pen, _: void) void {
 
 fn drawIcon(self: *Dialog, hdc: user32.HDC) void {
     if (!self.spec.icon or self.plan.icon.w <= 0) return;
-    const hinstance = win32.kernel32.GetModuleHandleW(null);
-    const id: *const anyopaque = @ptrFromInt(1);
-    const icon = user32.LoadImageW(hinstance, id, user32.IMAGE_ICON, self.plan.icon.w, self.plan.icon.h, user32.LR_DEFAULTCOLOR) orelse return;
-    defer _ = user32.DestroyIcon(@ptrCast(icon));
+    // Loaded once per size (a DPI change reloads it), freed in `deinit`.
+    if (self.icon_handle == null or self.icon_size != self.plan.icon.w) {
+        if (self.icon_handle) |old| _ = user32.DestroyIcon(@ptrCast(old));
+        const hinstance = win32.kernel32.GetModuleHandleW(null);
+        const id: *const anyopaque = @ptrFromInt(1);
+        self.icon_handle = user32.LoadImageW(hinstance, id, user32.IMAGE_ICON, self.plan.icon.w, self.plan.icon.h, user32.LR_DEFAULTCOLOR);
+        self.icon_size = self.plan.icon.w;
+    }
+    const icon = self.icon_handle orelse return;
     _ = ext.DrawIconEx(hdc, self.plan.icon.x, self.plan.icon.y, @ptrCast(icon), self.plan.icon.w, self.plan.icon.h, 0, null, 3);
 }
 

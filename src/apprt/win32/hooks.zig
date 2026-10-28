@@ -18,6 +18,7 @@ const SearchBar = @import("SearchBar.zig");
 const about = @import("about.zig");
 const app_toast = @import("app_toast.zig");
 const badges = @import("badges.zig");
+const bell = @import("bell.zig");
 const composition = @import("composition.zig");
 const config_errors = @import("config_errors.zig");
 const decor = @import("decor.zig");
@@ -80,6 +81,7 @@ pub fn appStopping(app: *App) void {
     tmux_Registry.appStopping(app);
     tmux_pane_io.appStopping(app);
     undo_actions.flushAll(app);
+    bell.deinit(app.core_app.alloc);
     Updater.stop(app);
     jumplist.stop(app);
     export_io.appStopping(app);

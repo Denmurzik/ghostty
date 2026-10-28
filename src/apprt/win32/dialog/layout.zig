@@ -163,7 +163,7 @@ pub fn plan(in: Input) Plan {
 
     var y = p;
     if (in.icon_h > 0) {
-        out.icon = .{ .x = p, .y = y, .w = in.icon_h, .h = in.icon_h };
+        out.icon = .{ .x = @divFloor(width - in.icon_h, 2), .y = y, .w = in.icon_h, .h = in.icon_h };
         y += in.icon_h + g;
     }
     if (in.title_h > 0) {

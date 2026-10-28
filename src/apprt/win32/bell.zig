@@ -53,9 +53,24 @@ pub fn ring(surface: *Surface) bool {
     return true;
 }
 
-/// Playing sound buffer (`SND_MEMORY` needs it alive while the async play
-/// runs). Replaced, and freed, by the next ring. UI thread only.
-var playing: ?[]align(2) u8 = null;
+/// The scaled WAV last played, kept for the next ring (`SND_MEMORY` also needs
+/// it alive while an async play runs). It is read again only when
+/// `bell-audio-path` or `bell-audio-volume` change. UI thread only.
+var cache: ?struct {
+    data: []align(2) u8,
+    path: []u8,
+    volume: f64,
+} = null;
+
+/// Free the cached sound (app shutdown).
+pub fn deinit(alloc: Allocator) void {
+    _ = win32.winmm.PlaySoundW(null, null, 0); // stop it before its memory goes
+    if (cache) |c| {
+        alloc.free(c.data);
+        alloc.free(c.path);
+    }
+    cache = null;
+}
 
 /// WAV files only. `bell-audio-volume` scales the 8/16-bit PCM samples in
 /// memory (other sample formats play at full volume); 0 is silent.
@@ -82,9 +97,19 @@ fn playAudio(app: *App) void {
         log.warn("unable to play bell audio", .{});
 }
 
-/// Read the WAV, scale it and play it from memory. False when the file
-/// cannot be read or scaled, so the caller plays the file unscaled.
+/// Play the WAV at `volume` from memory, reading and scaling it only when
+/// it is not the cached one. False when the file cannot be read or scaled, so
+/// the caller plays the file unscaled.
 fn playScaled(alloc: Allocator, path: []const u8, volume: f64) bool {
+    const flags = win32.winmm.SND_ASYNC | win32.winmm.SND_MEMORY | win32.winmm.SND_NODEFAULT;
+    if (cache) |c| {
+        if (c.volume == volume and std.mem.eql(u8, c.path, path)) {
+            if (win32.winmm.PlaySoundW(@ptrCast(@alignCast(c.data.ptr)), null, flags) == 0)
+                log.warn("unable to play bell audio", .{});
+            return true;
+        }
+    }
+
     const file = std.Io.Dir.cwd().readFileAlloc(global.io(), path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
         log.warn("unable to read bell audio err={}", .{err});
         return false;
@@ -93,19 +118,23 @@ fn playScaled(alloc: Allocator, path: []const u8, volume: f64) bool {
     // PlaySoundW wants a 2-byte aligned memory image.
     const data = alloc.alignedAlloc(u8, .@"2", file.len) catch return false;
     @memcpy(data, file);
-    if (!scaleWav(data, volume)) {
+    const key = alloc.dupe(u8, path) catch {
         alloc.free(data);
         return false;
-    }
-    const flags = win32.winmm.SND_ASYNC | win32.winmm.SND_MEMORY | win32.winmm.SND_NODEFAULT;
-    if (win32.winmm.PlaySoundW(@ptrCast(@alignCast(data.ptr)), null, flags) == 0) {
-        log.warn("unable to play bell audio", .{});
+    };
+    if (!scaleWav(data, volume)) {
         alloc.free(data);
-        return true;
+        alloc.free(key);
+        return false;
     }
+    if (win32.winmm.PlaySoundW(@ptrCast(@alignCast(data.ptr)), null, flags) == 0)
+        log.warn("unable to play bell audio", .{});
     // The new sound replaced the old one, which is no longer read.
-    if (playing) |old| alloc.free(old);
-    playing = data;
+    if (cache) |c| {
+        alloc.free(c.data);
+        alloc.free(c.path);
+    }
+    cache = .{ .data = data, .path = key, .volume = volume };
     return true;
 }
 
