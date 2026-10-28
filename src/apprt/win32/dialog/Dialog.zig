@@ -88,6 +88,7 @@ const ext = struct {
     extern "gdi32" fn SetBkColor(HDC, u32) callconv(.winapi) u32;
     extern "gdi32" fn SetTextColor(HDC, u32) callconv(.winapi) u32;
     extern "gdi32" fn GetTextMetricsW(HDC, *TEXTMETRICW) callconv(.winapi) BOOL;
+    extern "user32" fn ShowScrollBar(HWND, i32, BOOL) callconv(.winapi) BOOL;
     extern "gdi32" fn SetBkMode(HDC, i32) callconv(.winapi) i32;
 };
 
@@ -707,6 +708,7 @@ fn fitList(self: *Dialog) void {
     const count = user32.SendMessageW(edit, EM_GETLINECOUNT, 0, 0);
     const lines: usize = @intCast(@max(count, 0));
     const want = layout.listHeight(lines, self.list_line_h, self.list_cap, self.dpi);
+    defer self.updateScrollBar(lines);
     if (want == self.plan_input.list_h) return;
 
     self.plan_input.list_h = want;
@@ -721,6 +723,14 @@ fn fitList(self: *Dialog) void {
     const at = self.position(size);
     _ = user32.SetWindowPos(hwnd, null, at.x, at.y, size.w, size.h, user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
     _ = user32.InvalidateRect(hwnd, null, 0);
+}
+
+/// The scrollbar shows only when the lines do not all fit.
+fn updateScrollBar(self: *Dialog, lines: usize) void {
+    const edit = self.edit orelse return;
+    const r = self.listRect();
+    const visible: usize = @intCast(@max(@divFloor(r.h, @max(self.list_line_h, 1)), 1));
+    _ = ext.ShowScrollBar(edit, 1, @intFromBool(lines > visible));
 }
 
 fn applyListFont(self: *Dialog) void {
