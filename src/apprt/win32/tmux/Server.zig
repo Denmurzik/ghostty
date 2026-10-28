@@ -12,6 +12,7 @@ const win32 = @import("win32");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const Registry = @import("Registry.zig");
+const labels = @import("labels.zig");
 const global = @import("../../../global.zig");
 const util = @import("../util.zig");
 const protocol = @import("../ipc/protocol.zig");
@@ -185,6 +186,8 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
         }
     }
     try jw.endArray();
+    try jw.objectField("labels");
+    try labels.testState(app, jw);
     try jw.endObject();
 }
 
