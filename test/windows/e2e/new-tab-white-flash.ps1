@@ -1,17 +1,25 @@
-# e2e: milestone=M5 timeout=300 order=312
-# new-tab-white-flash: tabs opened in a quick burst (before any Git Bash
+# e2e: milestone=M5 timeout=420 order=312
+# new-tab-white-flash: panes opened in a quick burst (before any Git Bash
 # prompt) in a translucent window must show the terminal background from
 # their first visible frame, never the bare glass. The window is
 # `background-opacity = 0.85` without blur over a white backdrop window of
 # our own, so bare glass reads white while the terminal background
 # (#1a2b4c at 85 %) reads dark blue. A capture thread copies the terminal
-# area as fast as it can while four `new_tab` actions run back to back; a
-# frame whose sampled pixels are mostly near white (all channels >= 200)
-# counts as a flash. Three runs, each with 0 white frames.
-# GHOSTTY_E2E_FLASH_RUNS overrides the run count.
+# area as fast as it can while a burst runs; a frame whose sampled pixels are
+# mostly near white (all channels >= 200) counts as a flash. Phases, each
+# with 0 white frames:
+#   tabs    - four `new_tab` back to back (GHOSTTY_E2E_FLASH_RUNS times, 3)
+#   splits  - three `new_split:right` back to back
+#   window  - one `new_window` (cascaded over the first window)
+#   theme   - tabs again with `theme = light:e2e-light,dark:e2e-dark`, the
+#             light theme near white: the stand-in must take the dark one
+#             (only on a dark system scheme; SKIP of the phase otherwise)
+# RED/GREEN: point GHOSTTY_E2E_EXE at a build of the base (91ff7bac1) to see
+# it fail, at the fix to see it pass (see flash-report.md, Fix round 1).
 # Status: PENDING (M5): written while the desktop was busy, not run yet.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_backdrop.ps1')
+. (Join-Path $PSScriptRoot '_splits.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
@@ -65,70 +73,139 @@ public class WhiteFlashProbe {
 "@ -CompilerParameters (New-Object System.CodeDom.Compiler.CompilerParameters (,[string[]]@("System.dll","System.Drawing.dll")) -Property @{ CompilerOptions = "/unsafe" })
 }
 
+# The terminal area of the first window (below the tab strip), in screen pixels.
+function Get-TerminalRect($G) {
+    $st = @((Get-GhosttyState -Class $G.Class).windows)[0]
+    $origin = New-Object GhosttyE2e.Mouse+POINT
+    [void][GhosttyE2e.Mouse]::ClientToScreen($G.Hwnd, [ref]$origin)
+    $rc = New-Object GhosttyE2e.Win+RECT
+    [void][GhosttyE2e.Win]::GetClientRect($G.Hwnd, [ref]$rc)
+    $top = [int]$st.strip.bounds[3] + 4
+    [pscustomobject]@{ X = $origin.X + 4; Y = $origin.Y + $top; W = $rc.Right - 8; H = $rc.Bottom - $top - 4 }
+}
+
+# Runs `$Burst` while the probe samples `$Rect`, waits for `$Done` to return
+# something, and throws on any white frame.
+function Measure-Burst($Label, $Rect, [scriptblock]$Burst, [scriptblock]$Done) {
+    $probe = New-Object GhosttyE2e.WhiteFlashProbe
+    # The probe only counts white pixels (nothing is saved); a foreign window would skew it.
+    Assert-CaptureRectClear $Rect.X $Rect.Y $Rect.W $Rect.H
+    $probe.Start($Rect.X, $Rect.Y, $Rect.W, $Rect.H)
+    try {
+        Start-Sleep -Milliseconds 300
+        & $Burst
+        $ok = Wait-Until -TimeoutSec 10 -PollMs 50 -Condition $Done
+        Start-Sleep -Milliseconds 700
+    } finally {
+        $probe.Stop()
+    }
+    if (-not $ok) { throw "${Label}: the new panes did not appear" }
+    $n = $probe.WhiteFrac.Count
+    $white = 0
+    $first = -1
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($probe.WhiteFrac[$i] -gt 0.5) {
+            $white++
+            if ($first -lt 0) { $first = [Math]::Round($probe.Times[$i]) }
+        }
+    }
+    Write-E2eInfo ("{0}: {1} frames, {2} white, first white at {3} ms" -f $Label, $n, $white, $first)
+    if ($n -lt 20) { throw "${Label}: only $n frames captured" }
+    if ($white -ne 0) { throw "${Label}: $white white frames of $n" }
+}
+
+function Get-TabCount($G) { @(@((Get-GhosttyState -Class $G.Class).windows)[0].tabs).Count }
+
+function Invoke-TabBurst($G, [string]$Label, [int]$Count = 4) {
+    $before = Get-TabCount $G
+    Measure-Burst $Label (Get-TerminalRect $G) {
+        for ($i = 0; $i -lt $Count; $i++) {
+            [void](Invoke-GhosttyAction -Class $G.Class -Action 'new_tab')
+            Start-Sleep -Milliseconds 60
+        }
+    } {
+        if ((Get-TabCount $G) -eq $before + $Count) { $true }
+    }
+}
+
+function Start-FlashGhostty([string]$Extra) {
+    $g = Start-E2eGhostty -ConfigText "foreground = #e0e0e0`nbackground-opacity = 0.85`nbackground-blur = false`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = always`n$Extra"
+    if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
+    Move-Window $g.Hwnd 160 160 1000 700
+    [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+    Start-Sleep -Milliseconds 1000
+    $comp = (Get-GhosttyState -Class $g.Class).m3.composition
+    if ($comp.mode -ne 'composition') { throw "mode is $($comp.mode), expected composition" }
+    $g
+}
+
+function Stop-FlashGhostty($G) {
+    if ($G -and -not $G.Process.HasExited) {
+        $G.Process.Kill()
+        [void]$G.Process.WaitForExit(5000)
+    }
+}
+
 Invoke-E2eScenario 'new-tab-white-flash' {
     Assert-TransparencyEffects
     $runs = if ($env:GHOSTTY_E2E_FLASH_RUNS) { [int]$env:GHOSTTY_E2E_FLASH_RUNS } else { 3 }
-    $burst = 4
     $back = New-BackdropForm 60 60 1500 1000
     $back.BackColor = [Drawing.Color]::FromArgb(255, 255, 255)
     try {
         Show-BackdropForm $back
-        $g = Start-E2eGhostty -ConfigText "background = #1a2b4c`nforeground = #e0e0e0`nbackground-opacity = 0.85`nbackground-blur = false`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = always`n"
+
+        $g = Start-FlashGhostty "background = #1a2b4c`n"
         try {
-            if (-not (Wait-Dump $g { param($x) $x.Width -gt 100 } 15)) { throw "no frame dump at $($g.Dump)" }
-            Move-Window $g.Hwnd 160 160 1000 700
+            for ($run = 1; $run -le $runs; $run++) { Invoke-TabBurst $g "tabs run $run" }
+
+            $before = (Get-SplitState $g).Surfaces.Count
+            Measure-Burst 'splits' (Get-TerminalRect $g) {
+                for ($i = 0; $i -lt 3; $i++) {
+                    [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_split:right')
+                    Start-Sleep -Milliseconds 60
+                }
+            } {
+                if ((Get-SplitState $g).Surfaces.Count -eq $before + 3) { $true }
+            }
+
+            # The new window cascades by a caption height over the first one
+            # and is not topmost: the first window and the backdrop step down
+            # so that it shows above them. The sampled rect is the part both
+            # windows cover.
+            $notTopmost = [IntPtr]::op_Explicit(-2)
+            [void][GhosttyE2e.BackdropNative]::SetWindowPos($back.Handle, $notTopmost, 0, 0, 0, 0, 0x13)
+            [void][GhosttyE2e.BackdropNative]::SetWindowPos($g.Hwnd, $notTopmost, 0, 0, 0, 0, 0x13)
             [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
-            Start-Sleep -Milliseconds 1000
-            $comp = (Get-GhosttyState -Class $g.Class).m3.composition
-            if ($comp.mode -ne 'composition') { throw "mode is $($comp.mode), expected composition" }
-
-            for ($run = 1; $run -le $runs; $run++) {
-                $st = @((Get-GhosttyState -Class $g.Class).windows)[0]
-                $count = @($st.tabs).Count
-                $origin = New-Object GhosttyE2e.Mouse+POINT
-                [void][GhosttyE2e.Mouse]::ClientToScreen($g.Hwnd, [ref]$origin)
-                $rc = New-Object GhosttyE2e.Win+RECT
-                [void][GhosttyE2e.Win]::GetClientRect($g.Hwnd, [ref]$rc)
-                $top = [int]$st.strip.bounds[3] + 4
-                $w = $rc.Right - 8
-                $h = $rc.Bottom - $top - 4
-
-                $probe = New-Object GhosttyE2e.WhiteFlashProbe
-                # The probe only counts white pixels (nothing is saved); a foreign window would skew it.
-                Assert-CaptureRectClear ($origin.X + 4) ($origin.Y + $top) $w $h
-                $probe.Start($origin.X + 4, $origin.Y + $top, $w, $h)
-                try {
-                    Start-Sleep -Milliseconds 300
-                    for ($i = 0; $i -lt $burst; $i++) {
-                        [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_tab')
-                        Start-Sleep -Milliseconds 60
-                    }
-                    $ok = Wait-Until -TimeoutSec 10 -PollMs 50 -Condition {
-                        $x = @((Get-GhosttyState -Class $g.Class).windows)[0]
-                        if (@($x.tabs).Count -eq $count + $burst) { $x }
-                    }
-                    Start-Sleep -Milliseconds 700
-                } finally {
-                    $probe.Stop()
-                }
-                if (-not $ok) { throw "run ${run}: the $burst new tabs did not appear" }
-                $n = $probe.WhiteFrac.Count
-                $white = 0
-                $first = -1
-                for ($i = 0; $i -lt $n; $i++) {
-                    if ($probe.WhiteFrac[$i] -gt 0.5) {
-                        $white++
-                        if ($first -lt 0) { $first = [Math]::Round($probe.Times[$i]) }
-                    }
-                }
-                Write-E2eInfo ("run {0}: {1} frames, {2} white, first white at {3} ms" -f $run, $n, $white, $first)
-                if ($n -lt 20) { throw "run ${run}: only $n frames captured" }
-                if ($white -ne 0) { throw "run ${run}: $white white frames of $n" }
+            Start-Sleep -Milliseconds 500
+            $r = Get-TerminalRect $g
+            $shift = 80
+            $rect = [pscustomobject]@{ X = $r.X + $shift; Y = $r.Y + $shift; W = $r.W - 2 * $shift; H = $r.H - 2 * $shift }
+            Measure-Burst 'window' $rect {
+                [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_window')
+            } {
+                if (@((Get-GhosttyState -Class $g.Class).windows).Count -eq 2) { $true }
             }
         } finally {
-            if (-not $g.Process.HasExited) {
-                $g.Process.Kill()
-                [void]$g.Process.WaitForExit(5000)
+            Stop-FlashGhostty $g
+        }
+
+        # Light/dark theme pair: App.config holds the light theme; on a dark
+        # system the panes are dark and the stand-in must be too.
+        $light = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme
+        if ($null -ne $light -and $light -ne 0) {
+            Write-E2eInfo 'theme: SKIP (the system scheme is light, the light theme is what shows)'
+        } else {
+            $themes = Join-Path $script:Sbx.Home '.config\ghostty\themes'
+            New-Item -ItemType Directory -Force -Path $themes | Out-Null
+            $utf8 = New-Object Text.UTF8Encoding $false
+            [IO.File]::WriteAllText((Join-Path $themes 'e2e-light'), "background = #f4f4f4`nforeground = #202020`n", $utf8)
+            [IO.File]::WriteAllText((Join-Path $themes 'e2e-dark'), "background = #1a2b4c`nforeground = #e0e0e0`n", $utf8)
+            [void][GhosttyE2e.BackdropNative]::SetWindowPos($back.Handle, [IntPtr]::op_Explicit(-1), 0, 0, 0, 0, 0x13)
+            $g = Start-FlashGhostty "theme = light:e2e-light,dark:e2e-dark`n"
+            try {
+                Invoke-TabBurst $g 'theme'
+            } finally {
+                Stop-FlashGhostty $g
             }
         }
     } finally {

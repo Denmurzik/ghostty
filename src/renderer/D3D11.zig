@@ -406,6 +406,7 @@ pub fn presentSucceeded(self: *D3D11, generation: u32) void {
 /// the apprt now, with a frame in it. The caller holds the lock.
 pub fn framePresented(self: *D3D11) void {
     if (!self.hand_off_pending) return;
+    self.device.assertContextLocked();
     self.hand_off_pending = false;
     const target = self.present_target orelse return;
     const sc = if (self.swap_chain) |*sc| sc else return;
@@ -1201,7 +1202,7 @@ test "d3d11 swapchain: composition mode creates a premultiplied chain and hands 
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
 }
 
-test "d3d11 swapchain: a composition chain without a frame is never handed off" {
+test "d3d11 swapchain: a composition chain is handed off by framePresented, once, and not after a drop" {
     var api = try testApi(.native);
     defer api.device.deinit(std.testing.allocator);
     var window: SwapChain.TestWindow = try .init();

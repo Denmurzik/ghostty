@@ -44,6 +44,7 @@ const resize_overlay = @import("resize_overlay.zig");
 const scrollbar_mod = @import("scrollbar.zig");
 const taskbar = @import("taskbar.zig");
 const title_rules = @import("title_rules.zig");
+const theme = @import("theme.zig");
 const util = @import("util.zig");
 
 const log = std.log.scoped(.win32_surface);
@@ -294,7 +295,7 @@ fn fillBackground(self: *Surface, hdc: win32.user32.HDC) void {
     var rc: win32.foundation.RECT = undefined;
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
     const c = composition_mod.surfaceErase(
-        self.window.app.config.background,
+        theme.terminalBackground(&self.window.app.config),
         composition_mod.eraseTransparent(self.window),
         self.composition.showing,
         composition_mod.alphaByte(self.window),

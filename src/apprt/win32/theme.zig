@@ -291,6 +291,18 @@ pub fn palette(window: *const Window) Palette {
     return p;
 }
 
+/// The background a new surface's renderer starts with: the one of the config
+/// with its conditional (light/dark theme) state applied, as the tab row
+/// uses. `App.config` alone holds the theme of the default (light) state.
+pub fn terminalBackground(app_config: *const configpkg.Config) configpkg.Config.Color {
+    return backgroundOf(applied, app_config);
+}
+
+fn backgroundOf(in: ?Inputs, app_config: *const configpkg.Config) configpkg.Config.Color {
+    const c = (in orelse Inputs.from(app_config)).background;
+    return .{ .r = c.r, .g = c.g, .b = c.b };
+}
+
 /// Dark title bar and scrollbars of one window, and a repaint of its chrome.
 /// The first call also reports the system colour scheme to core, so that the
 /// `theme = light:...,dark:...` of the config is resolved before it is used.
@@ -416,6 +428,59 @@ pub fn settingChangedMsg(app: *App, wparam: WPARAM, lparam: LPARAM) void {
     // WindowsThemeElement, or SPI_SETHIGHCONTRAST (no name).
     high_contrast = null;
     applyToAll(app);
+}
+
+test "win32 theme: a new surface's background follows the applied light/dark theme" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const internal_os = @import("../../os/main.zig");
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    inline for (.{ .{ "light", "background = #fafafa\n" }, .{ "dark", "background = #1a1b26\n" } }) |t| {
+        var file = try td.dir.createFile(testing.io, t[0], .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
+        try writer.interface.writeAll(t[1]);
+        try writer.end();
+    }
+    var light_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const light = light_buf[0..try td.dir.realPathFile(testing.io, "light", &light_buf)];
+    var dark_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dark = dark_buf[0..try td.dir.realPathFile(testing.io, "dark", &dark_buf)];
+    const arg = try std.fmt.allocPrint(alloc, "--theme=light:{s},dark:{s}", .{ light, dark });
+    defer alloc.free(arg);
+
+    const Iter = struct {
+        data: []const []const u8,
+        i: usize = 0,
+        pub fn next(self: *@This()) ?[]const u8 {
+            if (self.i >= self.data.len) return null;
+            defer self.i += 1;
+            return self.data[self.i];
+        }
+    };
+
+    // `App.config`: the theme of the default (light) state.
+    var app_config = try configpkg.Config.default(alloc);
+    defer app_config.deinit();
+    var it: Iter = .{ .data = &.{arg} };
+    try app_config.loadIter(alloc, &it);
+    try app_config.finalize();
+    try testing.expectEqual(configpkg.Config.Color{ .r = 0xfa, .g = 0xfa, .b = 0xfa }, app_config.background);
+
+    // Before any `config_change`: the app config.
+    try testing.expectEqual(app_config.background, backgroundOf(null, &app_config));
+
+    // A dark system: `config_change` delivers the dark state, and a new
+    // surface starts dark, not with the light background of `App.config`.
+    var dark_config = (try app_config.changeConditionalState(.{ .theme = .dark })).?;
+    defer dark_config.deinit();
+    try testing.expectEqual(
+        configpkg.Config.Color{ .r = 0x1a, .g = 0x1b, .b = 0x26 },
+        backgroundOf(.from(&dark_config), &app_config),
+    );
 }
 
 test "win32 theme: dark and light palettes" {

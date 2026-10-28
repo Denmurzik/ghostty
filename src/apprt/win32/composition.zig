@@ -221,10 +221,21 @@ pub fn setContent(surface: *Surface, wparam: win32.foundation.WPARAM) ?win32.fou
     // The stand-in goes only once DWM shows the frame: cleared any earlier,
     // the glass would show through for a moment (a white flash over Acrylic).
     if (stand_in and eraseTransparent(surface.window)) {
-        if (surface.app.composition.device) |d| d.waitForCommitCompletion() catch {};
+        // Nobody sees a hidden pane (a parked or background tab, a minimised
+        // window): it needs no wait, which costs about one DWM frame.
+        if (waitBeforeErase(
+            win32.user32.IsWindowVisible(surface.hwnd) != 0,
+            win32.user32.IsIconic(surface.window.hwnd) != 0,
+        )) if (surface.app.composition.device) |d| d.waitForCommitCompletion() catch |err|
+            log.warn("surface {d}: WaitForCommitCompletion failed, erasing anyway err={}", .{ surface.id, err });
         surface.repaintBackground();
     }
     return 0;
+}
+
+/// Whether the stand-in's erase waits for the commit to reach DWM.
+fn waitBeforeErase(visible: bool, minimized: bool) bool {
+    return visible and !minimized;
 }
 
 /// Shows `chain` (one reference, always released) unless it belongs to an
@@ -853,6 +864,13 @@ test "win32 composition: a pane stands in for its first frame until a chain show
     try t.expectEqual(@as(u8, 255), premultiply(255, 255));
     try t.expectEqual(@as(u8, 0), premultiply(255, 0));
     try t.expectEqual(@as(u8, 128), premultiply(255, 128));
+}
+
+test "win32 composition: only a pane on screen waits for the commit before its erase" {
+    try std.testing.expect(waitBeforeErase(true, false));
+    try std.testing.expect(!waitBeforeErase(false, false));
+    try std.testing.expect(!waitBeforeErase(true, true));
+    try std.testing.expect(!waitBeforeErase(false, true));
 }
 
 test "win32 composition: dropping the chains brings the stand-in back" {
