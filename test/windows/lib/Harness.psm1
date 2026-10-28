@@ -384,6 +384,10 @@ The one writer of the config.ghostty text every test script uses: the Extra
 lines, then `class = <Class>`, always. The class gives the instance an
 identity of its own (window class, IPC pipe), so a test instance can never
 reach another instance or the owner's.
+
+GHOSTTY_E2E_EXTRA_CONFIG (lines separated by `;`) is appended after the
+Extra lines, so a whole run can be repeated with one setting changed (for
+example `windows-conpty = inbox`).
 #>
 function New-GhosttyConfigText {
     param(
@@ -391,6 +395,7 @@ function New-GhosttyConfigText {
         [string]$Extra
     )
     $text = if ($Extra) { ($Extra -replace "`r`n", "`n").TrimEnd("`n") + "`n" } else { '' }
+    if ($env:GHOSTTY_E2E_EXTRA_CONFIG) { $text += (($env:GHOSTTY_E2E_EXTRA_CONFIG -split ';' | ForEach-Object { $_.Trim() }) -join "`n") + "`n" }
     $text + "class = $Class`n"
 }
 
