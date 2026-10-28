@@ -20,6 +20,8 @@ pub const Plan = struct {
 
 pub const Probe = struct {
     exists: *const fn (path: []const u8) bool,
+    /// An existing directory.
+    is_dir: *const fn (path: []const u8) bool,
     /// Git Bash for the client environment ("K=V" entries), or null.
     git_bash: *const fn (arena: Allocator, env: []const []const u8) ?[]const u8,
 };
@@ -74,11 +76,13 @@ pub fn plan(
         try extra.appendSlice(arena, parsed.env);
         if (s.start_dir == null) {
             if (parsed.cwd) |c| {
-                if (!probe.exists(c)) {
+                // A relative target is relative to the client's directory.
+                const dir = if (std.fs.path.isAbsolute(c)) c else try std.fs.path.join(arena, &.{ s.cwd, c });
+                if (!probe.is_dir(dir)) {
                     diag.dir = c;
                     return error.NoDirectory;
                 }
-                cwd = c;
+                cwd = dir;
             }
         }
     }
@@ -116,7 +120,19 @@ fn gitBash(arena: Allocator, client_env: []const []const u8, probe: Probe) ?[]co
 
 /// The probe backed by the real filesystem, registry and environment.
 pub fn systemProbe() Probe {
-    return .{ .exists = systemExists, .git_bash = systemGitBash };
+    return .{ .exists = systemExists, .is_dir = systemIsDir, .git_bash = systemGitBash };
+}
+
+fn systemIsDir(path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    const w = internal_os.windows;
+    var buf: [2048]u16 = undefined;
+    if (path.len >= buf.len) return false;
+    const len = std.unicode.wtf8ToWtf16Le(buf[0 .. buf.len - 1], path) catch return false;
+    buf[len] = 0;
+    const attrs = w.GetFileAttributesW(@ptrCast(&buf));
+    if (attrs == w.INVALID_FILE_ATTRIBUTES) return false;
+    return attrs & w.FILE_ATTRIBUTE_DIRECTORY != 0;
 }
 
 fn systemExists(path: []const u8) bool {
@@ -140,6 +156,12 @@ const t = std.testing;
 
 const FakeProbe = struct {
     var existing: []const []const u8 = &.{};
+    var dirs: []const []const u8 = &.{};
+
+    fn fakeIsDir(path: []const u8) bool {
+        for (dirs) |p| if (std.mem.eql(u8, p, path)) return true;
+        return false;
+    }
     var bash: ?[]const u8 = null;
 
     fn fakeExists(path: []const u8) bool {
@@ -149,7 +171,7 @@ const FakeProbe = struct {
     fn fakeBash(_: Allocator, _: []const []const u8) ?[]const u8 {
         return bash;
     }
-    const probe: Probe = .{ .exists = fakeExists, .git_bash = fakeBash };
+    const probe: Probe = .{ .exists = fakeExists, .is_dir = fakeIsDir, .git_bash = fakeBash };
 };
 
 fn spawnOf(command: ?[]const u8) commands.Spawn {
@@ -210,8 +232,8 @@ test "win32 tmux spawn: no Git Bash uses the parser" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     FakeProbe.bash = null;
-    FakeProbe.existing = &.{"C:\\D\\den4ik\\Ghostty"};
-    defer FakeProbe.existing = &.{};
+    FakeProbe.dirs = &.{"C:\\D\\den4ik\\Ghostty"};
+    defer FakeProbe.dirs = &.{};
     var s = spawnOf(recon_command);
     s.extra_env = &.{"E=1"};
     const p = try planT(arena.allocator(), s, "C:\\g", FakeProbe.probe);
@@ -239,8 +261,8 @@ test "win32 tmux spawn: -c start dir beats client cwd" {
     const p2 = try planT(arena.allocator(), s2, "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\start", p2.cwd);
 
-    FakeProbe.existing = &.{"C:\\cd"};
-    defer FakeProbe.existing = &.{};
+    FakeProbe.dirs = &.{"C:\\cd"};
+    defer FakeProbe.dirs = &.{};
     // Without -c the cd target beats the client cwd.
     const p3 = try planT(arena.allocator(), spawnOf("cd 'C:\\cd' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe);
     try t.expectEqualStrings("C:\\cd", p3.cwd);
@@ -286,6 +308,29 @@ test "win32 tmux spawn: missing cd target fails on the parser path" {
     // With Git Bash the cd runs inside bash, which reports it itself.
     FakeProbe.bash = "C:\\Git\\bin\\bash.exe";
     _ = try planT(arena.allocator(), spawnOf("cd 'C:\\gone' && x"), "C:\\g", FakeProbe.probe);
+}
+
+test "win32 tmux spawn: cd target must be a directory, relative to the client cwd" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    FakeProbe.bash = null;
+    // A file of that name is no directory.
+    FakeProbe.existing = &.{"C:\\work\\sub"};
+    defer FakeProbe.existing = &.{};
+    var diag: Diag = .{};
+    try t.expectError(error.NoDirectory, plan(arena.allocator(), spawnOf("cd 'sub' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe, &diag));
+    FakeProbe.dirs = &.{"C:\\work\\sub"};
+    defer FakeProbe.dirs = &.{};
+    const p = try planT(arena.allocator(), spawnOf("cd 'sub' && 'C:\\p\\x.exe'"), "C:\\g", FakeProbe.probe);
+    try t.expectEqualStrings("C:\\work\\sub", p.cwd);
+}
+
+test "win32 tmux spawn: the system probe tells directories from files" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const probe = systemProbe();
+    try t.expect(probe.is_dir("C:\\Windows"));
+    try t.expect(!probe.is_dir("C:\\Windows\\notepad.exe"));
+    try t.expect(!probe.is_dir("C:\\no\\such\\dir"));
 }
 
 // ---- real Git Bash -----------------------------------------------------
@@ -350,7 +395,6 @@ fn runPane(alloc: Allocator, command: []const u8, git_dir: []const u8) !Run {
     s.client_env = env_list.items;
     const p = try planT(arena.allocator(), s, "C:\\g", systemProbe());
     const argv = p.argv orelse return error.TestUnexpectedResult;
-    std.debug.print("bash -c argv: {s} | {s} | [{s}]\n", .{ argv[0], argv[1], argv[2] });
 
     const out_file = try td.dir.createFile(io, "out.txt", .{ .read = true });
     defer out_file.close(io);
