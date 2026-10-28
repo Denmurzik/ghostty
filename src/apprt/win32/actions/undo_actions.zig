@@ -275,65 +275,160 @@ const Flip = enum {
     gone,
 };
 
-fn flip(app: *App, e: *Entry) Flip {
+/// What a window flip step came to.
+const WindowStep = enum { done, missing, oom };
+
+/// The live side of the flips: everything that touches windows, tabs and the
+/// stacks. The flip logic below runs against any type with these methods, so
+/// the unit tests drive it with a fake.
+const Live = struct {
+    app: *App,
+
+    fn tabUnpark(self: Live, tab: *Tab, index: usize) error{ OutOfMemory, NotParked }!void {
+        _ = self;
+        return tab.window.unparkTab(tab, index);
+    }
+
+    fn tabPark(self: Live, tab: *Tab) ?usize {
+        _ = self;
+        return tab.window.parkTab(tab);
+    }
+
+    fn tabActivate(self: Live, tab: *Tab) void {
+        _ = self;
+        tab.window.activate();
+    }
+
+    fn windowUnpark(self: Live, window: *Window) WindowStep {
+        for (self.app.parked_windows.items) |w| {
+            if (w == window) return if (self.app.unparkWindow(window)) .done else .oom;
+        }
+        return .missing;
+    }
+
+    fn windowPark(self: Live, window: *Window) WindowStep {
+        for (self.app.windows.items) |w| {
+            if (w == window) return if (self.app.parkWindow(window)) .done else .oom;
+        }
+        return .missing;
+    }
+
+    fn windowEndsSession(self: Live, window: *Window) bool {
+        return self.app.closingQuits(window);
+    }
+
+    fn windowActivate(self: Live, window: *Window) void {
+        _ = self;
+        window.activate();
+    }
+
+    fn treeOf(self: Live, tab: *Tab) *const Surface.Tree {
+        _ = self;
+        return &tab.tree;
+    }
+
+    fn swapTree(self: Live, tab: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void {
+        _ = self;
+        tab.swapTree(tree, s, show_s);
+    }
+
+    fn stack(self: Live) *undo_model.Stack(Entry) {
+        return &self.app.undo.stack;
+    }
+
+    fn allocator(self: Live) Allocator {
+        return self.app.core_app.alloc;
+    }
+
+    fn newExpiry(self: Live) u64 {
+        return expiry(self.app);
+    }
+
+    fn closeEntries(self: Live, entries: []const Entry) void {
+        closeAll(self.app, entries);
+    }
+
+    fn armTimer(self: Live) void {
+        schedule(self.app);
+    }
+};
+
+fn flipWith(env: anytype, e: *Entry) Flip {
     switch (e.kind) {
-        .close_tab, .new_tab => return flipTab(e),
-        .close_window, .new_window => return flipWindow(app, e),
-        .close_split, .new_split => return flipSplit(e),
-        .group => return flipGroup(app, e),
+        .close_tab, .new_tab => return flipTabWith(env, e),
+        .close_window, .new_window => return flipWindowWith(env, e),
+        .close_split, .new_split => return flipSplitWith(env, e),
+        .group => return flipGroupWith(env, e),
     }
 }
 
-fn flipTab(e: *Entry) Flip {
+fn flipTabWith(env: anytype, e: *Entry) Flip {
     const tab = e.tab orelse return .gone;
-    const window = tab.window;
     if (e.parked) {
-        window.unparkTab(tab, e.index) catch |err| return switch (err) {
+        env.tabUnpark(tab, e.index) catch |err| return switch (err) {
             error.OutOfMemory => .failed,
             error.NotParked => .gone,
         };
         e.parked = false;
-        window.activate();
+        env.tabActivate(tab);
     } else {
-        e.index = window.parkTab(tab) orelse return .gone;
+        e.index = env.tabPark(tab) orelse {
+            log.info("undo: the tab is now the only one of its window, entry dropped", .{});
+            return .gone;
+        };
         e.parked = true;
     }
     return .done;
 }
 
-fn flipWindow(app: *App, e: *Entry) Flip {
+fn flipWindowWith(env: anytype, e: *Entry) Flip {
     const window = e.window orelse return .gone;
     if (e.parked) {
-        if (!app.unparkWindow(window)) return .failed;
+        switch (env.windowUnpark(window)) {
+            .done => {},
+            .missing => {
+                // Not in the parked list: there is nothing left to close.
+                e.parked = false;
+                return .gone;
+            },
+            .oom => return .failed,
+        }
         e.parked = false;
-        window.activate();
+        env.windowActivate(window);
     } else {
         // Parking the last window of an app that quits with it would end the session.
-        if (app.closingQuits(window)) return .gone;
-        if (!app.parkWindow(window)) return .failed;
+        if (env.windowEndsSession(window)) {
+            log.info("undo: parking the window would end the session, entry dropped", .{});
+            return .gone;
+        }
+        switch (env.windowPark(window)) {
+            .done => {},
+            .missing => return .gone,
+            .oom => return .failed,
+        }
         e.parked = true;
     }
     return .done;
 }
 
-fn flipSplit(e: *Entry) Flip {
+fn flipSplitWith(env: anytype, e: *Entry) Flip {
     const tab = e.tab orelse return .gone;
     const s = e.surface orelse return .gone;
-    var before = e.before orelse return .gone;
-    var after = e.after orelse return .gone;
+    const before = e.before orelse return .gone;
+    const after = e.after orelse return .gone;
     const shown = if (e.current_after) &after else &before;
     const target = if (e.current_after) &before else &after;
-    if (!treesEql(&tab.tree, shown)) {
+    if (!treesEql(env.treeOf(tab), shown)) {
         log.info("undo: the tree of the tab changed since the split change, entry dropped", .{});
         return .gone;
     }
-    const clone = target.clone(tab.window.app.core_app.alloc) catch return .failed;
-    tab.swapTree(clone, s, target.locate(s) != null);
+    const clone = target.clone(env.allocator()) catch return .failed;
+    env.swapTree(tab, clone, s, target.locate(s) != null);
     e.current_after = !e.current_after;
     return .done;
 }
 
-fn flipGroup(app: *App, e: *Entry) Flip {
+fn flipGroupWith(env: anytype, e: *Entry) Flip {
     const n = e.group.len;
     // Whether the group is parked is the state of its first live member.
     var unparking = false;
@@ -353,7 +448,7 @@ fn flipGroup(app: *App, e: *Entry) Flip {
         m.flipped = false;
         if (m.kind == .group) continue;
         any_member = true;
-        switch (flip(app, m)) {
+        switch (flipWith(env, m)) {
             .done => {
                 m.flipped = true;
                 ok += 1;
@@ -369,8 +464,8 @@ fn flipGroup(app: *App, e: *Entry) Flip {
     return .done;
 }
 
-fn timestamp(app: *const App, e: *Entry) void {
-    e.expires_ms = expiry(app);
+fn timestamp(env: anytype, e: *Entry) void {
+    e.expires_ms = env.newExpiry();
     for (e.group) |*m| m.expires_ms = e.expires_ms;
 }
 
@@ -378,28 +473,28 @@ pub fn undo(app: *App, target: apprt.Target, value: void) !bool {
     _ = target;
     _ = value;
     const entry = app.undo.stack.popUndo(nowMs()) orelse return false;
-    return finish(app, entry, .undo);
+    return finish(Live{ .app = app }, entry, .undo);
 }
 
 pub fn redo(app: *App, target: apprt.Target, value: void) !bool {
     _ = target;
     _ = value;
     const entry = app.undo.stack.popRedo(nowMs()) orelse return false;
-    return finish(app, entry, .redo);
+    return finish(Live{ .app = app }, entry, .redo);
 }
 
 const Way = enum { undo, redo };
 
 /// Flips `popped` and puts what comes out on the other stack.
-fn finish(app: *App, popped: Entry, way: Way) bool {
-    defer schedule(app);
-    const alloc = app.core_app.alloc;
+fn finish(env: anytype, popped: Entry, way: Way) bool {
+    defer env.armTimer();
+    const alloc = env.allocator();
     var entry = popped;
-    const result = flip(app, &entry);
+    const result = flipWith(env, &entry);
     switch (result) {
         .done => {
-            timestamp(app, &entry);
-            keep(app, entry, way, .other);
+            timestamp(env, &entry);
+            keep(env, entry, way, .other);
             return true;
         },
         .partial => {
@@ -410,7 +505,7 @@ fn finish(app: *App, popped: Entry, way: Way) bool {
                 if (m.kind != .group and m.flipped) flipped_n += 1;
             }
             const part = alloc.alloc(Entry, flipped_n) catch {
-                keep(app, entry, way, .same);
+                keep(env, entry, way, .same);
                 return true;
             };
             var k: usize = 0;
@@ -421,19 +516,19 @@ fn finish(app: *App, popped: Entry, way: Way) bool {
                 k += 1;
                 m.* = .{ .kind = .group, .expires_ms = m.expires_ms };
             }
-            var flipped: Entry = .{ .kind = .group, .expires_ms = expiry(app), .group = part };
-            timestamp(app, &flipped);
-            keep(app, flipped, way, .other);
-            keep(app, entry, way, .same);
+            var flipped: Entry = .{ .kind = .group, .expires_ms = env.newExpiry(), .group = part };
+            timestamp(env, &flipped);
+            keep(env, flipped, way, .other);
+            keep(env, entry, way, .same);
             return true;
         },
         // Out of memory: the item is as it was, keep the entry for another try.
         .failed => {
-            keep(app, entry, way, .same);
+            keep(env, entry, way, .same);
             return false;
         },
         .gone => {
-            closeAll(app, &.{entry});
+            env.closeEntries(&.{entry});
             return false;
         },
     }
@@ -442,16 +537,16 @@ fn finish(app: *App, popped: Entry, way: Way) bool {
 const Side = enum { same, other };
 
 /// Puts `e` on a stack: where it came from (`same`) or the opposite one.
-fn keep(app: *App, e: Entry, way: Way, side: Side) void {
-    const alloc = app.core_app.alloc;
+fn keep(env: anytype, e: Entry, way: Way, side: Side) void {
+    const alloc = env.allocator();
     const to_undo = (way == .undo) == (side == .same);
     const ok = if (to_undo)
-        app.undo.stack.restoreUndo(alloc, e)
+        env.stack().restoreUndo(alloc, e)
     else
-        app.undo.stack.pushRedo(alloc, e);
+        env.stack().pushRedo(alloc, e);
     ok catch {
         log.warn("an undo entry was lost", .{});
-        closeAll(app, &.{e});
+        env.closeEntries(&.{e});
     };
 }
 
@@ -564,17 +659,19 @@ pub fn schedule(app: *App) void {
 /// A window is being destroyed by other means: drop every entry that names
 /// it. Its parked tabs are destroyed with it.
 pub fn forget(app: *App, window: *Window) void {
-    forgetIn(&app.undo.stack, app.core_app.alloc, .{ .window = window });
+    _ = forgetIn(&app.undo.stack, app.core_app.alloc, .{ .window = window });
 }
 
-/// A tab is closing for real: its entries go.
-pub fn forgetTab(app: *App, tab: *Tab) void {
-    forgetIn(&app.undo.stack, app.core_app.alloc, .{ .tab = tab });
+/// A tab is closing for real (or moving to another window): its entries go.
+/// Returns how many entries were dropped.
+pub fn forgetTab(app: *App, tab: *Tab) usize {
+    return forgetIn(&app.undo.stack, app.core_app.alloc, .{ .tab = tab });
 }
 
-/// A surface is leaving its tab for good: its entries go.
+/// A surface is leaving its tab for good: its entries go, and so do the
+/// split entries whose snapshots hold it (they would keep it alive).
 pub fn forgetSurface(app: *App, s: *Surface) void {
-    forgetIn(&app.undo.stack, app.core_app.alloc, .{ .surface = s });
+    _ = forgetIn(&app.undo.stack, app.core_app.alloc, .{ .surface = s });
 }
 
 /// A parked split surface exited by itself: its entry goes and the split
@@ -611,14 +708,17 @@ const Names = struct {
 
 /// Removes from `stack` every entry (or group member) that names `n`.
 /// Nothing is closed, but the snapshots a split entry holds are released.
-fn forgetIn(stack: *undo_model.Stack(Entry), alloc: Allocator, n: Names) void {
+/// Returns how many entries were removed whole.
+fn forgetIn(stack: *undo_model.Stack(Entry), alloc: Allocator, n: Names) usize {
     var dropped: std.ArrayList(Entry) = .empty;
     defer dropped.deinit(alloc);
+    var count: usize = 0;
     inline for (.{ &stack.undo, &stack.redo }) |list| {
         var keep_n: usize = 0;
         for (list.items) |e| {
             var e2 = e;
             if (scrub(alloc, &e2, n)) {
+                count += 1;
                 dropped.append(alloc, e2) catch releaseSplit(e2);
             } else {
                 list.items[keep_n] = e2;
@@ -629,12 +729,20 @@ fn forgetIn(stack: *undo_model.Stack(Entry), alloc: Allocator, n: Names) void {
     }
     // Last: releasing a snapshot may tear a surface down.
     for (dropped.items) |e| releaseSplit(e);
+    return count;
 }
 
 fn names(e: Entry, n: Names) bool {
     if (n.window) |w| if (e.window == w) return true;
     if (n.tab) |t| if (e.tab == t) return true;
-    if (n.surface) |s| if (e.surface == s) return true;
+    if (n.surface) |s| {
+        if (e.surface == s) return true;
+        // A snapshot that holds a surface that left the tab can never match
+        // the tab again, and keeps the surface (and its process) alive.
+        inline for (.{ e.before, e.after }) |snap| {
+            if (snap) |t| if (t.locate(s) != null) return true;
+        }
+    }
     return false;
 }
 
@@ -895,14 +1003,14 @@ test "win32 undo: forgetting a window drops its entries and group members" {
     members[1] = .{ .kind = .close_tab, .expires_ms = 100, .window = fakeWindow(2), .tab = fakeTab(4) };
     try stack.push(alloc, .{ .kind = .group, .expires_ms = 100, .group = members }, &dis);
 
-    forgetIn(&stack, alloc, .{ .window = fakeWindow(1) });
+    _ = forgetIn(&stack, alloc, .{ .window = fakeWindow(1) });
     try testing.expectEqual(@as(usize, 2), stack.undo.items.len);
     try testing.expectEqual(@as(usize, 2), stack.undo.items[1].group.len);
     try testing.expect(stack.undo.items[1].group[0].kind == .group);
     try testing.expectEqual(fakeTab(4), stack.undo.items[1].group[1].tab.?);
 
     // The last member of a group takes the group with it (and frees it).
-    forgetIn(&stack, alloc, .{ .tab = fakeTab(4) });
+    _ = forgetIn(&stack, alloc, .{ .tab = fakeTab(4) });
     try testing.expectEqual(@as(usize, 1), stack.undo.items.len);
     try testing.expectEqual(fakeTab(2), stack.undo.items[0].tab.?);
 }
@@ -920,10 +1028,10 @@ test "win32 undo: a surface or tab leaving for good drops its entries, redo incl
     try stack.pushRedo(alloc, .{ .kind = .close_split, .expires_ms = 100, .tab = fakeTab(2), .surface = s2 });
     try stack.pushRedo(alloc, .{ .kind = .new_tab, .expires_ms = 100, .tab = fakeTab(1) });
 
-    forgetIn(&stack, alloc, .{ .surface = s2 });
+    _ = forgetIn(&stack, alloc, .{ .surface = s2 });
     try testing.expectEqual(@as(usize, 2), stack.undo.items.len);
     try testing.expectEqual(@as(usize, 1), stack.redo.items.len);
-    forgetIn(&stack, alloc, .{ .tab = fakeTab(1) });
+    _ = forgetIn(&stack, alloc, .{ .tab = fakeTab(1) });
     try testing.expectEqual(@as(usize, 1), stack.undo.items.len);
     try testing.expectEqual(@as(usize, 0), stack.redo.items.len);
     try testing.expectEqual(s1, stack.undo.items[0].surface.?);
@@ -951,4 +1059,408 @@ test "win32 undo: an entry put back with restoreUndo keeps redo" {
     try stack.restoreUndo(alloc, .{ .kind = .close_tab, .expires_ms = 100, .tab = fakeTab(2) });
     try testing.expectEqual(@as(usize, 1), stack.undo.items.len);
     try testing.expectEqual(@as(usize, 1), stack.redo.items.len);
+}
+
+// -- Flip tests: the production flip/finish against a fake environment ----------
+
+fn fakeSurface() !*Surface {
+    const s = try testing.allocator.create(Surface);
+    // Only `refs` is read by the trees; it never gets near zero.
+    s.refs = 1000;
+    return s;
+}
+
+const Fake = struct {
+    st: undo_model.Stack(Entry) = .{},
+    /// The tree the fake tab shows.
+    tree: Surface.Tree = .empty,
+    events: std.ArrayList(u8) = .empty,
+    /// The `show_s` of the last tree swap.
+    shown: ?bool = null,
+    oom_tab: ?*Tab = null,
+    refuse_park: bool = false,
+    ends_session: bool = false,
+    window_missing: bool = false,
+    closed_splits: usize = 0,
+    closed_tabs: usize = 0,
+    closed_windows: usize = 0,
+    armed: usize = 0,
+
+    fn deinit(self: *Fake) void {
+        var all: std.ArrayList(Entry) = .empty;
+        defer all.deinit(testing.allocator);
+        self.st.takeAll(&all, testing.allocator) catch unreachable;
+        closeAllWith(Closer{ .f = self }, all.items);
+        self.st.deinit(testing.allocator);
+        self.tree.deinit();
+        self.events.deinit(testing.allocator);
+    }
+
+    fn event(self: *Fake, c: u8) void {
+        self.events.append(testing.allocator, c) catch unreachable;
+    }
+
+    fn tabUnpark(self: *Fake, tab: *Tab, index: usize) error{ OutOfMemory, NotParked }!void {
+        _ = index;
+        if (self.oom_tab == tab) return error.OutOfMemory;
+        self.event('u');
+    }
+
+    fn tabPark(self: *Fake, tab: *Tab) ?usize {
+        _ = tab;
+        if (self.refuse_park) return null;
+        self.event('p');
+        return 2;
+    }
+
+    fn tabActivate(self: *Fake, tab: *Tab) void {
+        _ = tab;
+        self.event('a');
+    }
+
+    fn windowUnpark(self: *Fake, window: *Window) WindowStep {
+        _ = window;
+        if (self.window_missing) return .missing;
+        self.event('U');
+        return .done;
+    }
+
+    fn windowPark(self: *Fake, window: *Window) WindowStep {
+        _ = window;
+        if (self.window_missing) return .missing;
+        self.event('P');
+        return .done;
+    }
+
+    fn windowEndsSession(self: *Fake, window: *Window) bool {
+        _ = window;
+        return self.ends_session;
+    }
+
+    fn windowActivate(self: *Fake, window: *Window) void {
+        _ = window;
+        self.event('A');
+    }
+
+    fn treeOf(self: *Fake, tab: *Tab) *const Surface.Tree {
+        _ = tab;
+        return &self.tree;
+    }
+
+    fn swapTree(self: *Fake, tab: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void {
+        _ = tab;
+        _ = s;
+        self.tree.deinit();
+        self.tree = tree;
+        self.shown = show_s;
+    }
+
+    fn stack(self: *Fake) *undo_model.Stack(Entry) {
+        return &self.st;
+    }
+
+    fn allocator(self: *Fake) Allocator {
+        _ = self;
+        return testing.allocator;
+    }
+
+    fn newExpiry(self: *Fake) u64 {
+        _ = self;
+        return 2_000_000;
+    }
+
+    fn closeEntries(self: *Fake, entries: []const Entry) void {
+        closeAllWith(Closer{ .f = self }, entries);
+    }
+
+    fn armTimer(self: *Fake) void {
+        self.armed += 1;
+    }
+
+    const Closer = struct {
+        f: *Fake,
+
+        fn closeSplit(self: Closer, e: Entry) void {
+            self.f.closed_splits += 1;
+            releaseSplit(e);
+        }
+        fn closeTab(self: Closer, tab: *Tab) void {
+            _ = tab;
+            self.f.closed_tabs += 1;
+        }
+        fn closeWindow(self: Closer, window: *Window) void {
+            _ = window;
+            self.f.closed_windows += 1;
+        }
+        fn freeGroup(self: Closer, group: []Entry) void {
+            _ = self;
+            testing.allocator.free(group);
+        }
+    };
+
+    fn push(self: *Fake, e: Entry) !void {
+        var displaced: std.ArrayList(Entry) = .empty;
+        defer displaced.deinit(testing.allocator);
+        try self.st.push(testing.allocator, e, &displaced);
+        self.closeEntries(displaced.items);
+    }
+
+    fn undo(self: *Fake) bool {
+        const e = self.st.popUndo(0) orelse return false;
+        return finish(self, e, .undo);
+    }
+
+    fn redo(self: *Fake) bool {
+        const e = self.st.popRedo(0) orelse return false;
+        return finish(self, e, .redo);
+    }
+};
+
+/// Panes A and B side by side (ratio 0.3), and the tree with B taken out.
+const Pair = struct {
+    sa: *Surface,
+    sb: *Surface,
+    ab: Surface.Tree,
+    only_a: Surface.Tree,
+
+    fn init() !Pair {
+        const alloc = testing.allocator;
+        const sa = try fakeSurface();
+        const sb = try fakeSurface();
+        var ta: Surface.Tree = try .init(alloc, sa);
+        defer ta.deinit();
+        var tb: Surface.Tree = try .init(alloc, sb);
+        defer tb.deinit();
+        var ab = try ta.split(alloc, .root, .right, 0.3, &tb);
+        errdefer ab.deinit();
+        const only_a = try ab.remove(alloc, ab.locate(sb).?);
+        return .{ .sa = sa, .sb = sb, .ab = ab, .only_a = only_a };
+    }
+
+    fn deinit(self: *Pair) void {
+        self.ab.deinit();
+        self.only_a.deinit();
+        testing.allocator.destroy(self.sa);
+        testing.allocator.destroy(self.sb);
+    }
+
+    /// The entry of a split change; the tab shows `after`.
+    fn entry(self: *Pair, kind: undo_model.Kind) !Entry {
+        const closing = kind == .close_split;
+        return .{
+            .kind = kind,
+            .expires_ms = 1_000_000,
+            .tab = fakeTab(1),
+            .surface = self.sb,
+            // Closing B: before is AB, after is A. Creating B: the other way.
+            .before = try (if (closing) self.ab else self.only_a).clone(testing.allocator),
+            .after = try (if (closing) self.only_a else self.ab).clone(testing.allocator),
+            .current_after = true,
+        };
+    }
+};
+
+test "win32 undo: close split then undo restores the exact tree" {
+    var p = try Pair.init();
+    defer p.deinit();
+    var f: Fake = .{ .tree = try p.only_a.clone(testing.allocator) };
+    defer f.deinit();
+    try f.push(try p.entry(.close_split));
+
+    try testing.expect(f.undo());
+    try testing.expect(treesEql(&f.tree, &p.ab)); // same panes, the old ratio
+    try testing.expect(!treesEql(&f.tree, &p.only_a));
+    try testing.expectEqual(true, f.shown.?); // the split is shown again
+    try testing.expectEqual(@as(usize, 0), f.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 1), f.st.redo.items.len);
+    try testing.expect(!f.st.redo.items[0].current_after);
+    try testing.expectEqual(@as(usize, 1), f.armed);
+}
+
+test "win32 undo: undo after a later split change drops the entry" {
+    var p = try Pair.init();
+    defer p.deinit();
+    // The user changed the tree after the close (here: a split of A).
+    const alloc = testing.allocator;
+    const sc = try fakeSurface();
+    defer alloc.destroy(sc);
+    var ta: Surface.Tree = try .init(alloc, p.sa);
+    defer ta.deinit();
+    var tc: Surface.Tree = try .init(alloc, sc);
+    defer tc.deinit();
+    var other = try ta.split(alloc, .root, .down, 0.5, &tc);
+    defer other.deinit();
+
+    var f: Fake = .{ .tree = try other.clone(alloc) };
+    defer f.deinit();
+    try f.push(try p.entry(.close_split));
+
+    try testing.expect(!f.undo());
+    try testing.expect(f.shown == null); // the tree was left alone
+    try testing.expectEqual(@as(usize, 0), f.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 0), f.st.redo.items.len);
+    try testing.expectEqual(@as(usize, 1), f.closed_splits); // snapshots released
+}
+
+test "win32 undo: redo after undo of close closes again" {
+    var p = try Pair.init();
+    defer p.deinit();
+    var f: Fake = .{ .tree = try p.only_a.clone(testing.allocator) };
+    defer f.deinit();
+    try f.push(try p.entry(.close_split));
+
+    try testing.expect(f.undo());
+    try testing.expect(f.redo());
+    try testing.expect(treesEql(&f.tree, &p.only_a));
+    try testing.expectEqual(false, f.shown.?); // B is parked again
+    try testing.expectEqual(@as(usize, 1), f.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 0), f.st.redo.items.len);
+    try testing.expect(f.st.undo.items[0].current_after);
+    // And it can be undone once more.
+    try testing.expect(f.undo());
+    try testing.expect(treesEql(&f.tree, &p.ab));
+}
+
+test "win32 undo: redo after undo of a closed tab parks it again" {
+    var f: Fake = .{};
+    defer f.deinit();
+    try f.push(.{ .kind = .close_tab, .expires_ms = 1_000_000, .window = fakeWindow(1), .tab = fakeTab(1), .index = 2, .parked = true });
+    try testing.expect(f.undo());
+    try testing.expect(!f.st.redo.items[0].parked);
+    try testing.expect(f.redo());
+    try testing.expect(f.st.undo.items[0].parked);
+    try testing.expectEqualStrings("uap", f.events.items);
+}
+
+test "win32 undo: new tab then undo parks it, redo restores" {
+    var f: Fake = .{};
+    defer f.deinit();
+    try f.push(.{ .kind = .new_tab, .expires_ms = 1_000_000, .window = fakeWindow(1), .tab = fakeTab(1) });
+
+    try testing.expect(f.undo());
+    try testing.expectEqualStrings("p", f.events.items);
+    try testing.expect(f.st.redo.items[0].parked);
+    try testing.expectEqual(@as(usize, 2), f.st.redo.items[0].index); // where it was
+
+    try testing.expect(f.redo());
+    try testing.expectEqualStrings("pua", f.events.items);
+    try testing.expect(!f.st.undo.items[0].parked);
+    try testing.expectEqual(@as(usize, 0), f.st.redo.items.len);
+}
+
+test "win32 undo: undo of a created split hides it, redo shows it" {
+    var p = try Pair.init();
+    defer p.deinit();
+    var f: Fake = .{ .tree = try p.ab.clone(testing.allocator) };
+    defer f.deinit();
+    try f.push(try p.entry(.new_split));
+
+    try testing.expect(f.undo());
+    try testing.expect(treesEql(&f.tree, &p.only_a));
+    try testing.expectEqual(false, f.shown.?);
+    try testing.expect(f.redo());
+    try testing.expect(treesEql(&f.tree, &p.ab));
+    try testing.expectEqual(true, f.shown.?);
+}
+
+test "win32 undo: tmux kill-pane is not undoable" {
+    try testing.expect(!surfaceCloseUndoable(.{ .child_exited = false, .final = true, .window_parked = false }));
+}
+
+test "win32 undo: a failed flip keeps the entry where it was, a gone one drops it" {
+    var f: Fake = .{ .oom_tab = fakeTab(1) };
+    defer f.deinit();
+    try f.push(.{ .kind = .close_tab, .expires_ms = 1_000_000, .window = fakeWindow(1), .tab = fakeTab(1), .parked = true });
+    try testing.expect(!f.undo());
+    try testing.expectEqual(@as(usize, 1), f.st.undo.items.len);
+    try testing.expect(f.st.undo.items[0].parked);
+
+    // A window that is not in the parked list any more: dropped, and nothing
+    // is closed in its name.
+    var g: Fake = .{ .window_missing = true };
+    defer g.deinit();
+    try g.push(.{ .kind = .close_window, .expires_ms = 1_000_000, .window = fakeWindow(1), .parked = true });
+    try testing.expect(!g.undo());
+    try testing.expectEqual(@as(usize, 0), g.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 0), g.st.redo.items.len);
+    try testing.expectEqual(@as(usize, 0), g.closed_windows);
+}
+
+test "win32 undo: refusals drop the entry" {
+    // Undoing the creation of the window that ends the session.
+    var f: Fake = .{ .ends_session = true };
+    defer f.deinit();
+    try f.push(.{ .kind = .new_window, .expires_ms = 1_000_000, .window = fakeWindow(1) });
+    try testing.expect(!f.undo());
+    try testing.expectEqual(@as(usize, 0), f.st.redo.items.len);
+    try testing.expectEqual(@as(usize, 0), f.st.undo.items.len);
+    try testing.expectEqualStrings("", f.events.items);
+
+    // Undoing a new tab that is now the only tab of its window.
+    var g: Fake = .{ .refuse_park = true };
+    defer g.deinit();
+    try g.push(.{ .kind = .new_tab, .expires_ms = 1_000_000, .window = fakeWindow(1), .tab = fakeTab(1) });
+    try testing.expect(!g.undo());
+    try testing.expectEqual(@as(usize, 0), g.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 0), g.st.redo.items.len);
+}
+
+test "win32 undo: a group that flips only in part splits into a flipped group and a remainder" {
+    var f: Fake = .{ .oom_tab = fakeTab(2) };
+    defer f.deinit();
+    const members = try testing.allocator.alloc(Entry, 3);
+    for (members, 0..) |*m, i| {
+        m.* = .{ .kind = .close_tab, .expires_ms = 1_000_000, .window = fakeWindow(1), .tab = fakeTab(i + 1), .index = i, .parked = true };
+    }
+    try f.push(.{ .kind = .group, .expires_ms = 1_000_000, .group = members });
+
+    try testing.expect(f.undo());
+    // Newest first: the third and the first came back (in group order), the second did not.
+    try testing.expectEqual(@as(usize, 1), f.st.undo.items.len);
+    try testing.expectEqual(@as(usize, 1), f.st.redo.items.len);
+    const back = f.st.redo.items[0];
+    try testing.expect(back.kind == .group);
+    try testing.expectEqual(@as(usize, 2), back.group.len);
+    try testing.expectEqual(fakeTab(1), back.group[0].tab.?);
+    try testing.expectEqual(fakeTab(3), back.group[1].tab.?);
+    try testing.expect(!back.group[0].parked);
+    const rest = f.st.undo.items[0];
+    try testing.expectEqual(fakeTab(2), rest.group[1].tab.?);
+    try testing.expect(rest.group[1].parked);
+    try testing.expect(rest.group[0].kind == .group); // inert
+}
+
+test "win32 undo: forgetting a surface drops the split entries whose snapshots hold it" {
+    var p = try Pair.init();
+    defer p.deinit();
+    var st: undo_model.Stack(Entry) = .{};
+    defer st.deinit(testing.allocator);
+    var dis: std.ArrayList(Entry) = .empty;
+    defer dis.deinit(testing.allocator);
+    // Entry about B; its snapshots hold A as well.
+    try st.push(testing.allocator, try p.entry(.close_split), &dis);
+    const held = p.sa.refs;
+
+    // A is killed (tmux kill-pane): the entry goes, and A is not kept alive.
+    try testing.expectEqual(@as(usize, 1), forgetIn(&st, testing.allocator, .{ .surface = p.sa }));
+    try testing.expectEqual(@as(usize, 0), st.undo.items.len);
+    try testing.expect(p.sa.refs < held);
+}
+
+test "win32 undo: a tab that moves or closes takes its entries along" {
+    var p = try Pair.init();
+    defer p.deinit();
+    var st: undo_model.Stack(Entry) = .{};
+    defer st.deinit(testing.allocator);
+    var dis: std.ArrayList(Entry) = .empty;
+    defer dis.deinit(testing.allocator);
+    try st.push(testing.allocator, try p.entry(.close_split), &dis);
+    try st.push(testing.allocator, .{ .kind = .new_tab, .expires_ms = 1, .window = fakeWindow(1), .tab = fakeTab(1) }, &dis);
+    try st.push(testing.allocator, .{ .kind = .new_tab, .expires_ms = 1, .window = fakeWindow(1), .tab = fakeTab(7) }, &dis);
+    const held = p.sb.refs;
+
+    try testing.expectEqual(@as(usize, 2), forgetIn(&st, testing.allocator, .{ .tab = fakeTab(1) }));
+    try testing.expectEqual(@as(usize, 1), st.undo.items.len);
+    try testing.expectEqual(fakeTab(7), st.undo.items[0].tab.?);
+    try testing.expect(p.sb.refs < held); // the parked split's snapshots are gone
 }

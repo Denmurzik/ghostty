@@ -4,8 +4,8 @@ const apprt = @import("../../../apprt.zig");
 const App = @import("../App.zig");
 const SplitLayout = @import("../SplitLayout.zig");
 const Surface = @import("../Surface.zig");
-
 const undo_actions = @import("undo_actions.zig");
+
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
     return switch (target) {
         .app => null,

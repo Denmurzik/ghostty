@@ -547,7 +547,7 @@ pub fn removeTab(self: *Window, tab: *Tab) void {
     self.tearing_down = true;
     defer self.tearing_down = was;
 
-    undo_actions.forgetTab(self.app, tab);
+    _ = undo_actions.forgetTab(self.app, tab);
     if (!self.unlinkTab(tab)) {
         // Hidden first, like `beginTeardown`: the thread joins take a while.
         _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
@@ -629,7 +629,7 @@ pub fn unparkTab(self: *Window, tab: *Tab, index: usize) error{ OutOfMemory, Not
 /// A parked tab closes for real (expiry, quit, its shell exited).
 pub fn releaseParkedTab(self: *Window, tab: *Tab) void {
     const at = self.parkedIndex(tab) orelse return;
-    undo_actions.forgetTab(self.app, tab);
+    _ = undo_actions.forgetTab(self.app, tab);
     _ = self.parked_tabs.orderedRemove(at);
     const was = self.tearing_down;
     self.tearing_down = true;
@@ -1370,7 +1370,7 @@ fn closeParkedSurface(self: *Window, surface: *Surface) void {
         tab.removeSurface(surface);
         return;
     }
-    undo_actions.forgetTab(self.app, tab);
+    _ = undo_actions.forgetTab(self.app, tab);
     self.releaseParkedTab(tab);
 }
 

@@ -163,6 +163,12 @@ pub fn rendererHealth(surface: *Surface, health: apprt.Action.Value(.renderer_he
     arm(surface.app, debounce_ms);
 }
 
+/// A surface that was out of the sweeps (a parked split) is back: if its
+/// device was lost meanwhile, the recovery runs.
+pub fn checkSurface(surface: *Surface) void {
+    if (isLost(surface)) arm(surface.app, debounce_ms);
+}
+
 fn arm(app: *App, ms: u32) void {
     if (app.recovery.armed) return;
     if (win32.user32.SetTimer(app.msg_hwnd, messages.timers.msg_window.recovery, ms, null) == 0) {

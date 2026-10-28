@@ -20,6 +20,7 @@ const title_rules = @import("title_rules.zig");
 const util = @import("util.zig");
 const geom = @import("geom.zig");
 const theme = @import("theme.zig");
+const recovery = @import("recovery.zig");
 const composition = @import("composition.zig");
 const messages = @import("messages.zig");
 const taskbar = @import("taskbar.zig");
@@ -194,6 +195,9 @@ pub fn stopIoThreads(self: *Tab) void {
 /// Destroy the tab and free it. Joins the core threads of every surface.
 pub fn destroy(self: *Tab) void {
     const alloc = self.window.app.core_app.alloc;
+    // Entries about the tab go first: their snapshots hold surfaces whose
+    // teardown still reads this tab and its window.
+    _ = undo_actions.forgetTab(self.window.app, self);
     self.stopRenderThreads();
     self.stopIoThreads();
 
@@ -311,19 +315,38 @@ pub fn parkSurface(self: *Tab, s: *Surface) ?SplitSnapshot {
     return .{ .before = before, .after = after };
 }
 
+/// The pane that takes the focus when `s` leaves the tree, as `removeSurfaceRaw`
+/// picks it.
+fn neighbourOf(self: *Tab, s: *Surface) ?*Surface {
+    const alloc = self.window.app.core_app.alloc;
+    const at = self.tree.locate(s) orelse return null;
+    const h = (focusAfterRemove(Surface.Tree, &self.tree, at, alloc) catch null) orelse return null;
+    return switch (self.tree.nodes[h.idx()]) {
+        .leaf => |v| v,
+        .split => null,
+    };
+}
+
 /// Makes `tree` the tree of the tab (undo or redo of a split); `s` is the
 /// surface that comes or goes with it, shown when `show_s`.
 pub fn swapTree(self: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void {
+    // The pane that takes the focus when `s` leaves is picked in the tree
+    // that still holds it.
+    const next_focus = if (!show_s and self.focused == s) self.neighbourOf(s) else null;
     self.replaceTree(tree);
     if (show_s) {
         s.split_parked = false;
         Inspector.parkSync(s);
         _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_SHOW);
         self.focused = s;
+        // The sweeps skipped it while it was parked.
+        theme.reportScheme(s);
+        recovery.checkSurface(s);
     } else {
         s.split_parked = true;
         _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_HIDE);
         parkOne(s);
+        if (self.focused == s) self.focused = next_focus;
     }
     const active = self.window.activeTab() == self;
     self.applyOcclusion(active);
@@ -625,6 +648,9 @@ pub fn replaceSurface(
         surface.destroy();
         return err;
     };
+    // The old pane is gone for good: snapshots that hold it would keep its
+    // process alive.
+    undo_actions.forgetSurface(self.window.app, old);
 
     const was_focused = self.focused == old;
     title_edit.cancelForSurface(self.window, old);
@@ -726,6 +752,9 @@ pub fn needsConfirmClose(self: *const Tab) bool {
 /// Move the tab to another top-level window.
 pub fn setWindow(self: *Tab, window: *Window) void {
     const from = self.window;
+    // A parked split keeps the window it was parked in and nothing sweeps it
+    // here: the undo entries of a tab that moves end.
+    if (undo_actions.forgetTab(from.app, self) > 0) log.info("undo: the tab moved to another window, its undo entries ended", .{});
     const rescale = self.window.dpi != window.dpi;
     // The progress bar of the moved surface stays on the old button otherwise.
     var moved = self.tree.iterator();

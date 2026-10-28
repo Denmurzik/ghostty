@@ -11,6 +11,7 @@ const App = @import("App.zig");
 const Chrome = @import("Chrome.zig");
 const overlay_host = @import("overlay.zig");
 const Window = @import("Window.zig");
+const Surface = @import("Surface.zig");
 const util = @import("util.zig");
 const composition = @import("composition.zig");
 const menu_theme = @import("menu_theme.zig");
@@ -356,6 +357,15 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
         else => {},
     }
     return null;
+}
+
+/// Tells `s` the colour scheme the sweeps of `schemeChanged` told the others
+/// (a split that was parked missed them).
+pub fn reportScheme(s: *Surface) void {
+    const dark = system_dark orelse return;
+    s.core().colorSchemeCallback(if (dark) .dark else .light) catch |err| {
+        log.warn("unable to report the color scheme to a surface err={}", .{err});
+    };
 }
 
 /// The system colour scheme changed (or was simulated by the test op).

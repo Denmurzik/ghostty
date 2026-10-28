@@ -20,6 +20,7 @@ const drag_ghost = @import("drag_ghost.zig");
 const tab_drag = @import("tab_drag.zig");
 const tab_menu = @import("tab_menu.zig");
 const util = @import("util.zig");
+const undo_actions = @import("actions/undo_actions.zig");
 
 const user32 = win32.user32;
 const comctl32 = win32.comctl32;
@@ -35,7 +36,6 @@ const MK_LBUTTON = 0x0001;
 const tooltip_delay_ms = 500;
 /// Widest tooltip, DIP; longer titles wrap.
 const tooltip_max_width = 600;
-const undo_actions = @import("actions/undo_actions.zig");
 
 /// A tab drag through `tab_drag.Machine`, from the press to the outcome.
 pub const Session = struct {
