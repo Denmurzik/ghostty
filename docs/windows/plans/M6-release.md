@@ -47,7 +47,7 @@ Other inputs:
 - Memory rules: speed over ceremony; style follows macOS (not relevant here except the icon).
 - Format and conventions: `docs/windows/plans/M5-windows-extras.md`, `docs/windows/plans/M5-preflight-review.md`.
 
-**Starts** when M5 is accepted (Task 20) **and** the M5 19.n batch that touches `src/build/Config.zig` (`tic`) has landed. Tasks 3, 4 and 5 touch no M5-owned file in flight and may start once M5 W8 has started. Task numbers are identities, not order: the wave table is the execution order.
+**Starts** when M5 is accepted (Task 20) **and** the M5 19.n batch that touches `src/build/Config.zig` (`tic`) has landed. Tasks 3, 4 and 5 touch no M5-owned file in flight and may start once M5 W8 has started. Task numbers are identities, not order: the wave table is the execution order. Tasks 4 and 8 also wait for the M5 bundled-ConPTY work (branch `sdd/task-m5-conpty`: `windows-conpty = bundled|inbox`, `-Dconpty-dir`) to land (R-M6-12).
 
 ## Global Constraints
 
@@ -202,14 +202,14 @@ The owner's M6 decisions (binding, not re-asked):
 - **R-M6-3 Artifacts and layout.**
   - Names: `ghostty-<version>-windows-<arch>.zip`, `ghostty-<version>-windows-<arch>-setup.exe`, `ghostty-<version>-windows-<arch>-symbols.zip`, and one `SHA256SUMS.txt` for all assets. `<arch>` is `x64` or `arm64`; `<version>` is the `-Dversion-string`.
   - The zip has one top folder `ghostty-<version>-windows-<arch>\`, so that extraction never spills files. Inside:
-    - `ghostty.exe`, `tmux.exe`, `LICENSE`, `THIRD_PARTY_NOTICES.txt` (R-M6-10), `README-windows.txt`;
+    - `ghostty.exe`, `tmux.exe`, `conpty.dll`, `OpenConsole.exe` (R-M6-12), `LICENSE`, `THIRD_PARTY_NOTICES.txt` (R-M6-10), `README-windows.txt`;
     - `share\` with the existing subfolders among `ghostty`, `terminfo`, `bash-completion`, `fish`, `zsh`, `vim`, `nvim`, `bat`, `man` (an allowlist; anything else the prefix has, e.g. Linux desktop files, is left out);
     - no `.pdb`.
   - Required, else packaging fails:
     - `share\ghostty\themes` (non-empty) and `share\ghostty\shell-integration`;
     - `share\terminfo\ghostty.terminfo` (the resources sentinel of `resourcesdir.zig`);
     - `share\terminfo\78\xterm-ghostty` (compiled, R-M5-7). Only a non-release local run may waive it with `-AllowNoTic`; `release.ps1` never does.
-  - **Release builds use** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dversion-string=<v>`, with `-Dtarget=x86_64-windows-msvc` or `-Dtarget=aarch64-windows-gnu` (`msvc` optional, R-M6-11).
+  - **Release builds use** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dversion-string=<v> -Dconpty-dir=<the arch's ConPTY dir>` (R-M6-12), with `-Dtarget=x86_64-windows-msvc` or `-Dtarget=aarch64-windows-gnu` (`msvc` optional, R-M6-11).
     - `-Dstrip=false` yields the PDBs for the M5 crash dumps, shipped only in `-symbols.zip`. It also keeps frame pointers and unwind tables, which help the dumps.
     - Cost if wrong (the Task 11 RAM/latency rows): drop to the default strip and ship no symbols.
 - **R-M6-4 Installer** (`dist/windows/installer/ghostty.iss`).
@@ -291,7 +291,7 @@ The owner's M6 decisions (binding, not re-asked):
   - `release_channel` stays `tip` for `-win.<N>` builds (semver pre-release). At this plan's base it only shows in `+version` on Windows. The M5 19.n batch 2 "update channel" item may give it a meaning; Task 1's implementer re-checks that the updater still looks only at `N` (R-M5-9a).
 - **R-M6-8 Signing hook, no certificate (gap).**
   - Artifacts are unsigned by default (DECISIONS: SmartScreen warning accepted).
-  - `release.ps1 -SignCommand '<command with {file}>'` passes through to `package.ps1`. That signs `ghostty.exe` and `tmux.exe` in the stage before zipping. It also gives ISCC `/DSign /Ssigntool=<command with $f>`, so `setup.exe` and the uninstaller (`SignedUninstaller=yes`) are signed.
+  - `release.ps1 -SignCommand '<command with {file}>'` passes through to `package.ps1`. That signs `ghostty.exe` and `tmux.exe` in the stage before zipping (never `conpty.dll`/`OpenConsole.exe`, which keep Microsoft's signature, R-M6-12). It also gives ISCC `/DSign /Ssigntool=<command with $f>`, so `setup.exe` and the uninstaller (`SignedUninstaller=yes`) are signed.
   - The PDBs still match: signing does not change the code.
   - `package.ps1 -FromZip` re-signs an existing zip without a build, for a release that was already published unsigned. The owner then uses `gh release upload --clobber` and a regenerated `SHA256SUMS.txt`.
 - **R-M6-9 What M6 does not do** (v1.0 gaps, in the CHANGELOG):
@@ -302,7 +302,7 @@ The owner's M6 decisions (binding, not re-asked):
   - jump-list removal on uninstall (Explorer drops it when the shortcut is gone; the CLI has no COM, R-M5-5).
 - **R-M6-10 Third-party notices** (owner decision 1).
   - `dist/windows/THIRD_PARTY_NOTICES.txt` ships at the zip root and in the install dir.
-  - It lists every component compiled, linked or embedded into the Windows `ghostty.exe`/`tmux.exe`, or shipped under `share` (e.g. the iTerm2 colour schemes), with its licence name and full licence text: fonts (JetBrains Mono, Nerd Fonts symbols), FreeType, HarfBuzz, zlib, libpng, oniguruma, simdutf, highway, wuffs, glslang, SPIRV-Cross, Dear ImGui, the Zig packages and the vendored `pkg/*` C sources.
+  - It lists every component compiled, linked or embedded into the Windows `ghostty.exe`/`tmux.exe`, or shipped under `share` (e.g. the iTerm2 colour schemes), with its licence name and full licence text: fonts (JetBrains Mono, Nerd Fonts symbols), FreeType, HarfBuzz, zlib, libpng, oniguruma, simdutf, highway, wuffs, glslang, SPIRV-Cross, Dear ImGui, microsoft/terminal (MIT; the bundled `conpty.dll`/`OpenConsole.exe`, R-M6-12), the Zig packages and the vendored `pkg/*` C sources.
   - Packaging fails when a `build.zig.zon` dependency is neither in the file nor in the check's exclusion list. Each exclusion carries a reason, e.g. `gtk4_layer_shell: Linux only`.
 - **R-M6-11 ARM64 release ABI is `aarch64-windows-gnu` by default** (lead, 2026-10-28; owner may overturn). Amends DECISIONS R3 (MSVC) for the ARM64 release artifacts only.
   - **Why:** the owner's VS 18 Build Tools have only the x86/x64 MSVC tools. Adding "MSVC ARM64 build tools" needs admin. `aarch64-windows-gnu` needs nothing extra, because Zig ships the MinGW-w64 libraries. M3–M5 proved it: the cross-build passed in each acceptance (M3 after `117aa103b`).
@@ -315,6 +315,16 @@ The owner's M6 decisions (binding, not re-asked):
     - **C runtime.** MinGW instead of the VC runtime for the C dependencies. `tmux.exe` has no libc (`link_libc = false`) and is unaffected.
     - **Checks.** The ARM64 test exe (`-Arm64TestExe`) uses the same ABI as the release, so the owner's device run tests what ships. The VersionInfo and import checks of `package.ps1` apply unchanged; the `dumpbin` import list is still readable.
   - **Cost if wrong:** add the VS component (admin, one time) and pass `-Arm64Abi msvc`.
+- **R-M6-12 Bundled ConPTY** (owner approval 2026-10-28; the feature itself is M5 work on `sdd/task-m5-conpty`: `windows-conpty = bundled|inbox`, build option `-Dconpty-dir`).
+  - **What ships.** `conpty.dll` and `OpenConsole.exe` from NuGet `Microsoft.Windows.Console.ConPTY` **1.25.260930003** (MIT, signed by Microsoft) sit next to `ghostty.exe`, per arch (x64 bits in the x64 zip/installer, arm64 bits in the arm64 ones). They are installed and uninstalled like the other files (the stage is the installer's source).
+  - **Where they come from.** `release.ps1 -ConptyPackage <nupkg or extracted dir>` (required) gives each build `-Dconpty-dir=<arch dir>`. `package.ps1` copies both files from `<Prefix>\bin`.
+  - **Integrity.** The package version is checked. Both files of both arches must have `Get-AuthenticodeSignature` = `Valid` with a Microsoft signer, in the preflight and again in the `package.ps1` verification. The SHA-256 of each file is recorded in `release.log` and the notes.
+  - **Signing.** `-SignCommand` never touches them (Microsoft's signature stays).
+  - **Imports.** The `dumpbin` check of `ghostty.exe` is unchanged: ConPTY is loaded at runtime, not imported. The M5 conpty task owns that rule.
+  - **Notices.** `THIRD_PARTY_NOTICES.txt` has a `microsoft/terminal` section with the MIT text (R-M6-10, Task 13); the exclusion check does not see NuGet packages, so Task 13 adds this section by hand.
+  - **README.** `README-windows.txt` names both files and the `windows-conpty = inbox` fallback.
+  - **Budget.** `OpenConsole.exe` is a separate process per surface. It is outside `ghostty.exe`'s Private Bytes but is reported in the Task 11 RAM rows, next to the inbox `conhost.exe` value.
+  - **Tests.** `package-portable.ps1` (Task 6) asserts both files in the extracted folder. With the config default from the M5 task, the session runs on the bundled `OpenConsole.exe`, taken from the extracted folder (process path check).
 
 ## Waves (parallelism)
 
@@ -360,7 +370,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - `release.ps1` (Task 8):
   ```
   release.ps1 -N <int> [-Rehearsal] [-V1] [-OutDir <dir>] [-Force] [-SignCommand '<cmd {file}>']
-              [-Arm64Abi gnu|msvc (default gnu)] [-Arm64TestExe] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
+              [-Arm64Abi gnu|msvc (default gnu)] -ConptyPackage <nupkg or extracted dir> [-Arm64TestExe] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
   ```
   - `-SkipTests` is refused without `-Rehearsal`.
   - `-DryRun` prints every step and command line and runs nothing heavy (preflight checks only).
@@ -476,7 +486,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 **Files:** Create `dist/windows/package.ps1` (interface above) and `dist/windows/README-windows.txt`.
 
 **What `package.ps1` does, in order:**
-1. **Stage.** `<OutDir>\stage\ghostty-<v>-windows-<arch>\` from `-Prefix` (`bin\ghostty.exe`, `bin\tmux.exe`, the `share` allowlist of R-M6-3, repo `LICENSE`, `README-windows.txt`) or from `-FromZip` (extract, then the same checks).
+1. **Stage.** `<OutDir>\stage\ghostty-<v>-windows-<arch>\` from `-Prefix` (`bin\ghostty.exe`, `bin\tmux.exe`, `bin\conpty.dll` and `bin\OpenConsole.exe` (R-M6-12; required unless `-NoConpty`, which `release.ps1` never passes), the `share` allowlist of R-M6-3, repo `LICENSE`, `README-windows.txt`) or from `-FromZip` (extract, then the same checks).
 2. **Verify.** Each failure prints `package: FAIL <check>` and exits 1:
    - the required files of R-M6-3;
    - VersionInfo of both exes: ProductVersion = `-Version`; FilePrivatePart = `N` or 0; ProductName as R-M6-2;
@@ -558,6 +568,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - Launch the extracted `ghostty.exe --class=<class>` with the sandbox env and `command = direct:cmd.exe /k` in the sandbox config. In the shell, through the M3 typed-input helper (oracle: the IPC `state`/screen text, as in M5 `term-terminfo.ps1`):
   - `echo %GHOSTTY_RESOURCES_DIR%` → under the extracted folder;
   - `echo %TERM%` → `xterm-ghostty`;
+  - `conpty.dll` and `OpenConsole.exe` are in the extracted folder. When `windows-conpty` resolves to `bundled`, the child `OpenConsole.exe` runs from that folder (`Win32_Process.ExecutablePath`; R-M6-12);
   - `where tmux` → first line is the extracted `tmux.exe`.
 - Close, and assert that the process tree is gone.
 - Moved share: rename `share` to `share.off`, launch → `TERM=xterm-256color` and one warning line in the sandbox log, no crash; rename it back.
@@ -619,8 +630,9 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
      - ISCC found (`installer\build.ps1 -Probe`);
      - the VS ARM64 MSVC libraries found through `vswhere -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64` (only with `-Arm64Abi msvc`);
      - free physical memory ≥ 3 GB (`Win32_OperatingSystem.FreePhysicalMemory`).
+     - `-ConptyPackage` holds `Microsoft.Windows.Console.ConPTY` 1.25.260930003 with `conpty.dll` and `OpenConsole.exe` for x64 and arm64, each `Get-AuthenticodeSignature` = Valid with a Microsoft signer; a `.nupkg` is extracted (it is a zip) into `<OutDir>\conpty\`. No network: the owner downloads the package once (RELEASING.md 1);
   2. **Unit tests:** the three groups of R-M6-6, then `test-tmux-shim`, each as `bash <lock> -- <zig> build test -j6 …` with a 1500 s timeout and the RAM check before it. The pass/skip/fail counts are parsed from the output and written to `tests.txt`.
-  3. **Build x64:** `bash <lock> -- <zig> build -j6` with the R-M6-3 flags, `--prefix <OutDir>\prefix-x64`.
+  3. **Build x64:** `bash <lock> -- <zig> build -j6` with the R-M6-3 flags, `--prefix <OutDir>\prefix-x64`, `-Dconpty-dir=<the package's x64 dir>`. The arm64 build gets the arm64 dir.
   4. **Build arm64:** the same with `aarch64-windows-<abi>` and `--prefix <OutDir>\prefix-arm64`. With `-Arm64TestExe`, then the ARM64 test exe of R-M6-6, never run, zipped as `ghostty-<v>-windows-arm64-tests.zip`. It is not in `SHA256SUMS.txt` or `publish.txt`.
   5. **Package:** `package.ps1 -Prefix … -Installer -Symbols [-SignCommand …]` per arch, into `<OutDir>`.
   6. **Check:** `<OutDir>\prefix-x64\bin\ghostty.exe +version` prints the version.
@@ -631,7 +643,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   `-DryRun` runs step 1 and prints steps 2–9 with their exact command lines.
 - `dist/windows/release-notes.md`: a template with `{{VERSION}}`, `{{TAG}}`, `{{V1_LINE}}`, `{{TESTS}}`, `{{ARM64_LINE}}`, `{{SHA256SUMS}}`.
 - `docs/windows/RELEASING.md`, the owner's runbook:
-  1. One-time setup: `gh auth login` (Inno Setup is already installed; the VS ARM64 component only for `-Arm64Abi msvc`, needs admin).
+  1. One-time setup: `gh auth login`; download `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (`.nupkg`) for `-ConptyPackage` (Inno Setup is already installed; the VS ARM64 component only for `-Arm64Abi msvc`, needs admin).
   2. `git fetch --tags origin`; the next `N`; the CHANGELOG entry.
   3. `PS dist/windows/release.ps1 -N <N> [-V1]`, about 1–2 h with RAM checks; do not run other builds meanwhile.
   4. Smoke the local artifacts (the owner part of § M6 exit checklist).
@@ -674,7 +686,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   - §3: release flags with `-Dstrip=false`;
   - §16 R15/R16: the outcome;
   - §17 M6: plan link, then "done" in Task 11;
-  - §18: R-M6-1…11.
+  - §18: R-M6-1…12.
 - `docs/windows/DECISIONS.md`, "Release": one dated line, "2026-10-28 (owner): releases are built locally with `dist/windows/release.ps1`; GitHub Actions is optional and manual-only".
 - `docs/windows/feature-checklist.md`: rows for zip, installer, version resource, release script; every row `done`, `manual` or a gap.
 - `test/windows/README.md`: the M6 scenarios and their env (`GHOSTTY_E2E_PACKAGE`, `GHOSTTY_E2E_SETUP`) and the installer safety rule.
@@ -808,7 +820,8 @@ Owner sign-off: name, date, tag, PASS/FAIL per line, decision (publish / fix and
   | **Local** release script: builds both, headless unit filters through the lock, zip + symbols + installers, SHA256, tag rules, printed `git tag`/`git push`/`gh release create … --prerelease --draft` | 8 (R-M6-6/7), 9 |
   | Workflow `workflow_dispatch` only, nothing depends on it; free public runners as an overturnable ruling | R-M6-6, Task 12 |
   | ARM64 cross-built locally; ARM64 tests an owner check, non-blocking | R-M6-6, 8 (`-Arm64TestExe`), exit checklist 7 |
-  | Third-party notices in zip + installer | 13 (R-M6-10) |
+  | Third-party notices in zip + installer (incl. microsoft/terminal for the bundled ConPTY) | 13 (R-M6-10) |
+  | Bundled ConPTY (`conpty.dll`, `OpenConsole.exe`) per arch, `-Dconpty-dir`, next to `ghostty.exe` in zip + installer | R-M6-12; 4, 6, 8 |
   | ISCC found in the owner's per-user path or Program Files, clear failure otherwise | 5 (`build.ps1 -Probe`), 8 (preflight) |
   | `GITHUB_TOKEN` only; signing hook, owner signs manually (gap) | R-M6-8, 4, 5, 8 |
   | Per-user, no admin; Start shortcut with AUMID | 5 (R-M6-4) |
