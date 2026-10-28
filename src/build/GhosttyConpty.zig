@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Config = @import("Config.zig");
+const conpty_pins = @import("conpty_pins.zig");
 
 /// The package's name for the target architecture, null when it ships none.
 pub fn arch(cpu: std.Target.Cpu.Arch) ?[]const u8 {
@@ -44,6 +45,21 @@ pub fn install(b: *std.Build, cfg: *const Config) void {
             std.log.warn("bundled ConPTY: {s}/{s} is missing: ghostty.exe will use the inbox ConPTY (no Kitty graphics, no SGR 58)", .{ prefix, f[0] });
             return;
         };
+    }
+
+    // Whatever directory it is, the files must be the pinned ones.
+    const pin_path = b.root.joinString(b.allocator, "vendor/conpty/README.md") catch @panic("OOM");
+    const readme = base.readFileAlloc(io, pin_path, b.allocator, .limited(1 << 20)) catch |err|
+        std.process.fatal("bundled ConPTY: cannot read the pins in {s}: {t}", .{ pin_path, err });
+    for (files, [_][]const u8{ "conpty.dll", "OpenConsole.exe" }) |f, name| {
+        const key = b.fmt("{s}/{s}", .{ a, name });
+        const pin = conpty_pins.pinFor(readme, key) orelse
+            std.process.fatal("bundled ConPTY: vendor/conpty/README.md pins no hash for {s}", .{key});
+        const path = b.pathJoin(&.{ prefix, f[0] });
+        const bytes = base.readFileAlloc(io, path, b.allocator, .limited(64 << 20)) catch |err|
+            std.process.fatal("bundled ConPTY: cannot read {s}: {t}", .{ path, err });
+        if (!conpty_pins.matches(bytes, pin))
+            std.process.fatal("bundled ConPTY: {s} does not match the SHA-256 pinned in vendor/conpty/README.md ({s})", .{ path, pin });
     }
 
     for (files) |f| {
