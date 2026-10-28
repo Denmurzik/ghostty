@@ -339,6 +339,10 @@ const WindowsPty = struct {
     pseudo_console: windows.HPCON,
     size: winsize,
 
+    /// The ConPTY that created `pseudo_console` (inbox or bundled); its
+    /// resize and close must come from the same DLL.
+    conpty: *const windows.ConPty,
+
     /// Set once the pseudo console has been (or is being) closed, so that
     /// `closeConsoleAsync` is idempotent and `deinit` doesn't close it twice.
     console_closed: std.atomic.Value(bool),
@@ -522,6 +526,7 @@ const WindowsPty = struct {
         }
         if (result != windows.S_OK) return error.Unexpected;
 
+        pty.conpty = conpty;
         pty.size = size;
         pty.console_closed = .init(false);
         return pty;
@@ -532,7 +537,7 @@ const WindowsPty = struct {
         _ = windows.exp.kernel32.CloseHandle(self.in_pipe);
         _ = windows.exp.kernel32.CloseHandle(self.out_pipe);
         if (!self.console_closed.load(.acquire)) {
-            windows.conpty().close(self.pseudo_console);
+            self.conpty.close(self.pseudo_console);
         }
         self.* = undefined;
     }
@@ -559,16 +564,16 @@ const WindowsPty = struct {
         if (self.console_closed.swap(true, .acq_rel)) return;
 
         const hpc = self.pseudo_console;
-        const thread = std.Thread.spawn(thread_spawn_config, closeConsole, .{hpc}) catch |err| {
+        const thread = std.Thread.spawn(thread_spawn_config, closeConsole, .{ self.conpty, hpc }) catch |err| {
             log.warn("error spawning pseudo console close thread err={}, closing inline", .{err});
-            closeConsole(hpc);
+            closeConsole(self.conpty, hpc);
             return;
         };
         thread.detach();
     }
 
-    fn closeConsole(hpc: windows.HPCON) void {
-        windows.conpty().close(hpc);
+    fn closeConsole(conpty: *const windows.ConPty, hpc: windows.HPCON) void {
+        conpty.close(hpc);
     }
 
     pub const GetSizeError = error{};
@@ -589,7 +594,7 @@ const WindowsPty = struct {
             return;
         }
 
-        const result = windows.conpty().resize(
+        const result = self.conpty.resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );

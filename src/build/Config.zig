@@ -45,6 +45,11 @@ lib_version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 /// the executable alone.
 installed_exe_path: ?[]const u8 = null,
 
+/// Windows: where `conpty.dll` and `OpenConsole.exe` (installed next to
+/// `ghostty.exe`) come from, overriding `vendor/conpty`: the same layout
+/// (`<arch>/<file>`) or an unpacked `Microsoft.Windows.Console.ConPTY` package.
+conpty_dir: ?[]const u8 = null,
+
 /// Binary properties
 pie: bool = false,
 strip: bool = false,
@@ -391,6 +396,15 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             return error.InvalidInstalledExePath;
         }
     }
+
+    config.conpty_dir = b.option(
+        []const u8,
+        "conpty-dir",
+        "Windows: overrides vendor/conpty as the source of the bundled ConPTY " ++
+            "(a dir laid out like it, or an unpacked Microsoft.Windows.Console.ConPTY " ++
+            "package). conpty.dll and OpenConsole.exe for the target (x64 or arm64) " ++
+            "are installed next to ghostty.exe; missing files only warn.",
+    );
 
     //---------------------------------------------------------------
     // Binary Properties

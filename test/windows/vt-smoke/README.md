@@ -24,8 +24,9 @@ exec sleep 600
 ```
 
 - `requires` names the task or decision that makes the case meaningful: `T5`
-  font fallback, `T7` custom shaders, `T15` transparency, `L1` ConPTY
-  passthrough (APC/Kitty graphics and SGR 58 do not survive the inbox ConPTY).
+  font fallback, `T7` custom shaders, `T15` transparency, `L1` the bundled
+  ConPTY (APC/Kitty graphics and SGR 58 do not survive the inbox ConPTY; every
+  build installs `conpty.dll` and `OpenConsole.exe` from `vendor/conpty`).
   A case with a requirement SKIPs until its reference PNG exists; generate it
   after the prerequisite landed with `-Only <case> -Update`.
 - `extra-config` lines are appended to the case's config; `@FIXTURES@` (also in

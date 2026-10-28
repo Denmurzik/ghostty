@@ -1,8 +1,9 @@
 #!/bin/bash
 # vts: requires=L1 extra-config=
 # underline-colors: underline colour (SGR 58, semicolon and 256 forms) with every underline style. The inbox ConPTY
-# drops or mangles SGR 58 (the 2026-10-27 reference run showed no line at all), so this case SKIPs until a reference
-# exists (decision L1: ConPTY passthrough mode).
+# drops or mangles SGR 58; the bundled one (`windows-conpty = bundled`, installed by every build) forwards it
+# unchanged (conpty-probe/RESULT.md). GUI check PENDING: SKIPs until its reference is generated with
+# `-Only underline-colors -Update`.
 printf '\e[2J\e[H\e[?25l'
 printf 'underline-colors\n\n'
 printf '\e[4:1;58;2;255;0;0msingle red\e[0m  \e[4:2;58;2;0;255;0mdouble green\e[0m  \e[4:3;58;2;255;128;0mcurly orange\e[0m\n'

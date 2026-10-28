@@ -24,11 +24,11 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | SGR: truecolor (semicolon and colon forms) | M1 | vt-smoke/sgr-truecolor | done |
 | SGR: bold, dim, italic, inverse, invisible, strikethrough, overline | M1 | vt-smoke/styles | done |
 | SGR: underline styles (single, double, curly, dotted, dashed) | M1 | vt-smoke/underlines | done |
-| SGR 58: underline colour | M1 | vt-smoke/underline-colors (case needs L1; the inbox ConPTY drops it) | gap (L1, see notes) |
+| SGR 58: underline colour | M1 | headless conpty-probe (bundled ConPTY forwards it unchanged); vt-smoke/underline-colors (GUI check pending) | pending (bundled ConPTY, see notes) |
 | OSC 8 hyperlinks (sequence arrives, text intact) | M1 | vt-smoke/osc8-link | done |
 | OSC 52 clipboard (write, read, confirmation, escaping) | M1 | unit: clipboard.zig | done |
 | Kitty keyboard protocol | M1 | core encoder: upstream `input` tests; no Windows end-to-end check | manual |
-| Kitty graphics protocol | M3 | vt-smoke/kitty-image (case needs L1; the inbox ConPTY drops APC) | gap (L1, see notes) |
+| Kitty graphics protocol | M3 | headless conpty-probe (bundled ConPTY forwards the APC); vt-smoke/kitty-image (GUI check pending) | pending (bundled ConPTY, see notes) |
 | Background image | M3 | vt-smoke/bg-image, e2e/device-recover (re-uploaded after a device loss) | done |
 | Custom shaders (GLSL to HLSL) | M3 | e2e/custom-shader, vt-smoke/custom-shader, unit: shadertoy.zig | done |
 | Fonts: embedded JetBrains Mono, size, metrics | M1 | e2e/render | done |
@@ -105,13 +105,13 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 
 ## Notes
 
-- **Kitty graphics (gap, provisional, owner-approved).** The inbox ConPTY drops APC sequences, so the Kitty graphics
-  APC never reaches the terminal (L1 ruling, M3 Task 28 probe). The `kitty-image` case exists and SKIPs until a
-  reference PNG can be produced; the reference step is dropped for now. The gap closes if L1 enables
-  a newer bundled `conpty.dll` + OpenConsole (flag 8 does not rescue it, SPEC 18.33).
-- **SGR 58 (gap under L1).** The first vt-smoke run showed that underline colours (`CSI 58`) are lost or mangle the
-  style on the inbox ConPTY: `4:1;58;2;r;g;b` produced no underline at all, `4:3;58;5;196` a white one. The case
-  `underline-colors` waits for L1 like `kitty-image`.
+- **Kitty graphics and SGR 58 (bundled ConPTY, GUI check pending).** The inbox ConPTY drops the Kitty graphics APC
+  and mangles SGR 58 (`58;5;196` turns into blink), with or without flag 8 (M3 Task 28 probe, SPEC 18.33). The
+  bundled `conpty.dll` + `OpenConsole.exe` (`Microsoft.Windows.Console.ConPTY` 1.25.260930003, MIT) forwards both
+  byte for byte, as the headless probe shows (`test/windows/conpty-probe/RESULT.md`, "Bundled ConPTY"). Every Windows
+  build installs both files from `vendor/conpty` next to `ghostty.exe`, and Ghostty uses them by default
+  (`windows-conpty = bundled`; inbox only as an override or when the files are missing). Kitty graphics settings keep
+  the upstream defaults. Open item: the `kitty-image` and `underline-colors` references (GUI run).
 - **OSC 8 arrives** through ConPTY (the `osc8-link` case shows the text intact and no stray bytes); hover underline
   and opening are covered by `e2e/link-hover-open`.
 - **Manual rows (owner checks, no automation).** Ligatures (core shaper, no Windows path), the Kitty keyboard protocol end

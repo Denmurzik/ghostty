@@ -56,3 +56,7 @@ src/font/nerd_font_attributes.zig linguist-generated=true
 src/font/nerd_font_codepoint_tables.py linguist-generated=true
 src/font/res/** linguist-vendored
 src/terminal/res/** linguist-vendored
+
+# Vendored binaries (bundled ConPTY)
+vendor/conpty/**/*.dll binary
+vendor/conpty/**/*.exe binary

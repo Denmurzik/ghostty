@@ -628,12 +628,23 @@ test "windows diag env: ignored when elevated" {
     try testing.expect(diagnosticEnvFor(false, testing.allocator, "GHOSTTY_NO_SUCH_VARIABLE_FOR_TEST") == null);
 }
 
-/// The ConPTY entry points the pty uses, plus the flags `CreatePseudoConsole`
-/// gets. Diagnostic overrides (latency measurements, not configuration):
+/// The ConPTY entry points a pty uses, plus the flags `CreatePseudoConsole`
+/// gets. Two sources, picked by `windows-conpty` (`setConptyBundled`):
+///
+/// - inbox: kernel32, the system's conhost.
+/// - bundled: `conpty.dll` next to `ghostty.exe`, which starts the
+///   `OpenConsole.exe` next to it (the `Microsoft.Windows.Console.ConPTY`
+///   package, the console Windows Terminal ships). It forwards what the inbox
+///   console drops (Kitty graphics APC, SGR 58), see
+///   test/windows/conpty-probe/RESULT.md. Missing or unloadable files fall
+///   back to inbox with one log line.
+///
+/// Diagnostic overrides (latency measurements, not configuration):
 /// `GHOSTTY_WIN32_CONPTY_FLAGS=<u32>` replaces the flags (0 otherwise) and
 /// `GHOSTTY_WIN32_CONPTY_DLL=<path to conpty.dll>` (Debug builds only) loads the
 /// three functions from that DLL (next to its `OpenConsole.exe`) instead of
-/// kernel32. Any failure falls back to kernel32. Elevated processes ignore both.
+/// kernel32, whatever `windows-conpty` says. Any failure falls back to
+/// kernel32. Elevated processes ignore both.
 pub const ConPty = struct {
     pub const CreateFn = *const fn (COORD, HANDLE, HANDLE, DWORD, *HPCON) callconv(.winapi) HRESULT;
     pub const ResizeFn = *const fn (HPCON, COORD) callconv(.winapi) HRESULT;
@@ -647,25 +658,88 @@ pub const ConPty = struct {
     pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
 };
 
-var conpty_state: ConPty = undefined;
-var conpty_ready: std.atomic.Value(bool) = .init(false);
+/// Which ConPTY a new pty gets.
+pub const ConptySource = enum { inbox, bundled, dll_override };
+
+pub fn conptySource(o: struct {
+    /// `GHOSTTY_WIN32_CONPTY_DLL` was loaded (Debug builds).
+    dll_override: bool,
+    /// `windows-conpty = bundled`.
+    bundled_wanted: bool,
+    /// The bundled pair was found and loaded.
+    bundled_loaded: bool,
+}) ConptySource {
+    if (o.dll_override) return .dll_override;
+    if (o.bundled_wanted and o.bundled_loaded) return .bundled;
+    return .inbox;
+}
+
+pub const BundledFiles = enum { present, no_dll, no_console };
+
+/// Whether `dir` holds both files of the bundled ConPTY.
+pub fn bundledFiles(alloc: std.mem.Allocator, dir: []const u8) BundledFiles {
+    inline for (.{ .{ "conpty.dll", BundledFiles.no_dll }, .{ "OpenConsole.exe", BundledFiles.no_console } }) |f| {
+        if (!isFile(alloc, dir, f[0])) return f[1];
+    }
+    return .present;
+}
+
+fn isFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) bool {
+    const path = std.fs.path.join(alloc, &.{ dir, name }) catch return false;
+    defer alloc.free(path);
+    const path_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, path) catch return false;
+    defer alloc.free(path_w);
+    const attrs = GetFileAttributesW(path_w.ptr);
+    return attrs != INVALID_FILE_ATTRIBUTES and attrs & FILE_ATTRIBUTE_DIRECTORY == 0;
+}
+
+var conpty_inbox: ConPty = undefined;
+var conpty_bundled: ConPty = undefined;
+var conpty_inbox_ready = false;
+var conpty_dll_override = false;
+var conpty_bundled_state: enum { untried, loaded, unavailable } = .untried;
+var conpty_bundled_wanted: std.atomic.Value(bool) = .init(true);
 var conpty_mutex: std.Io.Mutex = .init;
 
-/// Resolved once; the first call must come before the pty is used by
-/// several threads (`Pty.open` does).
-pub fn conpty() *const ConPty {
-    if (conpty_ready.load(.acquire)) return &conpty_state;
+/// `windows-conpty`: the apprt sets it from the config. Takes effect for
+/// ptys opened afterwards; the bundled DLL is loaded the first time a pty
+/// wants it and stays loaded.
+pub fn setConptyBundled(wanted: bool) void {
+    conpty_bundled_wanted.store(wanted, .release);
+}
 
+/// The ConPTY for a new pty. The pty keeps the pointer: its resize and
+/// close must go to the same DLL as its create.
+pub fn conpty() *const ConPty {
     const global = @import("../global.zig");
     const io = global.io();
     conpty_mutex.lockUncancelable(io);
     defer conpty_mutex.unlock(io);
-    if (conpty_ready.load(.acquire)) return &conpty_state;
 
+    if (!conpty_inbox_ready) {
+        resolveInbox(&conpty_inbox);
+        conpty_inbox_ready = true;
+    }
+    const wanted = conpty_bundled_wanted.load(.acquire);
+    if (wanted and !conpty_dll_override and conpty_bundled_state == .untried) {
+        conpty_bundled = conpty_inbox;
+        conpty_bundled_state = if (loadBundled(&conpty_bundled)) .loaded else .unavailable;
+    }
+    return switch (conptySource(.{
+        .dll_override = conpty_dll_override,
+        .bundled_wanted = wanted,
+        .bundled_loaded = conpty_bundled_state == .loaded,
+    })) {
+        .bundled => &conpty_bundled,
+        .inbox, .dll_override => &conpty_inbox,
+    };
+}
+
+fn resolveInbox(api: *ConPty) void {
     const log = std.log.scoped(.conpty);
-    const alloc = global.alloc();
+    const alloc = @import("../global.zig").alloc();
     const k32 = exp.kernel32;
-    var api: ConPty = .{
+    api.* = .{
         .create = &k32.CreatePseudoConsole,
         .resize = &k32.ResizePseudoConsole,
         .close = &k32.ClosePseudoConsole,
@@ -685,13 +759,11 @@ pub fn conpty() *const ConPty {
     if (builtin.mode == .debug) {
         if (diagnosticEnv(alloc, "GHOSTTY_WIN32_CONPTY_DLL")) |path| {
             defer alloc.free(path);
-            loadDll(path, &api) catch |err| log.warn("conpty dll {s} not used err={}, using kernel32", .{ path, err });
+            if (loadDll(path, api)) {
+                conpty_dll_override = true;
+            } else |err| log.warn("conpty dll {s} not used err={}, using kernel32", .{ path, err });
         }
     }
-
-    conpty_state = api;
-    conpty_ready.store(true, .release);
-    return &conpty_state;
 }
 
 fn loadDll(path: []const u8, api: *ConPty) !void {
@@ -702,15 +774,61 @@ fn loadDll(path: []const u8, api: *ConPty) !void {
 
     // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the DLL's own directory is searched
     // for its dependencies; it needs an absolute path.
-    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x100;
-    const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800;
     const module = exp.kernel32.LoadLibraryExW(
         path_w.ptr,
         null,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
     ) orelse return unexpectedError(GetLastError());
+    try bindConpty(module, api);
+    log.info("conpty functions from {s}", .{path});
+}
 
-    // A DLL that lacks an export is not kept loaded.
+const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x100;
+const LOAD_LIBRARY_SEARCH_APPLICATION_DIR = 0x200;
+const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800;
+
+/// The bundled pair next to `ghostty.exe`; false (after one log line) when
+/// it is missing or does not load.
+fn loadBundled(api: *ConPty) bool {
+    const log = std.log.scoped(.conpty);
+    const global = @import("../global.zig");
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executableDirPath(global.io(), &dir_buf) catch |err| {
+        log.info("windows-conpty = bundled, but the exe directory is unknown err={}; using the inbox ConPTY", .{err});
+        return false;
+    };
+    const dir = dir_buf[0..n];
+    switch (bundledFiles(global.alloc(), dir)) {
+        .present => {},
+        .no_dll, .no_console => |missing| {
+            log.info("windows-conpty = bundled, but {s} is not next to ghostty.exe; using the inbox ConPTY", .{
+                if (missing == .no_dll) "conpty.dll" else "OpenConsole.exe",
+            });
+            return false;
+        },
+    }
+
+    // By name from the application directory only: no PATH, no current
+    // directory (DLL planting). System32 serves its API-set dependencies.
+    const module = exp.kernel32.LoadLibraryExW(
+        std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll"),
+        null,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+    ) orelse {
+        log.warn("windows-conpty = bundled, but conpty.dll did not load err={d}; using the inbox ConPTY", .{@backingInt(GetLastError())});
+        return false;
+    };
+    bindConpty(module, api) catch |err| {
+        log.warn("windows-conpty = bundled, but conpty.dll is not usable err={}; using the inbox ConPTY", .{err});
+        return false;
+    };
+    log.info("conpty: bundled OpenConsole from {s}", .{dir});
+    return true;
+}
+
+/// Takes the three functions from `module`; a DLL that lacks one is not
+/// kept loaded.
+fn bindConpty(module: HANDLE, api: *ConPty) !void {
     errdefer _ = exp.kernel32.FreeLibrary(module);
     const create = exp.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse return error.MissingExport;
     const resize = exp.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse return error.MissingExport;
@@ -718,5 +836,41 @@ fn loadDll(path: []const u8, api: *ConPty) !void {
     api.create = @ptrCast(@alignCast(create));
     api.resize = @ptrCast(@alignCast(resize));
     api.close = @ptrCast(@alignCast(close));
-    log.info("conpty functions from {s}", .{path});
+}
+
+test "windows conpty: source" {
+    const testing = std.testing;
+    try testing.expectEqual(ConptySource.bundled, conptySource(.{ .dll_override = false, .bundled_wanted = true, .bundled_loaded = true }));
+    // Missing or unloadable files: inbox.
+    try testing.expectEqual(ConptySource.inbox, conptySource(.{ .dll_override = false, .bundled_wanted = true, .bundled_loaded = false }));
+    // `windows-conpty = inbox` wins over a loaded pair.
+    try testing.expectEqual(ConptySource.inbox, conptySource(.{ .dll_override = false, .bundled_wanted = false, .bundled_loaded = true }));
+    // The diagnostic DLL wins over everything.
+    try testing.expectEqual(ConptySource.dll_override, conptySource(.{ .dll_override = true, .bundled_wanted = true, .bundled_loaded = true }));
+    try testing.expectEqual(ConptySource.dll_override, conptySource(.{ .dll_override = true, .bundled_wanted = false, .bundled_loaded = false }));
+}
+
+test "windows conpty: bundled files" {
+    const testing = std.testing;
+    const io = testing.io;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPathFile(io, ".", &dir_buf);
+    const dir = dir_buf[0..n];
+
+    try testing.expectEqual(BundledFiles.no_dll, bundledFiles(alloc, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "conpty.dll", .data = "" });
+    try testing.expectEqual(BundledFiles.no_console, bundledFiles(alloc, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "OpenConsole.exe", .data = "" });
+    try testing.expectEqual(BundledFiles.present, bundledFiles(alloc, dir));
+
+    // A directory of that name is not the console.
+    try tmp.dir.createDir(io, "d", .default_dir);
+    try tmp.dir.createDir(io, "d/OpenConsole.exe", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "d/conpty.dll", .data = "" });
+    const sub = try std.fs.path.join(alloc, &.{ dir, "d" });
+    defer alloc.free(sub);
+    try testing.expectEqual(BundledFiles.no_console, bundledFiles(alloc, sub));
 }

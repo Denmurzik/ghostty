@@ -1,7 +1,8 @@
 #!/bin/bash
 # vts: requires=L1 extra-config=
-# kitty-image: Kitty graphics, file transmission of the 16x16 fixture. The inbox ConPTY drops APC (lead decision L1),
-# so this case SKIPs until a reference exists (provisional, owner-approved gap in docs/windows/feature-checklist.md).
+# kitty-image: Kitty graphics, file transmission of the 16x16 fixture. The inbox ConPTY drops APC; the bundled one
+# (`windows-conpty = bundled`, installed by every build) forwards it (conpty-probe/RESULT.md). GUI check PENDING:
+# SKIPs until its reference is generated with `-Only kitty-image -Update`.
 printf '\e[2J\e[H\e[?25l'
 printf 'kitty-image\n\n'
 img=$(printf '%s' "@FIXTURES@/kitty-16.png" | base64 | tr -d '\n')

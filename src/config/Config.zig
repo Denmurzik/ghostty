@@ -3898,6 +3898,24 @@ else
 /// This only applies to Windows.
 @"windows-jump-list": bool = true,
 
+/// Which pseudo console (ConPTY) runs the programs in a terminal.
+///
+///   * `bundled` (the default) - the `conpty.dll` and `OpenConsole.exe`
+///     shipped next to `ghostty.exe`, the newer console from Microsoft that
+///     Windows Terminal uses. It passes Kitty graphics, underline colours
+///     (SGR 58) and other sequences through to Ghostty unchanged. When the
+///     files are missing or fail to load, Ghostty logs one line and uses
+///     `inbox`.
+///
+///   * `inbox` - the console built into Windows (`conhost.exe`). It drops
+///     Kitty graphics and underline colours.
+///
+/// The setting is read when a surface starts, so a reload affects new
+/// surfaces only.
+///
+/// This only applies to Windows.
+@"windows-conpty": WindowsConpty = .bundled,
+
 /// When enabled, the full GTK titlebar is displayed instead of your window
 /// manager's simple titlebar. The behavior of this option will vary with your
 /// window manager.
@@ -9495,6 +9513,12 @@ pub const WindowsSingleInstance = enum {
     false,
 };
 
+/// See windows-conpty
+pub const WindowsConpty = enum {
+    bundled,
+    inbox,
+};
+
 /// See gtk-tabs-location
 pub const GtkTabsLocation = enum {
     top,
@@ -11602,6 +11626,29 @@ test "windows config: M5 keys default" {
     defer cfg.deinit();
     try testing.expect(!cfg.@"windows-tmux-external");
     try testing.expect(cfg.@"windows-jump-list");
+}
+
+test "windows config: windows-conpty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expectEqual(WindowsConpty.bundled, cfg.@"windows-conpty");
+
+    var it: TestIterator = .{ .data = &.{"--windows-conpty=inbox"} };
+    try cfg.loadIter(alloc, &it);
+    try testing.expectEqual(WindowsConpty.inbox, cfg.@"windows-conpty");
+    try testing.expectEqual(@as(usize, 0), cfg._diagnostics.items().len);
+
+    var back: TestIterator = .{ .data = &.{"--windows-conpty=bundled"} };
+    try cfg.loadIter(alloc, &back);
+    try testing.expectEqual(WindowsConpty.bundled, cfg.@"windows-conpty");
+
+    // An unknown value keeps the last one and is reported.
+    var bad: TestIterator = .{ .data = &.{"--windows-conpty=openconsole"} };
+    try cfg.loadIter(alloc, &bad);
+    try testing.expectEqual(WindowsConpty.bundled, cfg.@"windows-conpty");
+    try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
 }
 
 test "windows config: --profile is not a config key" {

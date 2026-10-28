@@ -223,6 +223,7 @@ pub fn build(b: *std.Build) !void {
             if (i18n) |v| v.install();
             if (config.target.result.os.tag == .windows and config.app_runtime == .win32) {
                 tmux_shim.install();
+                buildpkg.GhosttyConpty.install(b, &config);
             }
         }
     } else if (!config.emit_lib_vt) {
