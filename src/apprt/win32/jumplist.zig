@@ -65,16 +65,31 @@ fn argSafe(s: []const u8) bool {
 /// New Window, New Tab, a separator, then a task per profile except
 /// `Default`. `alloc` is an arena: every string is copied into it and the
 /// caller frees the whole block at once.
-pub fn buildItems(alloc: Allocator, exe: []const u8, profile_list: []const windows_shell.Profile) ![]Item {
+pub fn buildItems(alloc: Allocator, exe: []const u8, class: ?[]const u8, profile_list: []const windows_shell.Profile) ![]Item {
     var items: std.ArrayList(Item) = .empty;
     const exe_copy = try alloc.dupe(u8, exe);
-    try items.append(alloc, .{ .kind = .task, .title = "New Window", .args = "", .icon_path = exe_copy, .icon_index = 0 });
-    try items.append(alloc, .{ .kind = .task, .title = "New Tab", .args = "+new-tab --working-directory=home", .icon_path = exe_copy, .icon_index = 0 });
+    // The class selects the instance: with a configured `class` the tasks
+    // must name it, or New Tab finds no server and starts a second Ghostty.
+    const class_arg: []const u8 = if (class) |c| blk: {
+        const arg = try std.fmt.allocPrint(alloc, "--class={s}", .{c});
+        if (argSafe(arg)) break :blk arg;
+        log.warn("class {s} cannot be a task argument", .{c});
+        break :blk "";
+    } else "";
+    const sep: []const u8 = if (class_arg.len > 0) " " else "";
+    try items.append(alloc, .{ .kind = .task, .title = "New Window", .args = class_arg, .icon_path = exe_copy, .icon_index = 0 });
+    try items.append(alloc, .{
+        .kind = .task,
+        .title = "New Tab",
+        .args = try std.fmt.allocPrint(alloc, "+new-tab {s}{s}--working-directory=home", .{ class_arg, sep }),
+        .icon_path = exe_copy,
+        .icon_index = 0,
+    });
     try items.append(alloc, .{ .kind = .separator, .title = "", .args = "", .icon_path = "", .icon_index = 0 });
     for (profile_list) |p| {
         if (p.kind == .default) continue;
-        const args = try std.fmt.allocPrint(alloc, "--profile={s}", .{p.id});
-        if (!argSafe(args) or p.name.len == 0) {
+        const args = try std.fmt.allocPrint(alloc, "--profile={s}{s}{s}", .{ p.id, sep, class_arg });
+        if (!argSafe(p.id) or p.name.len == 0) {
             log.warn("skipping profile {s}: not representable as a task", .{p.id});
             continue;
         }
@@ -90,16 +105,15 @@ pub fn buildItems(alloc: Allocator, exe: []const u8, profile_list: []const windo
 }
 
 /// The command line of the instance that `+new-tab` starts when none runs:
-/// the class and the forwarded `--working-directory=` / `--profile=`
-/// arguments. `alloc` is an arena (the class argument is allocated).
+/// the class and every argument IPC would forward (all but `--class=` and
+/// `--surface-id=`). `alloc` is an arena (the class argument is allocated).
 pub fn fallbackArgv(alloc: Allocator, exe: []const u8, class: ?[]const u8, args: []const [:0]const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(alloc, exe);
     if (class) |c| try argv.append(alloc, try std.fmt.allocPrint(alloc, "--class={s}", .{c}));
     for (args) |a| {
-        if (std.mem.startsWith(u8, a, "--working-directory=") or std.mem.startsWith(u8, a, "--profile=")) {
-            try argv.append(alloc, a);
-        }
+        if (std.mem.startsWith(u8, a, "--class=") or std.mem.startsWith(u8, a, "--surface-id=")) continue;
+        try argv.append(alloc, a);
     }
     return argv.items;
 }
@@ -165,7 +179,12 @@ fn run(job: *Job) !void {
     if (job.mode == .delete or job.test_mode) {
         const hr = list.vtable.DeleteList(list, job.aumid.ptr);
         hr_delete.store(hrOf(hr), .release);
-        log.info("{s} e2e list hr=0x{x}", .{ if (job.mode == .delete) "deleted" else "reset", @as(u32, @bitCast(hr)) });
+        const code: u32 = @bitCast(hr);
+        if (job.test_mode) {
+            log.info("{s} e2e list hr=0x{x}", .{ if (job.mode == .delete) "deleted" else "reset", code });
+        } else {
+            log.info("deleted the jump list hr=0x{x}", .{code});
+        }
         if (job.mode == .delete) return;
     }
 
@@ -239,6 +258,49 @@ fn makeLink(alloc: Allocator, item: Item, exe_w: [:0]const u16, home_w: [:0]cons
 
 // -- UI thread -------------------------------------------------------------------------
 
+/// Copies everything the worker needs into one arena on `backing`; the Job
+/// lives in that arena. `job.arena` is assigned after the last allocation, so
+/// it is the arena that owns every node. Free with `freeJob`.
+fn prepareJob(
+    backing: Allocator,
+    mode: @FieldType(Job, "mode"),
+    src: []const Item,
+    exe: []const u8,
+    home: []const u8,
+    test_mode: bool,
+    done: foundation.HANDLE,
+) Allocator.Error!*Job {
+    var arena: std.heap.ArenaAllocator = .init(backing);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    const job = try a.create(Job);
+    const items = try a.alloc(Item, src.len);
+    for (src, items) |s, *d| d.* = .{
+        .kind = s.kind,
+        .title = try a.dupe(u8, s.title),
+        .args = try a.dupe(u8, s.args),
+        .icon_path = try a.dupe(u8, s.icon_path),
+        .icon_index = s.icon_index,
+    };
+    job.* = .{
+        .arena = undefined,
+        .mode = mode,
+        .exe = try a.dupe(u8, exe),
+        .home = try a.dupe(u8, home),
+        .items = items,
+        .aumid = aumidForRun(),
+        .test_mode = test_mode,
+        .done = done,
+    };
+    job.arena = arena;
+    return job;
+}
+
+fn freeJob(job: *Job) void {
+    var arena = job.arena;
+    arena.deinit();
+}
+
 /// Starts the worker for `job`-to-be. False when it could not be started.
 fn spawn(app: *App, mode: @FieldType(Job, "mode"), items_from: ?[]const Item) bool {
     const alloc = app.core_app.alloc;
@@ -247,40 +309,16 @@ fn spawn(app: *App, mode: @FieldType(Job, "mode"), items_from: ?[]const Item) bo
         return false;
     };
 
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    const a = arena.allocator();
-    const job = a.create(Job) catch {
-        arena.deinit();
-        _ = win32.kernel32.CloseHandle(ev);
-        return false;
-    };
-    job.* = .{
-        .arena = arena,
-        .mode = mode,
-        .exe = "",
-        .home = "",
-        .items = &.{},
-        .aumid = aumidForRun(),
-        .test_mode = ipc_ops.testOpsEnabled(),
-        .done = ev,
-    };
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var exe: []const u8 = "";
+    var home: []const u8 = "";
+    defer if (home.len > 0) alloc.free(home);
     if (mode == .build) {
-        const src = items_from.?;
-        const items = a.alloc(Item, src.len) catch return fail(job, ev);
-        for (src, items) |s, *d| d.* = .{
-            .kind = s.kind,
-            .title = a.dupe(u8, s.title) catch return fail(job, ev),
-            .args = a.dupe(u8, s.args) catch return fail(job, ev),
-            .icon_path = a.dupe(u8, s.icon_path) catch return fail(job, ev),
-            .icon_index = s.icon_index,
-        };
-        job.items = items;
-        var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const exe_len = std.process.executablePath(global.io(), &exe_buf) catch return fail(job, ev);
-        job.exe = a.dupe(u8, exe_buf[0..exe_len]) catch return fail(job, ev);
-        const home = global.environ().getAlloc(a, "USERPROFILE") catch return fail(job, ev);
-        job.home = home;
+        const exe_len = std.process.executablePath(global.io(), &exe_buf) catch return failEvent(ev);
+        exe = exe_buf[0..exe_len];
+        home = global.environ().getAlloc(alloc, "USERPROFILE") catch return failEvent(ev);
     }
+    const job = prepareJob(std.heap.page_allocator, mode, items_from orelse &.{}, exe, home, ipc_ops.testOpsEnabled(), ev) catch return failEvent(ev);
 
     hr_delete.store(hr_unset, .release);
     hr_begin.store(hr_unset, .release);
@@ -292,15 +330,14 @@ fn spawn(app: *App, mode: @FieldType(Job, "mode"), items_from: ?[]const Item) bo
 
     worker = std.Thread.spawn(.{}, workerMain, .{job}) catch |err| {
         log.warn("unable to start the jump list worker err={}", .{err});
-        return fail(job, ev);
+        freeJob(job);
+        return failEvent(ev);
     };
     done_event = ev;
     return true;
 }
 
-fn fail(job: *Job, ev: foundation.HANDLE) bool {
-    var arena = job.arena;
-    arena.deinit();
+fn failEvent(ev: foundation.HANDLE) bool {
     _ = win32.kernel32.CloseHandle(ev);
     return false;
 }
@@ -473,7 +510,7 @@ pub fn onTimer(app: *App) void {
         log.warn("unable to find the own executable err={}", .{err});
         return;
     };
-    const items = buildItems(a, exe_buf[0..exe_len], profiles.get(app)) catch return;
+    const items = buildItems(a, exe_buf[0..exe_len], app.config.class, profiles.get(app)) catch return;
     const sig = signature(items);
     if (last_sig) |s| if (s == sig) return;
     if (spawn(app, .build, items)) last_sig = sig;
@@ -507,7 +544,7 @@ test "win32 jumplist: tasks, separator, profile tasks" {
         testProfile("git-bash", "Git Bash", .git_bash, "C:\\Git\\bin\\bash.exe"),
         testProfile("wsl:Ubuntu", "Ubuntu", .wsl, "C:\\Windows\\System32\\wsl.exe"),
     };
-    const items = try buildItems(arena.allocator(), "C:\\g\\ghostty.exe", &list);
+    const items = try buildItems(arena.allocator(), "C:\\g\\ghostty.exe", null, &list);
     try std.testing.expectEqual(@as(usize, 5), items.len);
 
     try std.testing.expectEqualStrings("New Window", items[0].title);
@@ -531,7 +568,7 @@ test "win32 jumplist: args need no quoting" {
         testProfile("wsl:bad name", "Bad", .wsl, ""),
         testProfile("wsl:q\"uote", "Quote", .wsl, ""),
     };
-    const items = try buildItems(arena.allocator(), "C:\\Program Files\\Ghostty\\ghostty.exe", &list);
+    const items = try buildItems(arena.allocator(), "C:\\Program Files\\Ghostty\\ghostty.exe", null, &list);
     try std.testing.expectEqual(@as(usize, 4), items.len);
     for (items) |item| {
         // Each space-separated token is one argument that needs no quoting.
@@ -546,18 +583,52 @@ test "win32 jumplist: args need no quoting" {
 test "win32 jumplist: fallback keeps class, cwd and profile" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const args = [_][:0]const u8{ "--working-directory=home", "--profile=cmd", "--font-size=40" };
+    const args = [_][:0]const u8{ "--working-directory=home", "--profile=cmd", "--surface-id=3", "--font-size=40" };
 
     const with_class = try fallbackArgv(arena.allocator(), "C:\\g\\ghostty.exe", "x.e2e", &args);
-    try std.testing.expectEqual(@as(usize, 4), with_class.len);
+    try std.testing.expectEqual(@as(usize, 5), with_class.len);
     try std.testing.expectEqualStrings("C:\\g\\ghostty.exe", with_class[0]);
     try std.testing.expectEqualStrings("--class=x.e2e", with_class[1]);
     try std.testing.expectEqualStrings("--working-directory=home", with_class[2]);
     try std.testing.expectEqualStrings("--profile=cmd", with_class[3]);
+    try std.testing.expectEqualStrings("--font-size=40", with_class[4]);
 
     const no_class = try fallbackArgv(arena.allocator(), "C:\\g\\ghostty.exe", null, &args);
-    try std.testing.expectEqual(@as(usize, 3), no_class.len);
+    try std.testing.expectEqual(@as(usize, 4), no_class.len);
     try std.testing.expectEqualStrings("--working-directory=home", no_class[1]);
+}
+
+test "win32 jumplist: tasks carry the configured class" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = [_]windows_shell.Profile{testProfile("cmd", "Command Prompt", .cmd, "")};
+    const items = try buildItems(arena.allocator(), "C:\\g\\ghostty.exe", "my.class", &list);
+    try std.testing.expectEqualStrings("--class=my.class", items[0].args);
+    try std.testing.expectEqualStrings("+new-tab --class=my.class --working-directory=home", items[1].args);
+    try std.testing.expectEqualStrings("--profile=cmd --class=my.class", items[3].args);
+
+    // A class that would need quoting is left out.
+    const odd = try buildItems(arena.allocator(), "C:\\g\\ghostty.exe", "a b", &list);
+    try std.testing.expectEqualStrings("", odd[0].args);
+    try std.testing.expectEqualStrings("+new-tab --working-directory=home", odd[1].args);
+}
+
+test "win32 jumplist: a job frees all of its memory with job.arena" {
+    // testing.allocator reports a leak if a node is lost to a stale arena copy.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = [_]windows_shell.Profile{
+        testProfile("git-bash", "Git Bash", .git_bash, "C:\\Git\\bin\\bash.exe"),
+        testProfile("cmd", "Command Prompt", .cmd, "C:\\Windows\\System32\\cmd.exe"),
+    };
+    const items = try buildItems(arena.allocator(), "C:\\g\\ghostty.exe", "x", &list);
+    const job = try prepareJob(std.testing.allocator, .build, items, "C:\\g\\ghostty.exe", "C:\\Users\\u", false, undefined);
+    try std.testing.expectEqual(items.len, job.items.len);
+    try std.testing.expectEqualStrings("C:\\Users\\u", job.home);
+    // The worker allocates from the same arena.
+    _ = try job.arena.allocator().alloc(u8, 100_000);
+    _ = try job.arena.allocator().alloc(u8, 100_000);
+    freeJob(job);
 }
 
 test "win32 jumplist: aumid follows the mode" {
