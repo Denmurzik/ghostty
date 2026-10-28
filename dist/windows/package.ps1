@@ -42,12 +42,24 @@ function Fail([string]$check) {
     exit 1
 }
 
+# Fixed entry time (1980-01-01, the zip epoch) so equal inputs give equal zips.
+function Add-ZipFile($archive, [string]$path, [string]$name) {
+    $e = $archive.CreateEntry($name, [IO.Compression.CompressionLevel]::Optimal)
+    $e.LastWriteTime = [DateTimeOffset]'1980-01-01T00:00:00+00:00'
+    $in = [IO.File]::OpenRead($path)
+    try {
+        $out = $e.Open()
+        try { $in.CopyTo($out) } finally { $out.Dispose() }
+    } finally { $in.Dispose() }
+}
+
 function Get-Rel([string]$root, [string]$path) {
     return $path.Substring($root.Length).TrimStart('\', '/')
 }
 
 try {
     # ---- parameters ------------------------------------------------------
+    if ($Local) { Write-Host 'package: LOCAL BUILD (not for release): VERSIONINFO and imports checks skipped' }
     if ($Version -notmatch '^[^+\s\\/:]+-win\.(0|[1-9][0-9]*)$') {
         Fail "version '$Version' (must end in -win.<N>, N canonical, no +)"
     }
@@ -115,6 +127,7 @@ try {
         } finally { $zin.Dispose() }
         $kids = @(Get-ChildItem -LiteralPath $tmpX)
         if ($kids.Count -ne 1 -or -not $kids[0].PSIsContainer) { Fail 'zip layout (need exactly one top folder)' }
+        if ($kids[0].Name -cne $top) { Fail "zip top folder '$($kids[0].Name)' <> '$top'" }
         Remove-Item -LiteralPath $stage -Recurse -Force
         Move-Item -LiteralPath $kids[0].FullName -Destination $stage
         Remove-Item -LiteralPath $tmpX -Recurse -Force
@@ -275,7 +288,7 @@ try {
         $cmd = Get-Command cmd.exe
         foreach ($exe in 'ghostty.exe', 'tmux.exe') {
             $line = $SignCommand.Replace('{file}', '"' + (Join-Path $stage $exe) + '"')
-            $rc = Invoke-Native -Exe $cmd.Source -CmdLine ('/d /s /c "' + $line + '"') -Log $log
+            $rc = Invoke-Native -Exe $cmd.Source -CmdLine ('/d /s /c "' + $line + '"') -Log $log -HideCmdLine
             if ($rc -ne 0) { Fail "sign $exe (exit $rc)" }
         }
     }
@@ -284,10 +297,12 @@ try {
     if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
     $zout = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
     try {
-        foreach ($f in @(Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName)) {
-            $name = $top + '/' + (Get-Rel $stage $f.FullName).Replace('\', '/')
-            $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zout, $f.FullName, $name, [IO.Compression.CompressionLevel]::Optimal)
-        }
+        $items = @(Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
+                @{ Name = ($top + '/' + (Get-Rel $stage $_.FullName).Replace('\', '/')); Path = $_.FullName } })
+        $names = [string[]]@($items | ForEach-Object { $_.Name })
+        $paths = [string[]]@($items | ForEach-Object { $_.Path })
+        [Array]::Sort($names, $paths, [StringComparer]::Ordinal)
+        for ($i = 0; $i -lt $names.Length; $i++) { Add-ZipFile $zout $paths[$i] $names[$i] }
     } finally { $zout.Dispose() }
     $zchk = [IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
@@ -317,7 +332,7 @@ try {
             $sout = [IO.Compression.ZipFile]::Open($symPath, [IO.Compression.ZipArchiveMode]::Create)
             try {
                 foreach ($src in $have) {
-                    $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($sout, $src, (Split-Path -Leaf $src), [IO.Compression.CompressionLevel]::Optimal)
+                    Add-ZipFile $sout $src (Split-Path -Leaf $src)
                 }
             } finally { $sout.Dispose() }
             $artifacts.Add($symPath)
@@ -349,7 +364,7 @@ try {
     # ---- 8. done ---------------------------------------------------------
     foreach ($a in $artifacts) { Write-Host "artifact: $a" }
     Remove-Item -LiteralPath $stageRoot -Recurse -Force
-    Write-Host 'package: OK'
+    Write-Host $(if ($Local) { 'package: OK (LOCAL, not for release)' } else { 'package: OK' })
     exit 0
 } catch {
     Write-Host ('package: FAIL unexpected: ' + $_.Exception.Message)
