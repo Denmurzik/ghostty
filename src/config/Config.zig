@@ -2750,8 +2750,8 @@ keybind: Keybinds = .{},
 /// closed item is hidden, not closed: its programs keep running until the
 /// time has passed. `0` turns undo off.
 ///
-/// This configuration is only supported on macOS. Linux doesn't
-/// support undo operations at all so this configuration has no
+/// This configuration is only supported on macOS and Windows. Linux
+/// doesn't support undo operations at all so this configuration has no
 /// effect.
 ///
 /// Available since: 1.2.0

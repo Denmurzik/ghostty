@@ -50,10 +50,10 @@ const LRESULT = win32.foundation.LRESULT;
 /// What `WM_GHOSTTY_POSTED_DIALOG` (wparam) asks for.
 pub const DialogKind = enum(usize) { export_io, config_errors, url_confirm };
 
-/// The end of `App.init`.
 /// Set by the crash handler (M5 Task 12): looks for a crash dump of the last run.
 pub var crash_recheck: ?*const fn () void = null;
 
+/// The end of `App.init`.
 pub fn appStarted(app: *App) void {
     hotkeys.appStarted(app);
     composition.appStarted();
