@@ -56,9 +56,11 @@ Invoke-E2eScenario 'profiles-menu' {
     }
     if ($ids[0] -ne 'default') { throw "the first profile is '$($ids[0])', expected 'default'" }
 
-    # "&Command Prompt": the accelerator letter alone picks the item.
-    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'c' -Panel
-    Wait-Popup '#32768' $false 'the accelerator closes the menu'
+    # Command Prompt by position (the layout of the desktop may not type 'c'):
+    # the first Down selects the first item, the menu lists the ids in order.
+    $pos = [array]::IndexOf($ids, 'cmd') + 1
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys (@('down') * $pos + @('enter')) -Panel
+    Wait-Popup '#32768' $false 'Enter closes the menu'
     [void](Wait-Win 'a third tab' { param($w) @($w.tabs).Count -eq 3 })
     if (-not (Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { (Count-Shells 'cmd.exe') -gt $before })) {
         throw "no new cmd.exe under ghostty after the Command Prompt item: $(Format-Procs (Get-ProcessTree $g.Pid))"
