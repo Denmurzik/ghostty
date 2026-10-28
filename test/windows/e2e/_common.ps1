@@ -366,6 +366,9 @@ Command line arguments for the exe.
 .PARAMETER NoTestIpc
 Leaves GHOSTTY_WIN32_TEST_IPC unset (it is `1` otherwise).
 
+.PARAMETER AllowNoWindow
+Returns without a window (Hwnd is zero) when none appears: `initial-window = false`.
+
 .PARAMETER Env
 Extra environment variables for the child process (name -> value).
 
@@ -384,7 +387,8 @@ function Start-E2eGhostty {
         [string[]]$ExtraArgs,
         [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$ClassPrefix = 'ghostty-e2e',
         [hashtable]$Env,
-        [double]$WindowTimeoutSec = 15
+        [double]$WindowTimeoutSec = 15,
+        [switch]$AllowNoWindow
     )
 
     $sbx = $script:Sbx
@@ -444,7 +448,7 @@ function Start-E2eGhostty {
         Start-Sleep -Milliseconds 10
     }
     $startupMs = $sw.ElapsedMilliseconds
-    if ($hwnd -eq [IntPtr]::Zero) { throw "no main window within $WindowTimeoutSec s" }
+    if ($hwnd -eq [IntPtr]::Zero -and -not $AllowNoWindow) { throw "no main window within $WindowTimeoutSec s" }
 
     $global:E2eLast = [pscustomobject]@{
         Process   = $proc
