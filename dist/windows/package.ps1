@@ -232,7 +232,8 @@ try {
         }
         $ti = Get-Imports (Join-Path $stage 'tmux.exe')
         foreach ($d in $ti) {
-            if ($d -notin @('kernel32.dll', 'ntdll.dll')) { Fail "imports: tmux.exe imports $d" }
+            # advapi32 since M5 Task 17 (owner-SID check on the external pipe).
+            if ($d -notin @('kernel32.dll', 'ntdll.dll', 'advapi32.dll')) { Fail "imports: tmux.exe imports $d" }
         }
     }
 
