@@ -44,7 +44,8 @@ pub const Options = struct {
 ///
 /// On Windows the editor runs detached and this command exits 0 at once.
 /// The editor is the `$VISUAL` or `$EDITOR` command line (Windows quoting
-/// rules). A GUI program (VS Code, Notepad++) is started directly. A console
+/// rules). A GUI program (VS Code, Notepad++) or a `.cmd`/`.bat` launcher
+/// (`code.cmd`) is started directly and hidden from view. A console
 /// program is run by a separate Ghostty window of the configured `class`,
 /// because a terminal editor cannot share the calling console. Unlike on
 /// other systems, with neither variable set Notepad opens the file instead of
@@ -203,17 +204,22 @@ fn runWindows(alloc: Allocator, stderr: *std.Io.Writer, path: []const u8, class:
         }
     }
 
-    _ = std.process.spawn(global.io(), .{
+    const child = std.process.spawn(global.io(), .{
         .argv = spawn_argv,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
+        // A launcher script would otherwise flash a console window.
+        .create_no_window = isBatch(spawn_argv[0]),
     }) catch |err| {
         try stderr.print("Failed to start the editor ({t}).\n\nCommand: {s}\n", .{ err, argv[0] });
         try stderr.print("Path: {s}\n", .{path});
         return 1;
     };
 
+    // The editor runs on its own; its handles are not needed.
+    if (child.id) |h| std.os.windows.CloseHandle(h);
+    std.os.windows.CloseHandle(child.thread_handle);
     try stderr.print("Opening {s}\n", .{path});
     return 0;
 }
@@ -263,12 +269,19 @@ fn windowsEditorArgv(
     return out.items;
 }
 
+/// A `.cmd`/`.bat` launcher (`code.cmd`): it hands the file to a GUI program,
+/// so it is not given a Ghostty window.
+fn isBatch(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    return std.ascii.eqlIgnoreCase(ext, ".cmd") or std.ascii.eqlIgnoreCase(ext, ".bat");
+}
+
 fn isGuiResolved(token: []const u8) bool {
     const env = gui_env orelse return false;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const resolved = resolveExe(arena.allocator(), env, token) orelse return false;
-    return peIsGui(resolved);
+    return isBatch(resolved) or peIsGui(resolved);
 }
 
 /// `token` as an existing file: as it is when it names a path, else
@@ -380,6 +393,28 @@ test "windows edit-config: GUI editor is spawned directly" {
     try std.testing.expectEqualStrings("--wait", argv[1]);
     try std.testing.expectEqualStrings("p", argv[2]);
     for (argv) |arg| try std.testing.expect(!std.mem.endsWith(u8, arg, "ghostty.exe"));
+}
+
+test "windows edit-config: .cmd and .bat are launchers" {
+    try std.testing.expect(isBatch("C:/Users/u/Programs/Microsoft VS Code/bin/code.cmd"));
+    try std.testing.expect(isBatch("x.BAT"));
+    try std.testing.expect(!isBatch("vim.exe"));
+    try std.testing.expect(!isBatch("cmd"));
+}
+
+test "windows edit-config: a config path with spaces is one argument" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = "C:/Users/A B/.config/ghostty/config.ghostty";
+    const argv = try windowsEditorArgv(a, "C:/Program Files/Ghostty/ghostty.exe", "edit", "vim", null, path, "C:/Windows", neverGui);
+    try std.testing.expectEqualStrings(path, argv[argv.len - 1]);
+    // The command line the spawner builds quotes the path, and the child's
+    // argv parser reads it back as the same single argument.
+    const line = try internal_os.windows_cmdline.createCommandLine(a, argv);
+    const back = try internal_os.windows_cmdline.tokenizeWindows(a, line);
+    try std.testing.expectEqual(argv.len, back.len);
+    for (argv, back) |want, got| try std.testing.expectEqualStrings(want, got);
 }
 
 test "windows edit-config: no editor uses notepad" {
