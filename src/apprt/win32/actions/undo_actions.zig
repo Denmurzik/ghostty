@@ -114,7 +114,7 @@ fn expiry(app: *const App) u64 {
 /// caller closes it for real. Never the last tab of a window.
 pub fn closeTab(window: *Window, tab: *Tab) bool {
     const app = window.app;
-    if (!enabled(app)) return false;
+    if (!enabled(app) or window.kind != .normal) return false;
     const index = window.parkTab(tab) orelse return false;
     if (push(app, .{ .kind = .close_tab, .expires_ms = expiry(app), .window = window, .tab = tab, .index = index, .parked = true })) return true;
     // Could not record it: put it back and let the caller close it.
@@ -126,7 +126,7 @@ pub fn closeTab(window: *Window, tab: *Tab) bool {
 /// False: nothing was parked.
 pub fn closeTabs(window: *Window, targets: []const *Tab) bool {
     const app = window.app;
-    if (!enabled(app)) return false;
+    if (!enabled(app) or window.kind != .normal) return false;
     if (targets.len == 1) return closeTab(window, targets[0]);
 
     const alloc = app.core_app.alloc;
@@ -195,7 +195,7 @@ pub fn closeWindows(app: *App, windows: []const *Window) bool {
 /// after. False: nothing was parked.
 pub fn closeSplit(tab: *Tab, s: *Surface) bool {
     const app = tab.window.app;
-    if (!enabled(app)) return false;
+    if (!enabled(app) or tab.window.kind != .normal) return false;
     const snap = tab.parkSurface(s) orelse return false;
     if (push(app, .{
         .kind = .close_split,
@@ -278,6 +278,12 @@ const Flip = enum {
 /// What a window flip step came to.
 const WindowStep = enum { done, missing, oom };
 
+/// Undo never gives the keyboard to a window the user cannot see (a hidden
+/// quick terminal, or any window while `toggle_visibility` hides them).
+fn activatable(window: *const Window) bool {
+    return window.kind == .normal and win32.user32.IsWindowVisible(window.hwnd) != 0;
+}
+
 /// The live side of the flips: everything that touches windows, tabs and the
 /// stacks. The flip logic below runs against any type with these methods, so
 /// the unit tests drive it with a fake.
@@ -296,6 +302,7 @@ const Live = struct {
 
     fn tabActivate(self: Live, tab: *Tab) void {
         _ = self;
+        if (!activatable(tab.window)) return;
         tab.window.activate();
     }
 
@@ -319,6 +326,7 @@ const Live = struct {
 
     fn windowActivate(self: Live, window: *Window) void {
         _ = self;
+        if (!activatable(window)) return;
         window.activate();
     }
 

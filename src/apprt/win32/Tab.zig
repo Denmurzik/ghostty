@@ -274,6 +274,9 @@ fn parkOne(s: *Surface) void {
         const core_app = s.app.core_app;
         if (core_app.focused_surface == &s.core_surface) core_app.focused_surface = null;
     }
+    // Nothing is drawn for a surface nobody sees; the show path re-applies it.
+    if (s.initialized) s.core_surface.occlusionCallback(false) catch |err|
+        log.warn("occlusion callback failed err={}", .{err});
     Inspector.parkSync(s);
     taskbar.surfaceParked(s.window, s.id);
 }
@@ -289,7 +292,11 @@ pub fn unpark(self: *Tab) void {
     self.parked = false;
     self.restoreProgress();
     var it = self.tree.iterator();
-    while (it.next()) |entry| Inspector.parkSync(entry.view);
+    while (it.next()) |entry| {
+        Inspector.parkSync(entry.view);
+        // The window may have changed monitor while the tab was parked.
+        entry.view.applyDpi();
+    }
 }
 
 /// The progress reports the closes of a parked tab took off the taskbar.
@@ -345,6 +352,7 @@ pub fn swapTree(self: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void 
     if (show_s) {
         s.split_parked = false;
         Inspector.parkSync(s);
+        s.applyDpi();
         _ = win32.user32.ShowWindow(s.hwnd, win32.user32.SW_SHOW);
         self.focused = s;
         // The sweeps skipped it while it was parked.
