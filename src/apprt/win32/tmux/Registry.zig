@@ -469,6 +469,11 @@ pub const Host = struct {
         return &self.state().namespaces;
     }
 
+    /// Whether the Ghostty window `window_id` still exists.
+    pub fn ghosttyWindowAlive(self: *Host, window_id: u32) bool {
+        return windowById(self.app, window_id) != null;
+    }
+
     /// The Ghostty window (`Window.id`) that shows the tab.
     pub fn ghosttyWindowOf(self: *Host, win: Window) u32 {
         const tab = tabOf(self.app, win.id) orelse return 0;

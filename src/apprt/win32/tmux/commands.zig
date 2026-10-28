@@ -650,12 +650,16 @@ fn Env(comptime Host: type) type {
                 return self.fail("ghostty: too many windows (at most {d})", .{namespaces.max_tabs});
             }
             if (!try self.paneRoom()) return;
-            // The window of the first tab that is left: the user may have torn the others out.
-            const first = self.firstTab() orelse return self.fail("can't find session: {s}", .{session});
-            const window_id = self.host.ghosttyWindowOf(first);
-            ns.window_id = window_id;
+            // The namespace's own window while it lives; else the window of the first tab left
+            // (the user may have torn the tabs out).
+            const window_id = if (ns.window_id) |id| (if (self.host.ghosttyWindowAlive(id)) id else null) else null;
+            const target = window_id orelse blk: {
+                const first = self.firstTab() orelse return self.fail("can't find session: {s}", .{session});
+                break :blk self.host.ghosttyWindowOf(first);
+            };
+            ns.window_id = target;
             const spawn = try self.spawnOf(cmd);
-            const pane = self.host.newTabIn(window_id, wname, spawn, !cmd.has('d')) catch |err| return self.hostError(err);
+            const pane = self.host.newTabIn(target, wname, spawn, !cmd.has('d')) catch |err| return self.hostError(err);
             ns.addTab(self.host.gpa(), wname, self.windowIdOf(pane)) catch |err| return self.nsError(err);
             if (cmd.has('P')) try self.emitLine(fmt, pane);
         }
@@ -1970,4 +1974,18 @@ test "win32 tmux external: new-window follows a tab torn out of its window" {
     _ = try okIn(&rig, "ns", &.{ "new-window", "-t", "s", "-n", "v" });
     try testing.expectEqual(@as(?u32, 555), rig.host.namespaces().get("ns").?.window_id);
     try testing.expectEqual(@as(u32, 555), rig.host.windows_list.items[rig.host.windows_list.items.len - 1].owner);
+}
+
+test "win32 tmux external: new-window stays in the namespace window while it lives" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    _ = try okIn(&rig, "ns", &.{ "new-session", "-d", "-s", "s", "-n", "w" });
+    const first = rig.host.windows_list.items.len - 1;
+    const home = rig.host.windows_list.items[first].owner;
+    _ = try okIn(&rig, "ns", &.{ "new-window", "-t", "s", "-n", "v" });
+    // The first tab is torn out into another Ghostty window; `v` still lives in the home one.
+    rig.host.windows_list.items[first].owner = 555;
+    _ = try okIn(&rig, "ns", &.{ "new-window", "-t", "s", "-n", "x" });
+    try testing.expectEqual(home, rig.host.windows_list.items[rig.host.windows_list.items.len - 1].owner);
+    try testing.expectEqual(@as(?u32, home), rig.host.namespaces().get("ns").?.window_id);
 }

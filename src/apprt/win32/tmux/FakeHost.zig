@@ -571,6 +571,12 @@ pub fn newTabIn(self: *FakeHost, owner: u32, name: []const u8, spawn: commands.S
     return self.addOwnedWindow(owner, spawn);
 }
 
+/// Whether some fake window still belongs to the Ghostty window `window_id`.
+pub fn ghosttyWindowAlive(self: *FakeHost, window_id: u32) bool {
+    for (self.windows_list.items) |w| if (w.owner == window_id) return true;
+    return false;
+}
+
 /// The fake Ghostty window that shows the tab.
 pub fn ghosttyWindowOf(self: *FakeHost, win: Window) u32 {
     return self.windows_list.items[self.windowIndex(win.id).?].owner;
