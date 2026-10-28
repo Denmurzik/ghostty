@@ -1,6 +1,9 @@
 //! Release feed parsing and version compare. Pure: no network, the caller
 //! fetches and caps the body. Tags look like `win-<zon>-<N>` and the running
-//! version like `<zon>-win.<N>`; releases are compared by N only.
+//! version like `<zon>-win.<N>`; releases are compared by N only, regardless
+//! of the zon part, so the release process must keep N monotonic across zon
+//! bumps (`1.3.2-win.5` -> `1.3.3-win.6`, not `.1`). A tag with N = u32 max
+//! would silence all later announcements; only the repo owner can create it.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -24,8 +27,17 @@ pub fn parseTag(tag: []const u8) ?Tag {
     const rest = std.mem.cutPrefix(u8, tag, "win-") orelse return null;
     const dash = std.mem.lastIndexOfScalar(u8, rest, '-') orelse return null;
     if (dash == 0) return null;
-    const n = std.fmt.parseUnsigned(u32, rest[dash + 1 ..], 10) catch return null;
+    const digits = rest[dash + 1 ..];
+    if (!canonicalN(digits)) return null;
+    const n = std.fmt.parseUnsigned(u32, digits, 10) catch return null;
     return .{ .zon = rest[0..dash], .n = n };
+}
+
+/// Digits only, no sign, no leading zero (except "0" itself).
+fn canonicalN(s: []const u8) bool {
+    if (s.len == 0 or (s.len > 1 and s[0] == '0')) return false;
+    for (s) |c| if (c < '0' or c > '9') return false;
+    return true;
 }
 
 /// `<zon>-win.<N>` -> N. Null means a local build without a release number.
@@ -37,6 +49,7 @@ pub fn currentN(version: []const u8) ?u32 {
 /// The non-draft release with a valid tag and url and the highest N.
 /// Pre-releases count.
 pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
+    if (nestingDepth(body) > max_depth) return error.NotJson;
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NotJson,
@@ -51,8 +64,9 @@ pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
         }
         const tag = str(item.object.get("tag_name")) orelse continue;
         const url = str(item.object.get("html_url")) orelse continue;
-        if (!std.mem.startsWith(u8, url, release_prefix)) continue;
         const parsed = parseTag(tag) orelse continue;
+        if (!std.mem.startsWith(u8, url, release_prefix)) continue;
+        if (!std.mem.eql(u8, url[release_prefix.len..], tag["win-".len..])) continue;
         if (best) |b| if (b.n >= parsed.n) continue;
         best = .{
             .n = parsed.n,
@@ -62,6 +76,35 @@ pub fn newest(arena: Allocator, body: []const u8) ParseError!Release {
         };
     }
     return best orelse error.NoRelease;
+}
+
+/// Maximum bracket nesting accepted before handing the body to std.json,
+/// whose Value parse is recursive.
+const max_depth = 32;
+
+/// Deepest [ / { nesting outside of strings.
+fn nestingDepth(body: []const u8) usize {
+    var depth: usize = 0;
+    var deepest: usize = 0;
+    var in_str = false;
+    var i: usize = 0;
+    while (i < body.len) : (i += 1) {
+        const c = body[i];
+        if (in_str) {
+            if (c == '\\') i += 1 else if (c == '"') in_str = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_str = true,
+            '[', '{' => {
+                depth += 1;
+                deepest = @max(deepest, depth);
+            },
+            ']', '}' => depth -|= 1,
+            else => {},
+        }
+    }
+    return deepest;
 }
 
 fn str(v: ?std.json.Value) ?[]const u8 {
@@ -132,4 +175,46 @@ test "win32 update: parseTag and currentN" {
     try std.testing.expectEqual(@as(?u32, 3), currentN("1.3.2-dev-win.3"));
     try std.testing.expectEqual(@as(?u32, null), currentN("1.3.2-dev"));
     try std.testing.expectEqual(@as(?u32, null), currentN("1.3.2-dev-win.x"));
+}
+
+test "win32 update: parseTag is canonical" {
+    try std.testing.expect(parseTag("win-1.3.2-dev-007") == null);
+    try std.testing.expect(parseTag("win-1.3.2-dev-+5") == null);
+    try std.testing.expect(parseTag("win-1.3.2-dev-") == null);
+    try std.testing.expect(parseTag("win-1.3.2-dev-4294967296") == null);
+    try std.testing.expectEqual(@as(u32, 0), parseTag("win-1.3.2-dev-0").?.n);
+    try std.testing.expectEqual(@as(u32, 10), parseTag("win-1.3.2-dev-10").?.n);
+}
+
+test "win32 update: odd json types, duplicates, url mismatch, depth" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = release_prefix;
+    // Odd types are skipped, not fatal.
+    try std.testing.expectError(error.NoRelease, newest(a, "[]"));
+    try std.testing.expectError(error.NoRelease, newest(a, "[1,null,\"x\",[],{\"tag_name\":5,\"html_url\":[]}]"));
+    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-3\",\"html_url\":\"" ++ p ++ "1.0-3\",\"draft\":\"no\"}]"));
+    // Numeric, not lexicographic.
+    const ten = "[{\"tag_name\":\"win-1.0-9\",\"html_url\":\"" ++ p ++ "1.0-9\"},{\"tag_name\":\"win-1.0-10\",\"html_url\":\"" ++ p ++ "1.0-10\"}]";
+    try std.testing.expectEqual(@as(u32, 10), (try newest(a, ten)).n);
+    // Duplicate N: the first entry in feed order wins.
+    const dup = "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-5\"},{\"tag_name\":\"win-1.1-5\",\"html_url\":\"" ++ p ++ "1.1-5\"}]";
+    try std.testing.expectEqualStrings("win-1.0-5", (try newest(a, dup)).tag);
+    // url must match the tag.
+    try std.testing.expectError(error.NoRelease, newest(a, "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-6\"}]"));
+    // Deep nesting is refused; brackets inside strings do not count.
+    const deep = comptime brackets(100, "[") ++ brackets(100, "]");
+    try std.testing.expectError(error.NotJson, newest(a, deep));
+    const quoted = "[{\"tag_name\":\"win-1.0-5\",\"html_url\":\"" ++ p ++ "1.0-5\",\"body\":\"" ++ comptime brackets(100, "[") ++ "\\\"[\"}]";
+    try std.testing.expectEqual(@as(u32, 5), (try newest(a, quoted)).n);
+}
+
+fn brackets(comptime n: usize, comptime c: []const u8) *const [n]u8 {
+    comptime {
+        var buf: [n]u8 = undefined;
+        @memset(&buf, c[0]);
+        const out = buf;
+        return &out;
+    }
 }

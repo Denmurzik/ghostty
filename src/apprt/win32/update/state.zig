@@ -43,7 +43,9 @@ pub fn modeFor(
 }
 
 pub fn due(s: State, now_s: i64) bool {
-    return now_s - s.last_check >= interval_s;
+    // A garbage or future last_check must neither panic nor block forever.
+    if (s.last_check > now_s) return true;
+    return now_s -| s.last_check >= interval_s;
 }
 
 pub fn shouldAnnounce(s: State, r: release.Release, current_n: u32) bool {
@@ -91,4 +93,11 @@ test "win32 update: state round trip and garbage" {
     try std.testing.expectEqual(@as(i64, 0), d.last_check);
     try std.testing.expectEqual(@as(u32, 0), d.notified);
     try std.testing.expectEqual(@as(i64, 0), load(arena.allocator(), "[1,2]").last_check);
+}
+
+test "win32 update: due tolerates garbage and clock going back" {
+    try std.testing.expect(due(.{ .last_check = 5000 }, 1000));
+    try std.testing.expect(due(.{ .last_check = std.math.minInt(i64) }, 1_700_000_000));
+    try std.testing.expect(due(.{ .last_check = std.math.minInt(i64) }, std.math.maxInt(i64)));
+    try std.testing.expect(!due(.{ .last_check = std.math.maxInt(i64) }, std.math.maxInt(i64)));
 }
