@@ -13,7 +13,8 @@
 //!   `DwmEnableBlurBehindWindow` (spike R10: an empty blur region turns on
 //!   per-pixel alpha, `DwmExtendFrameIntoClientArea(-1)` + `DWMSBT_NONE`
 //!   stays opaque black). The surface child erases itself black so its area
-//!   is alpha 0. `.acrylic` adds the system Acrylic material.
+//!   is alpha 0, once its visual shows a chain (`surfaceErase`).
+//!   `.acrylic` adds the system Acrylic material.
 //!
 //! Whether a window can be translucent is decided once, when it is created
 //! (`WindowState.glass`): measured on Windows 11 10.0.26300, a window that
@@ -122,6 +123,9 @@ pub const SurfaceState = struct {
     pending_generation: std.atomic.Value(u32) = .init(0),
     /// Chains attached so far (test state).
     attached: u32 = 0,
+    /// The visual shows a chain (handed off with a frame in it). Until then
+    /// the surface erases itself with a stand-in for that frame. UI thread.
+    showing: bool = false,
 };
 
 /// Whether the config needs a composition swap chain.
@@ -212,32 +216,42 @@ pub fn setContent(surface: *Surface, wparam: win32.foundation.WPARAM) ?win32.fou
     const state = &surface.composition;
     const chain = state.pending.swap(null, .acq_rel) orelse return 0;
     const generation = state.pending_generation.load(.acquire);
-    attach(&surface.app.composition, state, chain, generation, surface.present_generation.load(.acquire));
+    const stand_in = !state.showing;
+    if (!attach(&surface.app.composition, state, chain, generation, surface.present_generation.load(.acquire))) return 0;
+    // The stand-in goes only once DWM shows the frame: cleared any earlier,
+    // the glass would show through for a moment (a white flash over Acrylic).
+    if (stand_in and eraseTransparent(surface.window)) {
+        if (surface.app.composition.device) |d| d.waitForCommitCompletion() catch {};
+        surface.repaintBackground();
+    }
     return 0;
 }
 
 /// Shows `chain` (one reference, always released) unless it belongs to an
-/// older present target or the surface has no visual any more.
+/// older present target or the surface has no visual any more. True when
+/// the visual shows it.
 fn attach(
     app_state: *AppState,
     state: *SurfaceState,
     chain: *dxgi.IDXGISwapChain1,
     chain_generation: u32,
     current_generation: u32,
-) void {
+) bool {
     defer com.release(chain);
-    if (chain_generation != current_generation) return;
-    const visual = state.visual orelse return;
-    const device = app_state.device orelse return;
+    if (chain_generation != current_generation) return false;
+    const visual = state.visual orelse return false;
+    const device = app_state.device orelse return false;
     visual.setContent(chain) catch |err| {
         log.warn("SetContent failed err={}", .{err});
-        return;
+        return false;
     };
     device.commit() catch |err| {
         log.warn("Commit failed err={}", .{err});
-        return;
+        return false;
     };
     state.attached += 1;
+    state.showing = true;
+    return true;
 }
 
 fn ensureDevice(app_state: *AppState) !*dcomp.IDCompositionDevice {
@@ -269,6 +283,7 @@ fn destroyTree(device: ?*dcomp.IDCompositionDevice, state: *SurfaceState) void {
     com.release(state.visual);
     state.target = null;
     state.visual = null;
+    state.showing = false;
 }
 
 /// hwnd -> composition, before the surface has any swap chain: the tree
@@ -438,8 +453,8 @@ fn disableBlurBehind(window: *Window) void {
     _ = dwm.DwmEnableBlurBehindWindow(window.hwnd, &bb);
 }
 
-/// The surface child erases itself once (black in glass, the background
-/// colour otherwise); a backdrop change needs the erase again.
+/// The surface child erases itself once (`surfaceErase`); a backdrop change
+/// needs the erase again.
 fn repaintSurfaces(window: *Window) void {
     for (window.tabs.items) |tab| {
         var it = tab.tree.iterator();
@@ -466,14 +481,43 @@ pub fn toggleOpacity(app: *App, target: apprt.Target) bool {
 /// paint (as the chrome painter does) sets the alpha: 0 when `see_through`
 /// (black is then glass), 255 otherwise.
 pub fn fillWithAlpha(hdc: win32.user32.HDC, rc: *const win32.foundation.RECT, brush: win32.user32.HBRUSH, see_through: bool) void {
+    fillAlpha(hdc, rc, brush, if (see_through) 0 else 255);
+}
+
+/// `fillWithAlpha` with any alpha; the brush colour must be premultiplied.
+pub fn fillAlpha(hdc: win32.user32.HDC, rc: *const win32.foundation.RECT, brush: win32.user32.HBRUSH, alpha: u8) void {
     const uxtheme = win32.uxtheme;
     const params: uxtheme.BP_PAINTPARAMS = .{ .dwFlags = uxtheme.BPPF_ERASE };
     var mem: ?win32.user32.HDC = null;
     const hbp = uxtheme.BeginBufferedPaint(hdc, rc, uxtheme.BPBF_TOPDOWNDIB, &params, &mem);
     _ = win32.gdi32.FillRect(mem orelse hdc, rc, brush);
     const b = hbp orelse return;
-    if (!see_through) _ = uxtheme.BufferedPaintSetAlpha(b, rc, 255);
+    if (alpha != 0) _ = uxtheme.BufferedPaintSetAlpha(b, rc, alpha);
     _ = uxtheme.EndBufferedPaint(b, 1);
+}
+
+/// What a surface child erases itself with: a premultiplied colour and its
+/// alpha (255 is opaque; only a glass window uses the alpha).
+pub const Erase = struct { r: u8, g: u8, b: u8, alpha: u8 };
+
+/// The erase of a surface child. In a translucent window the swap chain
+/// draws the background at the window's `alpha` over a child of alpha 0, but
+/// until the visual shows a chain (`SurfaceState.showing`) the child stands
+/// in for that frame: transparent there, the new pane would show the bare
+/// glass (Acrylic, or the desktop behind) until the chain is attached.
+pub fn surfaceErase(bg: configpkg.Config.Color, translucent: bool, showing: bool, alpha: u8) Erase {
+    if (!translucent) return .{ .r = bg.r, .g = bg.g, .b = bg.b, .alpha = 255 };
+    if (showing) return .{ .r = 0, .g = 0, .b = 0, .alpha = 0 };
+    return .{
+        .r = premultiply(bg.r, alpha),
+        .g = premultiply(bg.g, alpha),
+        .b = premultiply(bg.b, alpha),
+        .alpha = alpha,
+    };
+}
+
+fn premultiply(c: u8, alpha: u8) u8 {
+    return @intCast((@as(u32, c) * alpha + 127) / 255);
 }
 
 /// `windowAlpha` as the 0..255 alpha of the chrome rows.
@@ -525,6 +569,8 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: win32.foundation.WPARAM)
 /// any chain still waiting is stale; the renderer hands the new one over.
 pub fn recoveryHook(surface: *Surface) void {
     dropChains(surface.app.composition.device, &surface.composition);
+    // The empty visual shows the glass: the stand-in covers it again.
+    surface.repaintBackground();
 }
 
 fn dropChains(device: ?*dcomp.IDCompositionDevice, state: *SurfaceState) void {
@@ -533,6 +579,7 @@ fn dropChains(device: ?*dcomp.IDCompositionDevice, state: *SurfaceState) void {
         v.setContent(null) catch {};
         if (device) |d| d.commit() catch {};
     }
+    state.showing = false;
 }
 
 /// Used by `Surface.create` when core init fails.
@@ -771,17 +818,54 @@ test "win32 composition: stale hand-off is released" {
     defer std.testing.allocator.destroy(fc.obj);
 
     // The chain belongs to generation 3, the present target is at 4.
-    attach(&app_state, &state, fc.chain, 3, 4);
+    try std.testing.expect(!attach(&app_state, &state, fc.chain, 3, 4));
     try std.testing.expectEqual(@as(u32, 0), counts.set_content);
     try std.testing.expectEqual(@as(u32, 0), fc.obj.refs);
+    try std.testing.expect(!state.showing);
 
     // A current one is shown, and still released by the caller's reference.
     const fresh = fakeChain();
     defer std.testing.allocator.destroy(fresh.obj);
-    attach(&app_state, &state, fresh.chain, 4, 4);
+    try std.testing.expect(attach(&app_state, &state, fresh.chain, 4, 4));
     try std.testing.expectEqual(@as(u32, 1), counts.set_content);
     try std.testing.expectEqual(@as(u32, 0), fresh.obj.refs);
     try std.testing.expectEqual(@as(u32, 1), state.attached);
+    try std.testing.expect(state.showing);
+    destroyTree(device, &state);
+    try std.testing.expect(!state.showing);
+}
+
+test "win32 composition: a pane stands in for its first frame until a chain shows" {
+    const t = std.testing;
+    const bg: configpkg.Config.Color = .{ .r = 0x1a, .g = 0x2b, .b = 0x4c };
+    // Opaque (hwnd mode, or a glass window shown solid): the background.
+    try t.expectEqual(Erase{ .r = 0x1a, .g = 0x2b, .b = 0x4c, .alpha = 255 }, surfaceErase(bg, false, false, 255));
+    try t.expectEqual(Erase{ .r = 0x1a, .g = 0x2b, .b = 0x4c, .alpha = 255 }, surfaceErase(bg, false, true, 255));
+    // Translucent, no chain shown yet: the background at the window's alpha,
+    // premultiplied, never the bare glass.
+    const stand_in = surfaceErase(bg, true, false, 204);
+    try t.expectEqual(Erase{ .r = 21, .g = 34, .b = 61, .alpha = 204 }, stand_in);
+    try t.expect(stand_in.alpha != 0);
+    // Translucent with the chain shown: alpha 0 under it, so the frame is
+    // not composed twice.
+    try t.expectEqual(Erase{ .r = 0, .g = 0, .b = 0, .alpha = 0 }, surfaceErase(bg, true, true, 204));
+    // Premultiplication rounds and keeps the ends.
+    try t.expectEqual(@as(u8, 255), premultiply(255, 255));
+    try t.expectEqual(@as(u8, 0), premultiply(255, 0));
+    try t.expectEqual(@as(u8, 128), premultiply(255, 128));
+}
+
+test "win32 composition: dropping the chains brings the stand-in back" {
+    const device = fakeDevice();
+    var app_state: AppState = .{ .device = device };
+    var state: SurfaceState = .{};
+    try createTree(device, &state, undefined);
+    const fc = fakeChain();
+    defer std.testing.allocator.destroy(fc.obj);
+    try std.testing.expect(attach(&app_state, &state, fc.chain, 0, 0));
+    try std.testing.expect(state.showing);
+    dropChains(device, &state);
+    try std.testing.expect(!state.showing);
     destroyTree(device, &state);
 }
 
@@ -798,7 +882,7 @@ test "win32 composition: hand-off after surfaceDestroying is released" {
     defer std.testing.allocator.destroy(fc.obj);
     park(&state, fc.chain, 0);
     const taken = state.pending.swap(null, .acq_rel).?;
-    attach(&app_state, &state, taken, 0, 0);
+    _ = attach(&app_state, &state, taken, 0, 0);
     try std.testing.expectEqual(@as(u32, 0), counts.set_content);
     try std.testing.expectEqual(@as(u32, 0), fc.obj.refs);
 
@@ -869,7 +953,7 @@ test "win32 composition: recovery drops the old and the waiting chain" {
     try createTree(device, &state, undefined);
     const shown = fakeChain();
     defer std.testing.allocator.destroy(shown.obj);
-    attach(&app_state, &state, shown.chain, 0, 0);
+    _ = attach(&app_state, &state, shown.chain, 0, 0);
     try std.testing.expectEqual(@as(u32, 1), counts.set_content);
     const waiting = fakeChain();
     defer std.testing.allocator.destroy(waiting.obj);
@@ -896,7 +980,7 @@ test "win32 composition: a closing surface keeps its mode and releases late chai
     try std.testing.expectEqual(@as(u8, 1), state.mode.load(.acquire));
     const late = fakeChain();
     defer std.testing.allocator.destroy(late.obj);
-    attach(&app_state, &state, late.chain, 0, 0);
+    _ = attach(&app_state, &state, late.chain, 0, 0);
     try std.testing.expectEqual(@as(u32, 0), counts.set_content);
     try std.testing.expectEqual(@as(u32, 0), late.obj.refs);
 }

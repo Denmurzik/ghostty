@@ -149,7 +149,9 @@ fn present(self: *const Self) !void {
             @intCast(self.target.height),
         );
         // `fresh` took the generation at its creation.
-        return presentTo(fresh, self.target, api.vsync);
+        try presentTo(fresh, self.target, api.vsync);
+        api.framePresented();
+        return;
     };
     api.presentSucceeded(seen);
 }

@@ -288,17 +288,21 @@ pub fn create(tab: *Tab, opts: CreateOptions) !*Surface {
     return self;
 }
 
-/// Fill the client area with the configured terminal background.
+/// Fill the client area with the configured terminal background, or what a
+/// translucent window shows there (`composition.surfaceErase`).
 fn fillBackground(self: *Surface, hdc: win32.user32.HDC) void {
     var rc: win32.foundation.RECT = undefined;
     if (win32.user32.GetClientRect(self.hwnd, &rc) == 0) return;
-    // Black is alpha 0 over the glass of a translucent window.
-    var c = self.window.app.config.background;
-    if (composition_mod.eraseTransparent(self.window)) c = .{ .r = 0, .g = 0, .b = 0 };
+    const c = composition_mod.surfaceErase(
+        self.window.app.config.background,
+        composition_mod.eraseTransparent(self.window),
+        self.composition.showing,
+        composition_mod.alphaByte(self.window),
+    );
     const brush = win32.gdi32.CreateSolidBrush(@as(u32, c.r) | (@as(u32, c.g) << 8) | (@as(u32, c.b) << 16)) orelse return;
     defer _ = win32.gdi32.DeleteObject(@ptrCast(brush));
     if (self.window.composition.glass) {
-        composition_mod.fillWithAlpha(hdc, &rc, brush, composition_mod.eraseTransparent(self.window));
+        composition_mod.fillAlpha(hdc, &rc, brush, c.alpha);
     } else {
         _ = win32.gdi32.FillRect(hdc, &rc, brush);
     }

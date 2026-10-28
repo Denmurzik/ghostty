@@ -91,14 +91,15 @@ pub const PresentTarget = struct {
     /// `visible = false`) stops drawing, and the restore redraws.
     mode: ?*const std.atomic.Value(u8) = null,
 
-    /// Receives every composition swap chain right after its creation.
+    /// Receives every composition swap chain once its first frame was
+    /// presented: a visual given an empty chain shows the window's backdrop.
     /// Null: nobody can show a composition chain, so the mode is ignored.
     hand_off: ?HandOff = null,
 
     /// Called under the context lock, on the render thread or on the UI
-    /// thread (a sync draw during resize reaches `swapChain` too), right
-    /// after a composition swap chain was created or recreated, with one
-    /// reference held for the callee. The callee must not call back into the
+    /// thread (a sync draw during resize presents too), right after the
+    /// first successful present of a composition swap chain that was
+    /// created or recreated, with one reference held for the callee. The callee must not call back into the
     /// renderer or wait for the UI thread (post-only): it stores the chain (releasing a previous
     /// one) and posts a wakeup, and the UI thread then does `SetContent` and
     /// `Commit`. `generation` is the target's generation the chain was
@@ -148,6 +149,10 @@ swap_chain_generation: u32 = 0,
 /// The chain a mode change replaced, kept (its content stays on screen)
 /// until the new chain presented once. Same locking as `swap_chain`.
 retired_chain: ?SwapChain = null,
+
+/// `swap_chain` is a composition chain not handed off yet: it goes to the
+/// apprt with its first frame (`framePresented`). Same locking as `swap_chain`.
+hand_off_pending: bool = false,
 
 /// Whether presents wait for the vertical blank (config `window-vsync`).
 vsync: bool = true,
@@ -291,7 +296,7 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
     };
     const sc = &self.swap_chain.?;
     sc.surface_id = target.id;
-    if (mode == .composition) self.handOff(target, sc);
+    self.hand_off_pending = mode == .composition;
     return sc;
 }
 
@@ -394,6 +399,17 @@ pub fn presentSucceeded(self: *D3D11, generation: u32) void {
     self.releaseRetired();
     // A later failure is news again.
     self.swap_chain_failure_logged = false;
+    self.framePresented();
+}
+
+/// After a successful present of `swap_chain`: a composition chain goes to
+/// the apprt now, with a frame in it. The caller holds the lock.
+pub fn framePresented(self: *D3D11) void {
+    if (!self.hand_off_pending) return;
+    self.hand_off_pending = false;
+    const target = self.present_target orelse return;
+    const sc = if (self.swap_chain) |*sc| sc else return;
+    if (sc.mode == .composition) self.handOff(target, sc);
 }
 
 /// Logs a swap chain failure the first time only, until a present succeeds.
@@ -1164,17 +1180,50 @@ test "d3d11 swapchain: composition mode creates a premultiplied chain and hands 
     defer api.device.unlockContext();
     const sc = try api.swapChain(32, 32);
     try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
+    // Not before its first frame: an empty chain shows the backdrop.
+    try std.testing.expectEqual(@as(u32, 0), fake.calls);
+    try sc.present(true);
+    api.presentSucceeded(api.presentGeneration());
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
     try std.testing.expectEqual(win32.dxgi.AlphaMode.PREMULTIPLIED, fake.alpha.?);
 
     // Later frames reuse the chain: no second hand-off.
-    for (0..3) |_| try std.testing.expectEqual(sc, try api.swapChain(32, 32));
+    for (0..3) |_| {
+        try std.testing.expectEqual(sc, try api.swapChain(32, 32));
+        api.presentSucceeded(api.presentGeneration());
+    }
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
 
     // A composition target without a taker stays an hwnd chain.
     api.dropSwapChain();
     api.present_target.?.hand_off = null;
     try std.testing.expectEqual(SwapChain.Mode.hwnd, (try api.swapChain(32, 32)).mode);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+}
+
+test "d3d11 swapchain: a composition chain without a frame is never handed off" {
+    var api = try testApi(.native);
+    defer api.device.deinit(std.testing.allocator);
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(1);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+    defer api.threadExit();
+
+    api.device.lockContext();
+    defer api.device.unlockContext();
+    _ = try api.swapChain(32, 32);
+    api.dropSwapChain();
+    api.framePresented();
+    try std.testing.expectEqual(@as(u32, 0), fake.calls);
+
+    // The next chain goes with its own first frame, once.
+    _ = try api.swapChain(32, 32);
+    api.framePresented();
+    api.framePresented();
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
 }
 
@@ -1207,15 +1256,17 @@ test "d3d11 swapchain: mode change recreates the chain on the next frame" {
     const sc = try api.swapChain(32, 32);
     try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
     try std.testing.expect(sc.chain != hwnd_chain);
-    try std.testing.expectEqual(@as(u32, 1), fake.calls);
-    try std.testing.expectEqual(@as(u32, 1), fake.last_generation);
+    try std.testing.expectEqual(@as(u32, 0), fake.calls);
 
-    // The old chain stays until the new one presented, then goes.
+    // The old chain stays until the new one presented, then goes, and the
+    // new one is handed off with its frame.
     try std.testing.expect(api.retired_chain != null);
     try std.testing.expectEqual(hwnd_chain, api.retired_chain.?.chain);
     try sc.present(true);
     api.presentSucceeded(api.presentGeneration());
     try std.testing.expect(api.retired_chain == null);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expectEqual(@as(u32, 1), fake.last_generation);
 
     // And back; a second switch before a present releases the first retiree.
     mode.store(0, .release);
@@ -1265,6 +1316,8 @@ test "d3d11 swapchain: hand-off reference is balanced across create, retire and 
     defer api.device.unlockContext();
     const sc = try api.swapChain(32, 32);
     const unknown: *win32.com.IUnknown = @ptrCast(sc.chain);
+    try std.testing.expect(holder.held == null);
+    api.framePresented();
     const held = holder.held.?;
 
     // The chain's own reference plus the one the callee holds.
@@ -1277,12 +1330,14 @@ test "d3d11 swapchain: hand-off reference is balanced across create, retire and 
     mode.store(0, .release);
     const hwnd_sc = try api.swapChain(32, 32);
     try std.testing.expectEqual(SwapChain.Mode.hwnd, hwnd_sc.mode);
+    api.framePresented();
     try std.testing.expect(holder.held == null);
     _ = held;
     mode.store(1, .release);
     api.dropSwapChain();
     const again = try api.swapChain(32, 32);
     const again_unknown: *win32.com.IUnknown = @ptrCast(again.chain);
+    api.framePresented();
     const base = refCount(again_unknown);
     try std.testing.expect(holder.held != null);
     win32.com.release(holder.held);
@@ -1311,7 +1366,9 @@ test "d3d11 swapchain: composition resize keeps the hand-off count" {
     try std.testing.expectEqual(@as(u32, 48), sc.width);
     try std.testing.expectEqual(@as(u32, 40), sc.height);
     try sc.present(true);
+    api.presentSucceeded(api.presentGeneration());
     try std.testing.expectEqual(sc, try api.swapChain(48, 40));
+    api.presentSucceeded(api.presentGeneration());
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
 }
 
@@ -1446,6 +1503,7 @@ test "d3d11 device: composition chain handed off again after recovery" {
         api.device.lockContext();
         defer api.device.unlockContext();
         _ = try api.swapChain(32, 32);
+        api.framePresented();
     }
     try std.testing.expectEqual(@as(u32, 1), fake.calls);
 
@@ -1458,6 +1516,7 @@ test "d3d11 device: composition chain handed off again after recovery" {
     defer api.device.unlockContext();
     const sc = try api.swapChain(32, 32);
     try std.testing.expectEqual(SwapChain.Mode.composition, sc.mode);
+    api.framePresented();
     try std.testing.expectEqual(@as(u32, 2), fake.calls);
 }
 
