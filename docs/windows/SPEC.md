@@ -779,7 +779,7 @@ pane border labels, DCS `tmux;` verified in core (the ConPTY gap is documented, 
   clipboard (owner-run); DCS `tmux;` with an ST-terminated inner sequence is dropped by the inbox ConPTY (§12.4);
   external mode, `new-session`/`attach` and the other known gaps are listed in the CHANGELOG. Plan: `docs/windows/plans/M4-tmux-shim.md`.
 
-**M5 — Windows extras (in progress; acceptance pending Task 19/20 measurements: RAM and latency rows, import check, ARM64 cross-build, `E2E -Milestone M5` and the owner manual checklist; plan `docs/windows/plans/M5-windows-extras.md`, rulings §18.36).** Jump lists (new window/tab, profiles as tasks), shell-profiles menu (Git Bash, pwsh, Windows PowerShell, cmd, WSL distros
+**M5 — Windows extras (accepted 1e4912c37 with known limits R-M5-15…18 and the owner manual checks pending, see `docs/windows/m5/acceptance.md`; plan `docs/windows/plans/M5-windows-extras.md`, rulings §18.36).** Jump lists (new window/tab, profiles as tasks), shell-profiles menu (Git Bash, pwsh, Windows PowerShell, cmd, WSL distros
 from the Lxss registry; right-click `+`, palette, tray), Explorer "Open Ghostty here" (`+install-explorer-integration` + installer), pwsh integration
 (OSC 133/7/title), Git Bash integration fixes, OSC 7 translation, compiled terminfo + `TERM=xterm-ghostty`, `+edit-config`,
 update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), crash minidumps, external tmux mode,
@@ -1164,3 +1164,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       native context menu for `context-menu`; drag-and-drop pastes Windows paths (`C:\x`, quoted) in Git Bash/Cygwin and `/mnt/c` for WSL;
       popup menus follow the app theme (undocumented uxtheme ordinals 135/136 loaded from System32 only, build 18362 or later, high contrast
       uses the system theme, silent fallback); no network at all in test mode unless the loopback override is set.
+    - R-M5-15, `tui-latency` is a known limit for v1.0 (lead ruling, 2026-10-29): Ghostty-owned p95 14-16 ms against the 6 ms gate, bound by one 60 Hz frame; M3 already measured 9.7 ms on `b2-vim` at 120 Hz. Not a blocker. Cost if wrong: TUI scrolling feels about a frame slower than the target.
+    - R-M5-16, `split-many` teardown gates are 100 ms on ReleaseFast and 150 ms on Debug; 112 ms was measured once on ReleaseFast. Cost if wrong: Debug teardown regressions up to 150 ms go unflagged.
+    - R-M5-17, `windows-conpty = auto` is the default: inbox console for MSYS2/Cygwin programs (the bundled one loses the first key after a pty resize there), bundled otherwise; Kitty graphics and SGR 58 therefore do not work in Git Bash. A time-boxed input hold-back was ruled out by timing evidence. Cost if wrong: Git Bash users miss graphics, or MSYS2 loses keys if `bundled` is forced.
+    - R-M5-18, the 50 MB Debug `stream-integrity` run (never finished since M1) and the per-feature RAM rows (no `measure-ram.ps1` recipes) are documented limits, not blockers; ReleaseFast passes the stream in 42 s.
