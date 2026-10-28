@@ -866,6 +866,6 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       them). Armed only after the pseudo console asked for win32-input-mode (`CSI ? 9001 h` in its first output, found
       across read splits), so an older conhost never gets the sequence; the write path costs one branch otherwise.
       Evidence: `e2e/resize-input` (Git Bash 36 checks over window, split and tab-strip resizes; cmd.exe and pwsh lines
-      unchanged), 9 of 20 lost without it; residual: 2 of 36 lost in one run under heavy CPU load (the 50 ms window
-      assumes conhost handles the resize promptly). Root cause not proven (a minimal kernel32 ConPTY host never reproduced it);
+      unchanged), 9 of 20 lost without it; under heavy CPU load the 50 ms window now starts at conhost's first output after the resize (cap 2 s; 36/36 with 12 burner threads; before, 2 of 36 lost once
+      when conhost handled the resize late). Root cause not proven (a minimal kernel32 ConPTY host never reproduced it);
       follow-up: report to msys2-runtime (pointer: `strip_inrec` in the Cygwin console code).

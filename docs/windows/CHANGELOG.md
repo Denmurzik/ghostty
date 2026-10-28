@@ -125,8 +125,8 @@
   with a workaround (Task 26.4): the first pty write after a grid change starts with a win32-input-mode Shift key-up,
   which absorbs the loss and which readers ignore; it is armed only after the pseudo console asked for
   win32-input-mode (`CSI ? 9001 h`), so an older conhost never gets it. `e2e/resize-input`: 9 of 20 lines lost before,
-  0 of 36 (window, split, tab) after; cmd.exe and pwsh unchanged. Residual: one run on a heavily loaded machine
-  (a shell taking ~1 s per command) still lost 2 of 36. Root cause in MSYS2/conhost not proven; an msys2-runtime report is
+  0 of 36 (window, split, tab) after; cmd.exe and pwsh unchanged. Under heavy load (one run lost 2 of 36) the
+  window now starts at conhost's first output after the resize (cap 2 s): 36/36 under 12 CPU-burner threads. Root cause in MSYS2/conhost not proven; an msys2-runtime report is
   a follow-up.
 - Over the RAM budget (owner to decide, see `docs/windows/m3/acceptance.md`): custom shader (+1.3 MB at the default
   size), overlays (+1.1 MB), inspector memory after close (+1.6 MB), quick terminal (+10.1 MB first toggle).

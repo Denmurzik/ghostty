@@ -111,4 +111,4 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
   resize (window drag, split, tab strip shown or gone). Ghostty sends a win32-input-mode Shift key-up ahead of the first
   write after a grid change, only once the pseudo console has requested `?9001h`. Evidence: `e2e/resize-input`
   (Git Bash 36/36 checks, cmd.exe and pwsh unchanged; 9/20 lost without the fix), `background-focus` 0 retries in 5
-  runs. Residual: 2 of 36 lost once under heavy CPU load. Follow-up: msys2-runtime report.
+  runs. Heavy CPU load (12 burners): 36/36 since the window starts at conhost's first output (26.4.1). Follow-up: msys2-runtime report.
