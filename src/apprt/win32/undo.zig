@@ -23,10 +23,15 @@ pub fn Stack(comptime Entry: type) type {
         }
 
         /// Records a new undoable action; a new action invalidates redo.
-        /// Dropped redo entries are discarded without being returned.
-        pub fn push(self: *Self, gpa: Allocator, e: Entry) !void {
-            try self.undo.append(gpa, e);
+        /// Displaced redo entries (parked surfaces) are handed to `displaced`, the
+        /// caller owns and must close them.
+        pub fn push(self: *Self, gpa: Allocator, e: Entry, displaced: *std.ArrayList(Entry)) !void {
+            // Reserve first so an allocation failure displaces nothing.
+            try displaced.ensureUnusedCapacity(gpa, self.redo.items.len);
+            try self.undo.ensureUnusedCapacity(gpa, 1);
+            displaced.appendSliceAssumeCapacity(self.redo.items);
             self.redo.clearRetainingCapacity();
+            self.undo.appendAssumeCapacity(e);
         }
 
         pub fn pushRedo(self: *Self, gpa: Allocator, e: Entry) !void {
@@ -116,9 +121,11 @@ const alloc = std.testing.allocator;
 
 test "win32 undo stack: LIFO order" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
-    try s.push(alloc, .{ .id = 1, .expires_ms = 100 });
-    try s.push(alloc, .{ .id = 2, .expires_ms = 100 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 100 }, &dis);
+    try s.push(alloc, .{ .id = 2, .expires_ms = 100 }, &dis);
     try std.testing.expectEqual(@as(u8, 2), s.popUndo(0).?.id);
     try std.testing.expectEqual(@as(u8, 1), s.popUndo(0).?.id);
     try std.testing.expect(s.popUndo(0) == null);
@@ -126,19 +133,23 @@ test "win32 undo stack: LIFO order" {
 
 test "win32 undo stack: push clears redo, redo round trip" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
     try s.pushRedo(alloc, .{ .id = 7, .expires_ms = 100 });
     try std.testing.expectEqual(@as(u8, 7), s.popRedo(0).?.id);
     try s.pushRedo(alloc, .{ .id = 8, .expires_ms = 100 });
-    try s.push(alloc, .{ .id = 1, .expires_ms = 100 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 100 }, &dis);
     try std.testing.expect(s.popRedo(0) == null);
 }
 
 test "win32 undo stack: expired entry never returned, lands in takeExpired" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
-    try s.push(alloc, .{ .id = 1, .expires_ms = 50 });
-    try s.push(alloc, .{ .id = 2, .expires_ms = 200 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 50 }, &dis);
+    try s.push(alloc, .{ .id = 2, .expires_ms = 200 }, &dis);
     try s.pushRedo(alloc, .{ .id = 3, .expires_ms = 60 });
     try std.testing.expect(s.popRedo(60) == null);
     try std.testing.expectEqual(@as(u8, 2), s.popUndo(100).?.id);
@@ -152,18 +163,22 @@ test "win32 undo stack: expired entry never returned, lands in takeExpired" {
 
 test "win32 undo stack: nextExpiry is the minimum" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
     try std.testing.expect(s.nextExpiry() == null);
-    try s.push(alloc, .{ .id = 1, .expires_ms = 300 });
-    try s.push(alloc, .{ .id = 2, .expires_ms = 120 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 300 }, &dis);
+    try s.push(alloc, .{ .id = 2, .expires_ms = 120 }, &dis);
     try s.pushRedo(alloc, .{ .id = 3, .expires_ms = 500 });
     try std.testing.expectEqual(@as(u64, 120), s.nextExpiry().?);
 }
 
 test "win32 undo stack: takeAll empties both stacks" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
-    try s.push(alloc, .{ .id = 1, .expires_ms = 300 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 300 }, &dis);
     try s.pushRedo(alloc, .{ .id = 3, .expires_ms = 500 });
     var out: std.ArrayList(T) = .empty;
     defer out.deinit(alloc);
@@ -175,10 +190,12 @@ test "win32 undo stack: takeAll empties both stacks" {
 
 test "win32 undo stack: removeIf takes only matching entries" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
-    try s.push(alloc, .{ .id = 1, .expires_ms = 300 });
-    try s.push(alloc, .{ .id = 2, .expires_ms = 300 });
-    try s.push(alloc, .{ .id = 3, .expires_ms = 300 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 300 }, &dis);
+    try s.push(alloc, .{ .id = 2, .expires_ms = 300 }, &dis);
+    try s.push(alloc, .{ .id = 3, .expires_ms = 300 }, &dis);
     var out: std.ArrayList(T) = .empty;
     defer out.deinit(alloc);
     const P = struct {
@@ -194,12 +211,29 @@ test "win32 undo stack: removeIf takes only matching entries" {
 
 test "win32 undo stack: timeout 0 is already expired" {
     var s: TS = .{};
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
     defer s.deinit(alloc);
     const now: u64 = 1000;
-    try s.push(alloc, .{ .id = 1, .expires_ms = now });
+    try s.push(alloc, .{ .id = 1, .expires_ms = now }, &dis);
     try std.testing.expect(s.popUndo(now) == null);
     var out: std.ArrayList(T) = .empty;
     defer out.deinit(alloc);
     try s.takeExpired(now, &out, alloc);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
+}
+
+test "win32 undo stack: push hands back every displaced redo entry once" {
+    var s: TS = .{};
+    defer s.deinit(alloc);
+    var dis: std.ArrayList(T) = .empty;
+    defer dis.deinit(alloc);
+    try s.pushRedo(alloc, .{ .id = 5, .expires_ms = 100 });
+    try s.pushRedo(alloc, .{ .id = 6, .expires_ms = 100 });
+    try s.push(alloc, .{ .id = 1, .expires_ms = 100 }, &dis);
+    try std.testing.expectEqual(@as(usize, 2), dis.items.len);
+    try std.testing.expectEqual(@as(u8, 5), dis.items[0].id);
+    try std.testing.expectEqual(@as(u8, 6), dis.items[1].id);
+    try s.push(alloc, .{ .id = 2, .expires_ms = 100 }, &dis);
+    try std.testing.expectEqual(@as(usize, 2), dis.items.len);
 }
