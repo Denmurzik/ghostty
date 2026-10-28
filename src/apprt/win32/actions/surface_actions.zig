@@ -5,6 +5,7 @@ const mouse = @import("../mouse.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const scrollbar_mod = @import("../scrollbar.zig");
+const tmux_registry = @import("../tmux/Registry.zig");
 
 /// The apprt surface an action is aimed at.
 fn surfaceOf(app: *App, target: apprt.Target) ?*Surface {
@@ -29,11 +30,11 @@ pub fn mouse_visibility(app: *App, target: apprt.Target, value: apprt.Action.Val
 }
 
 /// A false return makes core handle the exit itself, per `wait-after-command`.
+/// A pane the tmux shim created follows `remain-on-exit`: closed here (true)
+/// or kept for core's message (false).
 pub fn show_child_exited(app: *App, target: apprt.Target, value: apprt.Action.Value(.show_child_exited)) !bool {
-    _ = app;
-    _ = target;
-    _ = value;
-    return false;
+    const s = surfaceOf(app, target) orelse return false;
+    return tmux_registry.childExited(s, value);
 }
 
 /// Drawing is driven by the renderer thread; nothing to do here.

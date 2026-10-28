@@ -23,9 +23,10 @@ function Get-TmuxPanes($G) {
     @($s.tmux.panes)
 }
 
-# Runs `tmux.exe -S <pipe of $G> <TmuxArgs>`; returns Code, Stdout, Stderr.
-# $StdinText is sent to stdin (UTF-8, no BOM) when given.
-function Invoke-Tmux($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [int]$TimeoutMs = 15000) {
+# Starts `tmux.exe -S <pipe of $G> <TmuxArgs>` without waiting. $Pane is the
+# TMUX_PANE of the caller ("%N"); $Pipe overrides the pipe of $G (a Ghostty
+# that is gone). $StdinText is sent to stdin (UTF-8, no BOM) when given.
+function Start-TmuxProc($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [string]$Pane = '', [string]$Pipe = '') {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:TmuxExe
     $psi.UseShellExecute = $false
@@ -36,22 +37,39 @@ function Invoke-Tmux($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [int]$
     $psi.WorkingDirectory = $script:Sbx.Tmp
     $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
     $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding $false
-    $all = @('-S', (Get-TmuxPipe $G)) + @($TmuxArgs)
+    $pipeName = if ($Pipe) { $Pipe } else { Get-TmuxPipe $G }
+    $all = @('-S', $pipeName) + @($TmuxArgs)
     # .NET Framework (Windows PowerShell 5.1) has no ArgumentList.
     $psi.Arguments = (@($all | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ')
     foreach ($n in 'TMUX', 'TMUX_PANE', 'GHOSTTY_TMUX_TRACE', 'GHOSTTY_TMUX_STATS') {
         [void]$psi.EnvironmentVariables.Remove($n)
     }
+    if ($Pane) { $psi.EnvironmentVariables['TMUX_PANE'] = $Pane }
     $p = [System.Diagnostics.Process]::Start($psi)
     if ($null -ne $StdinText) {
         $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($StdinText)
         $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
     }
     $p.StandardInput.Close()
-    $out = $p.StandardOutput.ReadToEndAsync()
-    $err = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit($TimeoutMs)) { try { $p.Kill() } catch {}; throw "tmux.exe $($TmuxArgs -join ' ') did not exit within $TimeoutMs ms" }
-    [pscustomobject]@{ Code = $p.ExitCode; Stdout = $out.Result; Stderr = $err.Result }
+    [pscustomobject]@{
+        Process = $p
+        Args    = $TmuxArgs
+        Out     = $p.StandardOutput.ReadToEndAsync()
+        Err     = $p.StandardError.ReadToEndAsync()
+        Watch   = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+# Waits for a Start-TmuxProc; returns Code, Stdout, Stderr, Ms.
+function Wait-TmuxProc($Run, [int]$TimeoutMs = 15000) {
+    $p = $Run.Process
+    if (-not $p.WaitForExit($TimeoutMs)) { try { $p.Kill() } catch {}; throw "tmux.exe $($Run.Args -join ' ') did not exit within $TimeoutMs ms" }
+    [pscustomobject]@{ Code = $p.ExitCode; Stdout = $Run.Out.Result; Stderr = $Run.Err.Result; Ms = $Run.Watch.ElapsedMilliseconds }
+}
+
+# Runs `tmux.exe -S <pipe of $G> <TmuxArgs>`; returns Code, Stdout, Stderr.
+function Invoke-Tmux($G, [string[]]$TmuxArgs, [string]$StdinText = $null, [int]$TimeoutMs = 15000, [string]$Pane = '', [string]$Pipe = '') {
+    Wait-TmuxProc (Start-TmuxProc $G $TmuxArgs $StdinText $Pane $Pipe) $TimeoutMs
 }
 
 # C:\a\b -> /c/a/b, the form Git Bash prints for a Windows path.

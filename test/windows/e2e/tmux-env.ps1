@@ -53,10 +53,10 @@ Invoke-E2eScenario 'tmux-env' {
     if ([string]$second.env_tmux_pane -ne [string]$second.pane) { throw "second pane env_tmux_pane '$($second.env_tmux_pane)' differs from its pane '$($second.pane)'" }
     if ([string]$second.env_tmux_pane -eq [string]$first.env_tmux_pane) { throw 'both panes got the same TMUX_PANE' }
 
-    # The stub server answers (Task 12 changes this assertion).
-    $r = Invoke-Tmux $g @('display-message', '-p', 'x')
-    if ($r.Code -ne 1 -or $r.Stderr.Trim() -ne 'ghostty: tmux is not ready') {
-        throw "display-message: exit $($r.Code), stderr '$($r.Stderr.Trim())'"
+    # The real host answers: the pane format of the caller's own pane.
+    $r = Invoke-Tmux $g @('display-message', '-p', '-t', [string]$first.pane, '#{pane_id}')
+    if ($r.Code -ne 0 -or $r.Stdout -ne "$($first.pane)`n") {
+        throw "display-message: exit $($r.Code), stdout '$($r.Stdout)', stderr '$($r.Stderr.Trim())'"
     }
     Stop-OwnGhostty
 
