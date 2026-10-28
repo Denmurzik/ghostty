@@ -191,10 +191,15 @@ fn run(job: *Job) !void {
     const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, job.exe);
     const home_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, job.home);
 
-    list.setAppId(job.aumid.ptr) catch |err| {
-        log.warn("SetAppID failed", .{});
-        return err;
-    };
+    // Not `setAppId`: its `check` logs an error, and the list is optional.
+    // 0x80070003 means the profile has no Recent\CustomDestinations folder
+    // (an e2e sandbox has none).
+    const app_id_hr = list.vtable.SetAppID(list, job.aumid.ptr);
+    if (!foundation.succeeded(app_id_hr)) {
+        log.warn("SetAppID failed hr=0x{x}, no jump list", .{@as(u32, @bitCast(app_id_hr))});
+        hr_commit.store(hrOf(app_id_hr), .release);
+        return;
+    }
 
     var min_slots: u32 = 0;
     var removed: ?*anyopaque = null;
