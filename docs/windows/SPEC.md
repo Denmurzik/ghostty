@@ -406,6 +406,15 @@ M4: DCS `tmux;` passthrough is already unwrapped by the core stream (tests only;
 - Windows-only config keys and defaults in `Config.zig`: `windows-jump-list`, `windows-tmux-external`, `auto-update` default `check`,
   `undo-timeout` 5 s with the default binds `ctrl+shift+z` = `undo` / `ctrl+shift+y` = `redo` (R-M5-12a), `right-click-action` default
   `copy-or-paste`. `main_ghostty.zig` turns Zig's segfault handler off on Windows (§11).
+- Close confirmation (task #53, `Surface.closeNeedsConfirm`): bash, zsh and pwsh keep `Terminal.cursorIsAtPrompt` (OSC 133). For a
+  surface whose shell integration is cmd, which never emits `133;C`, `Exec.shellBusy` asks instead: a Toolhelp snapshot looks for
+  a child of the shell (conhost/OpenConsole and processes older than the shell excluded; GUI-subsystem images via
+  `src/os/windows_pe.zig` and children with their own console host are ignored; a `--headless` pseudoconsole host such as
+  node-pty counts as busy; an unreadable child counts as busy). The zsh integration is loaded under MSYS: `.zshenv` sources a
+  drive path directly and the `path` feature is skipped.
+- `windows-conpty = bundled|inbox` (default `bundled`, read when a surface starts): `termio/Exec.zig` and `src/pty.zig` create
+  the pseudoconsole through the bundled `conpty.dll` (§18.33); a failed create falls back to the inbox table once and disables
+  the bundled one for the process.
 - Apprt-only features (no core change): jump list (`jumplist.zig`), profile menu, update check (`update/`), `secure_input.zig`
   (R-M5-11), undo (`undo.zig` and the park/restore code in `Window.zig`/`Tab.zig`, R-M5-12), `osk.zig` (R-M5-13), popup menu theme
   (`menu_theme.zig`), the right-click context menu (`context_menu.zig`).
@@ -441,6 +450,13 @@ FreeType + HarfBuzz.
 - Git Bash: `CHERE_INVOKING=1` (§8.3). MSYS-facing path vars (`GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`) use the mixed `C:/a/b` form
   when bash integration applies; `TERMINFO` uses `/c/a/b` (R-M5-8). Under MSYS the exe dir is already first on PATH (M4), so the bash
   `path` feature is skipped.
+- zsh from Git Bash (M5, task #53): while the bash startup files run, a DEBUG trap (`set -T` temporarily) arms the handoff right
+  before an `[exec] [path/]zsh[.exe]` command only: the user's `ZDOTDIR` at that moment goes to `GHOSTTY_ZSH_ZDOTDIR` (restored by our
+  `.zshenv` before the user's files) and `ZDOTDIR` points at the zsh integration. After a returning zsh and at the end `ZDOTDIR` is the
+  user's again. The trap is removed only if it is still exactly ours (`$_` and `functrace` are kept; a chained user trap survives).
+  Nothing else started by `.bashrc` sees our `ZDOTDIR`.
+- Conpty (M5): the pty is created through the bundled `conpty.dll` + `OpenConsole.exe` from the exe directory by default; `OpenConsole.exe`
+  appears as a child of Ghostty and the shell as its child.
 - Profiles (M5, R-M5-1): `windows_shell.profiles(alloc, env, probe, default_argv)` returns, in order, `default` (the config `command` or
   §8.3), `git-bash` (`bash --login -i`), `pwsh` (`pwsh -NoLogo`), `powershell` (System32 Windows PowerShell, `-NoLogo`), `cmd` and one
   `wsl:<distro>` per distro (`wsl.exe -d <distro> --cd ~`). Distros are read from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss\{GUID}\DistributionName`
@@ -457,6 +473,9 @@ FreeType + HarfBuzz.
   is invalid, `AttachConsole(ATTACH_PARENT_PROCESS)` then reopen `CONOUT$`/`CONIN$` and `SetStdHandle`; if there is no
   parent console (Explorer launch), output goes to the log file only. Implemented in `src/os/windows_console.zig`, called from
   `main_ghostty.zig` only on Windows.
+- ConPTY choice (M5): one warning line when the bundled `conpty.dll`/`OpenConsole.exe` pair is missing, fails to load or
+  `OpenConsole.exe` cannot start (then the inbox console is used for the process); `GHOSTTY_WIN32_CONPTY_FLAGS` applies to the inbox
+  table only.
 - Panics (M1): a root `panic` override writes the message + stack trace to the file sink and `OutputDebugStringW` before
   aborting (a GUI exe has no valid stderr).
 - Known limitation: a GUI-subsystem `ghostty.exe +version` started from interactive `cmd` returns the prompt before the
@@ -1130,6 +1149,12 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     - R-M5-13, `show_on_screen_keyboard`: if `IFrameworkInputPane::Location` reports an empty rect, `ITipInvocation::Toggle(GetDesktopWindow())`;
       never hide it. If `CoCreateInstance(CLSID_UIHostNoLaunch)` fails with `REGDB_E_CLASSNOTREG` (TabTip not running), `ShellExecuteW`
       `%CommonProgramFiles%\microsoft shared\ink\TabTip.exe` and retry once. Test mode only records.
+    - New tab fill (#57): in composition mode (translucent window) a swap chain is handed to the compositor only after its first
+      successful present, and until a chain shows, the pane erases itself with the applied light/dark theme background
+      premultiplied at the window alpha; after the first attach `setContent` waits for the commit before erasing to alpha 0.
+      Opaque windows keep the `WM_ERASEBKGND` fill from 468bace72.
+    - 19.n batch 2 (parity audit): About dialog (palette, tray, tab menu; GitHub button opens the fork's issues, Docs ghostty.org),
+      `window-step-resize`, `initial-window`, `window-subtitle`, `bell-audio-volume`, `auto-update-channel`; see `parity-audit.md`.
     - R-M5-14, external tmux mode is opt-in (`windows-tmux-external = false`): see §12.4. It relaxes M2 revision 2.
     - Other M5 rulings: right-click default `right-click-action = copy-or-paste` on Windows (Windows Terminal/conhost convention), with a
       native context menu for `context-menu`; drag-and-drop pastes Windows paths (`C:\x`, quoted) in Git Bash/Cygwin and `/mnt/c` for WSL;

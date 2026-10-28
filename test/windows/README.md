@@ -380,7 +380,7 @@ runs with `GHOSTTY_LAT_BUILD_VARIANT` so they never read as baseline rows.
 `e2e.ps1 -Milestone M5` runs these scenarios (header `milestone=M5`, with their orders): `right-click` (116), `menu-dark` (640),
 `prompt-marks` (700), `secure-input` (870), `undo-close` (880), `osk` (900), `jumplist` (910), `explorer-cli` (965),
 `term-terminfo` (966), `edit-config` (966), `update-check` (968), `profiles-menu` (970), `tmux-external` (975) and `crash-dump`
-(Task 12). `drop-files` (M2) also covers the Windows-path paste of M5. Helpers and self-tests: `e2e/_m5_fakeserver.ps1` (the
+(Task 12), plus the pending `close-idle-prompt`, `new-tab-white-flash` and `initial-window`. `drop-files` (M2) also covers the Windows-path paste of M5. Helpers and self-tests: `e2e/_m5_fakeserver.ps1` (the
 loopback release server), `e2e/_selftest-clipboard.ps1` (clipboard save and restore, no scenario) and
 `e2e/_selftest-capture.ps1` (the capture guard's pure part, no GUI).
 
@@ -408,6 +408,31 @@ loopback release server), `e2e/_selftest-clipboard.ps1` (clipboard save and rest
   sandbox instance; `has-session`, `new-session`, `new-window -n`, `kill-session`, `kill-server`.
 - `right-click`: the three `right-click-action` behaviours in Git Bash, with the owner's clipboard saved and restored.
 - `menu-dark`: median background luminance of the tab menu under the simulated dark and light scheme.
+- `close-idle-prompt` (425, PENDING first GUI run): with `confirm-close-surface = true`, `WM_CLOSE` at an idle Git Bash prompt,
+  at a Git Bash whose rc file runs `exec zsh`, and in cmd asks nothing; a running `ping -t` in cmd asks. Headless counterpart:
+  `shell-marks/run.ps1` (below).
+- `new-tab-white-flash` (312, PENDING): translucent window (0.85, no blur) over a white backdrop window of our own; a capture
+  thread counts near-white frames in the terminal area during bursts of `new_tab`, `new_split` and `new_window`, and again with
+  a light/dark theme pair; the expected count is 0. Run it against a build of `91ff7bac1` (red) and the fix (green) through
+  `GHOSTTY_E2E_EXE`; it SKIPs when a foreign window overlaps the capture rectangle.
+- `initial-window` (990, PENDING): `initial-window = false` starts the process and the tray with no window; a second launch
+  opens the first window. The harness knows `AllowNoWindow`.
+- `crash-dump` (980): see above; Debug and ReleaseFast both, with the stack-overflow case.
+- `package-portable` (milestone M6, order 1000): the release zip, with Mark-of-the-Web on the zip and every extracted file, runs
+  from a path with a space and a Cyrillic letter. Input: `GHOSTTY_E2E_PACKAGE=<zip>`. It checks `+version`, `+list-themes`, a cmd
+  session with the folder's resources, `TERM` and `tmux.exe`, the bundled `OpenConsole.exe` running from the folder, a clean close,
+  a moved `share\` (TERM falls back with one warning) and no writes into the folder. A SKIP counts as a FAIL here.
+- `installer-test` (milestone M6, M6 Task 7, in progress): installs the per-user Inno Setup test variant into a sandbox and
+  checks files, shortcut, uninstall and the running-Ghostty guard. Not in the tree at the time of writing; the Retry button of the
+  guard is a manual check.
+
+### Headless shell integration check (`shell-marks/run.ps1`)
+
+No window and no desktop: each case runs a shell in a pseudoconsole with Ghostty's integration environment and a sandbox
+`HOME`, and reads the raw output. A prompt is marked when a `133;B` follows the last `133;A`. Cases: Git Bash, `ZDOTDIR`
+handling around `exec zsh` (environment, rc file, leak, trap removed, chained user trap, `$_`), zsh from a drive path and a
+backslash path, the zsh `path` feature, and cmd while a command runs (`cmd-busy`). 15 cases pass. It never reads the owner's
+rc files.
 
 ### Safety rules (binding for every M5 scenario)
 

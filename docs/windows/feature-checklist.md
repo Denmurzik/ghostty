@@ -24,11 +24,11 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | SGR: truecolor (semicolon and colon forms) | M1 | vt-smoke/sgr-truecolor | done |
 | SGR: bold, dim, italic, inverse, invisible, strikethrough, overline | M1 | vt-smoke/styles | done |
 | SGR: underline styles (single, double, curly, dotted, dashed) | M1 | vt-smoke/underlines | done |
-| SGR 58: underline colour | M1 | headless conpty-probe (bundled ConPTY forwards it unchanged); vt-smoke/underline-colors (GUI check pending) | pending (bundled ConPTY, see notes) |
+| SGR 58: underline colour | M1 | headless conpty-probe (bundled ConPTY forwards it unchanged); vt-smoke/underline-colors (GUI check pending) | done via bundled ConPTY (GUI verification pending, see notes) |
 | OSC 8 hyperlinks (sequence arrives, text intact) | M1 | vt-smoke/osc8-link | done |
 | OSC 52 clipboard (write, read, confirmation, escaping) | M1 | unit: clipboard.zig | done |
 | Kitty keyboard protocol | M1 | core encoder: upstream `input` tests; no Windows end-to-end check | manual |
-| Kitty graphics protocol | M3 | headless conpty-probe (bundled ConPTY forwards the APC); vt-smoke/kitty-image (GUI check pending) | pending (bundled ConPTY, see notes) |
+| Kitty graphics protocol | M3 | headless conpty-probe (bundled ConPTY forwards the APC); vt-smoke/kitty-image (GUI check pending) | done via bundled ConPTY (GUI verification pending, see notes) |
 | Background image | M3 | vt-smoke/bg-image, e2e/device-recover (re-uploaded after a device loss) | done |
 | Custom shaders (GLSL to HLSL) | M3 | e2e/custom-shader, vt-smoke/custom-shader, unit: shadertoy.zig | done |
 | Fonts: embedded JetBrains Mono, size, metrics | M1 | e2e/render | done |
@@ -119,6 +119,12 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | File drop pastes Windows paths in Git Bash / Cygwin (WSL keeps `/mnt/c`) | M5 | e2e/drop-files (SKIPped on a locked session when written; re-run in the next GUI batch); unit: drop.zig | done |
 | Dialogs in the Windows 11 look (re-check after M5 additions: update dialog, secure-input explainer) | M5 | e2e/dialogs, e2e/secure-input, e2e/update-check | done |
 | Dark and light popup menus (tab menu, context menu, profile menu) | M5 | e2e/menu-dark (luminance 44 dark / 249 light) | done |
+| Bundled ConPTY (`windows-conpty = bundled`, inbox fallback when the pair is missing or OpenConsole cannot start) | M5 | headless conpty-probe (APC, SGR 58, OSC byte-exact, key-echo p95 under 1 ms); unit: windows_conpty tests (fallback, real bundled child). The e2e suite on the bundled console (resize-input, stream-integrity, latency) is in the Task 19 batch | done (GUI verification pending) |
+| Close confirmation at an idle prompt: no dialog in Git Bash (also after `exec zsh` in `.bashrc`), zsh and pwsh; cmd asks while a console child runs | M5 | e2e/close-idle-prompt (PENDING first GUI run); headless test/windows/shell-marks/run.ps1 (15 cases); unit: closeNeedsConfirm, shellBusy, cursorIsAtPrompt, peIsGui | done (GUI run pending) |
+| No white flash on a new tab or split in a translucent window | M5 | e2e/new-tab-white-flash (PENDING: red on 91ff7bac1, green on the fix); unit: win32 composition, d3d11 swapchain tests | done (GUI proof pending) |
+| About dialog (palette, tray, tab menu; version, icon) | M5 | unit: about.zig, palette tests; icon and centring are a GUI check | done (GUI check pending) |
+| `window-step-resize`, `initial-window = false`, `window-subtitle`, `bell-audio-volume`, `auto-update-channel` | M5 | unit: step_resize.zig, title_rules, bell PCM scaling, update/release.zig; e2e/initial-window (PENDING first run) | done (e2e pending) |
+| Undo polish: split follows config on unpark, taskbar progress restored, popups follow the window, parked windows render nothing | M5 | unit: win32 undo, tab, window, taskbar tests; GUI checks (progress after undo, popup order) in the Task 19 batch | done (GUI check pending) |
 
 ## Notes
 
@@ -146,7 +152,10 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
   input; cmd's OSC 133 `D` carries no exit code (no `command_finished` for cmd, `jump_to_prompt` works); `TERM=xterm-ghostty`
   over ssh to hosts without the entry (Windows OpenSSH from pwsh in particular); external tmux needs the Ghostty dir on PATH;
   undo is not offered for tmux, IPC and child-exit closes; a crash under the process heap lock leaves no dump; `+edit-config`
-  tells a GUI editor by its PE subsystem only.
+  tells a GUI editor by its PE subsystem only. Added after Task 19.n: the bundled console is disabled for the process after
+  any create failure; a winget "portable" symlink install uses the inbox console; non-undoable creates (profile menu, tray,
+  jump list); a closed external tmux tab leaves its namespace on the next client command; the installer's Retry button is a
+  manual check.
 - **Owner manual checks (M5 exit checklist item 8):** pinned jump list and WSL profile, Explorer entry on a folder, folder
   background and drive root, a real update toast, OBS / Snipping Tool against secure input and Win+V history, the touch
   keyboard, `vim` / `less` / `htop` with `TERM=xterm-ghostty`, Claude Code from Windows Terminal against external mode.

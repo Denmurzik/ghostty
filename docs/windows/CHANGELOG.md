@@ -246,6 +246,33 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   drives a Ghostty window per tmux server name: `new-session -d`, `new-window -n`, `has-session`, `kill-session`,
   `kill-server`, `list-windows -F '#{window_name}'` and `session:window-name` targets. Claude Code started in Windows
   Terminal then opens its teammates in Ghostty.
+- **Bundled ConPTY.** Ghostty now ships Microsoft's `conpty.dll` + `OpenConsole.exe` (package
+  `Microsoft.Windows.Console.ConPTY` 1.25.260930003, MIT, signed by Microsoft) next to `ghostty.exe` and uses them by default
+  (`windows-conpty = bundled`). The inbox console drops the Kitty graphics sequences and turns SGR 58 (underline colour) into
+  blink; the bundled one forwards both unchanged (headless probe), so both are expected to work out of the box with upstream
+  defaults. GUI verification (references `kitty-image`, `underline-colors`) is pending. If the pair is missing, fails to load
+  or `OpenConsole.exe` cannot start (policy, antivirus), Ghostty logs one warning and uses the inbox console for the rest of the
+  process; `windows-conpty = inbox` forces it. A running pane keeps the console it started with.
+- **Close confirmation at a prompt.** `confirm-close-surface` no longer asks at an idle prompt in Git Bash whose `~/.bashrc`
+  runs `exec zsh`: the zsh integration is now loaded there (a `C:/...` path in `.zshenv` was misread by MSYS zsh, and the bash
+  integration hands its `ZDOTDIR` over right before the `exec zsh`, keeping yours). In Command Prompt, which cannot mark a
+  running command, the window asks while the shell has a console child (`ping -t`, a build) and does not ask when idle or
+  when the only child is a GUI program or has its own console (`start notepad`). A node-pty/winpty `--headless` host counts
+  as busy.
+- **New tab without a white flash.** In a translucent window a new tab or split shows the terminal background from its first
+  frame instead of the bare Acrylic/desktop behind the window (the swap chain is handed to the compositor after its first
+  frame; until then the pane fills itself with the applied light/dark theme background at the window opacity).
+- **About dialog.** Command palette `About Ghostty`, the tray menu and the tab menu: version, app icon, GitHub and Docs buttons.
+- **Window options.** `window-step-resize` snaps interactive resizes to whole cells; `initial-window = false` starts with the
+  tray and the pipe only (the jump list or a second launch opens the first window); `window-subtitle = working-directory`
+  shows `title - pwd` in the title row.
+- **Sound and updates.** `bell-audio-volume` scales the WAV bell; `auto-update-channel = stable` makes the update check skip
+  GitHub pre-releases (`tip` also offers them; unset follows the build's release channel). `win-` tags are pre-releases.
+- **External tmux and tmux pipe fixes.** An external `new-window` opens in the namespace's window while it lives (else in the
+  first live tab's window); the tmux user-pipe drain keeps every foreign message and answers `ghostty: busy` to a request it
+  cannot store.
+- **Undo polish.** A restored split follows the current config on unpark, a closed surface's taskbar progress returns with it,
+  popups follow their window, parked windows and tabs render nothing.
 - **Also in this milestone.** Right-click pastes by default (`right-click-action = copy-or-paste`, like Windows Terminal; a
   selection is copied instead), with a native context menu for `context-menu`. File drops paste Windows paths in Git Bash and
   Cygwin (WSL keeps `/mnt/c/...`). Popup menus follow the dark and light theme. All dialogs, including the update and
@@ -261,7 +288,12 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   `redo` (`ctrl+shift+t` is already `new_tab` and `ctrl+z` belongs to the shell). The cost: for 5 s after a close, the
   closed tab's programs keep running (a dev server keeps its port), unlike Windows Terminal where they end at once. Set
   `undo-timeout = 0` to turn undo off.
-- `auto-update = check|off` (Windows default `check`).
+- `auto-update = check|off` (Windows default `check`); `auto-update-channel = stable|tip` filters the update check.
+- `windows-conpty = bundled|inbox` (default `bundled`, Windows only, read when a surface starts, so a reload affects new
+  surfaces only).
+- `window-step-resize`, `initial-window`, `window-subtitle`, `bell-audio-volume` now take effect on Windows. `bell-audio-path`
+  stays WAV only. `font-thicken` is macOS only upstream (no effect here); `mouse-hide-while-typing` and
+  `clipboard-write-limit-bytes` are core logic and were checked by code reading only.
 - `right-click-action` default on Windows is `copy-or-paste`.
 
 ### Known limitations (gaps)
@@ -283,6 +315,22 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
   8-byte word of every thread stack that is not zero and does not look like a user-mode pointer (a dump that cannot be
   parsed is kept as written and logged). A pointer-shaped value is kept by design, and module names, thread ids and register values stay in the file. Check a dump before sending
   it to anyone.
+
+- Bundled ConPTY: Kitty graphics and SGR 58 are verified headless only; the GUI references are pending. A winget "portable"
+  install starts through a symlink in `WinGet\Links`, where the pair is not found, so Ghostty uses the inbox console there
+  (installer or zip layout is fine). Any failure to create a bundled console disables the bundled one for the rest of the
+  process. `zig build run` uses the cached exe and so the inbox console; start `zig-out\bin\ghostty.exe`.
+- Close confirmation in Command Prompt uses a process snapshot (a child of the shell), not shell marks, so a running command
+  that owns a separate console window or a GUI child does not make the window ask.
+- In a translucent window the first-frame fill uses the applied theme background; the GUI proof (`e2e/new-tab-white-flash`
+  red on the old build, green on the fix) is pending.
+- `ssh-terminfo` was checked headless in Git Bash only: `ghostty +ssh` starts and tries the terminfo install; a real remote
+  install was not tested. `window-subtitle` is not re-applied on config reload until the next title change.
+- Test-only fixes in this stretch: the `right-click` scenario now polls the clipboard for the copied selection and `osk` reads
+  the state from `m5.osk`; neither changes product behaviour. The installer's Retry button (running-Ghostty guard) is covered
+  by a manual check only.
+- The undo of a closed external tmux tab leaves it out of its namespace on the next client command (parked items are invisible
+  to tmux); creates through the profile menu, tray and jump list are not undoable.
 
 #### Undo: known limits (Task 15b)
 
