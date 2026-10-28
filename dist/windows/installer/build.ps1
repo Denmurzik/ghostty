@@ -43,8 +43,11 @@ function Find-Iscc {
     return $null
 }
 
+# Names only the paths Find-Iscc actually tried.
 function Get-IsccNotFoundText {
-    return ('ISCC.exe not found (looked in: ' + ((Get-IsccCandidates) -join '; ') + '); install Inno Setup 6 or set ISCC')
+    $cands = Get-IsccCandidates
+    $tried = if ($env:ISCC) { @($cands[0]) } else { $cands }
+    return ('ISCC.exe not found (looked in: ' + ($tried -join '; ') + '); install Inno Setup 6 or set ISCC')
 }
 
 # X.Y.Z[-pre]-win.N  ->  X.Y.Z.N (the 4-part FILEVERSION of the exes).
@@ -85,7 +88,8 @@ if ($SelfTest) {
     try {
         $env:ISCC = Join-Path ([IO.Path]::GetTempPath()) 'no-such-dir\ISCC.exe'
         Check 'missing ISCC env -> null' ($null -eq (Find-Iscc))
-        Check 'not-found text' ((Get-IsccNotFoundText) -match '^ISCC\.exe not found \(looked in: .*\); install Inno Setup 6 or set ISCC$')
+        Check 'env override names only itself' ((Get-IsccNotFoundText) -notmatch 'Programs|Program Files')
+    Check 'not-found text' ((Get-IsccNotFoundText) -match '^ISCC\.exe not found \(looked in: .*\); install Inno Setup 6 or set ISCC$')
     } finally { $env:ISCC = $saved }
     if ($fail.Count -gt 0) { Write-Host ('build: SELFTEST FAIL: ' + ($fail -join ', ')); exit 1 }
     Write-Host 'build: selftest ok'

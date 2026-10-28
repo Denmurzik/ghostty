@@ -19,6 +19,9 @@
 #ifndef OutDir
   #error OutDir is not defined
 #endif
+#if (Arch != "x64") && (Arch != "arm64")
+  #error Arch must be x64 or arm64
+#endif
 
 ; Checked by dist/windows/package.ps1 against the app's own constants
 ; (src/os/windows_explorer.zig aumid, src/apprt/win32/tray.zig class_name).
@@ -94,8 +97,10 @@ Name: "{autoprograms}\Ghostty"; Filename: "{app}\ghostty.exe"; WorkingDir: "{%US
 Name: "{autodesktop}\Ghostty"; Filename: "{app}\ghostty.exe"; WorkingDir: "{%USERPROFILE}"; AppUserModelID: "{#AppAumid}"; Tasks: desktopicon
 #endif
 
+#ifndef GhosttyTest
 [Run]
 Filename: "{app}\ghostty.exe"; Description: "Launch Ghostty"; WorkingDir: "{%USERPROFILE}"; Flags: postinstall nowait skipifsilent
+#endif
 
 [UninstallRun]
 ; Always, whether or not the Explorer task was ticked. --only-this-exe keeps a
@@ -113,7 +118,7 @@ begin
     if not Exec(ExpandConstant('{app}\ghostty.exe'), '+install-explorer-integration',
                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
     begin
-      Log(Format('+install-explorer-integration failed (exit %d)', [ResultCode]));
+      Log(Format('+install-explorer-integration failed (code %d: %s)', [ResultCode, SysErrorMessage(ResultCode)]));
       SuppressibleMsgBox('Ghostty was installed, but the Explorer menu entry could not be added. ' +
         'You can add it later with: ghostty.exe +install-explorer-integration',
         mbInformation, MB_OK, IDOK);
@@ -121,11 +126,27 @@ begin
   end;
 end;
 
+// Runs before Setup's own in-use check (Restart Manager), so the guard has to
+// wait here itself. Any Ghostty counts, a portable copy too.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Msg: String;
 begin
+  Msg := 'Ghostty is running. Close all Ghostty windows (and the tray icon), then click Retry.';
   Result := '';
-  if FindWindowByClassName('{#TrayClass}') <> 0 then
-    Result := 'Ghostty is still running. Close it (including the tray icon) and run Setup again.';
+  while FindWindowByClassName('{#TrayClass}') <> 0 do
+  begin
+    if WizardSilent then
+    begin
+      Result := Msg;
+      Exit;
+    end;
+    if MsgBox(Msg, mbError, MB_RETRYCANCEL) = IDCANCEL then
+    begin
+      Result := 'Setup was stopped because Ghostty is running.';
+      Exit;
+    end;
+  end;
 end;
 
 function InitializeUninstall(): Boolean;
@@ -133,7 +154,7 @@ begin
   Result := True;
   while FindWindowByClassName('{#TrayClass}') <> 0 do
   begin
-    if SuppressibleMsgBox('Close Ghostty (including the tray icon) to continue.',
+    if SuppressibleMsgBox('Close any running Ghostty (including the tray icon) to continue.',
          mbError, MB_RETRYCANCEL, IDCANCEL) = IDCANCEL then
     begin
       Result := False;

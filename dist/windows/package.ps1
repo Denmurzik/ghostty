@@ -261,6 +261,11 @@ try {
         $aumid = $m.Groups[1].Value
         $m = [regex]::Match($issText, '#define\s+AppAumid\s+"([^"]+)"')
         if (-not $m.Success) { Fail 'AppAumid define not found in installer\ghostty.iss' }
+        $uses = [regex]::Matches($issText, 'AppUserModelID:\s*"([^"]*)"')
+        if ($uses.Count -eq 0) { Fail 'installer\ghostty.iss has no AppUserModelID in [Icons]' }
+        foreach ($u in $uses) {
+            if ($u.Groups[1].Value -ne '{#AppAumid}') { Fail "installer [Icons] AppUserModelID is not {#AppAumid}: '$($u.Groups[1].Value)'" }
+        }
         if ($m.Groups[1].Value -ne $aumid) { Fail "installer AUMID '$($m.Groups[1].Value)' <> app '$aumid'" }
         $zigTray = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src\apprt\win32\tray.zig')
         $m = [regex]::Match($zigTray, 'const class_name = std\.unicode\.utf8ToUtf16LeStringLiteral\("([^"]+)"\)')
@@ -348,7 +353,7 @@ try {
         if ($Test) { $ia += '-Test' }
         if ($SignCommand) { $ia += @('-SignCommand', $SignCommand) }
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $rc = Invoke-Native -Exe $ps -Args $ia -Log $log
+        $rc = Invoke-Native -Exe $ps -Args $ia -Log $log -HideCmdLine:([bool]$SignCommand)
         if ($rc -eq 2) {
             foreach ($a in $artifacts) { Write-Host "artifact: $a" }
             Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
