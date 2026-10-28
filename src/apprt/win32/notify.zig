@@ -21,6 +21,8 @@ const app_actions = @import("actions/app_actions.zig");
 const bell = @import("bell.zig");
 const ipc_ops = @import("ipc/ops.zig");
 const messages = @import("messages.zig");
+const Updater = @import("update/Updater.zig");
+const explorer = @import("../../os/main.zig").windows_explorer;
 
 const advapi32 = win32.advapi32;
 const com = win32.com;
@@ -33,16 +35,12 @@ const HWND = foundation.HWND;
 
 const log = std.log.scoped(.win32_notify);
 
-/// The AppUserModelID the toasts are shown under. The debug build has its own
-/// so that a development run never rewrites the registration of an installed
-/// build.
-pub const aumid = if (builtin.mode == .debug)
-    "com.mitchellh.ghostty.windows-unofficial-debug"
-else
-    "com.mitchellh.ghostty.windows-unofficial";
+/// The AppUserModelID the toasts are shown under; shared with the CLI revert
+/// (`+uninstall-explorer-integration --all`) through `windows_explorer`.
+pub const aumid = explorer.aumid;
 
 const display_name = "Ghostty \u{2014} Unofficial Windows port";
-const aumid_subkey = "Software\\Classes\\AppUserModelId\\" ++ aumid;
+const aumid_subkey = explorer.aumid_subkey;
 
 /// The icon the toast shows, written to disk on the first toast: the
 /// registration takes a file path.
@@ -58,6 +56,10 @@ const max_body_cp = 1024;
 const live_capacity = 16;
 
 const recorded_capacity = 16;
+
+/// The click id of the app-level "update available" toast (surface ids count
+/// up from 1 and never get near it).
+pub const update_click_id: u32 = std.math.maxInt(u32) - 1;
 
 /// A notice recorded in test mode. The text is cut to fit.
 pub const Recorded = struct {
@@ -225,7 +227,7 @@ fn L(comptime s: []const u8) []const u16 {
 /// The key and the icon file stay after the app is gone (nothing removes them:
 /// they are per user, small, and rewritten by the next run); an uninstaller
 /// deletes `HKCU\Software\Classes\AppUserModelId\<aumid>` and
-/// `%LOCALAPPDATA%\Ghostty\notify-icon.png`.
+/// `%LOCALAPPDATA%\ghostty\toast-icon.png`.
 pub fn registerAumid(w: RegistryWriter, icon_path: []const u8) bool {
     var icon_buf: [1024]u16 = undefined;
     const icon_len = std.unicode.utf8ToUtf16Le(&icon_buf, icon_path) catch return false;
@@ -280,9 +282,9 @@ const real_writer: RegistryWriter = .{ .ctx = &real_writer_ctx, .setString = reg
 fn writeIcon(alloc: Allocator) ?[]u8 {
     const base = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch return null;
     defer alloc.free(base);
-    const dir = std.fmt.allocPrint(alloc, "{s}\\Ghostty", .{base}) catch return null;
+    const dir = std.fmt.allocPrint(alloc, "{s}\\ghostty", .{base}) catch return null;
     defer alloc.free(dir);
-    const path = std.fmt.allocPrint(alloc, "{s}\\notify-icon.png", .{dir}) catch return null;
+    const path = std.fmt.allocPrint(alloc, "{s}\\" ++ explorer.toast_icon_name, .{dir}) catch return null;
     errdefer alloc.free(path);
 
     const io = global.io();
@@ -398,6 +400,7 @@ pub fn configChanged(app: *App, config: *const configpkg.Config) void {
 /// bring the surface of the clicked toast forward, if it is still alive.
 pub fn clicked(app: *App, wparam: WPARAM) void {
     const id = std.math.cast(u32, wparam) orelse return;
+    if (id == update_click_id) return Updater.openReleasePage(app);
     const surface = findSurface(app, id) orelse return;
     _ = app_actions.present_terminal(app, .{ .surface = &surface.core_surface }, {}) catch |err|
         log.warn("unable to present the surface of a clicked toast err={}", .{err});
@@ -489,11 +492,19 @@ fn surfaceFocused(surface: *Surface) bool {
     return foreground and win32.user32.GetFocus() == surface.hwnd;
 }
 
+/// The toast of a new release: not tied to a surface, a click opens the
+/// release page.
+pub fn showUpdate(app: *App, title: []const u8, body: []const u8) void {
+    emit(app, null, update_click_id, title, body);
+}
+
 /// Shows (or in test mode records) one notice. Never fails: a toast that
 /// cannot be shown flashes the taskbar button instead.
 fn show(app: *App, surface: ?*Surface, title: []const u8, body: []const u8) void {
-    const surface_id: u32 = if (surface) |s| s.id else 0;
+    emit(app, surface, if (surface) |s| s.id else 0, title, body);
+}
 
+fn emit(app: *App, surface: ?*Surface, surface_id: u32, title: []const u8, body: []const u8) void {
     if (testMode()) {
         const alloc = app.core_app.alloc;
         const clean_title = sanitize(alloc, title, max_title_cp) catch return;

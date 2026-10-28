@@ -35,6 +35,7 @@ pub extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?HANDLE, fla
 pub extern "kernel32" fn GetProcAddress(HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 pub extern "kernel32" fn FreeLibrary(HMODULE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+pub extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
 pub extern "kernel32" fn K32GetProcessMemoryInfo(process: HANDLE, counters: *PROCESS_MEMORY_COUNTERS_EX, cb: u32) callconv(.winapi) BOOL;
 
