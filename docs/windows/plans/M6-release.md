@@ -162,8 +162,8 @@ Over budget: DONE_WITH_CONCERNS with numbers. If `-Dstrip=false` is the cause, R
      - nothing written next to the exe.
    - Tests: Task 6 `package-portable.ps1` (space + Cyrillic dir); owner checklist (USB/read-only).
 6. **Release binaries run on every target machine.**
-   - Always an explicit `-Dtarget=<arch>-windows-msvc`: CPU baseline, never the build machine's native features.
-   - The ARM64 MSVC cross-link needs the VS ARM64 libraries on the owner's machine (SPEC R15). `release.ps1` checks them up front and names the missing VS component.
+   - Always an explicit `-Dtarget` (`x86_64-windows-msvc`, `aarch64-windows-gnu` by default, R-M6-11): CPU baseline, never the build machine's native features.
+   - ARM64 with the MinGW ABI: does the gnu build behave like the M5 msvc code paths (COM vtables, `callconv(.winapi)`, `@alignCast` sites fixed in M3, the dump writer)? Only `-Arm64Abi msvc` needs the VS ARM64 libraries; the preflight then names the missing component.
    - The ARM64 unit tests cannot run on this machine; they are an owner check (R-M6-6).
    - Tests: Task 9 (both arches build and package; `+version` of x64 only); owner ARM64 test exe and smoke (non-blocking).
 
@@ -209,7 +209,7 @@ The owner's M6 decisions (binding, not re-asked):
     - `share\ghostty\themes` (non-empty) and `share\ghostty\shell-integration`;
     - `share\terminfo\ghostty.terminfo` (the resources sentinel of `resourcesdir.zig`);
     - `share\terminfo\78\xterm-ghostty` (compiled, R-M5-7). Only a non-release local run may waive it with `-AllowNoTic`; `release.ps1` never does.
-  - **Release builds use** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dtarget=<x86_64|aarch64>-windows-msvc -Dversion-string=<v>`.
+  - **Release builds use** `-Doptimize=ReleaseFast -Demit-themes=true -Demit-terminfo=true -Dstrip=false -Dtic=<Git's tic.exe> -Dversion-string=<v>`, with `-Dtarget=x86_64-windows-msvc` or `-Dtarget=aarch64-windows-gnu` (`msvc` optional, R-M6-11).
     - `-Dstrip=false` yields the PDBs for the M5 crash dumps, shipped only in `-symbols.zip`. It also keeps frame pointers and unwind tables, which help the dumps.
     - Cost if wrong (the Task 11 RAM/latency rows): drop to the default strip and ship no symbols.
 - **R-M6-4 Installer** (`dist/windows/installer/ghostty.iss`).
@@ -251,9 +251,9 @@ The owner's M6 decisions (binding, not re-asked):
 
     The groups are defined once, in `release.ps1`. Any failure stops the release.
   - **ARM64** (owner decision 4: ARM64 checks never block a release):
-    - Cross-built locally with `aarch64-windows-msvc`. If the VS ARM64 libraries are missing, `release.ps1` stops and names the VS component to add. `-Arm64Abi gnu` (SPEC R15, the target M2–M5 compiled) is an explicit owner choice, printed in the notes.
+    - Cross-built locally with `aarch64-windows-gnu` by default; `-Arm64Abi msvc` is the optional switch (R-M6-11).
     - ARM64 unit tests are an **owner check**, because there is no ARM64 runner.
-      - With `-Arm64TestExe`, `release.ps1` builds one ARM64 test exe (`-Demit-test-exe`, groups 1+2 filters, `-Dtarget=aarch64-windows-msvc`) without running it.
+      - With `-Arm64TestExe`, `release.ps1` builds one ARM64 test exe (`-Demit-test-exe`, groups 1+2 filters, `-Dtarget=aarch64-windows-<abi>`) without running it.
       - It zips that exe as `ghostty-<v>-windows-arm64-tests.zip`, local only and never published.
       - The owner runs it on an ARM64 device. Exit 0 = PASS; a failure is recorded, not blocking.
       - Task 8's implementer confirms the build path that installs the foreign test exe without trying to run it. If none exists, the owner check is the ARM64 smoke alone and the report says so.
@@ -304,6 +304,17 @@ The owner's M6 decisions (binding, not re-asked):
   - `dist/windows/THIRD_PARTY_NOTICES.txt` ships at the zip root and in the install dir.
   - It lists every component compiled, linked or embedded into the Windows `ghostty.exe`/`tmux.exe`, or shipped under `share` (e.g. the iTerm2 colour schemes), with its licence name and full licence text: fonts (JetBrains Mono, Nerd Fonts symbols), FreeType, HarfBuzz, zlib, libpng, oniguruma, simdutf, highway, wuffs, glslang, SPIRV-Cross, Dear ImGui, the Zig packages and the vendored `pkg/*` C sources.
   - Packaging fails when a `build.zig.zon` dependency is neither in the file nor in the check's exclusion list. Each exclusion carries a reason, e.g. `gtk4_layer_shell: Linux only`.
+- **R-M6-11 ARM64 release ABI is `aarch64-windows-gnu` by default** (lead, 2026-10-28; owner may overturn). Amends DECISIONS R3 (MSVC) for the ARM64 release artifacts only.
+  - **Why:** the owner's VS 18 Build Tools have only the x86/x64 MSVC tools. Adding "MSVC ARM64 build tools" needs admin. `aarch64-windows-gnu` needs nothing extra, because Zig ships the MinGW-w64 libraries. M3–M5 proved it: the cross-build passed in each acceptance (M3 after `117aa103b`).
+  - **x64 stays `x86_64-windows-msvc`.**
+  - **`release.ps1 -Arm64Abi gnu|msvc`**, default `gnu`.
+    - `msvc` is the optional switch, for after the owner has added the VS component. Only then does the preflight check `vswhere -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64` and name the missing component.
+    - The chosen ABI is printed in the notes (`ARM64 build: aarch64-windows-gnu`) and in `+version` (Zig target).
+  - **Consequences:**
+    - **Symbols.** A `-gnu` build may emit no `.pdb`. When `prefix-arm64\bin\*.pdb` is missing under `gnu`, the arm64 `-symbols.zip` is left out with one notes line, and ARM64 crash dumps cannot be symbolised in WinDbg (gap). x64 keeps its PDBs (R-M6-3).
+    - **C runtime.** MinGW instead of the VC runtime for the C dependencies. `tmux.exe` has no libc (`link_libc = false`) and is unaffected.
+    - **Checks.** The ARM64 test exe (`-Arm64TestExe`) uses the same ABI as the release, so the owner's device run tests what ships. The VersionInfo and import checks of `package.ps1` apply unchanged; the `dumpbin` import list is still readable.
+  - **Cost if wrong:** add the VS component (admin, one time) and pass `-Arm64Abi msvc`.
 
 ## Waves (parallelism)
 
@@ -332,7 +343,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - `package.ps1` (Task 4):
   ```
   package.ps1 (-Prefix <dir with bin\ and share\> | -FromZip <zip>) -Version <v> -Arch x64|arm64 -OutDir <dir>
-              [-Installer] [-Test] [-Symbols] [-SignCommand '<cmd {file}>'] [-AllowNoTic]
+              [-Installer] [-Test] [-Symbols] [-NoPdbOk] [-SignCommand '<cmd {file}>'] [-AllowNoTic]
   ```
   - Writes `<OutDir>\ghostty-<v>-windows-<arch>.zip`; with `-Symbols`, the `-symbols.zip` from `<Prefix>\bin\*.pdb`.
   - With `-Installer`, calls `dist/windows/installer/build.ps1 -Stage <stage> -Version <v> -Arch <arch> -OutDir <OutDir> [-Test] [-SignCommand …]`.
@@ -349,7 +360,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - `release.ps1` (Task 8):
   ```
   release.ps1 -N <int> [-Rehearsal] [-V1] [-OutDir <dir>] [-Force] [-SignCommand '<cmd {file}>']
-              [-Arm64Abi msvc|gnu] [-Arm64TestExe] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
+              [-Arm64Abi gnu|msvc (default gnu)] [-Arm64TestExe] [-SkipTests] [-KeepPrefix] [-DryRun] [-Ci] [-Zig <path>] [-Lock <path>]
   ```
   - `-SkipTests` is refused without `-Rehearsal`.
   - `-DryRun` prints every step and command line and runs nothing heavy (preflight checks only).
@@ -474,7 +485,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
    - with `-Installer`: the AUMID string in `installer\ghostty.iss` equals the release `aumid` literal in `src/os/windows_explorer.zig`.
 3. **Sign** with `-SignCommand`: `{file}` replaced by each exe path; a non-zero exit fails.
 4. **Zip:** `[IO.Compression.ZipFile]::CreateFromDirectory(<stage dir>, <zip>, Optimal, $true)`, which keeps the top folder.
-5. **Symbols** with `-Symbols`: `ghostty.pdb`, `tmux.pdb` from `<Prefix>\bin`. Missing → FAIL (release builds use `-Dstrip=false`).
+5. **Symbols** with `-Symbols`: `ghostty.pdb`, `tmux.pdb` from `<Prefix>\bin`. Missing → FAIL (release builds use `-Dstrip=false`), except with `-NoPdbOk`. `release.ps1` passes it for an arm64 `gnu` build (R-M6-11); the result is no symbols zip and one `package: SKIP symbols (gnu)` line.
 6. **Installer** with `-Installer`: call `installer\build.ps1`. Exit 2 (no ISCC) passes through, so a run without ISCC says so plainly.
 7. Print the `artifact:` lines; remove `stage`.
 
@@ -620,7 +631,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   `-DryRun` runs step 1 and prints steps 2–9 with their exact command lines.
 - `dist/windows/release-notes.md`: a template with `{{VERSION}}`, `{{TAG}}`, `{{V1_LINE}}`, `{{TESTS}}`, `{{ARM64_LINE}}`, `{{SHA256SUMS}}`.
 - `docs/windows/RELEASING.md`, the owner's runbook:
-  1. One-time setup: VS ARM64 component, Inno Setup, `gh auth login`.
+  1. One-time setup: `gh auth login` (Inno Setup is already installed; the VS ARM64 component only for `-Arm64Abi msvc`, needs admin).
   2. `git fetch --tags origin`; the next `N`; the CHANGELOG entry.
   3. `PS dist/windows/release.ps1 -N <N> [-V1]`, about 1–2 h with RAM checks; do not run other builds meanwhile.
   4. Smoke the local artifacts (the owner part of § M6 exit checklist).
@@ -635,7 +646,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Verify:**
   - parse checks; `-SelfTest`;
-  - `release.ps1 -Rehearsal -N 0 -DryRun` on this machine: preflight passes or names exactly what is missing (ISCC, VS ARM64), and the printed command lines match the R-M6-3 flags and the R-M6-7 commands (marked REHEARSAL);
+  - `release.ps1 -Rehearsal -N 0 -DryRun` on this machine: preflight passes or names exactly what is missing (ISCC; the VS ARM64 component only with `-Arm64Abi msvc`), and the printed command lines match the R-M6-3 flags and the R-M6-7 commands (marked REHEARSAL);
   - `release.ps1 -N 0 -SkipTests -DryRun` → refused;
   - `git grep -n "gh release\|git push" dist/windows/*.ps1` shows them only inside printed strings.
 - [ ] **Step 4: Commit** `git commit -m "build(windows): local release script with tag validation, unit groups, sums, notes and printed publish commands"`
@@ -644,7 +655,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 
 **Files:** none planned. Each 9.n touches only the files its note names (the Task 4/5/8 files).
 
-- [ ] **Step 1:** If the VS ARM64 component is missing, ask the owner (one-time setup, RELEASING.md 1) before going on. ISCC is already installed (owner decision 2).
+- [ ] **Step 1:** Preflight only: ISCC is already installed (owner decision 2); ARM64 uses the default `gnu` ABI (R-M6-11), so no VS change is needed.
 - [ ] **Step 2:** `PS dist/windows/release.ps1 -Rehearsal -N 0 -Arm64TestExe` (no `-SkipTests`), started with `run_in_background`. Record the wall time per step and the lowest free memory seen.
 - [ ] **Step 3:** On its output:
   - `GHOSTTY_E2E_PACKAGE=<x64 zip>` `E2E -Only package-portable`;
@@ -663,7 +674,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
   - §3: release flags with `-Dstrip=false`;
   - §16 R15/R16: the outcome;
   - §17 M6: plan link, then "done" in Task 11;
-  - §18: R-M6-1…10.
+  - §18: R-M6-1…11.
 - `docs/windows/DECISIONS.md`, "Release": one dated line, "2026-10-28 (owner): releases are built locally with `dist/windows/release.ps1`; GitHub Actions is optional and manual-only".
 - `docs/windows/feature-checklist.md`: rows for zip, installer, version resource, release script; every row `done`, `manual` or a gap.
 - `test/windows/README.md`: the M6 scenarios and their env (`GHOSTTY_E2E_PACKAGE`, `GHOSTTY_E2E_SETUP`) and the installer safety rule.
@@ -753,7 +764,7 @@ Interfaces fixed by this plan (so W2/W3 tasks run in parallel):
 
 1. **Release run.**
    - `release.ps1 -N 1 -V1` finished, with the three unit groups and `test-tmux-shim` green (`tests.txt`).
-   - Both arches built and packaged: 2 zips, 2 setups, 2 symbol zips, and `SHA256SUMS.txt` matching them.
+   - Both arches built and packaged: 2 zips, 2 setups, the x64 symbols zip (and the arm64 one only if its build gave PDBs, R-M6-11), and `SHA256SUMS.txt` matching them.
    - `publish.txt` names the built commit.
    - The wall time and RAM low point are recorded.
 2. **Version.**
@@ -838,7 +849,7 @@ Owner sign-off: name, date, tag, PASS/FAIL per line, decision (publish / fix and
 - **Review Focus → tests:** 1 → Tasks 3, 7; 2 → owner checklist; 3 → Tasks 1, 4, 8, 9; 4 → Tasks 8, 9; 5 → Task 6; 6 → Task 9, owner checklist.
 - **Proportion:** the code blocks are signatures, interfaces and command lines only.
 - **Known risks:**
-  - A release needs the VS ARM64 component on the owner's machine (one-time setup; `-Arm64Abi gnu` is the fallback that needs no VS change).
+  - ARM64 ships with the MinGW ABI (R-M6-11): no PDBs for ARM64 dumps, and a different C runtime than x64. `-Arm64Abi msvc` needs an admin VS change.
   - A full `release.ps1` run is long (three test compiles, two ReleaseFast builds, optionally the ARM64 test exe) on a 15.5 GB machine. The test-lock, the RAM checks and the step order keep it to one heavy step at a time.
   - ARM64 is unit-tested only by the owner on a device, or by the optional Task 12.
 
