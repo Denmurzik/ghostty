@@ -1,0 +1,5 @@
+Build Summary: 91/91 steps succeeded
+test success
++- run test ghostty-test cached
+   +- compile test ghostty-test debug native-native-msvc cached 66ms MaxRSS:19M
+      +- WriteFile helpgen.zig success

@@ -1,0 +1,11 @@
+test
++- run test ghostty-test
+   +- compile test ghostty-test debug native-native-msvc
+      +- translate-c generated w
+warning: unknown argument '-fno-sanitize=undefined'
+warning: unknown argument '-fno-sanitize-trap=undefined'
+
+Build Summary: 91/91 steps succeeded; 89/90 tests passed (1 skipped)
+test success
++- run test ghostty-test 89 pass, 1 skip (90 total) 105ms MaxRSS:17M
+   +- compile test ghostty-test debug native-native-msvc success 47s MaxRSS:2G

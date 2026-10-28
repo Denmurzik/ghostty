@@ -18,7 +18,7 @@
 # -ConptyPackage omitted: the vendored copy under vendor\conpty is used.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$N,
+    [string]$N = '',
     [string]$ConptyPackage = '',
     [switch]$Rehearsal,
     [switch]$V1,
@@ -30,6 +30,7 @@ param(
     [string]$Arm64Result = '',
     [switch]$SkipTests,
     [switch]$DryRun,
+    [switch]$SelfTest,
     [string]$Zig = '',
     [string]$Lock = '',
     # Free physical memory required before each heavy step. G1 (the measured
@@ -164,6 +165,37 @@ function Set-RecordedCounts([string]$s, [string]$id, $c) {
     [IO.File]::WriteAllLines($countsFile, [string[]]$keep)
 }
 
+# A cached run step is a "run test" line of the summary tree that ends in
+# "cached" (fixtures: dist\windows\testdata\zig-summary-*.txt).
+function Test-CachedRun([string]$text) {
+    return [bool]($text -match '(?m)^\s*\+- run test .*\bcached\b')
+}
+
+# test-lock prints only the tail of the zig output, and the Build Summary is
+# near the top of a long tree; the full log's path is on its last line.
+function Get-FullZigText([string]$text) {
+    if ($text -match 'full log: (\S+)') {
+        $f = $Matches[1]
+        if (Test-Path -LiteralPath $f -PathType Leaf) { return [IO.File]::ReadAllText($f) }
+    }
+    return $text
+}
+
+function Invoke-ReleaseSelfTest {
+    $d = Join-Path $PSScriptRoot 'testdata'
+    $fresh = [IO.File]::ReadAllText((Join-Path $d 'zig-summary-fresh.txt'))
+    $cached = [IO.File]::ReadAllText((Join-Path $d 'zig-summary-cached.txt'))
+    $fail = @()
+    $c = Get-TestCounts $fresh
+    if (-not $c -or $c.Pass -ne 89 -or $c.Total -ne 90 -or $c.Skip -ne 1 -or $c.Fail -ne 0) { $fail += 'fresh counts' }
+    if (Test-CachedRun $fresh) { $fail += 'fresh text taken as cached' }
+    if ($null -ne (Get-TestCounts $cached)) { $fail += 'cached text has counts' }
+    if (-not (Test-CachedRun $cached)) { $fail += 'cached text not detected' }
+    if ($fail.Count -gt 0) { Write-Host ('release self-test FAIL: ' + ($fail -join '; ')); return $false }
+    Write-Host 'release self-test: 4 checks passed'
+    return $true
+}
+
 # ---- state filled by the preflight ---------------------------------------
 
 $bash = ''
@@ -196,6 +228,7 @@ function Invoke-Zig([string]$what, [string[]]$zigArgs, [int]$timeoutSec) {
     Wait-RamGate $what
     $c = Get-ZigCommand $zigArgs $timeoutSec
     $r = Invoke-Logged -Exe $c.Exe -ArgList $c.Args -TimeoutSec $c.Timeout
+    $r.FullText = Get-FullZigText $r.Text
     return $r
 }
 
@@ -485,6 +518,7 @@ function Show-PackageCommand([string]$arch, [string]$prefix) {
 
 # ---- run --------------------------------------------------------------------
 
+if ($SelfTest) { if (Invoke-ReleaseSelfTest) { exit 0 } else { exit 1 } }
 $failed = $false
 try {
     if ($SkipTests -and -not $Rehearsal) { throw '-SkipTests is only allowed with -Rehearsal (a release always runs the unit tests)' }
@@ -540,12 +574,12 @@ try {
             Write-Host "  $($g.Id): $($g.Label)"
             $r = Invoke-Zig "tests $($g.Id)" $za 1500
             if ($r.Code -ne 0) { throw "unit tests $($g.Id) ($($g.Label)) failed (exit $($r.Code)); see release.log" }
-            $c = Get-TestCounts $r.Text
+            $c = Get-TestCounts $r.FullText
             if ($c -and $c.Fail -gt 0) { throw "unit tests $($g.Id): $($c.Fail) failed" }
             # A cached run step adds nothing to the summary: the whole group (no
             # counts) or a part of it (a smaller total) was cached. The counts of
             # an earlier fresh run at this sha are used instead.
-            $cachedHint = ($r.Text -match '(?mi)^.*\brun\b.*\bcached\b')
+            $cachedHint = Test-CachedRun $r.FullText
             $rec = Get-RecordedCounts $sha $g.Id
             if ($c -and -not $cachedHint) {
                 Set-RecordedCounts $sha $g.Id $c
@@ -731,7 +765,7 @@ try {
     try { Write-Log ("FAIL step {0} ({1}): {2}" -f $script:CurStep, $stepName, $_.Exception.Message) } catch {}
 } finally {
     foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($DryRun -and (Test-Path -LiteralPath $script:LogPath)) { Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue }
+    if (($DryRun -or $script:LogPath.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase)) -and (Test-Path -LiteralPath $script:LogPath)) { Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue }
 }
 if ($failed) { exit 1 }
 exit 0
