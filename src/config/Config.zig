@@ -4494,6 +4494,7 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
 
     // Initialize our CLI iterator.
     var iter = try cli.args.argsIterator(alloc_gpa, global.args());
+    iter.skip_apprt = true;
     defer iter.deinit();
     try self.loadIter(alloc_gpa, &iter);
 
@@ -11591,4 +11592,20 @@ test "windows config: M5 keys default" {
     defer cfg.deinit();
     try testing.expect(!cfg.@"windows-tmux-external");
     try testing.expect(cfg.@"windows-jump-list");
+}
+
+test "windows config: --profile is not a config key" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    const child = try std.process.Args.IteratorGeneral(.{}).init(
+        testing.allocator,
+        "--profile=pwsh --title=t",
+    );
+    var it: cli.args.ArgsIterator(@TypeOf(child)) = .{ .iterator = child, .skip_apprt = true };
+    defer it.deinit();
+    try cfg.loadIter(testing.allocator, &it);
+    try testing.expectEqual(@as(usize, 0), cfg._diagnostics.items().len);
+    try testing.expectEqualStrings("t", cfg.title.?);
 }

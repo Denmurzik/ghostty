@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = mem.Allocator;
@@ -1328,6 +1329,12 @@ pub fn ArgsIterator(comptime Iterator: type) type {
         /// values yet.
         index: usize = 0,
 
+        /// Set once `-e` was seen: everything after it is the command.
+        in_command: bool = false,
+
+        /// The config parser skips arguments that belong to the apprt.
+        skip_apprt: bool = false,
+
         pub fn deinit(self: *Self) void {
             if (@hasDecl(Iterator, "deinit")) {
                 self.iterator.deinit();
@@ -1337,6 +1344,14 @@ pub fn ArgsIterator(comptime Iterator: type) type {
         pub fn next(self: *Self) ?[]const u8 {
             const value = self.iterator.next() orelse return null;
             self.index += 1;
+
+            if (std.mem.eql(u8, value, "-e")) self.in_command = true;
+
+            // `--profile=` is read by the Windows apprt (apprt/win32/
+            // Overrides.zig); to the config it would be an unknown field.
+            if (comptime builtin.target.os.tag == .windows) {
+                if (self.skip_apprt and !self.in_command and std.mem.startsWith(u8, value, "--profile=")) return self.next();
+            }
 
             // We ignore any argument that starts with "+". This is used
             // to indicate actions and are expected to be parsed out before

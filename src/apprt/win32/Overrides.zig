@@ -121,6 +121,29 @@ pub fn resolve(
     self.command = try command.clone(arena);
 }
 
+fn isBashExe(path: []const u8) bool {
+    const name = "bash.exe";
+    if (!std.ascii.endsWithIgnoreCase(path, name)) return false;
+    const before = path[0 .. path.len - name.len];
+    return before.len > 0 and (before[before.len - 1] == '\\' or before[before.len - 1] == '/');
+}
+
+test "win32 overrides: bash.exe with either separator" {
+    try std.testing.expect(isBashExe("C:\\Git\\bin\\bash.exe"));
+    try std.testing.expect(isBashExe("C:/Program Files/Git/bin/bash.exe"));
+    try std.testing.expect(isBashExe("C:/Git/bin\\BASH.EXE"));
+    try std.testing.expect(!isBashExe("C:/Git/bin/notbash.exe"));
+    try std.testing.expect(!isBashExe("bash.exe"));
+}
+
+test "win32 overrides: git bash keeps the cwd with forward slashes" {
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    const argv: []const [:0]const u8 = &.{ "C:/Program Files/Git/bin/bash.exe", "--login", "-i" };
+    try keepGitBashCwd(&cfg, .{ .direct = argv });
+    try std.testing.expectEqualStrings("1", cfg.env.map.get("CHERE_INVOKING").?);
+}
+
 /// A login msys bash changes to $HOME unless `CHERE_INVOKING` is set, which
 /// would lose the working directory (the default-shell path does the same).
 fn keepGitBashCwd(config: *configpkg.Config, command: configpkg.Command) !void {
@@ -128,7 +151,7 @@ fn keepGitBashCwd(config: *configpkg.Config, command: configpkg.Command) !void {
         .direct => |a| a,
         .shell => return,
     };
-    if (argv.len < 2 or !std.ascii.endsWithIgnoreCase(argv[0], "\\bash.exe")) return;
+    if (argv.len < 2 or !isBashExe(argv[0])) return;
     if (!std.mem.eql(u8, argv[1], "--login")) return;
     for (config.env.map.keys()) |key| {
         if (std.ascii.eqlIgnoreCase(key, "CHERE_INVOKING")) return;

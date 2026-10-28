@@ -321,8 +321,16 @@ fn forwardLaunch(self: *App, name: [:0]const u16) bool {
     const cwd_len = std.Io.Dir.cwd().realPathFile(global.io(), ".", &cwd_buf) catch return false;
     const forwarded_args = instance.absolutizeWorkingDirectory(a, args, cwd_buf[0..cwd_len]) catch return false;
 
-    switch (instance.forwardNewWindow(self.core_app.alloc, name, forwarded_args)) {
+    const sent = instance.forwardNewWindow(self.core_app.alloc, name, forwarded_args);
+    defer if (sent.message) |m| self.core_app.alloc.free(m);
+    switch (sent.result) {
         .forwarded => return true,
+        .refused => {
+            // The user asked for something that does not exist: say so and
+            // leave instead of opening a window with another shell.
+            ipcError("{s}", .{sent.message orelse "unknown profile"});
+            std.process.exit(1);
+        },
         .not_our_server => log.warn("the IPC pipe is owned by another user or elevation; running standalone", .{}),
         .no_server => log.info("the IPC pipe is stale; running standalone", .{}),
         .failed => log.warn("forwarding to the running instance failed; running standalone", .{}),
@@ -679,7 +687,7 @@ pub fn performIpc(
             ipcError("the IPC pipe of class {s} is owned by a process of another user or elevation", .{class orelse instance.defaultClass()});
             return error.IPCFailed;
         },
-        .failed => {
+        .failed, .refused => {
             ipcError("the running instance did not accept the request: {s}", .{sent.message orelse "no answer"});
             return error.IPCFailed;
         },

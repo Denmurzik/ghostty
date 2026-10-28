@@ -160,8 +160,17 @@ fn overridesOf(app: *App, alloc: Allocator, arena: Allocator, req: protocol.Requ
     const resolver = test_resolver orelse profiles.resolver(app);
     overrides.resolve(arena, resolver) catch |err| switch (err) {
         error.UnknownProfile => {
+            // The id is the caller's text and lands on a terminal.
+            var id_buf: [128]u8 = undefined;
+            const id = overrides.profile.?;
+            var n: usize = 0;
+            for (id) |c| {
+                if (n == id_buf.len) break;
+                id_buf[n] = if (c < 0x20 or c == 0x7f) '?' else c;
+                n += 1;
+            }
             var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "unknown profile: {s}", .{overrides.profile.?}) catch "unknown profile";
+            const msg = std.fmt.bufPrint(&buf, "unknown profile: {s}", .{id_buf[0..n]}) catch "unknown profile";
             return .{ .refused = reply(alloc, .failed, "", msg, null) };
         },
         error.OutOfMemory => return .{ .refused = reply(alloc, .failed, "", "out of memory", null) },
@@ -644,4 +653,19 @@ test "win32 ipc: new-tab with an unknown profile" {
     const resp = try protocol.parseResponse(arena.allocator(), out);
     try testing.expectEqual(protocol.Code.failed, resp.code);
     try testing.expectEqualStrings("unknown profile: nope", resp.stderr);
+}
+
+test "win32 ipc: unknown profile id has no control characters" {
+    const testing = std.testing;
+    const app: *App = undefined;
+    var dummy: u8 = 0;
+    test_resolver = .{ .ctx = &dummy, .commandFor = noProfiles };
+    defer test_resolver = null;
+
+    const out = handle(app, testing.allocator, "{\"v\":1,\"op\":\"new-window\",\"args\":[\"--profile=a\\u001b[31mb\\nc\"]}");
+    defer testing.allocator.free(out);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const resp = try protocol.parseResponse(arena.allocator(), out);
+    try testing.expectEqualStrings("unknown profile: a?[31mb?c", resp.stderr);
 }

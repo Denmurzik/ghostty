@@ -186,11 +186,19 @@ fn findCmd(alloc: Allocator, env: *const std.process.Environ.Map) ![]u8 {
 /// `C:\Windows\System32\bash.exe` (also under `Sysnative` / `SysWOW64`) is
 /// the WSL launcher.
 fn isWslLauncher(path: []const u8) bool {
-    const name = "\\bash.exe";
+    const isSep = struct {
+        fn f(c: u8) bool {
+            return c == '\\' or c == '/';
+        }
+    }.f;
+    const name = "bash.exe";
     if (!std.ascii.endsWithIgnoreCase(path, name)) return false;
-    const dir = path[0 .. path.len - name.len];
-    inline for (.{ "\\system32", "\\sysnative", "\\syswow64" }) |suffix| {
-        if (std.ascii.endsWithIgnoreCase(dir, suffix)) return true;
+    const before = path[0 .. path.len - name.len];
+    if (before.len == 0 or !isSep(before[before.len - 1])) return false;
+    const dir = before[0 .. before.len - 1];
+    inline for (.{ "system32", "sysnative", "syswow64" }) |leaf| {
+        if (std.ascii.endsWithIgnoreCase(dir, leaf) and
+            dir.len > leaf.len and isSep(dir[dir.len - leaf.len - 1])) return true;
     }
     return false;
 }
@@ -398,6 +406,48 @@ fn systemWslDistros(_: ?*anyopaque, alloc: Allocator) []const WslDistro {
     return readLxss(alloc) catch &.{};
 }
 
+/// A distro is usable when its `State` is 1 (installed; other values mean
+/// being installed or removed, a missing one is a partial key) and its
+/// `BasePath` directory still exists (an unregistered distro may leave a key
+/// behind, a deleted directory leaves a profile that fails in wsl.exe).
+fn distroInstalled(
+    state: ?u32,
+    base_path: ?[]const u16,
+    existsFn: *const fn (path: []const u16) bool,
+) bool {
+    if ((state orelse return false) != 1) return false;
+    var path = base_path orelse return false;
+    // The long-path prefix: the registry keeps it for some distros.
+    const long = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    if (std.mem.startsWith(u16, path, long)) path = path[long.len..];
+    if (path.len == 0) return false;
+    return existsFn(path);
+}
+
+fn dirExists(path: []const u16) bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    var buf: [1024]u16 = undefined;
+    if (path.len >= buf.len) return false;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    const attrs = windows.GetFileAttributesW(@ptrCast(&buf));
+    if (attrs == windows.INVALID_FILE_ATTRIBUTES) return false;
+    return attrs & windows.FILE_ATTRIBUTE_DIRECTORY != 0;
+}
+
+/// Registry GUIDs compare without regard to case (`{ABC...}` vs `{abc...}`).
+fn guidEql(a: []const u16, b: []const u16) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x > 0x7f or y > 0x7f) {
+            if (x != y) return false;
+            continue;
+        }
+        if (std.ascii.toLower(@intCast(x)) != std.ascii.toLower(@intCast(y))) return false;
+    }
+    return true;
+}
+
 fn readLxss(alloc: Allocator) ![]const WslDistro {
     const lxss = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
     var key: windows.HKEY = undefined;
@@ -446,18 +496,30 @@ fn readLxss(alloc: Allocator) ![]const WslDistro {
             &size,
         ) != windows.ERROR_SUCCESS) continue;
 
-        // State 1 is "installed"; others are being installed or removed.
-        var state: windows.DWORD = 0;
+        var state_value: windows.DWORD = 0;
         var state_size: windows.DWORD = @sizeOf(windows.DWORD);
-        if (windows.RegGetValueW(
+        const state: ?windows.DWORD = if (windows.RegGetValueW(
             key,
             sub_z,
             std.unicode.utf8ToUtf16LeStringLiteral("State"),
             RRF_RT_REG_DWORD,
             null,
-            &state,
+            &state_value,
             &state_size,
-        ) == windows.ERROR_SUCCESS and state != 1) continue;
+        ) == windows.ERROR_SUCCESS) state_value else null;
+
+        var base_buf: [1024]u16 = undefined;
+        var base_size: windows.DWORD = @sizeOf(@TypeOf(base_buf));
+        const base: ?[]const u16 = if (windows.RegGetValueW(
+            key,
+            sub_z,
+            std.unicode.utf8ToUtf16LeStringLiteral("BasePath"),
+            windows.RRF_RT_REG_SZ,
+            null,
+            &base_buf,
+            &base_size,
+        ) == windows.ERROR_SUCCESS) std.mem.sliceTo(base_buf[0 .. base_size / 2], 0) else null;
+        if (!distroInstalled(state, base, dirExists)) continue;
 
         const chars = std.mem.sliceTo(name_buf[0 .. size / 2], 0);
         if (chars.len == 0) continue;
@@ -465,7 +527,7 @@ fn readLxss(alloc: Allocator) ![]const WslDistro {
         errdefer alloc.free(name);
         try list.append(alloc, .{
             .name = name,
-            .default = default_len > 0 and std.mem.eql(u16, sub[0..sub_len], default_guid[0..default_len]),
+            .default = default_len > 0 and guidEql(sub[0..sub_len], default_guid[0..default_len]),
         });
     }
     return try list.toOwnedSlice(alloc);
@@ -800,4 +862,35 @@ test "windows shell profiles: default probe has no distros" {
     const probe: Probe = .{ .exists = MockProbe.exists, .regGitInstallPath = MockProbe.regGitInstallPath };
     try std.testing.expectEqual(@as(usize, 0), probe.wslDistros(null, std.testing.allocator).len);
     _ = systemProbe();
+}
+
+fn fakeDirExists(path: []const u16) bool {
+    return std.mem.eql(u16, path, std.unicode.utf8ToUtf16LeStringLiteral("C:\\wsl\\Ubuntu"));
+}
+
+test "windows shell profiles: lxss entry needs State 1 and an existing BasePath" {
+    const u = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(distroInstalled(1, u("C:\\wsl\\Ubuntu"), fakeDirExists));
+    try std.testing.expect(distroInstalled(1, u("\\\\?\\C:\\wsl\\Ubuntu"), fakeDirExists));
+    // Partial keys and half-installed distros.
+    try std.testing.expect(!distroInstalled(null, u("C:\\wsl\\Ubuntu"), fakeDirExists));
+    try std.testing.expect(!distroInstalled(3, u("C:\\wsl\\Ubuntu"), fakeDirExists));
+    try std.testing.expect(!distroInstalled(1, null, fakeDirExists));
+    try std.testing.expect(!distroInstalled(1, u(""), fakeDirExists));
+    // The directory was deleted.
+    try std.testing.expect(!distroInstalled(1, u("C:\\wsl\\Gone"), fakeDirExists));
+}
+
+test "windows shell profiles: default distro GUID ignores case" {
+    const u = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(guidEql(u("{AB12-cd}"), u("{ab12-CD}")));
+    try std.testing.expect(!guidEql(u("{AB12}"), u("{AB13}")));
+    try std.testing.expect(!guidEql(u("{AB12}"), u("{AB12}x")));
+}
+
+test "windows shell profiles: WSL launcher with forward slashes" {
+    try std.testing.expect(isWslLauncher("C:/Windows/System32/bash.exe"));
+    try std.testing.expect(isWslLauncher("C:\\Windows\\Sysnative\\bash.exe"));
+    try std.testing.expect(!isWslLauncher("C:/Program Files/Git/bin/bash.exe"));
+    try std.testing.expect(!isWslLauncher("C:/Tools/mysystem32/bash.exe"));
 }

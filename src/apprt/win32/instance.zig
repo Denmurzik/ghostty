@@ -186,7 +186,9 @@ pub fn absolutizeWorkingDirectory(
     return result;
 }
 
-pub const ForwardResult = enum { forwarded, no_server, not_our_server, failed };
+/// `refused`: the running instance rejected an unknown `--profile=`; the
+/// message is in `Sent.message`, the launch must not start a window.
+pub const ForwardResult = enum { forwarded, no_server, not_our_server, failed, refused };
 
 pub const Sent = struct {
     result: ForwardResult,
@@ -222,17 +224,27 @@ pub fn send(alloc: Allocator, name: [:0]const u16, req: protocol.Request, timeou
 
 /// Asks the running instance behind `name` for a new window. `args` are
 /// already forwardable (`shouldForward`) and absolutized.
-pub fn forwardNewWindow(alloc: Allocator, name: [:0]const u16, args: []const []const u8) ForwardResult {
-    const sent = send(alloc, name, .{
+pub fn forwardNewWindow(alloc: Allocator, name: [:0]const u16, args: []const []const u8) Sent {
+    var sent = send(alloc, name, .{
         .v = protocol.version,
         .op = "new-window",
         .args = args,
     }, forward_timeout_ms);
     if (sent.message) |m| {
         log.warn("running instance refused the new window: {s}", .{m});
-        alloc.free(m);
+        if (isProfileRefusal(m)) sent.result = .refused;
     }
-    return sent.result;
+    return sent;
+}
+
+/// The server's answer to an unknown `--profile=` (see `ipc/ops.zig`).
+fn isProfileRefusal(message: []const u8) bool {
+    return std.mem.startsWith(u8, message, "unknown profile");
+}
+
+test "win32 instance: profile refusal" {
+    try std.testing.expect(isProfileRefusal("unknown profile: typo"));
+    try std.testing.expect(!isProfileRefusal("unable to create a window"));
 }
 
 test "win32 instance: forward decision" {
