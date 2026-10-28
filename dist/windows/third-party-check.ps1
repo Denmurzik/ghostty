@@ -30,7 +30,8 @@ $ErrorActionPreference = 'Stop'
 $script:FixedAll = @(
     'zig',                  # Zig std + compiler_rt, compiled into every exe
     'microsoft/terminal',   # bundled ConPTY: conpty.dll, OpenConsole.exe
-    'noto_emoji'            # src/font/res/NotoColorEmoji.ttf, NotoEmoji-Regular.ttf, embedded
+    'noto_emoji',           # src/font/res/NotoColorEmoji.ttf, NotoEmoji-Regular.ttf, embedded
+    'stb'                   # in-tree vendored C libs (explicit list): src/stb
 )
 # Linked on top of that for aarch64-windows-gnu (libc++ for the C++ deps, the
 # unwinder, and Zig's MinGW-w64 C runtime with its winpthreads files).
