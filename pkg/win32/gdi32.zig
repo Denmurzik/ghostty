@@ -64,6 +64,8 @@ pub extern "gdi32" fn CreateDIBSection(
 ) callconv(.winapi) ?HBITMAP;
 /// Returns the previously selected object, null on failure.
 pub extern "gdi32" fn SelectObject(HDC, HGDIOBJ) callconv(.winapi) ?HGDIOBJ;
+/// Hands the GDI calls batched on this thread to the driver.
+pub extern "gdi32" fn GdiFlush() callconv(.winapi) BOOL;
 pub extern "gdi32" fn DeleteObject(HGDIOBJ) callconv(.winapi) BOOL;
 pub extern "gdi32" fn DeleteDC(HDC) callconv(.winapi) BOOL;
 /// `color` is a `COLORREF` (0x00BBGGRR).

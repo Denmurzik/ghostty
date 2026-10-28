@@ -499,9 +499,6 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     const old = self.activeTab();
     self.active_tab = index;
     const new = self.tabs.items[index];
-    if (old) |o| {
-        if (o != new) o.setVisible(false);
-    }
 
     self.layout();
     // A DPI change while the tab was hidden left its size stale.
@@ -509,10 +506,44 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
         var it = new.tree.iterator();
         while (it.next()) |entry| entry.view.flushSize();
     }
+    // Over glass, the first DWM frame after a tab container shows can show
+    // its area empty, i.e. the backdrop (measured: one white frame in about
+    // 30 new tabs over a white window, the new pane's stand-in and the old
+    // tab both gone). So the new tab shows first under the old one, which
+    // covers it for that frame, and only then comes to the top.
+    const glass = composition_mod.isTranslucent(self);
+    const swap = if (old) |o| o != new else false;
+    if (swap and glass) _ = win32.user32.SetWindowPos(new.hwnd, old.?.hwnd, 0, 0, 0, 0, z_only);
     new.setVisible(true);
+    if (swap) {
+        const o = old.?;
+        if (glass) {
+            _ = win32.gdi32.GdiFlush();
+            _ = win32.dwmapi.DwmFlush();
+        }
+        // Painted above the old tab before that one goes: the other way
+        // round, the window has a hole until the new tab's WM_PAINT.
+        raiseAbove(new.hwnd, o.hwnd);
+        _ = win32.user32.RedrawWindow(new.hwnd, null, null, win32.user32.RDW_INVALIDATE |
+            win32.user32.RDW_ERASE | win32.user32.RDW_ALLCHILDREN |
+            win32.user32.RDW_UPDATENOW | win32.user32.RDW_ERASENOW);
+        o.setVisible(false);
+    }
     if (focus) new.focus();
     self.refreshTitle();
 }
+
+/// Put the sibling `hwnd` directly above `below` in the Z order, leaving
+/// every other sibling where it is.
+fn raiseAbove(hwnd: win32.foundation.HWND, below: win32.foundation.HWND) void {
+    const prev = win32.user32.GetWindow(below, win32.user32.GW_HWNDPREV);
+    if (prev == hwnd) return;
+    _ = win32.user32.SetWindowPos(hwnd, prev, 0, 0, 0, 0, z_only);
+}
+
+/// `SetWindowPos` flags of a Z order change alone.
+const z_only = win32.user32.SWP_NOMOVE | win32.user32.SWP_NOSIZE |
+    win32.user32.SWP_NOACTIVATE | win32.user32.SWP_NOOWNERZORDER;
 
 /// Unlink a tab from the list and keep `active_tab` pointing at the right
 /// one. False if no tab is left.

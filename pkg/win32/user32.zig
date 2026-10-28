@@ -935,6 +935,7 @@ pub const RDW_INVALIDATE = 0x0001;
 pub const RDW_ERASE = 0x0004;
 pub const RDW_ALLCHILDREN = 0x0080;
 pub const RDW_UPDATENOW = 0x0100;
+pub const RDW_ERASENOW = 0x0200;
 pub const RDW_FRAME = 0x0400;
 
 pub const ES_AUTOHSCROLL = 0x0080;
@@ -1000,6 +1001,8 @@ pub const EN_KILLFOCUS = 0x0200;
 pub const EN_CHANGE = 0x0300;
 pub const WM_CTLCOLOREDIT = 0x0133;
 
+/// `GetWindow` command: the window above in the Z order.
+pub const GW_HWNDPREV = 3;
 /// `GetWindow` command: the owner of an owned window.
 pub const GW_OWNER = 4;
 pub extern "user32" fn GetWindow(HWND, cmd: u32) callconv(.winapi) ?HWND;

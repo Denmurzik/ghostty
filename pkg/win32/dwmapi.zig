@@ -8,6 +8,9 @@ const LPARAM = foundation.LPARAM;
 const LRESULT = foundation.LRESULT;
 const gdi32 = @import("gdi32.zig");
 
+/// Blocks until DWM has composed the surface updates made so far.
+pub extern "dwmapi" fn DwmFlush() callconv(.winapi) HRESULT;
+
 pub extern "dwmapi" fn DwmSetWindowAttribute(HWND, attribute: u32, value: *const anyopaque, size: u32) callconv(.winapi) HRESULT;
 
 pub const DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
