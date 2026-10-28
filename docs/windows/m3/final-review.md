@@ -191,3 +191,33 @@ None.
 - Findings 2-3 are documentation fixes needed for an honest owner record and for upstream tracking.
 - Findings 4-16 can be batched into one polish round or recorded as M5 carries.
 - Finding 14 belongs to the Windows 11 dialogs task.
+
+## Re-review of the fix round (commit `1fe65a3d8`, rerev-m3-final)
+
+`zig build test -j6 -Dtest-filter="win32 "` on the worktree under test-lock: exit 0.
+
+| # | Verdict | Note |
+|---|---|---|
+| 1 | FIXED | `title_timer_armed`: armed once, cleared in `titleDebounced`, which reads the current titles. At most one refresh per 75 ms, and a title set after the fire re-arms, so the last one lands. SetTimer failure falls back to an immediate refresh. No unit test, acceptable. |
+| 2 | PARTIAL | Acceptance status line, SPEC §17 M3 paragraph and CHANGELOG are fixed. **Not fixed:** SPEC §14 RAM table lines 526-527 still say overlays "+2.1 MB, over by 1.1 MB" and inspector "+3.6 MB, over by 1.6 MB"; `acceptance.md:84` still says "four feature rows over budget" (now two over, one borderline); SPEC §18 has no Task 26.5 / 26.4.1 entry and line 860 still says "Open: see the known issue below". |
+| 2b | FIXED | All 35 `m3-265-*` rows are exact copies of scratch rows: inspector1-4 (16 rows) = `scratchpad/ram2.csv` `insp:*` (`c10` renamed `after10s`), inspector5-6 = `final.csv` `insp2/insp3` (`after30` renamed `after30s`), overlays-warm (7) = `ram3.csv` `ov2tab:*`, overlays-cold (4) = `ram3.csv` `ovc:*`. No hand-mapped or invented value. Caveat: inspector1-4 are 10 s after close, 5-6 are 30 s (labels say so). The five deltas in the report (+1.6/+1.8/+1.3/+2.7/+2.1) are consistent with these rows (the +2.1 is cycle 1 or 2). |
+| 3 | FIXED | Core-changes list now covers Exec, stream_handler, hostname/pwd_path, Thread, Config, freetype. |
+| 4 | FIXED | Posts to `app.msg_hwnd`; `link.postedApp` searches all windows, else discards; a failed post frees the payload. |
+| 5 | FIXED | 2 s bounded wait, then detach. The detached worker only sees `stopped` and exits; a late post to a dead msg window fails and frees its payload. |
+| 6 | FIXED | Atomic store/load. Other readers stay non-atomic under the mutex; fine on x86 and arm64 for a bool. |
+| 7 | DEFERRED-OK | Needs a worker plus a post-back toast; a one-off user action, not a regression. Carry to M5. |
+| 8 | FIXED | Comment only. |
+| 9 | FIXED | |
+| 10 | FIXED | `shell_open` re-judges the `final_path` target (test added). `proxy_icon` walks components for `REPARSE_POINT`; fails closed on OOM, ignores errors. Side effect: OneDrive and other cloud-placeholder folders carry the reparse attribute, so they lose the folder icon (cosmetic). |
+| 11 | FIXED | Lists extended, test added. |
+| 12 | FIXED | One `isDeviceName`, now `pub` in `pwd_path`. |
+| 13 | FIXED | `SetThreadErrorMode` is per thread, not process-wide, and is not inherited by child processes or other threads, so no side effect on spawned shells or render threads. `folderIcon` now accepts only `DRIVE_FIXED`: USB sticks (removable) lose the proxy icon, intended by the finding. Untested on a real empty drive, as reported. |
+| 14 | FIXED | Mnemonic dropped, test and e2e updated. |
+| 15 | DEFERRED-OK | Test harness only, no product leak today. |
+| 16 | FIXED | Plan ids corrected (+11 is `CLOSE_ALL`, matches `messages.zig`). The timer line in the same plan paragraph ("2 bell border expiry") is stale after fix 8; trivial. |
+
+Docs vs the Windows 11 dialogs: neither `SPEC.md` (§7.6 still describes MessageBox/TaskDialog; lines 610 and 803 say "TaskDialog"), `CHANGELOG.md` nor `feature-checklist.md` mention the new owner-drawn dialogs (`fe9a5d5b2`). Not addressed.
+
+Other notes: the diff contains format-only hunks (`SharedDeps.zig`, `freetype.zig`, `stream_handler.zig`), harmless. `url_confirm` from the msg window can raise the dialog during quit, same as before.
+
+**Verdict: CHANGES_REQUESTED** (documentation only): update the two SPEC RAM rows and `acceptance.md:84`, add the Task 26.4.1 / 26.5 and Windows 11 dialog entries to SPEC §7.6/§18, CHANGELOG and checklist. No code changes needed.

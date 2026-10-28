@@ -40,6 +40,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Config: reload (soft/hard) | M2 | e2e/config-reload | done |
 | `open_config` | M3 | none (ShellExecuteExW + notepad fallback, owner check) | manual |
 | Config: errors dialog | M3 | e2e/config-errors | done |
+| Dialogs in the Windows 11 look (close, paste, link, config errors; light/dark, DPI, keys, no accelerator on Allow) | M3 | e2e/dialogs | done |
 | Keybinds: default bindings, action coverage | M2 | unit: actions.zig (action coverage); e2e/tabs-keys | done |
 | Keybinds: key tables and key sequences (+ indicator) | M3 | e2e/status-overlays | done |
 | Keybinds: global (`global:` via RegisterHotKey) | M3 | e2e/hotkey-global | done |

@@ -81,7 +81,7 @@ run on `e60878000` failed with `pkg/win32/dcomp.zig:43:22: error: @ptrCast incre
    slowness, foreground theft, L1 for `device-recover`); Tasks 26.1-26.3 fixed `device-recover`, the `vt-smoke` DPI refs
    and `background-focus` (exit retry). Today: `m3-shots`, `transparency`, `opacity-blur`, `vt-smoke` PASS; the full
    suite was not re-run. `vt-smoke -Driver warp`: 14 PASS, 3 SKIP.
-4. RAM: default rows pass (64.5 against 70.1); four feature rows over budget (above). Owner decision.
+4. RAM: default rows pass (64.5 against 70.1); two feature rows over budget (custom shader, quick terminal) and one borderline (inspector after close, Task 26.5). Owner decision.
 5. Latency: relative gates pass (-1.43, -0.42 ms); the absolute 6 ms is not reached under 6-23 % background CPU.
 6. Feature checklist: every row has evidence and a status; `manual` rows are ligatures, the Kitty keyboard protocol end to end,
    `open_config`, IME and the real toast; two are L1 gaps (Kitty graphics, SGR 58); shell integration

@@ -23,6 +23,9 @@
 - Safe GUI end-to-end harness in `test/windows` (desktop lock, sandboxed
   profile, clipboard backup).
 
+- All Ghostty dialogs (close, paste, link, config errors) are in the Windows 11 look (rounded, Mica, dark/light, per-monitor
+  DPI) instead of the Vista-style TaskDialog; `MessageBox` is only the fallback. "Allow" has no keyboard accelerator.
+
 ### Core changes outside Windows-only code
 
 - FreeType: COLRv0 glyphs in colour-capable faces now render as colour. This

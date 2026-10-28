@@ -336,8 +336,11 @@ Mouse (`mouse.zig`): client px → `cursorPosCallback`; buttons L/R/M/X1/X2 with
 
 ### 7.6 Dialogs
 M1: `MessageBoxW` (OK/Cancel) for close confirmation, unsafe paste and OSC 52 — no struct-packing risk. M2: `TaskDialogIndirect`
-(comctl32 v6 via the manifest dependency, already declared) with custom button labels and config-errors dialog; note
-`TASKDIALOGCONFIG` is declared under `pshpack1.h` (1-byte packing) in `commctrl.h`. Owned by the top-level window; modal.
+(comctl32 v6 via the manifest dependency) with custom button labels and config-errors dialog. **Since M3 (DECISIONS 2026-10-28)** every
+Ghostty dialog is our own modal window in the Windows 11 look (WinUI `ContentDialog`: rounded, Mica, dark/light, Direct2D
+text, per-monitor DPI; `src/apprt/win32/dialog/`, same `dialogs.zig` API); `MessageBoxW` remains only as the fallback when
+that window cannot be built. Owned by the top-level window; modal. The link and paste confirmations have no accelerator on
+"Allow" (the question appears asynchronously; a user who keeps typing must not accept it).
 
 ## 8. Core changes (platform-gated)
 
@@ -523,8 +526,8 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | M3 DirectWrite discovery (`font-family = Consolas`, CJK printed) | `font-consolas-m1` row + 2 MB | 66.5 MB (m1 69.7 at 175 %; same-day one-surface 64.5, +2.0): met |
 | M3 custom shader (1 shader, invert) | +2 x target bytes + 4 MB | +13.6 MB at 1388x751 (gate +12.3), +21.5 MB maximised 1872x1050 (gate +19.7): **over by 1.3 / 1.8 MB, owner decision** |
 | M3 composition mode (`background-opacity = 0.9`) | first surface +3 MB, each extra +0.5 MB | first +0.4 MB, extra -0.15 MB per surface: met |
-| M3 overlays (search + command palette, each opened once; link label not driven) | +1 MB total | +2.1 MB (search +1.1, palette +1.0; stays after close): **over by 1.1 MB, owner decision** |
-| M3 inspector open on 1 surface | +25 MB open; within +2 MB 30 s after close | +3.5 MB open (met); +3.6 MB 30 s after close: **over the +2 MB return rule by 1.6 MB, owner decision** |
+| M3 overlays (search + command palette, each opened once; link label not driven) | +1 MB total | cold +2.1 MB (search +1.1, palette +1.0); warm +0.4 MB (Task 26.5): met warm; the first paint of a cold window costs about +2 MB (shared Direct2D/DirectWrite state, irreducible; owner note) |
+| M3 inspector open on 1 surface | +25 MB open; within +2 MB 30 s after close | +3.5 MB open (met); 30 s after close +3.6 MB before Task 26.5, about +1.9 MB mean after it (imgui in its own heap; 2 of 5 samples over +2): **borderline, the rest is GPU driver cache** |
 | M3 quick terminal | 0 before the first toggle, then one surface's cost | 64.3 before (0); +10.1 MB after the first toggle (one tab/split costs +5.7/+6.0, an extra window +17.7): **over a surface's cost, owner decision** |
 | M3 first toast (WinRT DLLs) | +4 MB | deferred: owner-approval-gated (HKCU AUMID key) |
 Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit` (user),
@@ -607,7 +610,7 @@ goto, resize), multiple windows (cascade, goto/present, move tab to new window, 
 re-dock onto another window's strip with live ghost/insertion feedback, Esc cancel; processes keep running, §18.16), maximize/fullscreen/float/decorations toggles,
 per-monitor DPI incl. hidden tabs, theme (`window-theme`, titlebar colours, system colour scheme → conditional config), config
 reload (soft/hard) and `open_config`, native scrollbar, bell (title/attention/system/audio), taskbar progress, resize overlay
-(owned popup), TaskDialog close confirmations, named-pipe IPC + single-instance (`windows-single-instance`) + `performIpc` +
+(owned popup), Windows 11 style close confirmations, named-pipe IPC + single-instance (`windows-single-instance`) + `performIpc` +
 test-only IPC ops, notification-area icon with Ghostty staying alive after the last window (Windows default
 `quit-after-last-window-closed = false`, §18.7/§18.15), Windows Terminal tab-close process semantics (§18.14), file drag-and-drop from Explorer as shell-quoted paths (§18.17),
 input and output latency measured and fixed incl. TUI wheel scrolling and ConPTY (§18.18), new surfaces survive a GPU device loss while the process stays
@@ -800,7 +803,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
     after the drive), `\\?\` / `\\.\` prefixes, UNC, DOS device names, and drives that are not fixed or removable. Existing
     local files open, except that (after stripping trailing dots and spaces, and checking the 8.3 short name) an
     executable/script/container type or any type for which `AssocIsDangerous` is true is revealed in Explorer instead of run;
-    a missing path is refused; any other scheme asks first (TaskDialog); more than 2048 bytes or any C0/C1 control is
+    a missing path is refused; any other scheme asks first (the Windows 11 style dialog); more than 2048 bytes or any C0/C1 control is
     refused. Validation and execution run on one lazy STA worker (queue up to 8, `SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI`) so a dead
     network drive never blocks the UI thread; `link.open` returns true for every verdict. Cost if wrong: a confirmation or
     reveal where a direct open was expected.
@@ -857,7 +860,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       z-order and a `WindowFromPoint` grid and skip (E2E-SKIP, nothing saved) when a window that is not ours is in the
       capture area; images are cropped to the Ghostty window (a margin only over the scenario's own backdrop).
     - Task 26: `vt-smoke` references are keyed by display scale (`ref/<case>@<dpi>.png`, a missing DPI is a SKIP);
-      `background-focus` retries an exit line lost by Git Bash. Open: see the known issue below.
+      `background-focus` retries an exit line lost by Git Bash. Result: the Git Bash input loss is worked around, see Tasks 26.4 and 26.4.1 below.
     - Task 26.4: after a pseudo console resize, MSYS2 (Git Bash) sometimes takes in the window-size event only together
       with the next input record and loses that record (the shell misses the SIGWINCH until then; a delay does not help:
       0 lost at 0-20 ms, 3-5 of 12 at 50-1500 ms). Workaround in `termio/resize_prime.zig`: the first pty write after a
@@ -869,3 +872,13 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       unchanged), 9 of 20 lost without it; under heavy CPU load the 50 ms window now starts at conhost's first output after the resize (cap 2 s; 36/36 with 12 burner threads; before, 2 of 36 lost once
       when conhost handled the resize late). Root cause not proven (a minimal kernel32 ConPTY host never reproduced it);
       follow-up: report to msys2-runtime (pointer: `strip_inrec` in the Cygwin console code).
+    - Task 26.4.1: the resize-prime window now starts at conhost's first output after the resize (cap 2 s), so a resize that
+      conhost handles late no longer loses the record (36/36 with 12 CPU-burner threads; 2 of 36 before).
+    - Task 26.5: the inspector gives imgui its own heap (`ImGui_SetAllocatorFunctions`, destroyed with the last context);
+      30 s after close it holds about +1.9 MB over the pre-open value (was +3.6; 2 of 5 samples over +2, borderline).
+      Overlays: no code change, the cost is first use of shared Direct2D/DirectWrite/uxtheme state (+0.4 MB warm, about
+      +2 MB for a cold first paint); owner-visible note in `docs/windows/m3/acceptance.md`.
+    - Windows 11 dialogs (`fe9a5d5b2` and fixes): see 7.6 and DECISIONS 2026-10-28.
+    - M3 final review (`docs/windows/m3/final-review.md`): title updates use a fixed 75 ms window; link confirmations go
+      through the message window; proxy icon and reveal refuse links that leave the local disk; deferred to M5:
+      `export_terminal_io` write off the UI thread, translucent capture guard, DPAPI for the e2e clipboard backup.

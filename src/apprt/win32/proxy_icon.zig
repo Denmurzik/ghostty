@@ -32,9 +32,10 @@ const HRESULT = win32.foundation.HRESULT;
 
 const log = std.log.scoped(.win32_proxy_icon);
 
-/// `GetDriveTypeW` result of a disk that is always there. Removable drives
-/// are skipped: an empty card reader would raise the "No disk" dialog or
-/// stall the UI thread.
+/// `GetDriveTypeW` results that are local to the machine. An empty removable
+/// drive fails the check (`SEM_FAILCRITICALERRORS`, set in `App.init`)
+/// instead of raising the "No disk" dialog.
+const drive_removable = 2;
 const drive_fixed = 3;
 
 /// Longest directory the icon is made for.
@@ -141,11 +142,50 @@ fn widePath(alloc: Allocator, path: []const u8) ?[:0]u16 {
 fn onLocalDrive(wide: []const u16) bool {
     const root = [4:0]u16{ wide[0], ':', '\\', 0 };
     const kind = kernel32.GetDriveTypeW(&root);
-    return kind == drive_fixed;
+    return kind == drive_fixed or kind == drive_removable;
+}
+
+/// What to do with a folder that is a reparse point, by its tag.
+const ReparseVerdict = enum { allow, resolve };
+
+/// Cloud placeholders (OneDrive and other sync roots, `IO_REPARSE_TAG_CLOUD`
+/// and `_CLOUD_1` ... `_CLOUD_F`) are ordinary local folders: allow. Symlinks,
+/// junctions, mount points and everything else are followed: the target
+/// must be on a local drive.
+fn classifyReparseTag(tag: u32) ReparseVerdict {
+    const cloud: u32 = 0x9000001A;
+    // The variants differ in bits 12-15.
+    if (tag & 0xFFFF0FFF == cloud) return .allow;
+    return .resolve;
+}
+
+/// The final target of `prefix` is on a local drive (`\\?\X:\...`).
+fn resolvesLocally(prefix: [:0]const u16) bool {
+    const k = kernel32;
+    const file = k.CreateFileW(
+        prefix.ptr,
+        0,
+        k.FILE_SHARE_READ | k.FILE_SHARE_WRITE | k.FILE_SHARE_DELETE,
+        null,
+        k.OPEN_EXISTING,
+        k.FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (file == k.INVALID_HANDLE_VALUE) return false;
+    defer _ = k.CloseHandle(file);
+    var buf: [1100]u16 = undefined;
+    const flags = k.VOLUME_NAME_DOS | k.FILE_NAME_NORMALIZED;
+    const got = k.GetFinalPathNameByHandleW(file, &buf, buf.len, flags);
+    if (got < 7 or got >= buf.len) return false;
+    // `\\?\C:\x`; `\\?\UNC\...` and anything else is not local.
+    const lead = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    if (!std.mem.eql(u16, buf[0..4], lead) or buf[5] != ':') return false;
+    return onLocalDrive(buf[4..got]);
 }
 
 /// True when `wide` or one of its parent folders is a link, junction or
-/// mount point: the shell would follow it, maybe to a share.
+/// mount point that leads off the local disks: the shell would follow it,
+/// maybe to a share. Fails closed.
 fn throughReparsePoint(alloc: Allocator, wide: []const u16) bool {
     var end: usize = 3;
     while (end <= wide.len) : (end += 1) {
@@ -153,7 +193,16 @@ fn throughReparsePoint(alloc: Allocator, wide: []const u16) bool {
         const prefix = alloc.dupeSentinel(u16, wide[0..end], 0) catch return true;
         defer alloc.free(prefix);
         const attrs = kernel32.GetFileAttributesW(prefix.ptr);
-        if (attrs != kernel32.INVALID_FILE_ATTRIBUTES and attrs & kernel32.FILE_ATTRIBUTE_REPARSE_POINT != 0) return true;
+        if (attrs == kernel32.INVALID_FILE_ATTRIBUTES or attrs & kernel32.FILE_ATTRIBUTE_REPARSE_POINT == 0) continue;
+
+        var data: kernel32.WIN32_FIND_DATAW = undefined;
+        const find = kernel32.FindFirstFileW(prefix.ptr, &data);
+        if (find == kernel32.INVALID_HANDLE_VALUE) return true;
+        _ = kernel32.FindClose(find);
+        switch (classifyReparseTag(data.dwReserved0)) {
+            .allow => {},
+            .resolve => if (!resolvesLocally(prefix)) return true,
+        }
     }
     return false;
 }
@@ -508,4 +557,14 @@ test "win32 proxy icon: icons are found by folder and dpi" {
     try std.testing.expect(state.current() == null);
     state.shown = 1;
     try std.testing.expectEqual(@as(i32, 24), state.current().?.size);
+}
+
+test "win32 proxy icon: cloud placeholders are allowed, links are resolved" {
+    try std.testing.expectEqual(ReparseVerdict.allow, classifyReparseTag(0x9000001A));
+    try std.testing.expectEqual(ReparseVerdict.allow, classifyReparseTag(0x9000101A));
+    try std.testing.expectEqual(ReparseVerdict.allow, classifyReparseTag(0x9000F01A));
+    try std.testing.expectEqual(ReparseVerdict.resolve, classifyReparseTag(0xA000000C)); // symlink
+    try std.testing.expectEqual(ReparseVerdict.resolve, classifyReparseTag(0xA0000003)); // junction, mount point
+    try std.testing.expectEqual(ReparseVerdict.resolve, classifyReparseTag(0x9000001B));
+    try std.testing.expectEqual(ReparseVerdict.resolve, classifyReparseTag(0));
 }

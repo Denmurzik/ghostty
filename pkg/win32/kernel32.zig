@@ -171,6 +171,22 @@ pub const FILE_NAME_NORMALIZED = 0x0;
 /// `INVALID_FILE_ATTRIBUTES` when the path does not exist.
 pub extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(.winapi) u32;
 pub const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+pub const WIN32_FIND_DATAW = extern struct {
+    dwFileAttributes: u32,
+    ftCreationTime: [2]u32,
+    ftLastAccessTime: [2]u32,
+    ftLastWriteTime: [2]u32,
+    nFileSizeHigh: u32,
+    nFileSizeLow: u32,
+    /// The reparse tag when `dwFileAttributes` has `FILE_ATTRIBUTE_REPARSE_POINT`.
+    dwReserved0: u32,
+    dwReserved1: u32,
+    cFileName: [260]u16,
+    cAlternateFileName: [14]u16,
+};
+/// `INVALID_HANDLE_VALUE` on failure.
+pub extern "kernel32" fn FindFirstFileW(name: [*:0]const u16, data: *WIN32_FIND_DATAW) callconv(.winapi) HANDLE;
+pub extern "kernel32" fn FindClose(HANDLE) callconv(.winapi) BOOL;
 pub const SEM_FAILCRITICALERRORS = 0x0001;
 /// Per thread: with `SEM_FAILCRITICALERRORS` an empty drive fails instead of
 /// raising the system "No disk" dialog.
