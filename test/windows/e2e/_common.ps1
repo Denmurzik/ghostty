@@ -834,6 +834,8 @@ function Update-ClipboardMark {
 function Restore-ClipboardText($Saved) {
     if ($null -eq $Saved) { return }
     $bin = Get-ClipboardBackupPath; $mark = Get-ClipboardMarkPath
+    # Already restored (a scenario restores early and again in its finally).
+    if (-not (Test-Path -LiteralPath $bin)) { return }
     $own = $null
     if (Test-Path -LiteralPath $mark) { $own = [uint32](Get-Content -LiteralPath $mark -Raw).Trim() }
     if ($null -eq $own -or [uint32](Get-ClipboardSequence) -ne $own) {

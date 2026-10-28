@@ -61,6 +61,13 @@ Invoke-E2eScenario 'tmux-replay' {
             throw "$What : expected $N panes, state has $(@(Get-Panes).Count): $((Get-Panes | ConvertTo-Json -Compress -Depth 4))"
         }
     }
+    # Ghostty writes the clipboard after tmux.exe has returned: wait for the
+    # sequence number to move, then take the write as ours.
+    function Wait-ClipboardMarked([uint32]$Before) {
+        $end = [DateTime]::UtcNow.AddSeconds(3)
+        while (([uint32](Get-ClipboardSequence) -eq $Before) -and ([DateTime]::UtcNow -lt $end)) { Start-Sleep -Milliseconds 50 }
+        Update-ClipboardMark
+    }
     function Tm([string[]]$A, [string]$Stdin = $null, [string]$From = $leader) {
         Invoke-Tmux $g $A $Stdin 15000 $From
     }
@@ -162,7 +169,9 @@ Invoke-E2eScenario 'tmux-replay' {
         if ($verb -eq 'load-buffer' -and $argv -contains '-w' -and -not $saved) { continue }
         $isLayout = $verb -in 'split-window', 'respawn-pane', 'select-layout', 'resize-pane', 'kill-pane'
 
+        $clipSeq = [uint32](Get-ClipboardSequence)
         $r = Tm $argv $stdin
+        if ($verb -eq 'load-buffer' -and $argv -contains '-w') { Wait-ClipboardMarked $clipSeq }
         $hasStdout = $null -ne $c.PSObject.Properties['stdout']
         $exp = if ($hasStdout) { [string]$c.stdout } else { '' }
         if ($r.Code -ne 0) { throw "call $n ($($argv -join ' ')): exit $($r.Code), stderr '$($r.Stderr.Trim())'" }
@@ -317,8 +326,9 @@ Invoke-E2eScenario 'tmux-replay' {
 
     # --- load-buffer -w sets the clipboard ---
     if ($saved) {
+        $clipSeq = [uint32](Get-ClipboardSequence)
         Expect-Ok (Tm @('load-buffer', '-w', '-') 'm4-clip') 'load-buffer -w' | Out-Null
-        Update-ClipboardMark
+        Wait-ClipboardMarked $clipSeq
         $got = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
         if ($got -ne 'm4-clip') { throw "clipboard holds '$got', expected 'm4-clip'" }
     }
