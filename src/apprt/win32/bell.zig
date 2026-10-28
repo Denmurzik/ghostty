@@ -55,7 +55,7 @@ pub fn ring(surface: *Surface) bool {
 
 /// Playing sound buffer (`SND_MEMORY` needs it alive while the async play
 /// runs). Replaced, and freed, by the next ring. UI thread only.
-var playing: ?[]u8 = null;
+var playing: ?[]align(2) u8 = null;
 
 /// WAV files only. `bell-audio-volume` scales the 8/16-bit PCM samples in
 /// memory (other sample formats play at full volume); 0 is silent.
@@ -85,16 +85,20 @@ fn playAudio(app: *App) void {
 /// Read the WAV, scale it and play it from memory. False when the file
 /// cannot be read or scaled, so the caller plays the file unscaled.
 fn playScaled(alloc: Allocator, path: []const u8, volume: f64) bool {
-    const data = std.Io.Dir.cwd().readFileAlloc(global.io(), path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+    const file = std.Io.Dir.cwd().readFileAlloc(global.io(), path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
         log.warn("unable to read bell audio err={}", .{err});
         return false;
     };
+    defer alloc.free(file);
+    // PlaySoundW wants a 2-byte aligned memory image.
+    const data = alloc.alignedAlloc(u8, .@"2", file.len) catch return false;
+    @memcpy(data, file);
     if (!scaleWav(data, volume)) {
         alloc.free(data);
         return false;
     }
     const flags = win32.winmm.SND_ASYNC | win32.winmm.SND_MEMORY | win32.winmm.SND_NODEFAULT;
-    if (win32.winmm.PlaySoundW(@ptrCast(data.ptr), null, flags) == 0) {
+    if (win32.winmm.PlaySoundW(@ptrCast(@alignCast(data.ptr)), null, flags) == 0) {
         log.warn("unable to play bell audio", .{});
         alloc.free(data);
         return true;

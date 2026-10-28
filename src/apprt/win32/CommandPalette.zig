@@ -1467,8 +1467,8 @@ test "win32 palette: target closed while open" {
     try std.testing.expect(window.palette.popup != null);
     try std.testing.expectEqual(@as(?u32, 42), window.palette.target_id);
     // Sorted by title, the unsupported "Check for Updates" left out.
-    try std.testing.expectEqual(@as(usize, 2), window.palette.rows.len);
-    try std.testing.expectEqualStrings("Send Text", panel.items[window.palette.rows[0]].title);
+    try std.testing.expectEqual(@as(usize, 3), window.palette.rows.len);
+    try std.testing.expectEqualStrings("Send Text", panel.items[window.palette.rows[1]].title);
 
     // Another surface going away leaves the palette alone.
     closeForTarget(window, 7);
@@ -1546,17 +1546,20 @@ test "win32 palette: nothing selected until a query, jump entries" {
     defer close(window);
     const state = &window.palette;
 
-    try std.testing.expectEqual(@as(usize, 4), state.rows.len);
+    // "About Ghostty" sorts first.
+    try std.testing.expectEqual(@as(usize, 5), state.rows.len);
+    try std.testing.expectEqualStrings("About Ghostty", panel.items[state.rows[0]].title);
+    try std.testing.expect(panel.items[state.rows[0]].run == .about);
     try std.testing.expectEqual(no_sel, state.sel);
     // Sorted by title; a description makes the row taller, a title that
     // shows the directory has none.
-    try std.testing.expectEqualStrings("Focus: bash", panel.items[state.rows[0]].title);
-    try std.testing.expectEqualStrings("C:/work", panel.items[state.rows[0]].description);
-    try std.testing.expectEqual(@as(i32, row_double), panel.heights[0]);
-    try std.testing.expectEqualStrings("Focus: Untitled", panel.items[state.rows[1]].title);
-    try std.testing.expectEqual(@as(i32, row_single), panel.heights[1]);
-    try std.testing.expectEqualStrings("Focus: vim C:/work/a.txt", panel.items[state.rows[2]].title);
-    try std.testing.expectEqual(@as(usize, 6), panel.items[state.rows[2]].run.jump);
+    try std.testing.expectEqualStrings("Focus: bash", panel.items[state.rows[1]].title);
+    try std.testing.expectEqualStrings("C:/work", panel.items[state.rows[1]].description);
+    try std.testing.expectEqual(@as(i32, row_double), panel.heights[1]);
+    try std.testing.expectEqualStrings("Focus: Untitled", panel.items[state.rows[2]].title);
+    try std.testing.expectEqual(@as(i32, row_single), panel.heights[2]);
+    try std.testing.expectEqualStrings("Focus: vim C:/work/a.txt", panel.items[state.rows[3]].title);
+    try std.testing.expectEqual(@as(usize, 6), panel.items[state.rows[3]].run.jump);
 
     // A query selects the first row, clearing it on the first row drops it.
     try applyQuery(panel, "  send ");
@@ -1613,7 +1616,7 @@ test "win32 palette: profile entries are listed and run their profile" {
     defer close(window);
     const state = &window.palette;
 
-    try std.testing.expectEqual(@as(usize, 5), state.rows.len);
+    try std.testing.expectEqual(@as(usize, 6), state.rows.len);
     var tab: ?Run = null;
     var win: ?Run = null;
     for (state.rows) |r| {
