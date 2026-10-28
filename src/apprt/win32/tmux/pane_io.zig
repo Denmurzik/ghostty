@@ -131,7 +131,9 @@ pub fn layoutChanged(tab: *Tab) void {
     pruneTabs(st, now);
     var it = tab.tree.iterator();
     while (it.next()) |entry| {
-        st.pane_seen_ms.putNoClobber(alloc, entry.view.pane_id, now) catch return;
+        // First sighting only: a pane already seen keeps its time.
+        const gop = st.pane_seen_ms.getOrPut(alloc, entry.view.pane_id) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = now;
     }
 }
 
