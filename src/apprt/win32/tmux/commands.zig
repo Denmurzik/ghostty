@@ -252,6 +252,7 @@ const Fmt = struct {
         if (eql(u8, name, "pane_dead")) return flag(v.pane_dead);
         if (eql(u8, name, "pane_current_path")) return v.pane_current_path;
         // Fixed answers (Claude's startup probes, recon section 9).
+        // They shadow Options: set-option of these names does not change the answer.
         const fixed = [_][2][]const u8{
             .{ "session_name", "0" },
             .{ "session_id", "$0" },
@@ -306,7 +307,7 @@ fn Env(comptime Host: type) type {
                 .display_message => try self.displayMessage(cmd),
                 .list_panes => try self.listPanes(cmd),
                 .list_windows => try self.listWindows(cmd),
-                .show_environment => _ = try self.counts(cmd, 0, 1),
+                .show_environment => try self.showEnvironment(cmd),
                 .load_buffer => try self.loadBuffer(cmd),
                 .send_keys => try self.sendKeys(cmd),
                 .capture_pane => try self.capturePane(cmd),
@@ -439,6 +440,7 @@ fn Env(comptime Host: type) type {
         }
 
         fn splitWindow(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            // -Z is accepted and ignored: Claude never sends it and Spawn has no zoom state.
             if (!try self.reject(cmd, "fI")) return;
             const target = (try self.resolvePane(cmd.value('t'))) orelse return;
 
@@ -569,7 +571,7 @@ fn Env(comptime Host: type) type {
             } else {
                 try opts.set(gpa, scope, name, value);
             }
-            self.host.optionsChanged(window_id orelse 0);
+            if (window_id) |w| self.host.optionsChanged(w);
         }
 
         fn displayMessage(self: Self, cmd: *const cli.Command) Allocator.Error!void {
@@ -604,6 +606,12 @@ fn Env(comptime Host: type) type {
             const fmt = cmd.value('F') orelse "#{window_index}: #{window_name} (#{window_panes} panes) #{window_id}";
             // tmux lists the target's session (-a: all sessions): every window here.
             for (try self.host.windows(self.arena)) |w| try self.emitLine(fmt, self.host.activePane(w));
+        }
+
+        fn showEnvironment(self: Self, cmd: *const cli.Command) Allocator.Error!void {
+            if (!try self.counts(cmd, 0, 1)) return;
+            // The environment is empty: any named variable is unknown.
+            if (cmd.positional.len == 1) return self.fail("unknown variable: {s}", .{cmd.positional[0]});
         }
 
         fn loadBuffer(self: Self, cmd: *const cli.Command) Allocator.Error!void {
@@ -653,7 +661,6 @@ fn Env(comptime Host: type) type {
 const FakeHost = @import("FakeHost.zig");
 const testing = std.testing;
 
-const live_fixture = "src/apprt/win32/tmux/testdata/claude-spawn.jsonl";
 const static_fixture = @embedFile("testdata/claude-spawn.static.jsonl");
 
 const Rig = struct {
@@ -721,15 +728,6 @@ const FixtureLine = struct {
     stdin: ?[]const u8 = null,
     stdout: ?[]const u8 = null,
 };
-
-fn fixtureText(arena: Allocator) []const u8 {
-    // The live capture (Task 1) wins when present; the static one is derived
-    // from the recon tables. Both use the same line format.
-    if (std.Io.Dir.cwd().readFileAlloc(testing.io, live_fixture, arena, .limited(1 << 20))) |t| {
-        return t;
-    } else |_| {}
-    return static_fixture;
-}
 
 const IdMap = struct {
     panes: std.AutoHashMapUnmanaged(u32, u32) = .empty,
@@ -805,7 +803,9 @@ test "win32 tmux commands: replay Claude spawn fixture" {
     var rig = try Rig.init();
     defer rig.deinit();
     const arena = rig.arena();
-    const text = fixtureText(arena);
+    // Task 1 adds the live capture: embed testdata/claude-spawn.jsonl here
+    // and prefer it over the static one (same line format).
+    const text = static_fixture;
 
     var ids: IdMap = .{};
     try ids.panes.put(arena, 1, 1); // fixture leader %1 is the fake leader
@@ -824,6 +824,7 @@ test "win32 tmux commands: replay Claude spawn fixture" {
         const rest = try arena.alloc([]const u8, g.rest.len);
         for (g.rest, rest) |s, *d| d.* = (try ids.rewrite(arena, s)) orelse s;
 
+        if (rest.len == 0) return error.FixtureLineWithoutCommand;
         if (!teardown_checked and std.mem.eql(u8, rest[0], "kill-pane")) {
             teardown_checked = true;
             try expectSpawnedTree(&rig, &ids);
@@ -1125,6 +1126,7 @@ test "win32 tmux commands: display-message, buffers, keys, capture" {
     try testing.expectEqualStrings("0:0.1\n", try rig.ok(&.{ "split-window", "-d", "-P" }));
     try testing.expectEqualStrings("", try rig.ok(&.{ "show-environment", "-g" }));
     try rig.bad(&.{ "show-environment", "a", "b" }, "too many arguments");
+    try rig.bad(&.{ "show-environment", "-g", "NOPE" }, "unknown variable: NOPE");
 
     // load-buffer needs "-" and stdin.
     try rig.bad(&.{ "load-buffer", "-" }, "load-buffer");

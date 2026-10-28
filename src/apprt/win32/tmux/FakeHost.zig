@@ -462,7 +462,7 @@ pub fn options(self: *FakeHost) *commands.Options {
     return &self.opts;
 }
 
-pub fn optionsChanged(self: *FakeHost, window_id: u32) void {
+pub fn optionsChanged(self: *FakeHost, window_id: u32) void { // contract: only called with a window
     self.options_changed.append(self.alloc, window_id) catch {};
 }
 
