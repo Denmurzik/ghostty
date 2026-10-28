@@ -30,26 +30,55 @@ pub const State = struct {
     reporter: u32 = 0,
     /// Created lazily, again after every "TaskbarButtonCreated".
     list: ?*ITaskbarList3 = null,
-    /// The report a closing surface took along (it may come back with an
-    /// undo): its reporter and the report. At most one.
-    stash: ?struct { reporter: u32, report: Report } = null,
+    /// The reports of parked surfaces (they may come back with an undo), one
+    /// per surface; the oldest is replaced when the slots run out.
+    stash: [stash_slots]?Stashed = @splat(null),
 
-    /// The surface `id` closes: its report moves to the stash.
+    const Stashed = struct { reporter: u32, report: Report };
+    const stash_slots = 4;
+
+    /// The surface `id` is parked: its report moves to the stash. False when
+    /// the bar shows nothing of it.
     fn dropFor(self: *State, id: u32) bool {
         const p = self.progress orelse return false;
         if (self.reporter != id) return false;
-        self.stash = .{ .reporter = id, .report = p };
+        self.forget(id);
+        // Free slot, else the oldest (slot 0) goes.
+        var at: usize = 0;
+        for (self.stash, 0..) |s, i| {
+            if (s == null) {
+                at = i;
+                break;
+            }
+        } else {
+            std.mem.copyForwards(?Stashed, self.stash[0 .. stash_slots - 1], self.stash[1..]);
+            at = stash_slots - 1;
+        }
+        self.stash[at] = .{ .reporter = id, .report = p };
         return true;
+    }
+
+    /// The surface `id` is gone for good (or left the window): no report of
+    /// it may come back.
+    fn forget(self: *State, id: u32) void {
+        for (&self.stash) |*s| {
+            if (s.*) |v| if (v.reporter == id) {
+                s.* = null;
+            };
+        }
     }
 
     /// The report to show again for the surface `id` that came back: only
     /// while nothing else is on the bar.
     fn takeStash(self: *State, id: u32) ?Report {
-        const s = self.stash orelse return null;
-        if (s.reporter != id) return null;
-        self.stash = null;
-        if (self.progress != null) return null;
-        return s.report;
+        for (&self.stash) |*s| {
+            const v = s.* orelse continue;
+            if (v.reporter != id) continue;
+            s.* = null;
+            if (self.progress != null) return null;
+            return v.report;
+        }
+        return null;
     }
 };
 
@@ -89,8 +118,17 @@ pub fn setProgressFrom(window: *Window, reporter: u32, report: Report) bool {
     return true;
 }
 
-/// The surface `id` is closing: its progress goes with it.
+/// The surface `id` is closing for good, or leaves the window: its progress
+/// goes with it and nothing of it is kept.
 pub fn surfaceClosed(window: *Window, id: u32) void {
+    window.taskbar.forget(id);
+    if (window.taskbar.reporter != id or window.taskbar.progress == null) return;
+    _ = setProgressFrom(window, 0, .{ .state = .remove });
+}
+
+/// The surface `id` is parked (a close the undo keeps): its progress leaves
+/// the bar and waits for `surfaceRestored`.
+pub fn surfaceParked(window: *Window, id: u32) void {
     if (!window.taskbar.dropFor(id)) return;
     _ = setProgressFrom(window, 0, .{ .state = .remove });
 }
@@ -101,12 +139,12 @@ pub fn surfaceRestored(window: *Window, id: u32) void {
     _ = setProgressFrom(window, id, report);
 }
 
-test "win32 taskbar: the progress of a closed surface comes back with it" {
+test "win32 taskbar: the progress of a parked surface comes back with it" {
     var st: State = .{};
     try std.testing.expect(!st.dropFor(5)); // nothing reported
     st.progress = .{ .state = .set, .progress = 40 };
     st.reporter = 5;
-    try std.testing.expect(!st.dropFor(6)); // another surface closes
+    try std.testing.expect(!st.dropFor(6)); // another surface is parked
     try std.testing.expect(st.dropFor(5));
     st.progress = null;
     st.reporter = 0;
@@ -121,6 +159,41 @@ test "win32 taskbar: the progress of a closed surface comes back with it" {
     st.progress = .{ .state = .set, .progress = 90 };
     st.reporter = 7;
     try std.testing.expect(st.takeStash(5) == null);
+}
+
+test "win32 taskbar: every parked surface keeps its own report, a gone surface none" {
+    var st: State = .{};
+    // Two surfaces parked one after the other (a tab with two panes).
+    st.progress = .{ .state = .set, .progress = 20 };
+    st.reporter = 1;
+    try std.testing.expect(st.dropFor(1));
+    st.progress = .{ .state = .set, .progress = 60 };
+    st.reporter = 2;
+    try std.testing.expect(st.dropFor(2));
+    st.progress = null;
+    st.reporter = 0;
+    try std.testing.expectEqual(@as(?u8, 20), st.takeStash(1).?.progress);
+    st.progress = null;
+    try std.testing.expectEqual(@as(?u8, 60), st.takeStash(2).?.progress);
+
+    // A surface that moved to another window or died takes its report along.
+    st.progress = .{ .state = .set, .progress = 70 };
+    st.reporter = 3;
+    try std.testing.expect(st.dropFor(3));
+    st.forget(3);
+    st.progress = null;
+    try std.testing.expect(st.takeStash(3) == null);
+
+    // More parked surfaces than slots: the oldest is lost, the others stay.
+    var id: u32 = 10;
+    while (id < 10 + State.stash_slots + 1) : (id += 1) {
+        st.progress = .{ .state = .set, .progress = 5 };
+        st.reporter = id;
+        try std.testing.expect(st.dropFor(id));
+    }
+    st.progress = null;
+    try std.testing.expect(st.takeStash(10) == null);
+    try std.testing.expect(st.takeStash(10 + State.stash_slots) != null);
 }
 
 /// The bar's value for a report: 0-100.
@@ -188,7 +261,7 @@ pub fn handle(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) ?LRESUL
         },
         // A close that asks first may still be cancelled: only the immediate
         // one takes the progress along.
-        messages.WM_GHOSTTY_CLOSE_SURFACE => if (lparam == 0) surfaceClosed(window, @intCast(wparam)),
+        messages.WM_GHOSTTY_CLOSE_SURFACE => if (lparam == 0) surfaceParked(window, @intCast(wparam)),
         win32.user32.WM_NCDESTROY => {
             _ = win32.user32.KillTimer(window.hwnd, stale_timer_id);
             destroyList(window);

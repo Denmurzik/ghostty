@@ -275,6 +275,7 @@ fn parkOne(s: *Surface) void {
         if (core_app.focused_surface == &s.core_surface) core_app.focused_surface = null;
     }
     Inspector.parkSync(s);
+    taskbar.surfaceParked(s.window, s.id);
 }
 
 /// Hide the tab for the close-undo; its shells keep running.

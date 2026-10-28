@@ -183,7 +183,8 @@ See `docs/windows/m3/acceptance.md` (RAM and latency rows, screenshots, exit che
 
 - External mode (`TMUX` unset, `-L`) and `new-session`/`attach`/`has-session`/`kill-server` are M5.
 - `select-layout` other than `main-vertical` and `tiled` is accepted and does nothing; `capture-pane` covers the visible screen only.
-- Undo covers only the user's own creates and closes (new tab, window or split by key, menu or strip `+`; tab `x`, caption `x`, `close_surface`); the profile menu, tray "new window" and jump-list creates are not undoable, and an external-mode tmux tab that was undone after the next tmux command of its client is no longer listed for that session (its `%N` still works).
+- Creates from the profile menu, the tray ("New Window") and jump-list tasks are not undoable.
+- An external-mode tmux tab brought back by undo may be gone from its client's session listing (its `%N` still works).
 - DCS `tmux;` passthrough: core unwraps it, but the inbox ConPTY drops an ST-terminated inner sequence (an OSC 9 with a
   BEL terminator arrives); Claude notifications that use ST are lost while `TMUX` is set.
 - Images stay disabled under `TMUX` (XTVERSION is not spoofed, SPEC 12.4).
