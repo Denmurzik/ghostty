@@ -1,6 +1,6 @@
 # e2e: milestone=M3 timeout=90 order=620
 # config-errors: a config with an unknown key opens the "Configuration
-# errors" task dialog (GhosttyDialog of the pid) that lists the line; "Ignore"
+# errors" dialog (GhosttyDialog of the pid) that lists the line; "Ignore"
 # closes it; after the file is fixed, "Reload configuration" shows no dialog.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force

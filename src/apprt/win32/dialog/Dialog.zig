@@ -87,8 +87,34 @@ const ext = struct {
     extern "user32" fn GetDpiForSystem() callconv(.winapi) u32;
     extern "gdi32" fn SetBkColor(HDC, u32) callconv(.winapi) u32;
     extern "gdi32" fn SetTextColor(HDC, u32) callconv(.winapi) u32;
+    extern "gdi32" fn GetTextMetricsW(HDC, *TEXTMETRICW) callconv(.winapi) BOOL;
     extern "gdi32" fn SetBkMode(HDC, i32) callconv(.winapi) i32;
 };
+
+const TEXTMETRICW = extern struct {
+    tmHeight: i32,
+    tmAscent: i32,
+    tmDescent: i32,
+    tmInternalLeading: i32,
+    tmExternalLeading: i32,
+    tmAveCharWidth: i32,
+    tmMaxCharWidth: i32,
+    tmWeight: i32,
+    tmOverhang: i32,
+    tmDigitizedAspectX: i32,
+    tmDigitizedAspectY: i32,
+    tmFirstChar: u16,
+    tmLastChar: u16,
+    tmDefaultChar: u16,
+    tmBreakChar: u16,
+    tmItalic: u8,
+    tmUnderlined: u8,
+    tmStruckOut: u8,
+    tmPitchAndFamily: u8,
+    tmCharSet: u8,
+};
+
+const EM_GETLINECOUNT = 0x00BA;
 
 const DRAWITEMSTRUCT = extern struct {
     CtlType: u32,
@@ -111,7 +137,6 @@ const EM_SETMARGINS = 0x00D3;
 const EC_LEFTMARGIN = 1;
 const EC_RIGHTMARGIN = 2;
 const BS_OWNERDRAW = 0x0000000B;
-const SS_OWNERDRAW = 0x0000000D;
 const ES_MULTILINE = 0x0004;
 const ES_AUTOVSCROLL = 0x0040;
 const ES_READONLY = 0x0800;
@@ -166,6 +191,12 @@ title_family: [*:0]const u16,
 body_family: [*:0]const u16,
 list_family: [*:0]const u16,
 plan: layout.Plan,
+plan_input: layout.Input = undefined,
+/// Line pitch of the list font as GDI sets it, and the tallest the list may be.
+list_line_h: i32 = 0,
+list_cap: i32 = 0,
+/// The owner was already disabled when the dialog opened (it is nested in another one).
+owner_was_disabled: bool = false,
 labels: [max_buttons][64]u16 = undefined,
 label_len: [max_buttons]usize = @splat(0),
 accels: [max_buttons]u16 = @splat(0),
@@ -431,7 +462,7 @@ fn buildPlan(self: *Dialog) !layout.Plan {
     var list_h: i32 = 0;
     if (has_list) {
         cap -= body.h;
-        const cell = try self.measure(L("0"), f.list, unwrapped);
+        const cell = self.listMetrics();
         const scroll = user32.GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
         const cols: usize = @intCast(@max(1, @divFloor(
             content_w - 2 * layout.px(layout.list_inset + 6, dpi) - scroll,
@@ -439,9 +470,11 @@ fn buildPlan(self: *Dialog) !layout.Plan {
         )));
         const lines = layout.lineCount(self.list, cols);
         list_h = layout.listHeight(lines, cell.h, cap, dpi);
+        self.list_line_h = cell.h;
+        self.list_cap = cap;
     }
 
-    return layout.plan(.{
+    self.plan_input = .{
         .dpi = dpi,
         .text_w = text_w,
         .buttons_w = buttons_w,
@@ -449,7 +482,8 @@ fn buildPlan(self: *Dialog) !layout.Plan {
         .title_h = title.h,
         .body_h = body.h,
         .list_h = list_h,
-    });
+    };
+    return layout.plan(self.plan_input);
 }
 
 // -- Window ---------------------------------------------------------------------------
@@ -536,8 +570,11 @@ fn createChildren(self: *Dialog) !void {
     for (0..count) |i| {
         const r = self.plan.buttons[i];
         var wide: [65]u16 = undefined;
-        @memcpy(wide[0..self.label_len[i]], self.label(i));
-        wide[self.label_len[i]] = 0;
+        // The name keeps its &, which screen readers report as the access key.
+        const raw = self.spec.buttons[i].text;
+        const raw_n = @min(raw.len, wide.len - 1);
+        @memcpy(wide[0..raw_n], raw[0..raw_n]);
+        wide[raw_n] = 0;
         const child = user32.CreateWindowExW(
             0,
             L("BUTTON"),
@@ -555,28 +592,38 @@ fn createChildren(self: *Dialog) !void {
         self.buttons[i] = child;
     }
 
-    // The body text is painted by the window (a child cannot paint over
-    // Mica). This one-pixel control, in the corner the rounding cuts off,
-    // only carries the text for screen readers and draws nothing.
-    if (self.body.len > 0) {
-        var buf: [4097]u16 = undefined;
-        const n = @min(self.body.len, buf.len - 1);
-        @memcpy(buf[0..n], self.body[0..n]);
-        buf[n] = 0;
-        self.body_static = user32.CreateWindowExW(
-            0,
-            L("STATIC"),
-            @ptrCast(&buf),
-            user32.WS_CHILD | user32.WS_VISIBLE | SS_OWNERDRAW,
-            0,
-            0,
-            1,
-            1,
-            hwnd,
-            @ptrFromInt(id_body),
-            hinstance,
-            null,
-        );
+    // The text is painted by the window (a child cannot paint over Mica).
+    // This one-pixel control, in the corner the rounding cuts off, only
+    // carries the headline and the body for screen readers and draws
+    // nothing (its brush is hollow, see `WM_CTLCOLORSTATIC`).
+    if (self.spec.title.len + self.body.len > 0) {
+        const alloc = std.heap.page_allocator;
+        if (alloc.alloc(u16, self.spec.title.len + self.body.len + 2)) |buf| {
+            defer alloc.free(buf);
+            @memcpy(buf[0..self.spec.title.len], self.spec.title);
+            var n = self.spec.title.len;
+            if (self.body.len > 0) {
+                buf[n] = '\n';
+                n += 1;
+                @memcpy(buf[n..][0..self.body.len], self.body);
+                n += self.body.len;
+            }
+            buf[n] = 0;
+            self.body_static = user32.CreateWindowExW(
+                user32.WS_EX_TRANSPARENT,
+                L("STATIC"),
+                @ptrCast(buf.ptr),
+                user32.WS_CHILD | user32.WS_VISIBLE,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                @ptrFromInt(id_body),
+                hinstance,
+                null,
+            );
+        } else |_| {}
     }
 
     if (self.list.len > 0) try self.createList(hwnd, hinstance);
@@ -627,12 +674,58 @@ fn createList(self: *Dialog, hwnd: HWND, hinstance: ?win32.foundation.HINSTANCE)
     _ = user32.SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, margin);
     _ = user32.SendMessageW(edit, EM_SETSEL, 0, 0);
     _ = uxtheme.SetWindowTheme(edit, if (self.pal.dark) L("DarkMode_Explorer") else L("Explorer"), null);
+    self.fitList();
+}
+
+fn makeListFont(self: *const Dialog) ?gdi32.HFONT {
+    const height = -layout.px(layout.list_px, self.dpi);
+    return gdi32.CreateFontW(height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0x31, self.list_family);
+}
+
+/// Line pitch and character width (px) of the list font as GDI sets it: the
+/// edit control draws with a GDI font, whose lines are not DirectWrite's.
+fn listMetrics(self: *const Dialog) struct { h: i32, w: i32 } {
+    const fallback = layout.px(layout.list_px + 4, self.dpi);
+    const font = self.makeListFont() orelse return .{ .h = fallback, .w = layout.px(8, self.dpi) };
+    defer _ = gdi32.DeleteObject(@ptrCast(font));
+    const dc = gdi32.CreateCompatibleDC(null) orelse return .{ .h = fallback, .w = layout.px(8, self.dpi) };
+    defer _ = gdi32.DeleteDC(dc);
+    const old = gdi32.SelectObject(dc, @ptrCast(font));
+    defer if (old) |o| {
+        _ = gdi32.SelectObject(dc, o);
+    };
+    var tm: TEXTMETRICW = undefined;
+    if (ext.GetTextMetricsW(dc, &tm) == 0) return .{ .h = fallback, .w = layout.px(8, self.dpi) };
+    return .{ .h = tm.tmHeight + tm.tmExternalLeading, .w = @max(tm.tmAveCharWidth, 1) };
+}
+
+/// The list as the edit control wrapped it: its real line count, not the
+/// estimate, sets the card's height (up to the cap).
+fn fitList(self: *Dialog) void {
+    const edit = self.edit orelse return;
+    const hwnd = self.hwnd orelse return;
+    const count = user32.SendMessageW(edit, EM_GETLINECOUNT, 0, 0);
+    const lines: usize = @intCast(@max(count, 0));
+    const want = layout.listHeight(lines, self.list_line_h, self.list_cap, self.dpi);
+    if (want == self.plan_input.list_h) return;
+
+    self.plan_input.list_h = want;
+    self.plan = layout.plan(self.plan_input);
+    for (self.buttons[0..self.state.count], 0..) |b, i| if (b) |h| {
+        const r = self.plan.buttons[i];
+        _ = user32.MoveWindow(h, r.x, r.y, r.w, r.h, 1);
+    };
+    const r = self.listRect();
+    _ = user32.MoveWindow(edit, r.x, r.y, r.w, r.h, 1);
+    const size: geom.Size = .{ .w = self.plan.width, .h = self.plan.height };
+    const at = self.position(size);
+    _ = user32.SetWindowPos(hwnd, null, at.x, at.y, size.w, size.h, user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+    _ = user32.InvalidateRect(hwnd, null, 0);
 }
 
 fn applyListFont(self: *Dialog) void {
     const edit = self.edit orelse return;
-    const height = -layout.px(layout.list_px, self.dpi);
-    const font = gdi32.CreateFontW(height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0x31, self.list_family);
+    const font = self.makeListFont();
     _ = user32.SendMessageW(edit, WM_SETFONT, @intFromPtr(font), 1);
     if (self.edit_font) |old| _ = gdi32.DeleteObject(@ptrCast(old));
     self.edit_font = font;
@@ -643,7 +736,9 @@ fn applyListFont(self: *Dialog) void {
 fn loop(self: *Dialog) ?i32 {
     const hwnd = self.hwnd.?;
     const owner = self.ownerAlive();
-    if (owner) |o| _ = ext.EnableWindow(o, 0);
+    // EnableWindow answers whether the window was disabled already: nested in
+    // another dialog, the owner stays disabled when this one closes.
+    if (owner) |o| self.owner_was_disabled = ext.EnableWindow(o, 0) != 0;
 
     _ = user32.ShowWindow(hwnd, user32.SW_SHOW);
     _ = user32.SetForegroundWindow(hwnd);
@@ -655,7 +750,7 @@ fn loop(self: *Dialog) ?i32 {
         const got = user32.GetMessageW(&msg, null, 0, 0);
         if (got == 0) {
             // WM_QUIT is not ours to swallow.
-            user32.PostQuitMessage(@intCast(msg.wParam));
+            user32.PostQuitMessage(@bitCast(@as(u32, @truncate(msg.wParam))));
             break;
         }
         if (got < 0) break;
@@ -666,12 +761,22 @@ fn loop(self: *Dialog) ?i32 {
 
     // Enable the owner first, so that destroying the dialog hands the
     // activation back to it and not to some other window.
-    if (self.ownerAlive()) |o| _ = ext.EnableWindow(o, 1);
+    if (self.ownerAlive()) |o| if (!self.owner_was_disabled) {
+        _ = ext.EnableWindow(o, 1);
+    };
     if (self.hwnd) |h| {
         self.hwnd = null;
         _ = user32.DestroyWindow(h);
     }
     return self.result orelse self.spec.cancel_id;
+}
+
+/// wparam of msg_click_button as an id of one of the buttons or the cancel id.
+fn knownId(self: *const Dialog, wparam: WPARAM) ?i32 {
+    const id = std.math.cast(i32, wparam) orelse return null;
+    if (id == self.spec.cancel_id) return id;
+    for (self.spec.buttons[0..self.state.count]) |b| if (b.id == id) return id;
+    return null;
 }
 
 fn finish(self: *Dialog, id: i32) void {
@@ -1088,7 +1193,7 @@ fn wndProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winap
             return 0;
         },
         msg_click_button => {
-            self.finish(@intCast(wparam));
+            if (self.knownId(wparam)) |id| self.finish(id);
             return 0;
         },
         user32.WM_CLOSE => {

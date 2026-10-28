@@ -449,39 +449,56 @@ fn sanitize(alloc: Allocator, text: []const u8) ![]u8 {
 
 /// The text of a confirmation prompt's preview: `dialogs.previewText`
 /// plus an escape for what it leaves alone and that can mislead a reader,
-/// C1 controls and bidi overrides/isolates/marks, shown as `<U+XXXX>`.
+/// C1 controls and bidi overrides/isolates/marks, shown as `<U+XXXX>`. Text
+/// of more than `max_chars` codepoints keeps its head (three quarters) and
+/// its tail, with the number of codepoints left out between them.
 fn previewOf(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (total += 1) i += seqLen(text[i..]);
+    if (total <= max_chars) return previewPart(alloc, text);
+
+    const head = max_chars - max_chars / 4;
+    const tail = max_chars - head;
+    var head_end: usize = 0;
+    for (0..head) |_| head_end += seqLen(text[head_end..]);
+    var tail_start: usize = head_end;
+    for (0..total - head - tail) |_| tail_start += seqLen(text[tail_start..]);
+
+    const first = try previewPart(alloc, text[0..head_end]);
+    defer alloc.free(first);
+    const last = try previewPart(alloc, text[tail_start..]);
+    defer alloc.free(last);
+    return std.fmt.allocPrint(alloc, "{s}\u{2026} [{d} more characters] \u{2026}{s}", .{ first, total - head - tail, last });
+}
+
+/// Bytes of the codepoint at the start of `s`; 1 for invalid UTF-8.
+fn seqLen(s: []const u8) usize {
+    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return 1;
+    if (len > s.len) return 1;
+    _ = std.unicode.utf8Decode(s[0..len]) catch return 1;
+    return len;
+}
+
+fn previewPart(alloc: Allocator, text: []const u8) ![]u8 {
     var escaped: std.ArrayList(u8) = .empty;
     defer escaped.deinit(alloc);
 
-    var count: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        if (count == max_chars) {
-            try escaped.appendSlice(alloc, "\u{2026}");
-            break;
-        }
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const cp: ?u21 = if (i + len <= text.len)
-            std.unicode.utf8Decode(text[i..][0..len]) catch null
-        else
-            null;
+        const len = seqLen(text[i..]);
+        const cp: ?u21 = if (len > 1 or text[i] < 0x80) std.unicode.utf8Decode(text[i..][0..len]) catch null else null;
         if (cp) |c| {
             if (isDeceptive(c)) {
                 var tmp: [12]u8 = undefined;
                 try escaped.appendSlice(alloc, std.fmt.bufPrint(&tmp, "<U+{X:0>4}>", .{c}) catch unreachable);
             } else try escaped.appendSlice(alloc, text[i..][0..len]);
-            i += len;
-        } else {
-            try escaped.append(alloc, text[i]);
-            i += 1;
-        }
-        count += 1;
+        } else try escaped.append(alloc, text[i]);
+        i += len;
     }
 
     return dialogs.previewText(alloc, escaped.items, std.math.maxInt(usize));
 }
-
 fn isDeceptive(c: u21) bool {
     return (c >= 0x80 and c <= 0x9F) or
         c == 0x061C or c == 0x200E or c == 0x200F or
@@ -772,10 +789,10 @@ test "win32 clipboard: preview escapes bidi overrides" {
     defer alloc.free(a);
     try std.testing.expectEqualStrings("rm<U+202E>fdp<U+0085><U+2066>x\u{240A}", a);
 
-    // The limit counts source codepoints.
-    const b = try previewOf(alloc, "abcdef", 3);
+    // Over the limit: the head and the tail stay, the middle is counted.
+    const b = try previewOf(alloc, "abcdefghijklmnopqrstuvwx", 8);
     defer alloc.free(b);
-    try std.testing.expectEqualStrings("abc\u{2026}", b);
+    try std.testing.expectEqualStrings("abcdef\u{2026} [16 more characters] \u{2026}wx", b);
 }
 
 const FakeFlow = struct {

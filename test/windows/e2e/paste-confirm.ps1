@@ -1,6 +1,6 @@
 # e2e: milestone=M1 timeout=180 order=110
 # paste-confirm: pasting a multi-line clipboard asks for confirmation (a
-# GhosttyDialog task dialog). The default button is Cancel: Enter cancels and nothing
+# GhosttyDialog dialog). The default button is Cancel: Enter cancels and nothing
 # runs; answering Allow (custom button id 100) pastes both lines and (after Enter, as Git Bash holds a
 # bracketed paste in its line buffer) the shell runs them. The dialog is
 # answered with window messages, not key presses: the harness takes the
@@ -35,7 +35,7 @@ Invoke-E2eScenario 'paste-confirm' {
         $closed = Wait-Until -TimeoutSec 3 -PollMs 100 -Condition { -not [GhosttyE2e.Win]::IsWindow($dlg) }
         if (-not $closed) {
             # A task dialog may ignore a posted Enter: press its Cancel button.
-            Write-E2eInfo 'posted Enter did not close the task dialog; using TDM_CLICK_BUTTON(IDCANCEL)'
+            Write-E2eInfo 'posted Enter did not close the dialog; using TDM_CLICK_BUTTON(IDCANCEL)'
             [void][GhosttyE2e.Win]::PostMessageW($dlg, 0x466, [IntPtr]2, [IntPtr]::Zero)
             $closed = Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { -not [GhosttyE2e.Win]::IsWindow($dlg) }
         }

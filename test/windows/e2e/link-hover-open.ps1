@@ -3,7 +3,7 @@
 # GhosttyOverlayLabel while the pointer is over it and hides it when the
 # pointer leaves. Ctrl+click records the URL in `m3.opened` with verdict
 # `open` (test mode records, nothing is launched). An OSC 8 `ms-settings:`
-# link shows the confirmation task dialog; cancelling it records
+# link shows the confirmation dialog; cancelling it records
 # {verdict: confirm, outcome: cancelled}. Interactive only.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force

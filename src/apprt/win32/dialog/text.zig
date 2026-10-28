@@ -32,11 +32,16 @@ pub fn nextCodepoint(text: []const u8, i: *usize) u21 {
 }
 
 /// Characters that change how text is ordered or hide it: bidi controls,
-/// zero width and invisible formatting characters, the BOM, NEL and the
-/// line and paragraph separators.
+/// zero width and invisible formatting characters, the BOM, NEL, the line
+/// and paragraph separators, Hangul fillers, interlinear annotation marks and
+/// tag characters. A superset of shell_open.hasForbidden's bidi set.
 pub fn isInvisible(cp: u21) bool {
     return switch (cp) {
-        0x0085, 0x00AD, 0x061C, 0x180E, 0xFEFF => true,
+        0x0085, 0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x180E, 0x3164, 0xFEFF, 0xFFA0 => true,
+        0x180B...0x180D => true,
+        0xFFF9...0xFFFB => true,
+        // Tag characters: invisible text that survives a paste.
+        0xE0000...0xE007F => true,
         0x200B...0x200F => true,
         0x2028...0x202E => true,
         0x2060...0x2064 => true,
@@ -170,6 +175,14 @@ test "win32 dialog text: controls and bidi are shown, not obeyed" {
     const c1 = toWide(&buf, "x\u{0085}y", .single_line);
     const want2 = try std.unicode.utf8ToUtf16Le(&expect, "x<U+0085>y");
     try std.testing.expectEqualSlices(u16, expect[0..want2], c1);
+}
+
+test "win32 dialog text: tag characters and fillers are written out" {
+    var buf: [128]u16 = undefined;
+    var expect: [64]u16 = undefined;
+    const out = toWide(&buf, "a\u{E0041}b\u{3164}c\u{FFF9}", .paragraphs);
+    const want = try std.unicode.utf8ToUtf16Le(&expect, "a<U+E0041>b<U+3164>c<U+FFF9>");
+    try std.testing.expectEqualSlices(u16, expect[0..want], out);
 }
 
 test "win32 dialog text: truncation never splits an escape or a pair" {

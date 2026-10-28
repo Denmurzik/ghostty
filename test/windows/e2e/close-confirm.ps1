@@ -1,6 +1,6 @@
 # e2e: milestone=M2 timeout=240 order=420
 # close-confirm: closing something that still runs a process asks first, with
-# a task dialog (class GhosttyDialog, owned by the Ghostty pid). Cancel (the default)
+# a dialog (class GhosttyDialog, owned by the Ghostty pid). Cancel (the default)
 # keeps everything; "Close" (id 100) closes and kills the process tree. Also
 # covered: a shell that exits behind an open dialog, an IPC new-tab that runs
 # inside the dialog's message loop, close_tab with two tabs and quit with

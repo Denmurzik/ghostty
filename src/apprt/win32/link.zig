@@ -80,7 +80,8 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
     if (app.shell_open.confirming) return;
 
     const alloc = app.core_app.alloc;
-    const shown = dialogs.previewText(alloc, payload.url, 200) catch return;
+    // The whole URL (it is at most link_policy.max_len): what is opened is what is shown.
+    const shown = dialogs.previewText(alloc, payload.url, link_policy.max_len) catch return;
     defer alloc.free(shown);
     const scheme = if (link_policy.schemeEnd(payload.url)) |end| payload.url[0..end] else "unknown";
     const shown_scheme = dialogs.previewText(alloc, scheme, 40) catch return;

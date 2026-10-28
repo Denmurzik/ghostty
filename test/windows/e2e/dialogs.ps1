@@ -51,7 +51,7 @@ function Send-DlgAlt([IntPtr]$Dlg, [char]$Letter) {
 
 function Get-DialogFor($G, [string]$What, [double]$TimeoutSec = 10) {
     $dlg = Wait-Until -TimeoutSec $TimeoutSec -PollMs 100 -Condition {
-        [GhosttyE2e.Win]::TopLevel([uint32]$G.Pid, 'GhosttyDialog') | Select-Object -First 1
+        [GhosttyE2e.Win]::TopLevel([uint32]$G.Pid, 'GhosttyDialog') | Where-Object { [GhosttyE2e.Win]::IsWindowVisible($_) } | Select-Object -First 1
     }
     if (-not $dlg) { throw "no dialog (GhosttyDialog) within $TimeoutSec s: $What" }
     $dlg
@@ -153,6 +153,37 @@ function Assert-Dialog($G, [IntPtr]$Dlg, [string]$Kind, [string]$Theme, [string[
     $btns
 }
 
+# The y (px, in the edit's client area) of character `idx`: EM_POSFROMCHAR.
+function Get-EditY([IntPtr]$H, [int]$Idx) {
+    $r = [int64][GhosttyE2e.Win]::SendMessageW($H, 0xD6, [IntPtr]$Idx, [IntPtr]::Zero)
+    [int](($r -shr 16) -band 0xFFFF)
+}
+
+# A dialog nested in another one (a config error shown while the close
+# confirm is up, or the other way round): closing the inner one must not
+# enable the owner behind the outer one.
+function Test-NestedDialogs {
+    $cfg = $script:BaseConfig.Replace('confirm-close-surface = false', 'confirm-close-surface = true')
+    $g = Start-E2eGhostty -ConfigText ($cfg + "`ncommand = ping -t 127.0.0.1`nfont-sise = 3`n")
+    $cfgDlg = Get-DialogFor $g 'config errors at start'
+    if ([GhosttyE2e.Win]::TextOf($cfgDlg) -ne 'Configuration errors') { throw 'nested: the first dialog is not the config errors one' }
+    if ([GhosttyE2e.DlgWin]::IsWindowEnabled($g.Hwnd)) { throw 'nested: the owner is enabled under the config dialog' }
+    [void][GhosttyE2e.Win]::PostMessageW($g.Hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
+    $closeDlg = Wait-Until -TimeoutSec 8 -PollMs 100 -Condition {
+        [GhosttyE2e.Win]::TopLevel([uint32]$g.Pid, 'GhosttyDialog') | Where-Object { [GhosttyE2e.Win]::TextOf($_) -eq 'Ghostty' } | Select-Object -First 1
+    }
+    if (-not $closeDlg) { throw 'nested: no close confirm over the config dialog' }
+    Send-DlgKey $closeDlg $script:VK_ESCAPE
+    Wait-DlgGone $closeDlg 'Esc on the inner dialog'
+    Start-Sleep -Milliseconds 400
+    if (-not [GhosttyE2e.Win]::IsWindow($cfgDlg)) { throw 'nested: the outer dialog went away with the inner one' }
+    if ([GhosttyE2e.DlgWin]::IsWindowEnabled($g.Hwnd)) { throw 'nested: the owner was enabled behind the outer dialog' }
+    Send-DlgKey $cfgDlg $script:VK_ESCAPE
+    Wait-DlgGone $cfgDlg 'Esc on the outer dialog'
+    Start-Sleep -Milliseconds 400
+    if (-not [GhosttyE2e.DlgWin]::IsWindowEnabled($g.Hwnd)) { throw 'nested: the owner stayed disabled after both closed' }
+    if ($g.Process.HasExited) { throw 'nested: ghostty exited' }
+}
 function Get-ConfirmShell([string]$Theme) {
     $cfg = (Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8) -replace 'confirm-close-surface = false', 'confirm-close-surface = true'
     $g = Start-E2eGhostty -ConfigText ($cfg.TrimEnd() + "`nwindow-theme = $Theme`n")
@@ -168,7 +199,7 @@ function Test-CloseDialog([string]$Theme, [bool]$Keys) {
     $snapshot = @(Get-ProcessTree $g.Pid)
     [void][GhosttyE2e.Win]::PostMessageW($g.Hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
     $dlg = Get-DialogFor $g 'close with a running ping'
-    [void](Assert-Dialog $g $dlg 'close' $Theme @('Close', 'Cancel') 'Ghostty')
+    [void](Assert-Dialog $g $dlg 'close' $Theme @('&Close', 'Cancel') 'Ghostty')
     $body = [GhosttyE2e.DlgWin]::Text([GhosttyE2e.Win]::GetDlgItem($dlg, 900))
     if ($body -notmatch 'process is still running') { throw "close: body is '$body'" }
 
@@ -217,11 +248,11 @@ function Test-PasteDialog([string]$Theme, [bool]$Keys) {
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+v'
         $dlg = Get-DialogFor $g 'multi-line paste'
         $title = [GhosttyE2e.Win]::TextOf($dlg)
-        $btns = Assert-Dialog $g $dlg 'paste' $Theme @('Allow', 'Cancel') $title
+        $btns = Assert-Dialog $g $dlg 'paste' $Theme @('&Allow', 'Cancel') $title
         $body = [GhosttyE2e.DlgWin]::Text([GhosttyE2e.Win]::GetDlgItem($dlg, 900))
         if ($body -notmatch 'echo a') { throw "paste: the text is not in the dialog: '$body'" }
         # Newlines show as symbols, not as line breaks of the pasted text.
-        if ($body -notmatch [regex]::Escape([string][char]0x240A)) { Write-E2eInfo "paste: no newline symbol in '$body'" }
+        if ($body -notmatch [regex]::Escape([string][char]0x240A)) { throw "paste: no newline symbol in '$body'" }
         Send-DlgKey $dlg $script:VK_ESCAPE
         Wait-DlgGone $dlg 'Esc'
         if ($Keys) {
@@ -258,7 +289,7 @@ function Test-UrlDialog([string]$Theme) {
     if (-not $dlg) { throw 'no URL confirmation dialog for the ms-settings: link' }
     $title = [GhosttyE2e.Win]::TextOf($dlg)
     if ($title -ne 'Open Link') { throw "url: window text is '$title'" }
-    [void](Assert-Dialog $g $dlg 'url' $Theme @('Allow', 'Cancel') 'Open Link')
+    [void](Assert-Dialog $g $dlg 'url' $Theme @('&Allow', 'Cancel') 'Open Link')
     $body = [GhosttyE2e.DlgWin]::Text([GhosttyE2e.Win]::GetDlgItem($dlg, 900))
     if ($body -notmatch 'ms-settings:') { throw "url: the link is not in the dialog: '$body'" }
     Send-DlgKey $dlg $script:VK_ESCAPE
@@ -279,6 +310,17 @@ function Test-ConfigDialog([string]$Theme, [bool]$Keys) {
     if ([GhosttyE2e.Win]::ClassOf($list) -ne 'Edit') { throw "config: the list is a '$([GhosttyE2e.Win]::ClassOf($list))'" }
     $text = [GhosttyE2e.DlgWin]::Text($list)
     if ($text -notmatch 'font-sise') { throw "config: the list does not show font-sise: '$text'" }
+    # Not clipped: the last line, one line pitch tall, lies inside the edit.
+    $lines = [int][GhosttyE2e.Win]::SendMessageW($list, 0xBA, [IntPtr]::Zero, [IntPtr]::Zero)
+    $client = New-Object GhosttyE2e.Win+RECT
+    [void][GhosttyE2e.Win]::GetClientRect($list, [ref]$client)
+    $y0 = Get-EditY $list 0
+    $y1 = Get-EditY $list ([int][GhosttyE2e.Win]::SendMessageW($list, 0xBB, [IntPtr]1, [IntPtr]::Zero))
+    $yl = Get-EditY $list ([int][GhosttyE2e.Win]::SendMessageW($list, 0xBB, [IntPtr]($lines - 1), [IntPtr]::Zero))
+    $pitch = $y1 - $y0
+    Write-E2eInfo "config ${Theme}: $lines lines, pitch $pitch px, last line at $yl, edit height $($client.Bottom)"
+    if ($lines -lt 2 -or $pitch -le 0) { throw "config: unexpected line metrics ($lines lines, pitch $pitch)" }
+    if ($yl + $pitch -gt $client.Bottom) { throw "config: the last line is clipped (y $yl + $pitch > $($client.Bottom))" }
     Send-DlgKey $dlg $script:VK_ESCAPE
     Wait-DlgGone $dlg 'Esc'
     $choice = (Get-GhosttyState -Class $g.Class).m3.config_errors.choice
@@ -304,6 +346,7 @@ Invoke-E2eScenario 'dialogs' {
     }
 
     $themes = if ($env:GHOSTTY_E2E_DIALOG_THEMES) { $env:GHOSTTY_E2E_DIALOG_THEMES -split ',' } else { 'dark', 'light' }
+    Test-NestedDialogs
     foreach ($theme in $themes) {
         $full = ($theme -eq 'dark')
         Test-CloseDialog $theme $full
