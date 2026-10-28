@@ -3905,7 +3905,11 @@ else
 ///     programs). On the bundled console their runtime loses the first key
 ///     typed after the terminal is resized (a split, a new tab, a window
 ///     resize), so Kitty graphics and underline colours are given up there.
-///     Set `bundled` to have them in Git Bash anyway.
+///     Set `bundled` to have them in Git Bash anyway. The program is
+///     recognised by its path only (a POSIX shell name such as `bash.exe`
+///     outside `System32`, or a path under `usr\bin` or a Cygwin folder):
+///     a wrapper such as `cmd /c start-bash.cmd` keeps the bundled console
+///     for whatever it starts, and a bare `bash` counts as MSYS2.
 ///
 ///   * `bundled` - the `conpty.dll` and `OpenConsole.exe`
 ///     shipped next to `ghostty.exe`, the newer console from Microsoft that

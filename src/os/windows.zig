@@ -721,19 +721,38 @@ pub fn setConptyMode(mode: ConptyMode) void {
 /// Whether `program` (the path or name a pty runs) is linked against the
 /// MSYS2 or Cygwin runtime: Git Bash and the other POSIX shells outside
 /// System32 (where `bash.exe` is the WSL launcher), and anything under a
-/// `usr\bin` or a Cygwin tree.
+/// `usr\bin` or a Cygwin tree. `/` and `\` are the same separator. Only the
+/// path is looked at: a bare `bash` counts as MSYS2 although CreateProcess
+/// may find System32's WSL launcher first (the pty never sees the resolved
+/// path; WSL then merely runs on the inbox console), and a wrapper such as
+/// `cmd /c x.cmd` keeps the bundled console whatever it starts.
+/// (`apprt/win32/drop.zig` classifies shells too; the two could share code.)
 pub fn isMsysProgram(program: []const u8) bool {
     const base_start = if (std.mem.lastIndexOfAny(u8, program, "/\\")) |i| i + 1 else 0;
     var base = program[base_start..];
     if (base.len > 4 and std.ascii.eqlIgnoreCase(base[base.len - 4 ..], ".exe")) base = base[0 .. base.len - 4];
-    if (std.ascii.findIgnoreCase(program, "\\windows\\system32\\") != null or
-        std.ascii.findIgnoreCase(program, "\\windows\\sysnative\\") != null) return false;
-    if (std.ascii.findIgnoreCase(program, "\\usr\\bin\\") != null or
-        std.ascii.findIgnoreCase(program, "/usr/bin/") != null or
-        std.ascii.findIgnoreCase(program, "\\cygwin") != null) return true;
+    if (hasPathPart(program, "\\windows\\system32\\") or
+        hasPathPart(program, "\\windows\\sysnative\\")) return false;
+    if (hasPathPart(program, "\\usr\\bin\\") or
+        hasPathPart(program, "\\cygwin")) return true;
     // busybox-w32 is a native build, not MSYS2.
     const shells = [_][]const u8{ "bash", "sh", "zsh", "fish", "dash", "ksh", "mksh" };
     for (shells) |name| if (std.ascii.eqlIgnoreCase(base, name)) return true;
+    return false;
+}
+
+/// `needle` (written with `\`) in `path`, ignoring case and treating `/`
+/// as `\`.
+fn hasPathPart(path: []const u8, needle: []const u8) bool {
+    if (needle.len > path.len) return false;
+    var i: usize = 0;
+    outer: while (i + needle.len <= path.len) : (i += 1) {
+        for (needle, path[i..][0..needle.len]) |n, c| {
+            const p = if (c == '/') '\\' else c;
+            if (std.ascii.toLower(p) != std.ascii.toLower(n)) continue :outer;
+        }
+        return true;
+    }
     return false;
 }
 
@@ -977,12 +996,16 @@ test "windows conpty: MSYS2 and Cygwin programs" {
         "C:\\cygwin64\\bin\\bash.exe",
         "C:\\cygwin64\\bin\\ls.exe",
         "/usr/bin/fish",
+        "C:/cygwin64/bin/ls.exe",
+        "C:/Program Files/Git/usr/bin/zsh.exe",
         "bash",
         "SH.EXE",
     }) |p| try testing.expect(isMsysProgram(p));
     for ([_][]const u8{
         "C:\\Windows\\System32\\bash.exe",
         "C:\\WINDOWS\\Sysnative\\bash.exe",
+        "C:/Windows/System32/bash.exe",
+        "c:/windows/sysnative/bash.exe",
         "C:\\Windows\\System32\\wsl.exe",
         "C:\\Windows\\System32\\cmd.exe",
         "C:\\Program Files\\PowerShell\\7\\pwsh.exe",

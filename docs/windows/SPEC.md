@@ -412,8 +412,8 @@ M4: DCS `tmux;` passthrough is already unwrapped by the core stream (tests only;
   `src/os/windows_pe.zig` and children with their own console host are ignored; a `--headless` pseudoconsole host such as
   node-pty counts as busy; an unreadable child counts as busy). The zsh integration is loaded under MSYS: `.zshenv` sources a
   drive path directly and the `path` feature is skipped.
-- `windows-conpty = bundled|inbox` (default `bundled`, read when a surface starts): `termio/Exec.zig` and `src/pty.zig` create
-  the pseudoconsole through the bundled `conpty.dll` (§18.33); a failed create falls back to the inbox table once and disables
+- `windows-conpty = auto|bundled|inbox` (default `auto`, read when a surface starts): `termio/Exec.zig` and `src/pty.zig` create
+  the pseudoconsole through the bundled `conpty.dll` (§18.33), or the inbox one for an MSYS2/Cygwin `args[0]` under `auto`; a failed create falls back to the inbox table once and disables
   the bundled one for the process.
 - Apprt-only features (no core change): jump list (`jumplist.zig`), profile menu, update check (`update/`), `secure_input.zig`
   (R-M5-11), undo (`undo.zig` and the park/restore code in `Window.zig`/`Tab.zig`, R-M5-12), `osk.zig` (R-M5-13), popup menu theme
