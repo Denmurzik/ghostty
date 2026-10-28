@@ -3423,6 +3423,70 @@ test "windows exec: output before child exit is drained and EOF follows" {
     try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-drain-token") != null);
 }
 
+test "windows exec: the bundled console runs a child, drains its output and ends" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const k32 = windows.exp.kernel32;
+
+    // `zig build test` runs from the repository root; without vendor/conpty
+    // (a source tree without the binaries) there is nothing to test.
+    const arch = switch (builtin.cpu.arch) {
+        .x86_64 => "x64",
+        .aarch64 => "arm64",
+        else => return error.SkipZigTest,
+    };
+    const dll = std.Io.Dir.cwd().realPathFileAlloc(global.io(), "vendor/conpty/" ++ arch ++ "/conpty.dll", testing.allocator) catch
+        return error.SkipZigTest;
+    defer testing.allocator.free(dll);
+    // Static: the pty keeps a pointer to it.
+    const T = struct {
+        var api: windows.ConPty = undefined;
+    };
+    T.api = .{ .create = undefined, .resize = undefined, .close = undefined, .flags = 0 };
+    try windows.loadDll(dll, &T.api);
+
+    var pty = try Pty.openWith(.{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 }, &T.api);
+    defer pty.deinit();
+    try testing.expect(pty.conpty == &T.api);
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/c", "echo ghostty-bundled-token" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(testing.allocator);
+    defer _ = k32.CloseHandle(cmd.pid.?);
+    pty.closeChildSide();
+
+    // The console is the bundled OpenConsole.exe, a child of this process.
+    const console = openChildNamed(k32.GetCurrentProcess(), "OpenConsole.exe") orelse
+        return error.TestUnexpectedResult;
+    defer _ = k32.CloseHandle(console);
+
+    var loop = try TestReadLoop.init(pty.out_pipe);
+    defer loop.deinit();
+    try loop.start();
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(cmd.pid.?, 10_000),
+    );
+
+    // Closing the pseudo console ends OpenConsole.exe and the read side sees EOF.
+    pty.closeConsoleAsync();
+    try testing.expect(loop.waitDone(2000));
+    try testing.expectEqual(ReadLoopEnd.eof, loop.end);
+    try testing.expect(std.mem.indexOf(u8, loop.collected.items, "ghostty-bundled-token") != null);
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(console, 5000),
+    );
+}
+
 /// A handle (terminate, synchronize) to a child process of `parent` whose
 /// image is named `name`, found with a Toolhelp snapshot; null if none yet.
 fn openChildNamed(parent: windows.HANDLE, name: []const u8) ?windows.HANDLE {

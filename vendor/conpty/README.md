@@ -26,3 +26,7 @@ ship them without a separate download step.
 To update: unpack the new package, copy the four files to the same places,
 update the version and the hashes here, and rerun
 `test/windows/conpty-probe/headless.ps1 -DllDir vendor/conpty/x64`.
+
+`zig build run` starts the exe from the build cache, where there is no
+`conpty.dll` next to it, so that run uses the inbox ConPTY (one log line says
+so). To run on the bundled console, start the installed `zig-out\bin\ghostty.exe`.

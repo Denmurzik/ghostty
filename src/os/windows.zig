@@ -636,11 +636,15 @@ test "windows diag env: ignored when elevated" {
 ///   `OpenConsole.exe` next to it (the `Microsoft.Windows.Console.ConPTY`
 ///   package, the console Windows Terminal ships). It forwards what the inbox
 ///   console drops (Kitty graphics APC, SGR 58), see
-///   test/windows/conpty-probe/RESULT.md. Missing or unloadable files fall
-///   back to inbox with one log line.
+///   test/windows/conpty-probe/RESULT.md. Missing or unloadable files, a
+///   console that fails to start (`createPseudoConsole`) and an
+///   `OpenConsole.exe` gone since the load fall back to inbox with one log
+///   line; the process then stays on inbox.
 ///
 /// Diagnostic overrides (latency measurements, not configuration):
-/// `GHOSTTY_WIN32_CONPTY_FLAGS=<u32>` replaces the flags (0 otherwise) and
+/// `GHOSTTY_WIN32_CONPTY_FLAGS=<u32>` replaces the inbox flags (0 otherwise;
+/// the bundled console always gets 0: its bit 8 is a glyph width mode, not
+/// passthrough) and
 /// `GHOSTTY_WIN32_CONPTY_DLL=<path to conpty.dll>` (Debug builds only) loads the
 /// three functions from that DLL (next to its `OpenConsole.exe`) instead of
 /// kernel32, whatever `windows-conpty` says. Any failure falls back to
@@ -700,6 +704,9 @@ var conpty_dll_override = false;
 var conpty_bundled_state: enum { untried, loaded, unavailable } = .untried;
 var conpty_bundled_wanted: std.atomic.Value(bool) = .init(true);
 var conpty_mutex: std.Io.Mutex = .init;
+/// `OpenConsole.exe` next to the loaded `conpty.dll`: conpty.dll quietly
+/// starts the system conhost when it is gone, so `conpty` checks it.
+var conpty_console_path: [std.fs.max_path_bytes:0]u16 = undefined;
 
 /// `windows-conpty`: the apprt sets it from the config. Takes effect for
 /// ptys opened afterwards; the bundled DLL is loaded the first time a pty
@@ -723,7 +730,14 @@ pub fn conpty() *const ConPty {
     const wanted = conpty_bundled_wanted.load(.acquire);
     if (wanted and !conpty_dll_override and conpty_bundled_state == .untried) {
         conpty_bundled = conpty_inbox;
+        conpty_bundled.flags = 0;
         conpty_bundled_state = if (loadBundled(&conpty_bundled)) .loaded else .unavailable;
+    }
+    if (wanted and conpty_bundled_state == .loaded) {
+        const attrs = GetFileAttributesW(&conpty_console_path);
+        if (attrs == INVALID_FILE_ATTRIBUTES or attrs & FILE_ATTRIBUTE_DIRECTORY != 0) {
+            giveUpBundledLocked("OpenConsole.exe is gone", null);
+        }
     }
     return switch (conptySource(.{
         .dll_override = conpty_dll_override,
@@ -733,6 +747,61 @@ pub fn conpty() *const ConPty {
         .bundled => &conpty_bundled,
         .inbox, .dll_override => &conpty_inbox,
     };
+}
+
+/// The table to retry with when `api` fails to create a console: inbox for
+/// the bundled table, none otherwise.
+pub fn conptyFallback(api: *const ConPty) ?*const ConPty {
+    return if (api == &conpty_bundled) &conpty_inbox else null;
+}
+
+/// The bundled console failed to start (`hr`): one log line, and every later
+/// pty of this process goes to inbox.
+pub fn conptyBundledFailed(hr: HRESULT) void {
+    const io = @import("../global.zig").io();
+    conpty_mutex.lockUncancelable(io);
+    defer conpty_mutex.unlock(io);
+    giveUpBundledLocked("CreatePseudoConsole failed", hr);
+}
+
+fn giveUpBundledLocked(why: []const u8, hr: ?HRESULT) void {
+    if (conpty_bundled_state != .loaded) return;
+    conpty_bundled_state = .unavailable;
+    std.log.scoped(.conpty).warn("bundled ConPTY not used any more: {s} hr=0x{x:0>8}; using the inbox ConPTY", .{
+        why,
+        @as(u32, @bitCast(hr orelse 0)),
+    });
+}
+
+pub const Created = struct {
+    /// The table that created the console, null when none did.
+    api: ?*const ConPty,
+    /// The result of the first table (after its flags retry).
+    first_hr: HRESULT,
+};
+
+/// Creates a pseudo console with `api`; flags it rejects are retried with 0.
+/// When that fails and there is a `fallback`, the same with `fallback`.
+pub fn createPseudoConsole(
+    api: *const ConPty,
+    fallback: ?*const ConPty,
+    size: COORD,
+    in: HANDLE,
+    out: HANDLE,
+    hpc: *HPCON,
+) Created {
+    const first_hr = createWith(api, size, in, out, hpc);
+    if (first_hr == S_OK) return .{ .api = api, .first_hr = first_hr };
+    const other = fallback orelse return .{ .api = null, .first_hr = first_hr };
+    if (createWith(other, size, in, out, hpc) == S_OK) return .{ .api = other, .first_hr = first_hr };
+    return .{ .api = null, .first_hr = first_hr };
+}
+
+fn createWith(api: *const ConPty, size: COORD, in: HANDLE, out: HANDLE, hpc: *HPCON) HRESULT {
+    const result = api.create(size, in, out, api.flags, hpc);
+    if (result != ConPty.E_INVALIDARG or api.flags == 0) return result;
+    std.log.scoped(.conpty).warn("CreatePseudoConsole rejected flags={d}, retrying with 0", .{api.flags});
+    return api.create(size, in, out, 0, hpc);
 }
 
 fn resolveInbox(api: *ConPty) void {
@@ -766,7 +835,7 @@ fn resolveInbox(api: *ConPty) void {
     }
 }
 
-fn loadDll(path: []const u8, api: *ConPty) !void {
+pub fn loadDll(path: []const u8, api: *ConPty) !void {
     const log = std.log.scoped(.conpty);
     const global = @import("../global.zig");
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(global.alloc(), path);
@@ -822,6 +891,10 @@ fn loadBundled(api: *ConPty) bool {
         log.warn("windows-conpty = bundled, but conpty.dll is not usable err={}; using the inbox ConPTY", .{err});
         return false;
     };
+    const console = std.fs.path.join(global.alloc(), &.{ dir, "OpenConsole.exe" }) catch "";
+    defer if (console.len > 0) global.alloc().free(console);
+    const len = std.unicode.utf8ToUtf16Le(conpty_console_path[0 .. conpty_console_path.len - 1], console) catch 0;
+    conpty_console_path[len] = 0;
     log.info("conpty: bundled OpenConsole from {s}", .{dir});
     return true;
 }
@@ -873,4 +946,76 @@ test "windows conpty: bundled files" {
     const sub = try std.fs.path.join(alloc, &.{ dir, "d" });
     defer alloc.free(sub);
     try testing.expectEqual(BundledFiles.no_console, bundledFiles(alloc, sub));
+}
+
+test "windows conpty: a failing create falls back" {
+    const testing = std.testing;
+    const E_ACCESSDENIED: HRESULT = @bitCast(@as(u32, 0x80070005));
+    const Fake = struct {
+        var flags_seen: [4]DWORD = undefined;
+        var calls: usize = 0;
+        fn record(flags: DWORD) void {
+            flags_seen[calls] = flags;
+            calls += 1;
+        }
+        fn fail(_: COORD, _: HANDLE, _: HANDLE, flags: DWORD, _: *HPCON) callconv(.winapi) HRESULT {
+            record(flags);
+            return E_ACCESSDENIED;
+        }
+        fn ok(_: COORD, _: HANDLE, _: HANDLE, flags: DWORD, hpc: *HPCON) callconv(.winapi) HRESULT {
+            record(flags);
+            hpc.* = @ptrFromInt(0x1234);
+            return S_OK;
+        }
+        fn onlyZero(_: COORD, _: HANDLE, _: HANDLE, flags: DWORD, hpc: *HPCON) callconv(.winapi) HRESULT {
+            record(flags);
+            if (flags != 0) return ConPty.E_INVALIDARG;
+            hpc.* = @ptrFromInt(0x1234);
+            return S_OK;
+        }
+        fn resize(_: HPCON, _: COORD) callconv(.winapi) HRESULT {
+            return S_OK;
+        }
+        fn close(_: HPCON) callconv(.winapi) void {}
+        fn table(create: ConPty.CreateFn, flags: DWORD) ConPty {
+            return .{ .create = create, .resize = &resize, .close = &close, .flags = flags };
+        }
+    };
+    const h: HANDLE = @ptrFromInt(4);
+    const size: COORD = .{ .X = 80, .Y = 24 };
+    var hpc: HPCON = undefined;
+    const failing = Fake.table(&Fake.fail, 0);
+    const working = Fake.table(&Fake.ok, 0);
+
+    // The bundled console does not start: the fallback creates it.
+    Fake.calls = 0;
+    var c = createPseudoConsole(&failing, &working, size, h, h, &hpc);
+    try testing.expectEqual(@as(?*const ConPty, &working), c.api);
+    try testing.expectEqual(E_ACCESSDENIED, c.first_hr);
+    try testing.expectEqual(@as(usize, 2), Fake.calls);
+
+    // A working first table: the fallback is not called.
+    Fake.calls = 0;
+    c = createPseudoConsole(&working, &failing, size, h, h, &hpc);
+    try testing.expectEqual(@as(?*const ConPty, &working), c.api);
+    try testing.expectEqual(@as(usize, 1), Fake.calls);
+
+    // Both fail, or no fallback: none.
+    c = createPseudoConsole(&failing, &failing, size, h, h, &hpc);
+    try testing.expect(c.api == null);
+    c = createPseudoConsole(&failing, null, size, h, h, &hpc);
+    try testing.expect(c.api == null);
+
+    // Rejected flags are retried with 0 on the same table first.
+    const picky = Fake.table(&Fake.onlyZero, 8);
+    Fake.calls = 0;
+    c = createPseudoConsole(&picky, &failing, size, h, h, &hpc);
+    try testing.expectEqual(@as(?*const ConPty, &picky), c.api);
+    try testing.expectEqualSlices(DWORD, &.{ 8, 0 }, Fake.flags_seen[0..Fake.calls]);
+}
+
+test "windows conpty: only the bundled table has a fallback" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(?*const ConPty, &conpty_inbox), conptyFallback(&conpty_bundled));
+    try testing.expect(conptyFallback(&conpty_inbox) == null);
 }

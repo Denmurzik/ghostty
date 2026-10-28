@@ -31,3 +31,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+### Components inside `OpenConsole.exe`
+
+`OpenConsole.exe` is built from microsoft/terminal, which compiles in
+third-party code under its own licenses. The authoritative list, with each
+license text, is the `NOTICE.md` of that repository:
+https://github.com/microsoft/terminal/blob/main/NOTICE.md (the NuGet package
+carries no notice file of its own). Those notices apply to the bundled
+`OpenConsole.exe` and `conpty.dll` as well.

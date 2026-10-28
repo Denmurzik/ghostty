@@ -423,6 +423,12 @@ const WindowsPty = struct {
 
     /// Open a new PTY with the given initial size.
     pub fn open(size: winsize) OpenError!Pty {
+        return openWith(size, null);
+    }
+
+    /// `open` on the ConPTY `api` (no fallback), or on `windows.conpty()`
+    /// when null. Tests use it to run a specific console.
+    pub fn openWith(size: winsize, api: ?*const windows.ConPty) OpenError!Pty {
         var pty: Pty = undefined;
 
         var pipe_path_buf_w: [128]u16 = undefined;
@@ -506,27 +512,20 @@ const WindowsPty = struct {
         try SetHandleInformation.f(pty.out_pipe);
         try SetHandleInformation.f(pty.out_pipe_pty);
 
-        const conpty = windows.conpty();
-        var result = conpty.create(
+        // A bundled console that fails to start (a policy or an antivirus
+        // refusing OpenConsole.exe) falls back to inbox for this pty and,
+        // through `conptyBundledFailed`, for every later one.
+        const conpty = api orelse windows.conpty();
+        const created = windows.createPseudoConsole(
+            conpty,
+            if (api == null) windows.conptyFallback(conpty) else null,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
             pty.in_pipe_pty,
             pty.out_pipe_pty,
-            conpty.flags,
             &pty.pseudo_console,
         );
-        if (result == windows.ConPty.E_INVALIDARG and conpty.flags != 0) {
-            log.warn("CreatePseudoConsole rejected flags={d}, retrying with 0", .{conpty.flags});
-            result = conpty.create(
-                .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                pty.in_pipe_pty,
-                pty.out_pipe_pty,
-                0,
-                &pty.pseudo_console,
-            );
-        }
-        if (result != windows.S_OK) return error.Unexpected;
-
-        pty.conpty = conpty;
+        if (created.api != null and created.api != conpty) windows.conptyBundledFailed(created.first_hr);
+        pty.conpty = created.api orelse return error.Unexpected;
         pty.size = size;
         pty.console_closed = .init(false);
         return pty;
