@@ -5,6 +5,7 @@ const foundation = @import("foundation.zig");
 /// `fdwSound` flags of `PlaySoundW`.
 pub const SND_ASYNC = 0x0001;
 pub const SND_NODEFAULT = 0x0002;
+pub const SND_MEMORY = 0x0004;
 pub const SND_PURGE = 0x0040;
 pub const SND_FILENAME = 0x00020000;
 
