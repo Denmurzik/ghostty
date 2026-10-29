@@ -29,6 +29,7 @@ const Server = @import("Server.zig");
 const QuickTerminal = @import("../QuickTerminal.zig");
 const export_io = @import("../export_io.zig");
 const hooks = @import("../hooks.zig");
+const w32im = @import("../w32im_experiment.zig");
 const scrollbar = @import("../scrollbar.zig");
 
 const log = std.log.scoped(.win32_ipc_ops);
@@ -295,6 +296,17 @@ fn action(app: *App, alloc: Allocator, req: protocol.Request) []u8 {
             return reply(alloc, .ok, "", "", if (done) "{\"performed\":true}" else "{\"performed\":false}");
         }
         return reply(alloc, .failed, "", "no such surface", null);
+    };
+    // Test-mode experiment: typed text as win32-input-mode key records.
+    if (w32im.enabled()) switch (parsed) {
+        .text => |data| {
+            var buf: [512]u8 = undefined;
+            if (@import("../../../config/string.zig").parse(&buf, data)) |text| {
+                w32im.writeText(surface, text);
+                return reply(alloc, .ok, "", "", "{\"performed\":true}");
+            } else |_| {}
+        },
+        else => {},
     };
     const performed = surface.core().performBindingAction(parsed) catch |err| {
         log.warn("binding action failed err={}", .{err});

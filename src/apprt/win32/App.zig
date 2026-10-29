@@ -151,6 +151,7 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
 
     // Before anything can spawn a child process.
     ipc.ops.cacheTestOps(core_app.alloc);
+    @import("w32im_experiment.zig").cache(core_app.alloc, ipc.ops.testOpsEnabled());
 
     // OLE (not plain COM) because drag-and-drop and the clipboard need it.
     try win32.foundation.check(win32.ole32.OleInitialize(null));

@@ -16,7 +16,10 @@ Invoke-E2eScenario 'resize-input' {
     $variant = if ($env:GHOSTTY_E2E_VARIANT) { $env:GHOSTTY_E2E_VARIANT } else { 'default' }
     # bundled: Git Bash gets the bundled OpenConsole (windows-conpty = bundled)
     # instead of the inbox one that `auto` gives it.
-    $bashExtra = if ($variant -eq 'bundled') { 'windows-conpty = bundled' } else { $null }
+    # bundled-w32im: the same, and keys go to the pty as win32-input-mode
+    # records (GHOSTTY_WIN32_TEST_W32IM, test mode only).
+    $bashExtra = if ($variant -in @('bundled', 'bundled-w32im')) { 'windows-conpty = bundled' } else { $null }
+    if ($variant -eq 'bundled-w32im') { $env:GHOSTTY_WIN32_TEST_W32IM = '1' }
     try {
 
     function Get-Win($G) {

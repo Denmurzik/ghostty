@@ -11,6 +11,7 @@ const input = @import("../../input.zig");
 const Surface = @import("Surface.zig");
 const key = @import("key.zig");
 const frame = @import("frame.zig");
+const w32im = @import("w32im_experiment.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const user32 = win32.user32;
@@ -127,6 +128,26 @@ fn handleKey(
         const drained = drainChars(surface, sys, &text_buf);
         text = drained.text;
         dead = drained.dead;
+    }
+
+    // Test-mode experiment (GHOSTTY_WIN32_TEST_W32IM): the key as a
+    // win32-input-mode record, bypassing core's encoder.
+    if (w32im.enabled()) {
+        var cs: u16 = 0;
+        if (key_state[user32.VK_SHIFT] & 0x80 != 0) cs |= w32im.cs_shift;
+        if (key_state[user32.VK_LCONTROL] & 0x80 != 0) cs |= w32im.cs_left_ctrl;
+        if (key_state[user32.VK_RCONTROL] & 0x80 != 0) cs |= w32im.cs_right_ctrl;
+        if (key_state[user32.VK_LMENU] & 0x80 != 0) cs |= w32im.cs_left_alt;
+        if (key_state[user32.VK_RMENU] & 0x80 != 0) cs |= w32im.cs_right_alt;
+        if (bits & (1 << 24) != 0) cs |= w32im.cs_enhanced;
+        const uc: u21 = if (text.len > 0)
+            (std.unicode.utf8Decode(text[0..std.unicode.utf8ByteSequenceLength(text[0]) catch 1]) catch 0)
+        else
+            0;
+        const rc: u16 = @max(1, @as(u16, @truncate(bits)));
+        var rec: [64]u8 = undefined;
+        w32im.write(surface, w32im.record(&rec, vk, scancode, uc, is_down, cs, rc));
+        return 0;
     }
 
     var stripped_buf: [64]u8 = undefined;

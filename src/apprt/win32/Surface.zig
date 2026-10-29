@@ -860,6 +860,7 @@ test {
     _ = dpi;
     _ = scrollbar_mod;
     _ = keyboard;
+    _ = @import("w32im_experiment.zig");
     _ = mouse;
     _ = ime;
     _ = clipboard;
