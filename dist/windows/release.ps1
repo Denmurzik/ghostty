@@ -423,6 +423,14 @@ function Invoke-Preflight {
         $problems.Add($msg)
     }
 
+    # makeappx (the sparse package of the Explorer menu)
+    $sp = Invoke-Logged -Exe 'powershell.exe' -ArgList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'sparse\build-sparse.ps1'), '-Probe') -TimeoutSec 60 -Quiet
+    if ($sp.Code -ne 0) {
+        $msg = (($sp.Text -split "`r?`n") | Where-Object { $_ -like 'makeappx.exe not found*' } | Select-Object -First 1)
+        if (-not $msg) { $msg = 'makeappx.exe not found; install the Windows SDK or set MAKEAPPX' }
+        $problems.Add($msg)
+    }
+
     # ConPTY
     $src = $ConptyPackage
     if (-not $src) {
@@ -569,7 +577,8 @@ try {
         @{ Id = 'group1'; Label = 'win32'; Step = 'test'; Filters = $testFiltersG1 },
         @{ Id = 'group2'; Label = 'windows, tmux shim, Exec, d3d11'; Step = 'test'; Filters = $testFiltersG2 },
         @{ Id = 'group3'; Label = 'terminal, config, input, font'; Step = 'test'; Filters = $testFiltersG3 },
-        @{ Id = 'tmux-shim'; Label = 'tmux.exe shim'; Step = 'test-tmux-shim'; Filters = @() }
+        @{ Id = 'tmux-shim'; Label = 'tmux.exe shim'; Step = 'test-tmux-shim'; Filters = @() },
+        @{ Id = 'explorer-command'; Label = 'ghostty-explorer.dll'; Step = 'test-explorer-command'; Filters = @() }
     )
     if ($SkipTests) {
         Write-Host '  unit tests skipped (-SkipTests, rehearsal)'
@@ -620,7 +629,7 @@ try {
     if ($DryRun) { Show-ZigCommand $ba 3000 } else {
         $r = Invoke-Zig 'build x64' $ba 3000
         if ($r.Code -ne 0) { throw "x64 build failed (exit $($r.Code)); see release.log" }
-        foreach ($f in 'ghostty.exe', 'tmux.exe', 'conpty.dll', 'OpenConsole.exe') {
+        foreach ($f in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll', 'conpty.dll', 'OpenConsole.exe') {
             if (-not (Test-Path -LiteralPath (Join-Path $prefX64 "bin\$f"))) { throw "x64 prefix lacks bin\$f" }
         }
     }
@@ -632,7 +641,7 @@ try {
     if ($DryRun) { Show-ZigCommand $ba 3000 } else {
         $r = Invoke-Zig 'build arm64' $ba 3000
         if ($r.Code -ne 0) { throw "arm64 build failed (exit $($r.Code)); see release.log" }
-        foreach ($f in 'ghostty.exe', 'tmux.exe', 'conpty.dll', 'OpenConsole.exe') {
+        foreach ($f in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll', 'conpty.dll', 'OpenConsole.exe') {
             if (-not (Test-Path -LiteralPath (Join-Path $prefArm "bin\$f"))) { throw "arm64 prefix lacks bin\$f" }
         }
         $pdbG = Test-Path -LiteralPath (Join-Path $prefArm 'bin\ghostty.pdb')

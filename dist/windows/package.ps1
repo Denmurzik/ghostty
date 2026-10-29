@@ -6,6 +6,9 @@
 #               [-Installer] [-Test] [-Symbols] [-NoPdbOk]
 #               [-SignCommand '<cmd with {file}>'] [-AllowNoTic] [-NoConpty]
 #
+# The stage also carries ghostty-explorer.dll and the unsigned sparse package
+# ghostty-explorer.msix (sparse\build-sparse.ps1).
+#
 # Every failed check prints "package: FAIL <check>" and exits 1. Exit 2 is
 # installer\build.ps1's "no ISCC", passed through.
 [CmdletBinding()]
@@ -85,7 +88,7 @@ try {
         if (-not (Test-Path -LiteralPath $Prefix -PathType Container)) { Fail "-Prefix $Prefix (no such folder)" }
         $Prefix = (Resolve-Path -LiteralPath $Prefix).Path
         $bin = Join-Path $Prefix 'bin'
-        $binFiles = @('ghostty.exe', 'tmux.exe')
+        $binFiles = @('ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll')
         if (-not $NoConpty) { $binFiles += @('conpty.dll', 'OpenConsole.exe') }
         foreach ($f in $binFiles) {
             $src = Join-Path $bin $f
@@ -154,6 +157,7 @@ try {
 
     Require-File 'ghostty.exe'
     Require-File 'tmux.exe'
+    Require-File 'ghostty-explorer.dll'
     Require-File 'LICENSE'
     Require-File 'README-windows.txt'
     Require-File 'THIRD_PARTY_NOTICES.txt'
@@ -172,7 +176,7 @@ try {
     # VersionInfo of both exes (R-M6-2).
     if (-not $Local) {
         $wantName = 'Ghostty ' + [char]0x2014 + ' Unofficial Windows port'
-        foreach ($exe in 'ghostty.exe', 'tmux.exe') {
+        foreach ($exe in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll') {
             $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $stage $exe))
             if ($vi.ProductVersion -ne $Version) { Fail "$exe ProductVersion '$($vi.ProductVersion)' <> '$Version'" }
             if ([string]$vi.FilePrivatePart -ne $verN) { Fail "$exe FilePrivatePart $($vi.FilePrivatePart) <> $verN" }
@@ -181,6 +185,51 @@ try {
     } else {
         Write-Host 'package: SKIP versioninfo (-Local)'
     }
+
+    # The sparse package for the Windows 11 Explorer menu (R-M7-13): built into
+    # the stage from a prefix (a zip already carries the one that was built),
+    # never signed. Its manifest must name the DLL's CLSID and the package name
+    # from ids.zig.
+    if ($PSCmdlet.ParameterSetName -eq 'Prefix') {
+        $vm = [regex]::Match($Version, '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[^+\s]+)?-win\.(0|[1-9][0-9]*)$')
+        if (-not $vm.Success) { Fail "version '$Version' has no X.Y.Z base for the sparse package" }
+        $ver4 = '{0}.{1}.{2}.{3}' -f $vm.Groups[1].Value, $vm.Groups[2].Value, $vm.Groups[3].Value, $vm.Groups[5].Value
+        $sparse = Join-Path $PSScriptRoot 'sparse\build-sparse.ps1'
+        if (-not (Test-Path -LiteralPath $sparse)) { Fail 'sparse\build-sparse.ps1' }
+        $psx = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $rc = Invoke-Native -Exe $psx -Log $log -Args @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $sparse,
+            '-Stage', $stage, '-Version', $ver4, '-Arch', $Arch)
+        if ($rc -eq 2) { Fail 'makeappx not found' }
+        if ($rc -ne 0) { Fail "build-sparse (exit $rc)" }
+    }
+    Require-File 'ghostty-explorer.msix'
+    $ids = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src\explorer_command\ids.zig')
+    $mc = [regex]::Match($ids, 'pub const clsid_text = "(\{[0-9A-Fa-f-]{36}\})";')
+    $mn = [regex]::Match($ids, 'pub const package_name = "([^"]+)";')
+    if (-not $mc.Success -or -not $mn.Success) { Fail 'clsid_text or package_name not found in src\explorer_command\ids.zig' }
+    $msixZip = [IO.Compression.ZipFile]::OpenRead((Join-Path $stage 'ghostty-explorer.msix'))
+    try {
+        $ent = $msixZip.GetEntry('AppxManifest.xml')
+        if ($null -eq $ent) { Fail 'ghostty-explorer.msix has no AppxManifest.xml' }
+        $rd = New-Object IO.StreamReader($ent.Open(), [Text.Encoding]::UTF8)
+        try { $manifestText = $rd.ReadToEnd() } finally { $rd.Dispose() }
+    } finally { $msixZip.Dispose() }
+    $mx = [xml]$manifestText
+    $idn = $mx.Package.Identity
+    if ($idn.Name -ne $mn.Groups[1].Value) { Fail "msix package name '$($idn.Name)' <> ids.zig '$($mn.Groups[1].Value)'" }
+    $clsids = @([regex]::Matches($manifestText, '(?:Clsid|Id)="([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"') | ForEach-Object { $_.Groups[1].Value })
+    if ($clsids.Count -ne 3) { Fail "msix manifest names $($clsids.Count) CLSIDs (want 3: two verbs and the class)" }
+    foreach ($c in $clsids) {
+        if ("{$c}" -ne $mc.Groups[1].Value) { Fail "msix CLSID {$c} <> ids.zig $($mc.Groups[1].Value)" }
+    }
+    if ($manifestText -match '\{\{') { Fail 'msix manifest has an unreplaced placeholder' }
+    if ($PSCmdlet.ParameterSetName -eq 'Prefix' -and $idn.Version -ne $ver4) { Fail "msix version '$($idn.Version)' <> '$ver4'" }
+    if ($idn.ProcessorArchitecture -ne $Arch) { Fail "msix architecture '$($idn.ProcessorArchitecture)' <> '$Arch'" }
+    $manifestCopy = Join-Path $OutDir 'msix-manifest.tmp.xml'
+    [IO.File]::WriteAllText($manifestCopy, $manifestText)
+    $hit = Test-Privacy -Path $manifestCopy
+    Remove-Item -LiteralPath $manifestCopy -Force
+    if ($null -ne $hit) { Fail ('privacy ghostty-explorer.msix manifest ' + ($hit -replace '^(\d+): ', '@$1: ')) }
 
     # The bundled ConPTY: pinned hashes (vendor/conpty/README.md) and a
     # Microsoft Authenticode signature (R-M6-12).
@@ -247,6 +296,11 @@ try {
         foreach ($d in $ti) {
             # advapi32 since M5 Task 17 (owner-SID check on the external pipe).
             if ($d -notin @('kernel32.dll', 'ntdll.dll', 'advapi32.dll')) { Fail "imports: tmux.exe imports $d" }
+        }
+        # The DLL loads into Explorer: no CRT, only kernel32, ole32, shell32 (R-M7-13).
+        $ei = Get-Imports (Join-Path $stage 'ghostty-explorer.dll')
+        foreach ($d in $ei) {
+            if ($d -notin @('kernel32.dll', 'ole32.dll', 'shell32.dll')) { Fail "imports: ghostty-explorer.dll imports $d" }
         }
     }
 
