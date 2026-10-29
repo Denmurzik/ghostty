@@ -43,5 +43,6 @@ ledger M7 (`.superpowers/sdd/M7-win2/progress.md`), финальное ревь�
 22. tmux-shim: другие `select-layout`, `capture-pane` с историей (5.6). `+ssh-cache` блокировка файла (6.3).
 23. Локализация интерфейса (8.3). Устаревшие пометки «macOS only/GTK only» в документации Config.zig (9.1). `bell-audio-path` не только WAV (9.2). `drag-handle` (9.3). Два правила `TERMINFO` (9.4).
 24. WSL: кастомный hostname в `wsl.conf` не наследует папку; `/c/x` превращается в `C:\x`.
-25. Тесты: нестабильный сценарий scrollbar; латентность на 60 Гц (ограничена кадром); split-many teardown на границе 100 мс; шум запуска процессов в tmux-cli.
-26. Ручные проверки владельца: Retry установщика при запущенном Ghostty; ARM64 на устройстве.
+25. Claude Code на Windows рисует ASCII-заглушки `( )` вместо `◯`: его `is-unicode-supported` на win32 знает только WT_SESSION, vscode, `TERM=xterm-256color` и т. п., а `TERM=xterm-ghostty` нет. Обход: `env = TERMINUS_SUBLIME=1` (переменная используется только этой проверкой). Решить: выставлять её по умолчанию на Windows или отправить фикс в is-unicode-supported (проверка `TERM_PROGRAM=ghostty`).
+26. Тесты: нестабильный сценарий scrollbar; латентность на 60 Гц (ограничена кадром); split-many teardown на границе 100 мс; шум запуска процессов в tmux-cli.
+27. Ручные проверки владельца: Retry установщика при запущенном Ghostty; ARM64 на устройстве.
