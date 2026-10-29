@@ -82,6 +82,10 @@ pub fn build(b: *std.Build) !void {
         "test-tmux-shim",
         "Run the tmux.exe shim tests (Windows)",
     );
+    const test_explorer_command_step = b.step(
+        "test-explorer-command",
+        "Run the ghostty-explorer.dll tests (Windows)",
+    );
     const test_valgrind_step = b.step(
         "test-valgrind",
         "Run tests under valgrind",
@@ -101,6 +105,10 @@ pub fn build(b: *std.Build) !void {
     // The Windows tmux.exe shim (std only, no SharedDeps).
     const tmux_shim = buildpkg.GhosttyTmuxShim.init(b, &config, test_filters);
     if (config.target.result.os.tag == .windows) tmux_shim.addTests(test_tmux_shim_step);
+
+    // The Windows ghostty-explorer.dll (std only, no SharedDeps).
+    const explorer_command = buildpkg.GhosttyExplorerCommand.init(b, &config, test_filters);
+    if (config.target.result.os.tag == .windows) explorer_command.addTests(test_explorer_command_step);
 
     // Ghostty docs
     const docs = try buildpkg.GhosttyDocs.init(b, &deps);
@@ -223,6 +231,7 @@ pub fn build(b: *std.Build) !void {
             if (i18n) |v| v.install();
             if (config.target.result.os.tag == .windows and config.app_runtime == .win32) {
                 tmux_shim.install();
+                explorer_command.install();
                 buildpkg.GhosttyConpty.install(b, &config);
             }
         }

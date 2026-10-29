@@ -1,0 +1,7 @@
+#pragma code_page(65001)
+
+// LANG_NEUTRAL(0), SUBLANG_NEUTRAL(0)
+LANGUAGE 0, 0
+
+// No icon and no manifest: the DLL only carries its version resource.
+#include "versioninfo.rc"

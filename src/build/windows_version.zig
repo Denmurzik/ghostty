@@ -66,7 +66,7 @@ pub fn fileVersion(v: std.SemanticVersion) [4]u16 {
     };
 }
 
-pub const Exe = enum { ghostty, tmux };
+pub const Exe = enum { ghostty, tmux, explorer_command };
 
 /// The generated `#define`s that `dist/windows/versioninfo.rc` includes.
 pub fn rcHeader(
@@ -87,6 +87,12 @@ pub fn rcHeader(
     const description, const original = switch (exe) {
         .ghostty => .{ "Ghostty", "ghostty.exe" },
         .tmux => .{ "Ghostty tmux shim", "tmux.exe" },
+        .explorer_command => .{ "Ghostty Explorer menu", "ghostty-explorer.dll" },
+    };
+    // VFT_APP for the exes, VFT_DLL for the Explorer command.
+    const filetype: u8 = switch (exe) {
+        .ghostty, .tmux => 0x1,
+        .explorer_command => 0x2,
     };
     return std.fmt.allocPrint(alloc,
         \\#define GHOSTTY_FILEVERSION {d},{d},{d},{d}
@@ -94,8 +100,9 @@ pub fn rcHeader(
         \\#define GHOSTTY_FILEFLAGS 0x{X}L
         \\#define GHOSTTY_FILE_DESCRIPTION "{s}"
         \\#define GHOSTTY_ORIGINAL_FILENAME "{s}"
+        \\#define GHOSTTY_FILETYPE 0x{X}L
         \\
-    , .{ fv[0], fv[1], fv[2], fv[3], ver, flags, description, original });
+    , .{ fv[0], fv[1], fv[2], fv[3], ver, flags, description, original, filetype });
 }
 
 test "windows version: tag kinds" {
@@ -160,4 +167,21 @@ test "windows version: edge cases" {
     try checkVersionString("1.3.2-win.1-win.2");
     try std.testing.expectEqual(@as(?u32, 2), winN("1.3.2-win.1-win.2"));
     try std.testing.expectEqual(@as(?u32, null), winN("1.3.2-win.5-rc"));
+}
+
+test "windows version: version header" {
+    const alloc = std.testing.allocator;
+    const v: std.SemanticVersion = .{ .major = 1, .minor = 3, .patch = 2, .pre = "dev-win.7" };
+
+    const dll = try rcHeader(alloc, v, false, .explorer_command);
+    defer alloc.free(dll);
+    try std.testing.expect(std.mem.indexOf(u8, dll, "#define GHOSTTY_FILETYPE 0x2L\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dll, "#define GHOSTTY_FILE_DESCRIPTION \"Ghostty Explorer menu\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dll, "#define GHOSTTY_ORIGINAL_FILENAME \"ghostty-explorer.dll\"\n") != null);
+
+    for ([_]Exe{ .ghostty, .tmux }) |exe| {
+        const h = try rcHeader(alloc, v, false, exe);
+        defer alloc.free(h);
+        try std.testing.expect(std.mem.indexOf(u8, h, "#define GHOSTTY_FILETYPE 0x1L\n") != null);
+    }
 }

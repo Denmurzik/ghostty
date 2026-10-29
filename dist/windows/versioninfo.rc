@@ -1,5 +1,6 @@
-// Shared VERSIONINFO of ghostty.exe and tmux.exe. The per-exe values come
-// from ghostty_version.h, which the build generates (windows_version.zig).
+// Shared VERSIONINFO of ghostty.exe, tmux.exe and ghostty-explorer.dll. The
+// per-binary values come from ghostty_version.h, which the build generates
+// (windows_version.zig).
 // Numeric literals keep this free of winver.h under either ABI.
 #include "ghostty_version.h"
 
@@ -9,7 +10,7 @@ PRODUCTVERSION  GHOSTTY_FILEVERSION
 FILEFLAGSMASK   0x3FL                 // VS_FFI_FILEFLAGSMASK
 FILEFLAGS       GHOSTTY_FILEFLAGS     // VS_FF_PRERELEASE | VS_FF_DEBUG
 FILEOS          0x40004L              // VOS_NT_WINDOWS32
-FILETYPE        0x1L                  // VFT_APP
+FILETYPE        GHOSTTY_FILETYPE      // VFT_APP (exes) or VFT_DLL
 FILESUBTYPE     0x0L                  // VFT2_UNKNOWN
 BEGIN
     BLOCK "StringFileInfo"
