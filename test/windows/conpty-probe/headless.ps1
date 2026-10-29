@@ -39,12 +39,16 @@ param(
     [ValidateRange(1, 10)][int]$Repeat = 1,
     [ValidateRange(0, 2000)][int]$Samples = 200,
     [string]$Bash,
-    [string]$OutDir
+    [string]$OutDir,
+    [switch]$KittyQ,
+    [string[]]$ReplyForm = @('plain', 'w32im')
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$ReplyForm = @($ReplyForm | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+foreach ($rf in $ReplyForm) { if ($rf -notin 'plain', 'w32im') { throw "-ReplyForm: plain or w32im, not '$rf'" } }
 $Flags = @($Flags | ForEach-Object { $_ -split "," } | Where-Object { $_ } | ForEach-Object { [uint32]$_ })
 if (-not $OutDir) { $OutDir = Join-Path $env:TEMP 'conpty-probe-headless' }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -114,6 +118,10 @@ public class Session {
     readonly object gate = new object();
     readonly object writeGate = new object();
     int scanned;
+    int kqScanned;
+    // "" = do not answer Kitty a=q; "plain" = ESC _ G i=31;OK ESC \ ; "w32im" = the same
+    // characters as win32-input-mode key-down records CSI 0;0;<unit>;1;0;1 _
+    public string ReplyForm = "";
     long lastTicks;
     Thread reader;
     public readonly Stopwatch Clock = Stopwatch.StartNew();
@@ -183,12 +191,39 @@ public class Session {
                 Answer("\x1b[c", "\x1b[?62;22c", answers);
                 Answer("\x1b[0c", "\x1b[?62;22c", answers);
                 Answer("\x1b[6n", "\x1b[24;77R", answers);
+                AnswerKitty(answers);
                 scanned = buf.Count;
                 Monitor.PulseAll(gate);
             }
             foreach (string a in answers) Write(a);
         }
         lock (gate) { lastTicks = Clock.ElapsedTicks; Monitor.PulseAll(gate); }
+    }
+
+    // A complete `ESC _ G ... a=q ... ESC \` in the output gets the OK reply.
+    void AnswerKitty(List<string> answers) {
+        if (ReplyForm == "") return;
+        while (true) {
+            int s = -1;
+            for (int i = kqScanned; i + 3 <= buf.Count; i++)
+                if (buf[i] == 0x1b && buf[i + 1] == (byte)'_' && buf[i + 2] == (byte)'G') { s = i; break; }
+            if (s < 0) return;
+            int e = -1;
+            for (int i = s + 3; i + 2 <= buf.Count; i++)
+                if (buf[i] == 0x1b && buf[i + 1] == (byte)'\\') { e = i + 2; break; }
+            if (e < 0) { kqScanned = s; return; }
+            string body = Encoding.ASCII.GetString(buf.GetRange(s, e - s).ToArray());
+            kqScanned = e;
+            if (!body.Contains("a=q")) continue;
+            string reply = "\x1b_Gi=31;OK\x1b\\";
+            if (ReplyForm == "w32im") {
+                StringBuilder w = new StringBuilder();
+                foreach (char c in reply) w.Append("\x1b[0;0;" + (int)c + ";1;0;1_");
+                reply = w.ToString();
+            }
+            answers.Add(reply);
+            Replies.Add("kitty-a=q@" + s + "->" + ReplyForm);
+        }
     }
 
     // A query that ends in the bytes read just now (not in bytes scanned before).
@@ -393,9 +428,80 @@ function Invoke-Latency([string]$Dll, [uint32]$F) {
     }
 }
 
+# One run of the Kitty a=q reply case: the host answers the query in <Form> and
+# the client (Git Bash `read`, or the native vtreader exe) reports what reached
+# its input. Returns rows (name, verdict, evidence).
+function Invoke-KittyQRun([string]$Dll, [uint32]$F, [string]$Form, [string]$Client) {
+    $s = New-Object CpProbe.Session -ArgumentList @(, $Dll)
+    $s.ReplyForm = $Form
+    $rows = New-Object System.Collections.Generic.List[object]
+    try {
+        if ($Client -eq 'bash') {
+            $cmd = '"{0}" --noprofile --norc "{1}"' -f $Bash, ($kqCase -replace '\\', '/')
+        } else {
+            $cmd = '"{0}"' -f $kqExe
+        }
+        if (-not $s.Start($F, $cmd, 80, 25)) {
+            $rows.Add(@('start', 'failed', ('CreatePseudoConsole hr=0x{0:x8}' -f $s.Hr)))
+            return , $rows
+        }
+        $done = $s.WaitFor("GOT:", 0, 15000)
+        if ($done -ge 0) { $s.WaitFor("`n", $done, 8000) | Out-Null }
+        $s.WaitQuiet(300, 2000)
+        $bytes = $s.Bytes()
+        [IO.File]::WriteAllBytes((Join-Path $OutDir ('{0}-{1}-{2}-{3}.bin' -f $script:Variant, $Form, $Client, $script:RunNo)), $bytes)
+        $text = $latin1.GetString($bytes)
+        $m = [regex]::Match($text, 'GOT:([0-9a-f]*)')
+        if (-not $m.Success) {
+            $rows.Add(@('kittyq', 'failed', ('no GOT line; output: ' + [CpProbe.Session]::Esc($bytes, 0, 4096, 600))))
+            return , $rows
+        }
+        $hex = $m.Groups[1].Value
+        $got = [byte[]]@(for ($i = 0; $i + 1 -lt $hex.Length; $i += 2) { [Convert]::ToByte($hex.Substring($i, 2), 16) })
+        $e = [CpProbe.Session]::Esc($got, 0, $got.Length, 400)
+        $str = $latin1.GetString($got)
+        $v = if ($got.Length -eq 0) { 'nothing' }
+            elseif ($str.Contains("$([char]27)_Gi=31;OK")) { 'plain arrives' }
+            elseif ($str.Contains('i=31;OK')) { 'arrives, envelope lost' }
+            else { 'other' }
+        $rows.Add(@('kittyq', $v, "reply form $Form; client $Client; $($got.Length) bytes: $e; hex $hex; host replies: $($s.Replies -join ' ')"))
+    } finally {
+        $s.Stop()
+    }
+    , $rows
+}
+
 $variants = @()
 foreach ($f in $Flags) { $variants += , @("inbox-f$f", $null, $f) }
 if ($dll) { foreach ($f in $Flags) { $variants += , @("bundled-f$f", $dll, $f) } }
+
+if ($KittyQ) {
+    $kqCase = Join-Path $PSScriptRoot 'cases\headless-kittyq.sh'
+    Import-Module (Join-Path $PSScriptRoot '..\lib\FakeExe.psm1') -Force
+    $kqExe = New-FakeExe -Path (Join-Path $OutDir 'vtreader.exe') -Kind vtreader
+    # \e _ G ... a=q ... \e \ : the shape of a Kitty graphics support query
+    $env:FAKE_QUERY = '\e_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\e\\'
+    $env:FAKE_WAIT_MS = '2000'
+    $csv = Join-Path $OutDir 'headless-kittyq.csv'
+    Set-Content -LiteralPath $csv -Value 'variant,run,form,client,verdict,evidence' -Encoding UTF8
+    $failed = 0
+    foreach ($v in $variants) {
+        $script:Variant = $v[0]
+        foreach ($form in $ReplyForm) {
+            foreach ($client in 'bash', 'native') {
+                for ($run = 1; $run -le $Repeat; $run++) {
+                    $script:RunNo = $run
+                    foreach ($r in (Invoke-KittyQRun $v[1] $v[2] $form $client)) {
+                        if ($r[1] -eq 'failed') { $failed++ }
+                        Add-Content -LiteralPath $csv -Value ('{0},{1},{2},{3},{4},"{5}"' -f $v[0], $run, $form, $client, $r[1], ($r[2] -replace '"', "'")) -Encoding UTF8
+                        Write-Output ('ROW {0} run={1} form={2} client={3} -> {4} | {5}' -f $v[0], $run, $form, $client, $r[1], $r[2])
+                    }
+                }
+            }
+        }
+    }
+    exit $(if ($failed) { 1 } else { 0 })
+}
 
 $csv = Join-Path $OutDir 'headless.csv'
 Set-Content -LiteralPath $csv -Value 'variant,run,sequence,verdict,evidence' -Encoding UTF8

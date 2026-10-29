@@ -185,3 +185,44 @@ grapheme-width flag (8) changes nothing the probe measures, and the bundled
 console forwards cursor queries to Ghostty, so Ghostty's widths win either way.
 A GUI check in Ghostty itself is still owed: `vt-smoke/kitty-image`,
 `vt-smoke/underline-colors`.
+
+## Kitty `a=q` reply path through ConPTY input (M7 Task 9)
+
+Question: when the terminal answers a Kitty graphics query by writing the reply
+to the ConPTY input, does the program read it? (Issue after v1, 2a, question 4.)
+
+Method: `headless.ps1 -KittyQ -DllDir vendor/conpty/x64 -Flags 0 -Repeat 2`
+(no window; the script is the terminal). When the output holds
+`ESC _ G ... a=q ... ESC \`, the host writes `ESC _ G i=31;OK ESC \` to the
+input, either `plain`, or `w32im`: every character of it as a win32-input-mode
+key-down record `CSI 0;0;<unit>;1;0;1 _` (the R-M7-11 form). Clients: Git Bash
+(`cases/headless-kittyq.sh`: the query, then `read -rs -t 2 -d '\'`, hex of what
+it read; `-d '\'` stops at the final `\`, so it is not in the hex) and a native
+exe (`New-FakeExe -Kind vtreader`: ENABLE_VIRTUAL_TERMINAL_INPUT, `FAKE_WAIT_MS`
+2000, hex of every byte read). Bundled console: `vendor/conpty/x64`,
+OpenConsole.exe / conpty.dll 1.25.2609.30003 (package 1.25.260930003). Inbox:
+kernel32 on Windows 11 10.0.26300. Both runs of every cell agree.
+
+| Console | Reply form | Git Bash read | Native read |
+|---|---|---|---|
+| inbox | plain | nothing (query never reached the host) | nothing (same) |
+| inbox | w32im | nothing (same) | nothing (same) |
+| bundled | plain | `1b5f47693d33313b4f4b1b` = `ESC _Gi=31;OK ESC` (+ `\` as the delimiter) | `1b5f47693d33313b4f4b1b5c` = `ESC _Gi=31;OK ESC \` |
+| bundled | w32im | `1b5f47693d33313b4f4b1b` (same) | `1b5f47693d33313b4f4b1b5c` (same) |
+
+Inbox: the console drops the `ESC _ G` query itself (see the arrival table
+above), so the host never sees an `a=q` to answer; the reply path is not
+reached and there is nothing to measure.
+
+Verdict, bundled console:
+- Git Bash: **plain arrives** (and the wrapped form arrives as the same plain bytes).
+- native VT-input reader: **plain arrives** (and the wrapped form arrives as the same plain bytes).
+- Neither cell loses the reply, so the wrapped form is not needed: OpenConsole
+  passes the plain APC reply to the program intact, and decodes win32-input-mode
+  character records back to the characters (the program sees identical bytes).
+
+Consequence for Task 12: the condition "plain is lost and wrapped arrives" is
+false for the bundled console; Task 12 is Step 4 only (no wrapping code).
+Limits: the host here does not send `CSI ? 9001 h` handshakes beyond what
+OpenConsole asks for; a missing Kitty image in Ghostty with Claude Code is then
+not explained by the reply being lost in ConPTY input.
