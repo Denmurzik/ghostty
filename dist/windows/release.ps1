@@ -726,7 +726,9 @@ try {
     $notesPath = Join-Path $OutDir 'release-notes.md'
     if ($DryRun) { Write-Host "  release-notes.md from dist\windows\release-notes.md, then a privacy scan of it and SHA256SUMS.txt" } else {
         $tpl = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'release-notes.md'))
-        $v1 = if ($V1) { 'Windows port v1.0' } else { '' }
+        # Not `$v1`: PowerShell names are case-insensitive, and the [switch]$V1
+        # parameter refuses a string.
+        $v1Line = if ($V1) { 'Windows port v1.0' } else { '' }
         if ($SkipTests) {
             $testsText = 'Unit tests were skipped in this build (rehearsal).'
         } else {
@@ -738,7 +740,7 @@ try {
         $cp = New-Object System.Text.StringBuilder
         [void]$cp.Append("Microsoft.Windows.Console.ConPTY $($conpty.Version) (MIT, signed by Microsoft). SHA-256:`n`n")
         foreach ($h in $conpty.Hashes) { [void]$cp.Append("- ``$h```n") }
-        $notes = $tpl.Replace('{{VERSION}}', $verStr).Replace('{{TAG}}', $tag).Replace('{{V1_LINE}}', $v1).Replace('{{TESTS}}', $testsText).Replace('{{ARM64_LINE}}', $armLine).Replace('{{CONPTY}}', $cp.ToString().TrimEnd()).Replace('{{SHA256SUMS}}', ([IO.File]::ReadAllText($sumsPath).TrimEnd()))
+        $notes = $tpl.Replace('{{VERSION}}', $verStr).Replace('{{TAG}}', $tag).Replace('{{V1_LINE}}', $v1Line).Replace('{{TESTS}}', $testsText).Replace('{{ARM64_LINE}}', $armLine).Replace('{{CONPTY}}', $cp.ToString().TrimEnd()).Replace('{{SHA256SUMS}}', ([IO.File]::ReadAllText($sumsPath).TrimEnd()))
         if ($notes -match '\{\{[A-Z0-9_]+\}\}') { throw "release-notes.md still has a placeholder: $($Matches[0])" }
         [IO.File]::WriteAllText($notesPath, $notes, (New-Object Text.UTF8Encoding($false)))
         foreach ($f in @($notesPath, $sumsPath)) {
