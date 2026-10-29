@@ -479,6 +479,14 @@ if (Test-Path -LiteralPath $ghosttyExe) {
             Check = { param($t, $h) Test-SshArgv $t ($sendEnv + @('-p', '2222', 'host one')) 'xterm-256color' }
         }
         $cases += @{
+            # Captured output bypasses the wrapper: the real fake is called, so
+            # its stdout lands in $x (and no SendEnv options were added).
+            Name = "$($ps.Prefix)-ssh-capture"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Needs = $ghosttyExe
+            Input = "`$x = ssh -p 3 hostc`r$([char]1)`r$([char]1)'ca' + 'p-' + (@(`$x) -match 'ARGV:').Count + '-' + (@(`$x) -match 'SendEnv').Count`r"
+            Env = (Get-SshEnv $argvDir 'cursor,title,ssh-env' "$($ps.Prefix)-ssh-capture" @{})
+            Expect = 'cap-1-0'
+        }
+        $cases += @{
             Name = "$($ps.Prefix)-no-ssh"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Needs = $ghosttyExe
             Input = "ssh -p 1 hostx`r$([char]1)`r$([char]1)'ty-' + (Get-Command ssh).CommandType`r"
             Env = (Get-SshEnv $argvDir 'cursor,title' "$($ps.Prefix)-no-ssh" @{ TERM = 'xterm-256color' })

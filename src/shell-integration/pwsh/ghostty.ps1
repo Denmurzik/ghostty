@@ -162,7 +162,22 @@ if ($env:GHOSTTY_SHELL_FEATURES -like '*ssh-*' -and $env:GHOSTTY_BIN_DIR) {
         $out.ToString()
     }
 
+    # The wrapper is for a session typed at the prompt. A call in a pipeline,
+    # fed from a pipeline, from a script or captured (`$x = ssh ...`) must keep
+    # its output and stdin, so it runs the real ssh.exe unchanged.
     function global:ssh {
+        $inv = $MyInvocation
+        $direct = $inv.ExpectingInput -or
+            $inv.PipelinePosition -lt $inv.PipelineLength -or
+            $inv.CommandOrigin -ne 'Runspace' -or
+            $inv.Line -match '(=|\$\(|\(|@\()\s*(&\s*)?ssh\b'
+        if ($direct) {
+            $real = Get-Command ssh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($real) {
+                if ($inv.ExpectingInput) { $input | & $real.Source @args } else { & $real.Source @args }
+                return
+            }
+        }
         $flags = @()
         if ($env:GHOSTTY_SHELL_FEATURES -notlike '*ssh-env*') { $flags += '--forward-env=false' }
         if ($env:GHOSTTY_SHELL_FEATURES -notlike '*ssh-terminfo*') { $flags += '--terminfo=false' }
