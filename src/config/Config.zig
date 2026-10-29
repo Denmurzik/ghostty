@@ -3004,6 +3004,13 @@ keybind: Keybinds = .{},
 ///     cache manually using various arguments.
 ///     (Available since: 1.2.0)
 ///
+///     On Windows the `ssh-env` and `ssh-terminfo` features work in pwsh and cmd.
+///     In pwsh the `ssh` function wraps a call typed at the prompt; a piped,
+///     captured (`$x = ssh ...`) or scripted call runs the real `ssh.exe`. In cmd
+///     the `ssh.cmd` shim directory stays on `PATH` for every child process of the
+///     pane, so an `ssh` started by tools from that pane (`cmd /c ssh`, scripts)
+///     also goes through `ghostty +ssh`.
+///
 ///   * `path` - Add Ghostty's binary directory to PATH. This ensures the `ghostty`
 ///     command is available in the shell even if shell init scripts reset PATH.
 ///     This is particularly useful on macOS where PATH is often overridden by
