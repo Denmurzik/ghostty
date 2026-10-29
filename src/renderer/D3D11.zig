@@ -302,11 +302,20 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
 
 /// Per-frame uniforms: a frame for a composition chain premultiplies in sRGB
 /// space (`shaders/hlsl/common.hlsli` `load_color`), the way DWM blends it.
+/// A frame for an hwnd chain draws the background opaque: DWM ignores the
+/// alpha of that chain, so a translucent background would only show dim.
+/// That frame also stays under the visual when the window's surface moves
+/// to a composition chain (a window created opaque, reloaded translucent):
+/// drawn dim, it showed through the premultiplied frame (#102030 at 0.5 as
+/// #0c1a28 instead of the solid background).
 pub fn adjustUniforms(self: *const D3D11, uniforms: *shaders.Uniforms) void {
     const target = self.present_target orelse return;
     // The chain this frame is drawn into, else the one it will get.
     const mode = if (self.swap_chain) |*sc| sc.mode else currentMode(target);
     uniforms.bools.composition = self.blending.isLinear() and mode == .composition;
+    // By the mode the apprt asks for now (the chain `beginFrame` uses): the
+    // first frame after a switch to composition goes to the new chain.
+    if (currentMode(target) == .hwnd) uniforms.bg_color[3] = 255;
 }
 
 /// The mode to create a chain in: composition only when the apprt asked
@@ -1164,6 +1173,30 @@ const FakeHandOff = struct {
         return .{ .ctx = self, .func = func };
     }
 };
+
+test "d3d11 api: an hwnd frame draws the background opaque, a composition frame keeps its alpha" {
+    var api = try testApi(.linear);
+    defer api.device.deinit(std.testing.allocator);
+
+    var packed_size: std.atomic.Value(u64) = .init(packSize(32, 32));
+    var mode: std.atomic.Value(u8) = .init(0);
+    var fake: FakeHandOff = .{};
+    api.present_target = .{ .hwnd = undefined, .size = &packed_size, .mode = &mode, .hand_off = fake.handOff() };
+
+    var u = std.mem.zeroes(shaders.Uniforms);
+    u.bg_color = .{ 0x10, 0x20, 0x30, 128 };
+    api.adjustUniforms(&u);
+    try std.testing.expectEqual([4]u8{ 0x10, 0x20, 0x30, 255 }, u.bg_color);
+    try std.testing.expect(!u.bools.composition);
+
+    // The apprt switched the surface to composition: the next frame (the
+    // first of the new chain) keeps the configured alpha.
+    mode.store(1, .release);
+    u.bg_color = .{ 0x10, 0x20, 0x30, 128 };
+    api.adjustUniforms(&u);
+    try std.testing.expectEqual([4]u8{ 0x10, 0x20, 0x30, 128 }, u.bg_color);
+    try std.testing.expect(u.bools.composition);
+}
 
 test "d3d11 swapchain: composition mode creates a premultiplied chain and hands it off once" {
     var api = try testApi(.native);
