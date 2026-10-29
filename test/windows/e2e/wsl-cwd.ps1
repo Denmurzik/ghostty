@@ -1,8 +1,9 @@
 # e2e: milestone=M7 timeout=150 order=1150
 # wsl-cwd: a WSL pane's OSC 7 path (a POSIX path) is kept, and a new split /
 # tab of that pane starts `wsl.exe --cd <path>` (R-M7-10). No WSL runs: the
-# pane command is a fake wsl.exe (New-FakeExe -Kind osc7), recognised by its
-# file name. What the new panes were started with is read from the command
+# pane command is a fake wsl.exe compiled here (FakeExe's osc7 kind writes the
+# host "fake", which a WSL pane is rightly refused: the host must be this
+# computer's name), recognised by its file name. What the new panes were started with is read from the command
 # line of the fake processes (the pane output is not readable by a script).
 #   1. the first pane: no `--cd` (nothing to inherit), reports the path;
 #      state `pwd` is the POSIX path as is (spaces kept);
@@ -10,17 +11,35 @@
 #      `--cd "<path>"`, and its process directory is not the POSIX path.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
-Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\FakeExe.psm1') -Force
 
 Invoke-E2eScenario 'wsl-cwd' {
     $posix = '/home/e2e/my proj'
-    # The fake writes file://fake/<value>; a space is percent-encoded like a shell does.
+    # The fake writes file://<computer name>/<value>; a space is percent-encoded like a shell does.
     $uriTail = 'home/e2e/my%20proj'
 
     $bin = Join-Path $script:Sbx.Tmp 'bin'
     $wsl = Join-Path $bin 'wsl.exe'
     if ($wsl -match '\s') { throw "E2E-SKIP: the sandbox path has a blank ($wsl): direct: splits on blanks" }
-    [void](New-FakeExe -Path $wsl -Kind osc7)
+    $src = @'
+using System;
+using System.IO;
+using System.Text;
+public static class FakeWsl {
+    public static int Main(string[] args) {
+        Stream o = Console.OpenStandardOutput();
+        string host = Environment.MachineName;
+        string p = Environment.GetEnvironmentVariable("FAKE_OSC7_PATH") ?? "";
+        byte[] b = Encoding.UTF8.GetBytes("\u001b]7;file://" + host + "/" + p + "\u0007ARGV:\r\n" + string.Join("\r\n", args) + "\r\n");
+        o.Write(b, 0, b.Length);
+        o.Flush();
+        Console.In.ReadLine();
+        return 0;
+    }
+}
+'@
+    if (-not (Test-Path -LiteralPath $bin)) { New-Item -ItemType Directory -Force -Path $bin | Out-Null }
+    Add-Type -TypeDefinition $src -Language CSharp -OutputType ConsoleApplication -OutputAssembly $wsl
+    if (-not (Test-Path -LiteralPath $wsl)) { throw "the fake wsl.exe was not written" }
 
     function Get-FakeWsl {
         @(Get-CimInstance -ClassName Win32_Process -Filter "Name='wsl.exe'" |

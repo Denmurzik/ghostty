@@ -1572,9 +1572,7 @@ pub const StreamHandler = struct {
         var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
         // Windows paths come as `file:///C:/x`: no host means this machine.
         const is_windows = comptime builtin.target.os.tag == .windows;
-        // A WSL shell reports its own host name (renameable in wsl.conf), so a
-        // WSL pane is not held to this machine's name.
-        const host = if (is_windows and (self.wsl or uri.host == null or uri.host.?.isEmpty()))
+        const host = if (is_windows and (uri.host == null or uri.host.?.isEmpty()))
             std.Io.net.HostName{ .bytes = "localhost" }
         else std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
             error.UriMissingHost => {
@@ -2060,4 +2058,23 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "windows osc7: a WSL pane is held to this machine's host name" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    // WSL reports the Windows computer name by default (any case); a remote
+    // host (ssh inside WSL) or a custom wsl.conf hostname is refused.
+    try testing.expect(try internal_os.hostname.isLocal("localhost"));
+    try testing.expect(!(try internal_os.hostname.isLocal("remote.example.org")));
+    try testing.expect(!(try internal_os.hostname.isLocal("fake")));
+
+    var buf: [256:0]u8 = undefined;
+    var n: u32 = buf.len;
+    if (internal_os.windows.exp.kernel32.GetComputerNameExA(1, &buf, &n) == internal_os.windows.FALSE)
+        return error.SkipZigTest;
+    var up: [256]u8 = undefined;
+    var low: [256]u8 = undefined;
+    try testing.expect(try internal_os.hostname.isLocal(std.ascii.upperString(&up, buf[0..n])));
+    try testing.expect(try internal_os.hostname.isLocal(std.ascii.lowerString(&low, buf[0..n])));
 }
