@@ -9,10 +9,12 @@
 #   3. Git Bash with `auto` (the inbox ConPTY drops APC): no magenta. This is
 #      the documented limit; it PASSES when the image is absent.
 #   4. `a=q` in pwsh: Ghostty answers (the sandbox log has
-#      `kitty graphics response`). Whether the program receives the answer
-#      is the a=q probe's question, not this scenario's.
+#      `kitty graphics response`).
+#   5. `a=q` reply: a vtreader fake in pwsh receives ESC _ G i=31;OK ESC backslash on
+#      its stdin (the screen shows GOT: + its hex).
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
+Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\FakeExe.psm1') -Force
 
 Invoke-E2eScenario 'kitty-render' {
     $tmp = $script:Sbx.Tmp
@@ -151,4 +153,39 @@ Invoke-E2eScenario 'kitty-render' {
     if (-not $answered) { throw "a=q: the log has no 'kitty graphics response' ($($g.Log))" }
     Write-E2eInfo 'a=q: Ghostty answered (log: kitty graphics response)'
     Close-Pane $g
+
+    # --- 5. a=q in pwsh: the program receives the answer ------------------------
+    # A vtreader fake (VT input on) sends the query and prints the hex of what
+    # reaches its stdin; the screen text is read back through select_all +
+    # copy_to_clipboard.
+    $fake = New-FakeExe -Path (Join-Path $tmp 'bin/vtreader.exe') -Kind vtreader
+    $k5 = Join-Path $tmp 'k5.ps1'
+    Write-LfFile $k5 @(
+        '$e = [string][char]27'
+        '[Console]::Out.Write($e + "[2J" + $e + "[H")'
+        '[Console]::Out.Flush()'
+        ('$env:FAKE_QUERY = ''\e_G' + $queryApc[0] + ';' + $queryApc[1] + '\e\\''')
+        '$env:FAKE_WAIT_MS = "3000"'
+        ('& "' + ($fake -replace '\\', '/') + '"')
+        ('Set-Content -LiteralPath "' + $tmpFwd + '/k5.done" -Value done')
+        'Start-Sleep -Seconds 600'
+    )
+    $want = 'GOT:' + ((([Text.Encoding]::ASCII.GetBytes([string][char]27 + '_Gi=31;OK' + [char]27 + [char]92)) | ForEach-Object { $_.ToString('x2') }) -join '')
+    $saved = Save-ClipboardText
+    try {
+        $cfg = "command = direct:powershell.exe -NoProfile -NoLogo -File $($k5 -replace '\\', '/')`nwindows-conpty = auto`n$noPad"
+        $g = Start-E2eGhostty -ConfigText $cfg
+        if (-not (Wait-File (Join-Path $tmp 'k5.done') 40)) { throw 'the a=q reader script never finished' }
+        if (-not (Invoke-GhosttyAction -Class $g.Class -Action 'select_all')) { throw 'select_all was not performed' }
+        if (-not (Invoke-GhosttyAction -Class $g.Class -Action 'copy_to_clipboard')) { throw 'copy_to_clipboard was not performed' }
+        Update-ClipboardMark
+        Start-Sleep -Milliseconds 300
+        $text = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetText() }
+        Save-Evidence -Tag 'pwsh-query-reply' -G $g
+        $flat = $text -replace '\s', ''
+        if ($flat -notmatch 'GOT:[0-9a-f]*') { throw "a=q reply: the screen has no 'GOT:' line: $text" }
+        if (-not $flat.Contains($want)) { throw "a=q reply: expected $want on the screen, got: $($Matches[0])" }
+        Write-E2eInfo "a=q reply: the program received ESC _ G i=31;OK ESC \ ($want)"
+        Close-Pane $g
+    } finally { Restore-ClipboardText $saved }
 }
