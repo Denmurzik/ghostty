@@ -479,10 +479,12 @@ unless the environment already has it. `tmux.exe` stays in the zip and the insta
 - **WSL.** A new tab or split of a WSL profile starts in the directory the WSL shell last reported (`wsl.exe --cd <dir>`).
   Only an OSC 7 host that is empty, `localhost` or the computer name is accepted.
 - **Explorer.** The installer task is renamed `explorermenu` and is **ticked by default** (an upgrade from v1.0 shows it
-  ticked once). On Windows 11 it also registers a top-level "Open Ghostty here" (no "Show more options") through
-  `ghostty-explorer.dll` and an unsigned sparse package `ghostty-explorer.msix`. Unticking the task on an upgrade removes the
-  top-level entry (the classic verb is not touched, as before); the uninstaller removes both.
-- **Portable zip** contains `ghostty-explorer.dll` and `ghostty-explorer.msix`; `README-windows.txt` has the two PowerShell lines.
+  ticked once). It adds the classic verb ("Show more options", Shift+F10). The Windows 11 top-level entry is **not shipped**:
+  Windows refuses to install an unsigned sparse package with executable activations (`0x80073D2B`), so it needs a real
+  code-signing certificate. The DLL and sparse-package code stay in the repository (`package.ps1 -Win11Menu`, installer
+  define `GhosttyWin11Menu`); an upgrade removes a `Ghostty.ExplorerMenu` registered from the install folder and a leftover
+  `ghostty-explorer.dll`.
+- **Portable zip** has no `ghostty-explorer.dll` or `.msix`.
 - Tests: scenarios `font-symbols`, `kitty-render`, `text-weight`, `link-windows-path`, `paste-files`, `wsl-cwd`; `FakeExe.psm1`;
   the tmux scenarios enable the shim; `resize-input` has a `bundled` variant.
 
@@ -490,8 +492,7 @@ unless the environment already has it. `tmux.exe` stays in the zip and the insta
 
 - Symbols and emoji (`✓`, `⚠`, `⏺`, emoji) look like Windows Terminal, not like the embedded Noto set.
 - The tab editor is a popup that looks like the tab label made editable.
-- The Explorer task is ticked in the installer, and on Windows 11 the entry is in the top-level menu for folders and folder
-  backgrounds.
+- The Explorer task is ticked in the installer; on Windows 11 the entry is under "Show more options" (the top-level entry is not shipped).
 - A bar cursor at the pwsh and cmd prompt (`shell-integration-features = cursor`, on by default).
 - Tools that detect tmux no longer see it unless `windows-tmux-shim = true`.
 
@@ -515,9 +516,7 @@ unless the environment already has it. `tmux.exe` stays in the zip and the insta
 - **WSL cwd.** A distro with a custom `hostname` in `wsl.conf` is not accepted by the host check and the new tab starts in the
   default directory. An OSC 7 path such as `/c/x` is mapped to `C:\x` only for drive paths; other POSIX paths are kept for WSL
   panes and dropped for the rest (one log line).
-- **Windows 11 top-level menu.** Folders and folder backgrounds only; **drives keep the classic verb** (the package schema
-  rejects the `Drive` class). The package is unsigned (`Add-AppxPackage -AllowUnsigned`; a machine may need Developer Mode,
-  then the install logs it and keeps the classic verb) and was **tested only on the owner's machine**. A DLL that Explorer
-  still holds on an upgrade or uninstall is renamed to `ghostty-explorer.dll.old-<n>`; a leftover file can keep the install
-  folder until the next install or a manual delete.
+- **No Windows 11 top-level menu entry.** Windows refuses an unsigned sparse package with executable activations
+  (`0x80073D2B`, "an unsigned package cannot include Executable activations"); shipping it needs a real code-signing
+  certificate. The classic verb in "Show more options" (Shift+F10) is the only Explorer entry.
 - Everything in the v1.0 "Gaps" list that is not named above is unchanged (unsigned builds, per-user install, winget).

@@ -134,7 +134,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | `THIRD_PARTY_NOTICES.txt` with every shipped component and full licence text | M6 | `third-party-check.ps1` (run by package.ps1) passes for x64 and arm64 | done |
 | Bundled ConPTY shipped per arch, Microsoft signature and SHA-256 checked at preflight and packaging | M6 | package.ps1 verification; e2e/package-portable (OpenConsole.exe runs from the folder) | done (rehearsal output pending) |
 | ARM64 artifacts (`aarch64-windows-gnu`) | M6 | cross-build; unit tests are an owner check on a device (`-Arm64TestExe`) | manual |
-| Code signing; Smart App Control compatibility; MSIX; winget/scoop | M6 | R-M6-9 | gap (the Windows 11 top-level Explorer menu is done in M7, unsigned) |
+| Code signing; Smart App Control compatibility; MSIX; winget/scoop | M6 | R-M6-9 | gap (the Windows 11 top-level Explorer menu is not shipped: unsigned sparse package refused, 0x80073D2B) |
 | Kitty graphics in pwsh/cmd: image drawn on the bundled console and the `a=q` reply read by the program (corrects the M3/M5 "done via bundled ConPTY") | M7 | e2e/kitty-render (5/5), vt-smoke/kitty-image, conpty-probe | done |
 | Kitty graphics in Git Bash | M7 | `windows-conpty = bundled` only (draws; input lines lost under MSYS, `docs/windows/m7/msys-key-loss.md`); default `auto` stays inbox | gap (opt-in) |
 | Kitty `t=s`, `t=f` with MSYS paths, DCS `tmux;` unwrap | M7 | R-M7-11 | gap |
@@ -147,7 +147,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | `click-repeat-interval = 0` follows the system double-click time | M7 | unit: os/mouse.zig | done |
 | pwsh `cursor`, `ssh-env`, `ssh-terminfo`; cmd `cursor`, `ssh-env`, `ssh-terminfo` | M7 | shell-marks, headless cases | done (cmd cursor stays during commands) |
 | WSL tabs and splits start in the shell's reported directory (`--cd`) | M7 | e2e/wsl-cwd | done (custom hostname: limit) |
-| Windows 11 top-level "Open Ghostty here" (`ghostty-explorer.dll`, sparse package; folders and backgrounds; drives keep the classic verb) | M7 | installer-test, package-portable, owner check (G4) | done (unsigned; tested on one machine) |
+| Windows 11 top-level "Open Ghostty here" (`ghostty-explorer.dll`, sparse package) | M7 | owner check (G4) | gap: not shipped, Windows refuses an unsigned sparse package (`0x80073D2B`); needs a code-signing certificate. Classic verb in "Show more options" remains |
 | Installer task `explorermenu` ticked by default; unticking on upgrade removes the package; locked DLL renamed aside | M7 | installer-test | done |
 
 ## Notes

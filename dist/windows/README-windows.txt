@@ -47,20 +47,11 @@ Windows 11) for the current user. Undo it with
 If you used it from a portable copy, run the undo command BEFORE you delete
 the folder.
 
-Windows 11 top-level menu (optional)
-------------------------------------
-ghostty-explorer.dll and ghostty-explorer.msix add "Open Ghostty here" to
-the top-level menu of folders and folder backgrounds (drives keep the
-classic entry). The package is unsigned, and Windows may need Developer Mode
-for it. In PowerShell, from this folder:
-
-  Add-AppxPackage -Path .\ghostty-explorer.msix `
-    -ExternalLocation $PWD.Path -AllowUnsigned
-  Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage
-
-The first command adds the entry, the second removes it. Remove it BEFORE
-you delete or move the folder. The installer does this when the task
-"explorermenu" is ticked.
+Windows 11 top-level menu
+-------------------------
+Not included. Windows refuses to install an unsigned package for it
+(error 0x80073D2B); it needs a code-signing certificate. The entry stays in
+"Show more options" (Shift+F10).
 
 tmux.exe
 --------

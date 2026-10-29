@@ -65,6 +65,6 @@ GUI proof for About, `initial-window`, Kitty graphics and SGR 58 on the bundled 
 | `click-repeat-interval` | done: follows the system double-click time | unit: os/mouse.zig |
 | pwsh `cursor`/`ssh-env`/`ssh-terminfo`, cmd `cursor`/`ssh-env`/`ssh-terminfo` | done; cmd cursor stays while a command runs (no pre-exec hook) | `shell-marks`, headless cases |
 | WSL tab/split start directory | done; custom `wsl.conf` hostname is a limit | `e2e/wsl-cwd` |
-| Windows 11 top-level "Open Ghostty here" | done for folders and folder backgrounds (drives: classic verb); unsigned package, one-machine test | `installer-test`, `package-portable`, G4 owner check |
+| Windows 11 top-level "Open Ghostty here" | not shipped: Windows refuses an unsigned sparse package (`0x80073D2B`); needs a code-signing certificate. Classic verb in "Show more options" remains | G4 owner check |
 | Tmux shim default | off; `windows-tmux-shim = true` for Claude Code agent teams | `e2e/tmux-env` |
 | IME, ligatures, Kitty keyboard protocol, UI Automation, `window-save-state`, IPC scripting | unchanged (manual / post-v1) | this audit above |

@@ -515,8 +515,8 @@ nothing. On Windows 11 the verb appears only under "Show more options"
 (classic menu). Options:
 - make the task checked by default (S);
 - a top-level Windows 11 menu entry needs an `IExplorerCommand` shell
-  extension plus a sparse package with identity. Unsigned, that works only
-  in developer mode (L).
+  extension plus a sparse package with identity. Unsigned, it is refused:
+  (L). win.2 result: Windows refuses it (`0x80073D2B`); not shipped, needs a code-signing certificate.
 
 ## 6. Audit: what else is not ported or broken
 
@@ -722,7 +722,7 @@ Merged from the audit report below (§ 6a).
 | Thin/pale text | Compare `alpha-blending = native` and `font-thicken = true` first; make the better one the Windows default; DirectWrite rasterizer later |
 | Symbols/emoji | Skip embedded Noto on Windows like macOS: Segoe UI Symbol / Segoe UI Emoji (§ 4) |
 | win.2 scope | Small fixes (above + `C:\path:12` links, Explorer file drop `CF_HDROP`, `click-repeat-interval`) + Kitty (tmux off, `a=q` reply path, GUI render check) + shells (pwsh/cmd `ssh-env`/`ssh-terminfo`/`cursor`, WSL cwd) |
-| Win11 top-level "Open Ghostty here" | In win.2. `IExplorerCommand` COM DLL + unsigned sparse package (publisher with the unsigned-namespace OID `2.25.311729368913984317654407730594956997722=1`, `windows.fileExplorerContextMenus`), registered/removed by the installer (`Add-AppxPackage -ExternalLocation`), classic verb kept for Windows 10. DLL replacement on upgrade goes through the existing Retry loop. Tested only on the owner's machine (no clean/foreign machine available): residual risk noted in the release notes. Effort M (~2–3 days) |
+| Win11 top-level "Open Ghostty here" | NOT shipped in win.2 (owner decision 2026-10-29): Windows refuses the unsigned sparse package with executable activations (`0x80073D2B`); needs a real code-signing certificate. Original plan: `IExplorerCommand` COM DLL + unsigned sparse package (publisher with the unsigned-namespace OID `2.25.311729368913984317654407730594956997722=1`, `windows.fileExplorerContextMenus`), registered/removed by the installer (`Add-AppxPackage -ExternalLocation`), classic verb kept for Windows 10. DLL replacement on upgrade goes through the existing Retry loop. Tested only on the owner's machine (no clean/foreign machine available): residual risk noted in the release notes. Effort M (~2–3 days) |
 
 ### Status after win.2 (`1.3.2-dev-win.2`, 2026-10-29)
 
@@ -737,7 +737,7 @@ Merged from the audit report below (§ 6a).
 | 2 Kitty `t=s`, MSYS paths, DCS `tmux;` passthrough | limit | R-M7-11 |
 | 3 Tab rename white box, invisible text | done | Task 3: borderless themed popup; focus loss cancels |
 | 4 Symbols and emoji | done | Task 2: Segoe UI Symbol/Emoji, no Noto with DirectWrite |
-| 5 Explorer entry missing | done | Tasks 10, 14, 15: installer task `explorermenu` ticked; Windows 11 top-level entry for folders and backgrounds (drives: classic verb); unsigned, one-machine test |
+| 5 Explorer entry missing | done (classic verb only) | Tasks 10, 14, 15: installer task `explorermenu` ticked; classic verb in "Show more options". The Windows 11 top-level entry is not shipped: Windows refuses the unsigned sparse package (`0x80073D2B`), it needs a code-signing certificate |
 | 6 `C:\path:12` links | done | Task 6 |
 | 6 Paste of files copied in Explorer | done | Task 6 |
 | 6 `click-repeat-interval` | done | Task 6 (system double-click time) |

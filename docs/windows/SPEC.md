@@ -675,6 +675,7 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
   off in the fork's settings). A `workflow_dispatch`-only `windows-ci.yml` with ARM64 unit tests is a backlog line.
 
 ### 13.1 M7 amendments (win.2, R-M7-2, R-M7-13, R-M7-14)
+- **As built (owner decision 2026-10-29): the Windows 11 top-level menu is NOT shipped.** The owner's G4 check showed that Windows  refuses the unsigned sparse package (`Add-AppxPackage` fails with `0x80073D2B`: an unsigned package cannot include Executable  activations; AppXDeploymentServer event 796). It needs a real code-signing certificate. The code below stays in the repository  behind `package.ps1 -Win11Menu` (DLL + `.msix` in the stage, makeappx required) and the installer define `GhosttyWin11Menu`  (the `Add-AppxPackage` step); both are off by default, so releases need no Windows SDK. The installer still removes a  `Ghostty.ExplorerMenu` registered from its own folder and moves/deletes a leftover `ghostty-explorer.dll` on upgrade and uninstall.  The classic verb (`+install-explorer-integration`, task `explorermenu`) is the only Explorer entry; `test-explorer-command` stays in the unit step.  The paragraphs below describe the signed-package design, not the shipped zip or installer.
 - Zip additions: `ghostty-explorer.dll` and `ghostty-explorer.msix` next to `ghostty.exe` (per arch); `package.ps1` builds the `.msix` with
   `makeappx pack /nv` (Windows SDK, never signed), verifies the staged file on every path (all entries scanned for the privacy
   check, imports and machine type of the DLL read with a PowerShell PE reader, the DLL signed when `-SignCommand` is given).
@@ -877,8 +878,8 @@ owner smoke). Exit: owner sign-off.
 
 **M7 — win.2 (`1.3.2-dev-win.2`, plan `docs/windows/plans/M7-win2.md`, rulings R-M7-1…14 in §18; "done" is recorded in Task 18, `docs/windows/m7/acceptance.md`).** tmux shim off by default,
 Kitty in pwsh/cmd (render and `a=q` reply measured), symbols/emoji from Segoe UI Symbol/Emoji, `font-thicken`, tab rename popup, Windows paths in links,
-`CF_HDROP` paste, system double-click time, pwsh/cmd `cursor`/`ssh-env`/`ssh-terminfo`, WSL start directory, Windows 11 top-level "Open Ghostty here"
-(sparse package), installer task `explorermenu`. MSYS stays on the inbox console (limit, `docs/windows/m7/msys-key-loss.md`).
+`CF_HDROP` paste, system double-click time, pwsh/cmd `cursor`/`ssh-env`/`ssh-terminfo`, WSL start directory, Windows 11 top-level "Open Ghostty here" (not shipped, see 13.1),
+installer task `explorermenu`. MSYS stays on the inbox console (limit, `docs/windows/m7/msys-key-loss.md`).
 
 ## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
 1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
@@ -1298,6 +1299,6 @@ Rulings for M7 (plan-m7 and lead, 2026-10-29; the owner may overturn; full text 
 - R-M7-12, MSYS stays on the inbox console under `auto` (documented limit): the bundled console lost whole lines in 7-16 of 36 checks per run, with
   VT or win32-input-mode keys, against 0 of 48 on inbox; Windows Terminal does not show it. Kitty in Git Bash is opt-in with
   `windows-conpty = bundled`. `docs/windows/m7/msys-key-loss.md` has the measurements and the unsent bug-report text.
-- R-M7-13, the Windows 11 top-level menu: `ghostty-explorer.dll` + unsigned sparse package; **folders and folder backgrounds only, drives keep the
+- R-M7-13, the Windows 11 top-level menu: **not shipped in win.2** (Windows refuses the unsigned sparse package, `0x80073D2B`; needs a code-signing certificate; code kept behind `-Win11Menu`); the design: `ghostty-explorer.dll` + sparse package, **folders and folder backgrounds only, drives keep the
   classic verb** (schema limit); tested only on the owner's machine (§13.1).
 - R-M7-14, release `release.ps1 -N 2`, no upstream merge; the lead adds highlights and the residual-risk line to `release-notes.md`.
