@@ -8,6 +8,11 @@
 # the toast icon, left the user's files alone and that the real HKCU, the
 # Start menu and the uninstall list are unchanged (read-only snapshots).
 #
+# The Windows 11 menu files (ghostty-explorer.dll, ghostty-explorer.msix) must be
+# installed and then removed by the uninstaller; a read-only Get-AppxPackage
+# snapshot must be identical before install, after install and after uninstall
+# (the test variant never registers a package).
+#
 # Input: GHOSTTY_E2E_SETUP=<...-setup-test.exe>. The guards make sure it is
 # never the real installer (only the /DGhosttyTest variant writes no
 # registry and no shortcuts). Optional: GHOSTTY_E2E_STAGE_ZIP=<package zip>
@@ -84,6 +89,12 @@ function Get-RealSnapshot {
     } finally { $ErrorActionPreference = $eap }
 }
 
+# Read-only: the registered Ghostty.ExplorerMenu package (this variant never registers one).
+function Get-MenuPackageSnapshot {
+    $p = @(Get-AppxPackage -Name 'Ghostty.ExplorerMenu' -ErrorAction SilentlyContinue | ForEach-Object { $_.PackageFullName })
+    'appx: ' + ($p -join '|')
+}
+
 # Runs a program with the sandbox env plus the test hive; returns code and output.
 function Invoke-Sandboxed([string]$Exe, [string]$Arguments, [double]$TimeoutSec, [string]$Cwd) {
     $sbx = $script:Sbx
@@ -158,6 +169,7 @@ Invoke-E2eScenario 'installer-test' {
     Remove-Item -LiteralPath ($script:Hive + '*') -Force -ErrorAction SilentlyContinue
 
     $before = Get-RealSnapshot
+    $appxBefore = Get-MenuPackageSnapshot
     $setupArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS /DIR=`"$inst`" /LOG=`"$(Join-Path $sbx.Root 'setup.log')`""
 
     function Install-Once([string]$What) {
@@ -168,7 +180,7 @@ Invoke-E2eScenario 'installer-test' {
 
     function Assert-Files([string]$What) {
         $have = @(Get-RelFiles $inst | Where-Object { $_ -ne 'user-note.txt' })
-        foreach ($f in 'unins000.exe', 'unins000.dat', 'ghostty.exe', 'tmux.exe', 'LICENSE', 'README-windows.txt') {
+        foreach ($f in 'unins000.exe', 'unins000.dat', 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll', 'ghostty-explorer.msix', 'LICENSE', 'README-windows.txt') {
             if ($have -notcontains $f) { throw "$What : $f is missing" }
         }
         if (@($have | Where-Object { $_ -like 'share\ghostty\themes\*' }).Count -eq 0) { throw "$What : no themes" }
@@ -212,6 +224,7 @@ Invoke-E2eScenario 'installer-test' {
     # ---- install ----
     Install-Once 'install'
     Assert-Files 'after install'
+    if ((Get-MenuPackageSnapshot) -ne $appxBefore) { throw 'the test install changed the Ghostty.ExplorerMenu package state' }
     $exe = Join-Path $inst 'ghostty.exe'
     $v1 = Invoke-Sandboxed $exe '+version' 20 $inst
     $v0 = Invoke-Sandboxed $script:Exe '+version' 20 $script:Root
@@ -293,6 +306,10 @@ Invoke-E2eScenario 'installer-test' {
     if (Test-Path -LiteralPath $icon) { throw 'the toast icon is still there' }
     $left = @(Get-RelFiles $inst)
     if ($left.Count -ne 1 -or $left[0] -ne 'user-note.txt') { throw "the install folder keeps: $($left -join ', ')" }
+    foreach ($m in 'ghostty-explorer.dll', 'ghostty-explorer.msix') {
+        if (Test-Path -LiteralPath (Join-Path $inst $m)) { throw "the uninstaller left $m" }
+    }
+    if ((Get-MenuPackageSnapshot) -ne $appxBefore) { throw 'the test uninstall changed the Ghostty.ExplorerMenu package state' }
     if (-not (Test-Path -LiteralPath $sentinel) -or ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne 'keep me')) { throw 'the config sentinel changed' }
     $after = Get-RealSnapshot
     if ($after -ne $before) { throw "the real HKCU / Start menu state changed:`nbefore:`n$before`nafter:`n$after" }

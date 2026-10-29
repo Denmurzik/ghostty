@@ -3,7 +3,7 @@
 ; (x64|arm64), Stage, OutDir, and optionally GhosttyTest and Sign.
 ; /DGhosttyTest builds the test variant (R-M6-4): its own AppId, a folder
 ; under %TEMP%, no uninstall key, no shortcuts, no tasks, no Restart Manager,
-; no Explorer step. It keeps the running-Ghostty guards (they write nothing).
+; no Explorer step, no menu-package code. It keeps the running-Ghostty guards (they write nothing).
 ; Only that variant ever runs on a development machine.
 #ifndef AppVersion
   #error AppVersion is not defined
@@ -104,15 +104,93 @@ Filename: "{app}\ghostty.exe"; Description: "Launch Ghostty"; WorkingDir: "{%USE
 #endif
 
 [UninstallRun]
+#ifndef GhosttyTest
+; The Windows 11 folder-menu package (R-M7-13): removed first, whether or not
+; the task was ticked; no package, or a failed removal, is not an error.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ""try {{ Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage } catch {{ }; exit 0"""; Flags: runhidden waituntilterminated; RunOnceId: "ExplorerMenuRevert"
+#endif
 ; Always, whether or not the Explorer task was ticked. --only-this-exe keeps a
 ; portable copy's entries; --all also removes the AUMID key and toast icon.
 Filename: "{app}\ghostty.exe"; Parameters: "+uninstall-explorer-integration --all --only-this-exe"; Flags: runhidden waituntilterminated; RunOnceId: "ExplorerRevert"
 
 [Code]
 #ifndef GhosttyTest
+function GetTickCount(): Cardinal; external 'GetTickCount@kernel32.dll stdcall';
+
+// The Windows 11 folder-menu package (R-M7-13). Every PowerShell call uses the
+// full path, runs hidden and waited; paths sit in single quotes, doubled inside.
+function PsExe(): String;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+function PsQuote(const S: String): String;
+var
+  T: String;
+begin
+  T := S;
+  StringChangeEx(T, '''', '''''', True);
+  Result := '''' + T + '''';
+end;
+
+function RunPs(const Command: String): Integer;
+var
+  ResultCode: Integer;
+begin
+  if not Exec(PsExe(), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Command + '"',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    ResultCode := -1;
+  Result := ResultCode;
+end;
+
+procedure RemoveMenuPackage();
+begin
+  // The result is ignored: no package is the usual case.
+  RunPs('try { Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage } catch { }; exit 0');
+end;
+
+function MenuDll(): String;
+begin
+  Result := ExpandConstant('{app}\ghostty-explorer.dll');
+end;
+
+// A DLL that Explorer holds cannot be deleted but can be renamed on the same volume.
+function MoveDllAside(): Boolean;
+var
+  Dll: String;
+begin
+  Dll := MenuDll();
+  Result := not FileExists(Dll);
+  if Result then Exit;
+  Result := DeleteFile(Dll);
+  if not Result then
+    Result := RenameFile(Dll, Dll + '.old-' + IntToStr(GetTickCount()));
+end;
+
+procedure DeleteOldMenuDlls();
+var
+  Rec: TFindRec;
+  Dir: String;
+begin
+  Dir := ExpandConstant('{app}');
+  if FindFirst(Dir + '\ghostty-explorer.dll.old-*', Rec) then
+  begin
+    try
+      repeat
+        if (Rec.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0 then
+          DeleteFile(Dir + '\' + Rec.Name);
+      until not FindNext(Rec);
+    finally
+      FindClose(Rec);
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  WinVer: TWindowsVersion;
+  App: String;
 begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('explorermenu') then
   begin
@@ -124,7 +202,27 @@ begin
         'You can add it later with: ghostty.exe +install-explorer-integration',
         mbInformation, MB_OK, IDOK);
     end;
+
+    // Windows 11 top-level entry. A failure leaves the classic verb in place.
+    GetWindowsVersionEx(WinVer);
+    if WinVer.Build >= 22000 then
+    begin
+      App := ExpandConstant('{app}');
+      ResultCode := RunPs('try { Add-AppxPackage -Path ' + PsQuote(App + '\ghostty-explorer.msix') +
+        ' -ExternalLocation ' + PsQuote(App) +
+        ' -AllowUnsigned -ForceUpdateFromAnyVersion; exit 0 } catch { exit 1 }');
+      if ResultCode <> 0 then
+      begin
+        Log(Format('Add-AppxPackage failed (code %d)', [ResultCode]));
+        SuppressibleMsgBox('Ghostty was installed, but the Windows 11 folder-menu entry could not be added ' +
+          '(the classic "Show more options" entry still works). ' +
+          'The package may need Developer Mode to be turned on in Windows settings.',
+          mbInformation, MB_OK, IDOK);
+      end;
+    end;
   end;
+  if CurStep = ssPostInstall then
+    DeleteOldMenuDlls();
 end;
 #endif
 
@@ -149,6 +247,28 @@ begin
       Exit;
     end;
   end;
+#ifndef GhosttyTest
+  // Upgrade: Explorer may hold the previous menu DLL. Drop the package, then
+  // delete the DLL or move it aside; never offer Ignore.
+  if FileExists(MenuDll()) then
+  begin
+    RemoveMenuPackage();
+    Msg := 'Explorer is still using the Ghostty menu. Close all File Explorer windows, then click Retry.';
+    while not MoveDllAside() do
+    begin
+      if WizardSilent then
+      begin
+        Result := Msg;
+        Exit;
+      end;
+      if MsgBox(Msg, mbError, MB_RETRYCANCEL) = IDCANCEL then
+      begin
+        Result := 'Setup was stopped because Explorer is using the Ghostty menu.';
+        Exit;
+      end;
+    end;
+  end;
+#endif
 end;
 
 function InitializeUninstall(): Boolean;
@@ -164,3 +284,14 @@ begin
     end;
   end;
 end;
+
+#ifndef GhosttyTest
+// The package is gone by now (ExplorerMenuRevert); a DLL Explorer still holds
+// is moved aside so the uninstaller does not trip over it. The leftover
+// ghostty-explorer.dll.old-* can keep the folder until the next install.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    MoveDllAside();
+end;
+#endif
