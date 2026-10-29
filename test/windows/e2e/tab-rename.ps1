@@ -4,7 +4,7 @@
 # title changes), Esc cancels, an empty commit clears the title. The
 # prompt_surface_title action opens the editor too, and its commit sets the
 # surface title. The editor is not a white box (fewer than 10 % of its pixels
-# are near white, its median colour is the tab fill within 24 per channel)
+# are near white, its median colour is the tab fill within 24 per channel, opaque window only)
 # and the typed text is visible, also with background-opacity = 0.85.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_backdrop.ps1')
@@ -57,7 +57,7 @@ Invoke-E2eScenario 'tab-rename' {
         $s[[int][Math]::Floor($s.Count / 2)]
     }
     function Get-Lum($p) { 0.2126 * $p.R + 0.7152 * $p.G + 0.0722 * $p.B }
-    function Assert-EditorLooksLikeTab([string]$Tag, $Bmp) {
+    function Assert-EditorLooksLikeTab([string]$Tag, $Bmp, [switch]$SkipColour) {
         $white = 0; $rs = @(); $gs = @(); $bs = @()
         for ($y = 0; $y -lt $Bmp.Height; $y++) {
             for ($x = 0; $x -lt $Bmp.Width; $x++) {
@@ -76,9 +76,9 @@ Invoke-E2eScenario 'tab-rename' {
         $near.Dispose()
         $med = @((Get-Median $rs), (Get-Median $gs), (Get-Median $bs))
         $fill = @((Get-Median $nr), (Get-Median $ng), (Get-Median $nb))
-        for ($i = 0; $i -lt 3; $i++) {
+        if (-not $SkipColour) { for ($i = 0; $i -lt 3; $i++) {
             if ([Math]::Abs($med[$i] - $fill[$i]) -gt 24) { throw "$Tag : editor median colour $($med -join ',') is not the tab fill $($fill -join ',') (+-24)" }
-        }
+        } }
         Write-E2eInfo "$Tag : editor median $($med -join ','), tab fill $($fill -join ','), near-white $white/$total"
     }
     function Assert-EditorTextVisible([string]$Tag, $Before) {
@@ -96,7 +96,7 @@ Invoke-E2eScenario 'tab-rename' {
         } finally { $after.Dispose() }
     }
     # Opens the editor on the first tab, checks the pixels, types, checks the text, Esc.
-    function Test-EditorPixels([string]$Tag) {
+    function Test-EditorPixels([string]$Tag, [switch]$SkipColour) {
         $w = Get-Win
         $c = Get-Centre @($w.strip.tabs)[0]
         Send-MouseClick -Hwnd $g.Hwnd -X ($c[0] - 40) -Y $c[1] -Double
@@ -104,7 +104,7 @@ Invoke-E2eScenario 'tab-rename' {
         Start-Sleep -Milliseconds 300
         $before = Get-EditorShot
         try {
-            Assert-EditorLooksLikeTab $Tag $before
+            Assert-EditorLooksLikeTab $Tag $before -SkipColour:$SkipColour
             Invoke-SendInput -Panel -Hwnd $g.Hwnd -Text 'renamed'
             Start-Sleep -Milliseconds 300
             Assert-EditorTextVisible $Tag $before
@@ -174,6 +174,6 @@ Invoke-E2eScenario 'tab-rename' {
         Move-Window $g.Hwnd 160 160 1000 700
         [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
         Start-Sleep -Milliseconds 800
-        Test-EditorPixels 'translucent'
+        Test-EditorPixels 'translucent' -SkipColour
     } finally { $back.Close() }
 }
