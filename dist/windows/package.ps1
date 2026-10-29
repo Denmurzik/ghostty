@@ -188,12 +188,12 @@ try {
 
     # The sparse package for the Windows 11 Explorer menu (R-M7-13): built into
     # the stage from a prefix (a zip already carries the one that was built),
-    # never signed. Its manifest must name the DLL's CLSID and the package name
-    # from ids.zig.
+    # never signed. Either way it is verified: name, CLSIDs, version, arch and
+    # publisher against ids.zig and the version, and every entry privacy-scanned.
+    $vm = [regex]::Match($Version, '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[^+\s]+)?-win\.(0|[1-9][0-9]*)$')
+    if (-not $vm.Success) { Fail "version '$Version' has no X.Y.Z base for the sparse package" }
+    $ver4 = '{0}.{1}.{2}.{3}' -f $vm.Groups[1].Value, $vm.Groups[2].Value, $vm.Groups[3].Value, $vm.Groups[5].Value
     if ($PSCmdlet.ParameterSetName -eq 'Prefix') {
-        $vm = [regex]::Match($Version, '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[^+\s]+)?-win\.(0|[1-9][0-9]*)$')
-        if (-not $vm.Success) { Fail "version '$Version' has no X.Y.Z base for the sparse package" }
-        $ver4 = '{0}.{1}.{2}.{3}' -f $vm.Groups[1].Value, $vm.Groups[2].Value, $vm.Groups[3].Value, $vm.Groups[5].Value
         $sparse = Join-Path $PSScriptRoot 'sparse\build-sparse.ps1'
         if (-not (Test-Path -LiteralPath $sparse)) { Fail 'sparse\build-sparse.ps1' }
         $psx = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -207,29 +207,50 @@ try {
     $mc = [regex]::Match($ids, 'pub const clsid_text = "(\{[0-9A-Fa-f-]{36}\})";')
     $mn = [regex]::Match($ids, 'pub const package_name = "([^"]+)";')
     if (-not $mc.Success -or -not $mn.Success) { Fail 'clsid_text or package_name not found in src\explorer_command\ids.zig' }
+    $oidPublisher = 'CN=Ghostty Windows port (unofficial), OID.2.25.311729368913984317654407730594956997722=1'
+    $msixScan = Join-Path $stageRoot '_msix'
+    $null = New-Item -ItemType Directory -Force -Path $msixScan
+    $manifestText = $null
     $msixZip = [IO.Compression.ZipFile]::OpenRead((Join-Path $stage 'ghostty-explorer.msix'))
     try {
-        $ent = $msixZip.GetEntry('AppxManifest.xml')
-        if ($null -eq $ent) { Fail 'ghostty-explorer.msix has no AppxManifest.xml' }
-        $rd = New-Object IO.StreamReader($ent.Open(), [Text.Encoding]::UTF8)
-        try { $manifestText = $rd.ReadToEnd() } finally { $rd.Dispose() }
+        $k = 0
+        foreach ($ent in $msixZip.Entries) {
+            if ($ent.FullName.EndsWith('/')) { continue }
+            $en = [Uri]::UnescapeDataString($ent.FullName)
+            if ($en -notin @('AppxManifest.xml', 'AppxBlockMap.xml', '[Content_Types].xml') -and $en -notmatch '^Assets/[A-Za-z0-9]+\.png$') {
+                Fail "ghostty-explorer.msix has an unexpected entry: $en"
+            }
+            $k++
+            $tmp = Join-Path $msixScan ("e$k.bin")
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($ent, $tmp, $true)
+            $hit = Test-Privacy -Path $tmp
+            if ($null -ne $hit) { Fail ("privacy ghostty-explorer.msix/$en " + ($hit -replace '^(\d+): ', '@$1: ')) }
+            if ($en -eq 'AppxManifest.xml') { $manifestText = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8) }
+        }
     } finally { $msixZip.Dispose() }
+    Remove-Item -LiteralPath $msixScan -Recurse -Force
+    if ($null -eq $manifestText) { Fail 'ghostty-explorer.msix has no AppxManifest.xml' }
     $mx = [xml]$manifestText
     $idn = $mx.Package.Identity
     if ($idn.Name -ne $mn.Groups[1].Value) { Fail "msix package name '$($idn.Name)' <> ids.zig '$($mn.Groups[1].Value)'" }
+    if ($idn.Publisher -cne $oidPublisher) { Fail "msix publisher '$($idn.Publisher)'" }
     $clsids = @([regex]::Matches($manifestText, '(?:Clsid|Id)="([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"') | ForEach-Object { $_.Groups[1].Value })
     if ($clsids.Count -ne 3) { Fail "msix manifest names $($clsids.Count) CLSIDs (want 3: two verbs and the class)" }
     foreach ($c in $clsids) {
         if ("{$c}" -ne $mc.Groups[1].Value) { Fail "msix CLSID {$c} <> ids.zig $($mc.Groups[1].Value)" }
     }
     if ($manifestText -match '\{\{') { Fail 'msix manifest has an unreplaced placeholder' }
-    if ($PSCmdlet.ParameterSetName -eq 'Prefix' -and $idn.Version -ne $ver4) { Fail "msix version '$($idn.Version)' <> '$ver4'" }
+    if ($idn.Version -ne $ver4) { Fail "msix version '$($idn.Version)' <> '$ver4'" }
     if ($idn.ProcessorArchitecture -ne $Arch) { Fail "msix architecture '$($idn.ProcessorArchitecture)' <> '$Arch'" }
-    $manifestCopy = Join-Path $OutDir 'msix-manifest.tmp.xml'
-    [IO.File]::WriteAllText($manifestCopy, $manifestText)
-    $hit = Test-Privacy -Path $manifestCopy
-    Remove-Item -LiteralPath $manifestCopy -Force
-    if ($null -ne $hit) { Fail ('privacy ghostty-explorer.msix manifest ' + ($hit -replace '^(\d+): ', '@$1: ')) }
+
+    # The staged DLL must be built for -Arch (an x64 DLL in an arm64 package
+    # would register and never load).
+    $dllBytes = [IO.File]::ReadAllBytes((Join-Path $stage 'ghostty-explorer.dll'))
+    $peOff = if ($dllBytes.Length -gt 0x40) { [BitConverter]::ToInt32($dllBytes, 0x3C) } else { -1 }
+    if ($peOff -lt 0 -or $peOff + 6 -gt $dllBytes.Length) { Fail 'ghostty-explorer.dll is not a PE file' }
+    $machine = [BitConverter]::ToUInt16($dllBytes, $peOff + 4)
+    $wantMachine = if ($Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
+    if ($machine -ne $wantMachine) { Fail ('ghostty-explorer.dll machine 0x{0:X4} <> {1}' -f $machine, $Arch) }
 
     # The bundled ConPTY: pinned hashes (vendor/conpty/README.md) and a
     # Microsoft Authenticode signature (R-M6-12).
@@ -274,7 +295,7 @@ try {
     if ($Local) {
         Write-Host 'package: SKIP imports (-Local)'
     } elseif (-not $dumpbin) {
-        Write-Host 'package: SKIP imports (no dumpbin)'
+        Fail 'imports: dumpbin not found (Visual Studio build tools); the imports of ghostty-explorer.dll cannot be checked'
     } else {
         function Get-Imports([string]$exePath) {
             $tmpLog = Join-Path $OutDir 'dumpbin.tmp.log'
@@ -355,7 +376,7 @@ try {
     # ---- 4. sign ---------------------------------------------------------
     if ($SignCommand) {
         $cmd = Get-Command cmd.exe
-        foreach ($exe in 'ghostty.exe', 'tmux.exe') {
+        foreach ($exe in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll') {
             $line = $SignCommand.Replace('{file}', '"' + (Join-Path $stage $exe) + '"')
             $rc = Invoke-Native -Exe $cmd.Source -CmdLine ('/d /s /c "' + $line + '"') -Log $log -HideCmdLine
             if ($rc -ne 0) { Fail "sign $exe (exit $rc)" }

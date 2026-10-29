@@ -52,6 +52,10 @@ pub const GUID = extern struct {
 
     /// `{8-4-4-4-12}` hex text, at comptime.
     pub fn parse(comptime text: []const u8) GUID {
+        return comptime parseText(text);
+    }
+
+    fn parseText(comptime text: []const u8) GUID {
         comptime {
             if (text.len != 38 or text[0] != '{' or text[37] != '}') @compileError("bad GUID text");
             const d = std.fmt.parseUnsigned;

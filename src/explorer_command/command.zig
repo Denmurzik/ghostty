@@ -557,18 +557,83 @@ fn realModuleDir(buf: []u16) ?usize {
     return std.mem.lastIndexOfScalar(u16, buf[0..n], '\\');
 }
 
+/// `PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY` with
+/// `PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_ENABLE_PROCESS_TREE`: the packaged
+/// COM surrogate's child (ghostty.exe) must not inherit the package identity
+/// (R-M7-13: no identity for ghostty.exe).
+const attr_desktop_app_policy: usize = 0x00020012;
+const desktop_app_breakaway_enable_process_tree: u32 = 0x1;
+const extended_startupinfo_present: u32 = 0x00080000;
+
+const StartupInfoEx = extern struct {
+    si: StartupInfo = .{ .cb = @sizeOf(StartupInfoEx) },
+    attrs: ?*anyopaque = null,
+};
+
+/// The attribute-list calls, so a test can stand in for kernel32.
+const AttrApi = struct {
+    init: *const fn (list: ?*anyopaque, count: u32, flags: u32, size: *usize) callconv(.winapi) i32,
+    update: *const fn (list: *anyopaque, flags: u32, attr: usize, value: *const anyopaque, size: usize, prev: ?*anyopaque, ret: ?*usize) callconv(.winapi) i32,
+    delete: *const fn (list: *anyopaque) callconv(.winapi) void,
+};
+
+extern "kernel32" fn InitializeProcThreadAttributeList(list: ?*anyopaque, count: u32, flags: u32, size: *usize) callconv(.winapi) i32;
+extern "kernel32" fn UpdateProcThreadAttribute(list: *anyopaque, flags: u32, attr: usize, value: *const anyopaque, size: usize, prev: ?*anyopaque, ret: ?*usize) callconv(.winapi) i32;
+extern "kernel32" fn DeleteProcThreadAttributeList(list: *anyopaque) callconv(.winapi) void;
+
+const real_attr_api: AttrApi = .{
+    .init = InitializeProcThreadAttributeList,
+    .update = UpdateProcThreadAttribute,
+    .delete = DeleteProcThreadAttributeList,
+};
+
+/// A one-attribute list holding the breakaway policy, or null when any call
+/// fails (the caller then launches plainly). Free with `freeAttrList`.
+fn buildAttrList(api: AttrApi, policy: *const u32) ?*anyopaque {
+    var size: usize = 0;
+    _ = api.init(null, 1, 0, &size); // fails by design and reports the size
+    if (size == 0 or size > 4096) return null;
+    const heap = GetProcessHeap() orelse return null;
+    const mem = HeapAlloc(heap, 0, size) orelse return null;
+    if (api.init(mem, 1, 0, &size) == 0) {
+        _ = HeapFree(heap, 0, mem);
+        return null;
+    }
+    if (api.update(mem, 0, attr_desktop_app_policy, policy, @sizeOf(u32), null, null) == 0) {
+        api.delete(mem);
+        _ = HeapFree(heap, 0, mem);
+        return null;
+    }
+    return mem;
+}
+
+fn freeAttrList(api: AttrApi, list: *anyopaque) void {
+    api.delete(list);
+    if (GetProcessHeap()) |heap| _ = HeapFree(heap, 0, list);
+}
+
 fn realLaunch(cmdline: [:0]u16, cwd: [*:0]const u16) u32 {
-    var si: StartupInfo = .{};
     var pi: ProcessInformation = .{};
-    if (CreateProcessW(null, cmdline.ptr, null, null, 0, create_unicode_environment, null, cwd, &si, &pi) == 0) {
-        const e = GetLastError();
-        return if (e == 0) 0xFFFF else e;
+    var policy: u32 = desktop_app_breakaway_enable_process_tree;
+    var ex: StartupInfoEx = .{};
+    var ok = false;
+    if (buildAttrList(real_attr_api, &policy)) |list| {
+        defer freeAttrList(real_attr_api, list);
+        ex.attrs = list;
+        ok = CreateProcessW(null, cmdline.ptr, null, null, 0, create_unicode_environment | extended_startupinfo_present, null, cwd, &ex.si, &pi) != 0;
+    }
+    if (!ok) {
+        // No attribute list, or the system refused it: a plain launch.
+        var si: StartupInfo = .{};
+        if (CreateProcessW(null, cmdline.ptr, null, null, 0, create_unicode_environment, null, cwd, &si, &pi) == 0) {
+            const e = GetLastError();
+            return if (e == 0) 0xFFFF else e;
+        }
     }
     if (pi.hThread) |h| _ = CloseHandle(h);
     if (pi.hProcess) |h| _ = CloseHandle(h);
     return 0;
 }
-
 fn realPidlPath(pidl: *anyopaque) ?com.LPWSTR {
     var name: ?com.LPWSTR = null;
     if (!com.succeeded(com.SHGetNameFromIDList(pidl, com.SIGDN_FILESYSPATH, &name))) return null;
@@ -1018,7 +1083,7 @@ test "explorer command: null array resolves the folder from the site" {
         "\"C:\\Program Files\\Ghostty\\ghostty.exe\" \"--working-directory=C:\\bg dir\\.\"",
         captured_cmd[0..captured_cmd_len],
     );
-    try testing.expectEqualStrings("C:\\bg dir",captured_cwd[0..captured_cwd_len]);
+    try testing.expectEqualStrings("C:\\bg dir", captured_cwd[0..captured_cwd_len]);
 
     // The command's last Release drops the site it holds.
     const released_before = fake_site_released;
@@ -1072,4 +1137,54 @@ test "explorer command: invoke builds the classic command" {
     captured_cmd_len = 0;
     try testing.expectEqual(com.E_INVALIDARG, v.Invoke(c, @ptrCast(&arr), null));
     try testing.expectEqual(@as(usize, 0), captured_cmd_len);
+}
+
+var fake_attr_calls: u32 = 0;
+var fake_attr_id: usize = 0;
+var fake_attr_value: u32 = 0;
+var fake_attr_deleted: bool = false;
+var fake_attr_fail_update: bool = false;
+
+fn fakeAttrInit(list: ?*anyopaque, count: u32, _: u32, size: *usize) callconv(.winapi) i32 {
+    _ = count;
+    if (list == null) {
+        size.* = 64;
+        return 0;
+    }
+    fake_attr_calls += 1;
+    return 1;
+}
+
+fn fakeAttrUpdate(_: *anyopaque, _: u32, attr: usize, value: *const anyopaque, size: usize, _: ?*anyopaque, _: ?*usize) callconv(.winapi) i32 {
+    if (fake_attr_fail_update) return 0;
+    fake_attr_id = attr;
+    fake_attr_value = @as(*const u32, @ptrCast(@alignCast(value))).*;
+    std.debug.assert(size == 4);
+    return 1;
+}
+
+fn fakeAttrDelete(_: *anyopaque) callconv(.winapi) void {
+    fake_attr_deleted = true;
+}
+
+test "explorer command: launch builds the desktop-app breakaway attribute list" {
+    const api: AttrApi = .{ .init = fakeAttrInit, .update = fakeAttrUpdate, .delete = fakeAttrDelete };
+    fake_attr_calls = 0;
+    fake_attr_deleted = false;
+    fake_attr_fail_update = false;
+    const policy: u32 = desktop_app_breakaway_enable_process_tree;
+    const list = buildAttrList(api, &policy) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0x00020012), fake_attr_id);
+    try testing.expectEqual(@as(u32, 1), fake_attr_value);
+    try testing.expectEqual(@as(u32, 1), fake_attr_calls);
+    freeAttrList(api, list);
+    try testing.expect(fake_attr_deleted);
+
+    // A failing update yields no list (the launch falls back to plain) and
+    // still releases what was initialised.
+    fake_attr_deleted = false;
+    fake_attr_fail_update = true;
+    try testing.expect(buildAttrList(api, &policy) == null);
+    try testing.expect(fake_attr_deleted);
+    fake_attr_fail_update = false;
 }

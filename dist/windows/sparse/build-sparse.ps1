@@ -95,6 +95,11 @@ if ($SelfTest) {
         @('MinVersion 10.0.22000.0', 'MinVersion="10.0.22000.0"', 'MinVersion="10.0.19041.0"'),
         @('AppListEntry none', 'AppListEntry="none"', 'AppListEntry="default"'),
         @('item type Directory\Background', 'Type="Directory\Background"', 'Type="Background"'),
+        @('item type Directory', 'Type="Directory"', 'Type="Dir"'),
+        @('CLSID placeholder (verb)', 'Verb Id="GhosttyOpenHere" Clsid="{{CLSID}}"', 'Verb Id="GhosttyOpenHere" Clsid="x"'),
+        @('VERSION placeholder', 'Version="{{VERSION}}"', 'Version="1.0.0.0"'),
+        @('ARCH placeholder', 'ProcessorArchitecture="{{ARCH}}"', 'ProcessorArchitecture="x64"'),
+        @('package name', 'Name="Ghostty.ExplorerMenu"', 'Name="Other"'),
         @('ThreadingModel STA', 'ThreadingModel="STA"', 'ThreadingModel="MTA"'),
         @('CLSID placeholder (class)', '<com:Class Id="{{CLSID}}"', '<com:Class Id="{5DCE6858-478B-4439-9D93-6DAB0557A7BB}"')
     )
