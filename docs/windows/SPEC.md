@@ -816,7 +816,7 @@ update check (`auto-update = check|off`, GitHub Releases via WinHTTP, toast), cr
 Windows analogs of macOS-only actions (`secure_input`, `undo`/`redo`), on-screen keyboard.
 Exit: each feature has a test or scripted screenshot; update check tested against a fake release JSON.
 
-**M6 — packaging and release (in progress; plan `docs/windows/plans/M6-release.md`; "done" is recorded by Task 11).** Zip + Inno Setup
+**M6 — packaging and release (done 2026-10-29: v1.0 pre-release `win-1.3.2-dev-1` from `f904ba62c`; record `docs/windows/m6/acceptance.md`; plan `docs/windows/plans/M6-release.md`).** Zip + Inno Setup
 (x64 + ARM64), version resource, third-party notices, bundled ConPTY, a local release script that prints the publish commands
 (no CI: R-M6-6), pre-release published by the owner, v1.0 gate of DECISIONS (feature checklist closed, RAM rows, Claude Code run,
 owner smoke). Exit: owner sign-off.
