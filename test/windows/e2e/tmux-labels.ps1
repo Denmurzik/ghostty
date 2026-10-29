@@ -20,7 +20,7 @@ public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new
 }
 
 Invoke-E2eScenario 'tmux-labels' {
-    $g = Start-BashE2e
+    $g = Start-BashE2e -ExtraConfig 'windows-tmux-shim = true'
     [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
 
     function Get-State { Get-GhosttyState -Class $g.Class }

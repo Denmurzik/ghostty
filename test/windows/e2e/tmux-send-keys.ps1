@@ -10,7 +10,7 @@ Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
 
 Invoke-E2eScenario 'tmux-send-keys' {
     if (-not (Test-Path -LiteralPath $script:TmuxExe)) { throw "missing $script:TmuxExe (run zig build first)" }
-    $g = Start-BashE2e
+    $g = Start-BashE2e -ExtraConfig 'windows-tmux-shim = true'
     if (-not (Wait-Until -TimeoutSec 10 -Condition { @(Get-TmuxPanes $g).Count -eq 1 })) { throw 'the state does not list exactly one tmux pane' }
 
     # The pane gets the client's environment (tmux.exe's, here the harness's own),

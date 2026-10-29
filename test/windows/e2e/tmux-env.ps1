@@ -1,8 +1,10 @@
 # e2e: milestone=M4 timeout=180 order=710
-# tmux-env: every pane gets TMUX (the Ghostty tmux pipe, the Ghostty pid, 0),
-# its own TMUX_PANE and the directory of tmux.exe first on PATH; the key
-# `windows-tmux-shim = false` leaves an inherited TMUX alone and does not
-# touch PATH.
+# tmux-env: with the default config (`windows-tmux-shim` off) no pane has TMUX
+# or TMUX_PANE and the Ghostty folder is not where `tmux` is found; with
+# `windows-tmux-shim = true` every pane gets TMUX (the Ghostty tmux pipe, the
+# Ghostty pid, 0), its own TMUX_PANE and the directory of tmux.exe first on
+# PATH; an explicit `false` leaves an inherited TMUX alone and does not touch
+# PATH.
 . (Join-Path $PSScriptRoot '_common.ps1')
 . (Join-Path $PSScriptRoot '_tmux.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
@@ -29,8 +31,16 @@ Invoke-E2eScenario 'tmux-env' {
         [pscustomobject]@{ Tmux = $f[0]; Pane = $f[1]; Command = $f[2]; PathHead = [string]$head }
     }
 
-    # --- enabled (default) ---
-    $g = Start-BashE2e
+    # --- default config: the shim is off ---
+    $g0 = Start-BashE2e
+    $e0 = Read-PaneEnv $g0 'tmux-env-0.txt'
+    if ($e0.Tmux -ne '') { throw "default: TMUX is '$($e0.Tmux)', expected unset" }
+    if ($e0.Pane -ne '') { throw "default: TMUX_PANE is '$($e0.Pane)', expected unset" }
+    if ($e0.Command -ieq "$msysBin/tmux") { throw "default: command -v tmux names the Ghostty folder ($($e0.Command))" }
+    Stop-OwnGhostty
+
+    # --- windows-tmux-shim = true ---
+    $g = Start-BashE2e -ExtraConfig 'windows-tmux-shim = true'
     if (-not (Wait-Until -TimeoutSec 10 -Condition { @(Get-TmuxPanes $g).Count -eq 1 })) { throw 'the state does not list exactly one tmux pane' }
     $first = @(Get-TmuxPanes $g)[0]
     $pipe = Get-TmuxPipe $g

@@ -80,7 +80,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 #ifndef GhosttyTest
 [Tasks]
-Name: "explorer"; Description: "Add ""Open Ghostty here"" to the Explorer folder menu"; Flags: unchecked
+Name: "explorermenu"; Description: "Add ""Open Ghostty here"" to the Explorer folder menu"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 #endif
 
@@ -114,7 +114,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
-  if (CurStep = ssPostInstall) and WizardIsTaskSelected('explorer') then
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('explorermenu') then
   begin
     if not Exec(ExpandConstant('{app}\ghostty.exe'), '+install-explorer-integration',
                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then

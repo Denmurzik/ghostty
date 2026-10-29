@@ -102,7 +102,7 @@ function Invoke-PackageCase {
     Write-E2eInfo "version=$version themes=$($themes.Count)"
 
     # --- session ---
-    $cfg = "command = direct:cmd.exe /k`nconfirm-close-surface = false`n"
+    $cfg = "command = direct:cmd.exe /k`nconfirm-close-surface = false`nwindows-tmux-shim = true`n"
     $g = Start-E2eGhostty -ConfigText $cfg -NoDump -Env @{ GHOSTTY_RESOURCES_DIR = $null }
     Assert-Foreground $g
     if (-not (Wait-ChildNamed $g @('cmd.exe') 20)) { throw 'cmd did not start' }

@@ -100,7 +100,7 @@ function Invoke-TeamRun([int]$N) {
         $sbx = $script:Sbx
         $trace = Join-Path $sbx.Root 'trace.jsonl'
         $extra = @{ GHOSTTY_TMUX_TRACE = $trace }
-        $cfgText = Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8
+        $cfgText = (Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8).TrimEnd() + "`nwindows-tmux-shim = true`n"
         $start = { param($e, $wd) Start-E2eGhostty -ConfigText $cfgText -Env $e }
         $ready = { param($g) Wait-BashReady $g }
         $failures = New-Object System.Collections.Generic.List[string]

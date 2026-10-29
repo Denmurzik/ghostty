@@ -34,6 +34,10 @@ pub fn apply(map: *std.process.Environ.Map, opts: Options) !void {
             try map.put("TMUX", try protocol.tmuxEnvValue(&tmux_buf, pipe, opts.server_pid));
             var pane_buf: [16]u8 = undefined;
             try map.put("TMUX_PANE", try std.fmt.bufPrint(&pane_buf, "%{d}", .{opts.pane_id}));
+            // The shim's "outer terminal" is Ghostty, which is truecolor.
+            if (map.get("CLAUDE_CODE_TMUX_TRUECOLOR") == null) {
+                try map.put("CLAUDE_CODE_TMUX_TRUECOLOR", "1");
+            }
         } else {
             _ = map.orderedRemove("TMUX");
             _ = map.orderedRemove("TMUX_PANE");
@@ -114,7 +118,7 @@ test "win32 tmux env: Path and PATH merge" {
     var m = try testMap(&.{.{ "Path", "C:\\u;C:\\v" }});
     defer m.deinit();
     try apply(&m, .{ .enabled = true, .pipe = test_pipe, .server_pid = 42, .pane_id = 1, .exe_dir = "C:\\g" });
-    try std.testing.expectEqual(@as(usize, 3), m.count()); // Path, TMUX, TMUX_PANE
+    try std.testing.expectEqual(@as(usize, 4), m.count()); // Path, TMUX, TMUX_PANE, CLAUDE_CODE_TMUX_TRUECOLOR
     try std.testing.expectEqualStrings("C:\\g;C:\\u;C:\\v", m.get("PATH").?);
     try std.testing.expectEqualStrings("C:\\g;C:\\u;C:\\v", m.get("Path").?);
 }
@@ -193,9 +197,31 @@ test "win32 tmux env: map keys are case-insensitive" {
     try std.testing.expectEqualStrings("x", m.get("path").?);
 }
 
-test "win32 config: windows-tmux-shim defaults to true" {
+test "win32 config: windows-tmux-shim defaults to false" {
     const Config = @import("../../../config.zig").Config;
     const field = std.meta.fieldInfo(Config, .@"windows-tmux-shim");
     try std.testing.expect(field.type == bool);
-    try std.testing.expect(field.attrs.defaultValue(bool).?);
+    try std.testing.expect(!field.attrs.defaultValue(bool).?);
+}
+
+test "win32 tmux env: truecolor hint with the shim" {
+    var m = try testMap(&.{});
+    defer m.deinit();
+    try apply(&m, .{ .enabled = true, .pipe = test_pipe, .server_pid = 42, .pane_id = 1, .exe_dir = null });
+    try std.testing.expectEqualStrings("1", m.get("CLAUDE_CODE_TMUX_TRUECOLOR").?);
+
+    var kept = try testMap(&.{.{ "CLAUDE_CODE_TMUX_TRUECOLOR", "0" }});
+    defer kept.deinit();
+    try apply(&kept, .{ .enabled = true, .pipe = test_pipe, .server_pid = 42, .pane_id = 1, .exe_dir = null });
+    try std.testing.expectEqualStrings("0", kept.get("CLAUDE_CODE_TMUX_TRUECOLOR").?);
+
+    var off = try testMap(&.{});
+    defer off.deinit();
+    try apply(&off, .{ .enabled = false, .pipe = test_pipe, .server_pid = 42, .pane_id = 1, .exe_dir = null });
+    try std.testing.expect(off.get("CLAUDE_CODE_TMUX_TRUECOLOR") == null);
+
+    var nopipe = try testMap(&.{});
+    defer nopipe.deinit();
+    try apply(&nopipe, .{ .enabled = true, .pipe = null, .server_pid = 0, .pane_id = 1, .exe_dir = null });
+    try std.testing.expect(nopipe.get("CLAUDE_CODE_TMUX_TRUECOLOR") == null);
 }

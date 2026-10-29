@@ -3862,13 +3862,19 @@ else
 /// to `ghostty.exe`; it talks to this Ghostty over a private named pipe and
 /// opens panes as Ghostty splits, tabs and windows.
 ///
-/// When enabled (the default), every pane gets `TMUX` and `TMUX_PANE`, and the
-/// directory of `tmux.exe` is put first on its `PATH` (moved to the front if
-/// it was already there), so Ghostty's `tmux.exe` wins over any other `tmux`.
+/// Off by default. Turn it on for Claude Code agent teams (`teammateMode:
+/// "tmux"`), which need a `tmux` to open their panes as Ghostty splits.
+///
+/// When enabled, every pane gets `TMUX`, `TMUX_PANE` and
+/// `CLAUDE_CODE_TMUX_TRUECOLOR=1` (unless already set), and the directory of
+/// `tmux.exe` is put first on its `PATH` (moved to the front if it was
+/// already there), so Ghostty's `tmux.exe` wins over any other `tmux`. With
+/// `TMUX` set, tmux-aware tools do not show Kitty images.
+///
 /// A login shell such as Git Bash may reorder `PATH` in its profile; run
 /// `command -v tmux` in a pane to check which `tmux` is found.
 ///
-/// When disabled, `TMUX` and `TMUX_PANE` are neither set nor removed (an
+/// When disabled (the default), `TMUX` and `TMUX_PANE` are neither set nor removed (an
 /// inherited `TMUX` stays as it is), `PATH` is not changed, and `tmux.exe`
 /// is only found if Ghostty's own directory is on `PATH`. The setting is read
 /// when a surface starts, so a reload affects new surfaces only. The key is
@@ -3876,7 +3882,7 @@ else
 /// window) is ignored.
 ///
 /// This only applies to Windows.
-@"windows-tmux-shim": bool = true,
+@"windows-tmux-shim": bool = false,
 
 /// Whether programs outside of Ghostty can drive Ghostty with `tmux.exe`
 /// (for `new-session`, `new-window`, `kill-session` and the like). When
@@ -11647,6 +11653,7 @@ test "windows config: M5 keys default" {
     var cfg = try Config.default(testing.allocator);
     defer cfg.deinit();
     try testing.expect(!cfg.@"windows-tmux-external");
+    try testing.expect(!cfg.@"windows-tmux-shim");
     try testing.expect(cfg.@"windows-jump-list");
 }
 

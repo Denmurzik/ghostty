@@ -39,7 +39,7 @@ Invoke-E2eScenario 'tmux-replay' {
     Write-E2eInfo "replaying $($calls.Count) calls from $(Split-Path -Leaf $fixture)"
 
     # Confirmation on, for the modal step.
-    $text = (Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8) -replace 'confirm-close-surface = false', 'confirm-close-surface = true'
+    $text = ((Get-Content -LiteralPath (Get-ConfigPath 'gitbash-de') -Raw -Encoding UTF8) -replace 'confirm-close-surface = false', 'confirm-close-surface = true').TrimEnd() + "`nwindows-tmux-shim = true`n"
     $g = Start-E2eGhostty -ConfigText $text
     Wait-BashReady $g
     $pipe = Get-TmuxPipe $g

@@ -70,7 +70,7 @@ Invoke-E2eScenario 'tmux-external' {
     if (-not (Test-Path -LiteralPath $script:TmuxExe)) { throw "missing $script:TmuxExe (run zig build first)" }
 
     # --- Key true: the user pipe is served. -----------------------------------
-    $g = Start-E2eGhostty -ConfigText ($script:BaseConfig + "`nwindows-tmux-external = true`n")
+    $g = Start-E2eGhostty -ConfigText ($script:BaseConfig + "`nwindows-tmux-external = true`nwindows-tmux-shim = true`n")
     $s = Get-GhosttyState -Class $g.Class
     $user = [string]$s.tmux.user_pipe
     if ($user -notmatch '^..[.].pipe.ghostty-tmux-S-1-[0-9]+(-[0-9]+)+-[ua]-[0-9]+-.+') { throw "unexpected user pipe name '$user'" }
@@ -151,7 +151,7 @@ Invoke-E2eScenario 'tmux-external' {
     [void](Wait-ProcessExit $g 10)
 
     # --- Key false (the default): no user pipe, "no server running". ---------
-    $g = Start-E2eGhostty
+    $g = Start-E2eGhostty -ConfigText ($script:BaseConfig + "`nwindows-tmux-shim = true`n")
     $s = Get-GhosttyState -Class $g.Class
     if ([string]$s.tmux.user_pipe) { throw "user pipe '$($s.tmux.user_pipe)' exists with windows-tmux-external = false" }
     $r = Invoke-TmuxExt $g @('-L', 'claude-swarm-1', 'has-session', '-t', 'claude-swarm')

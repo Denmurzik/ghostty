@@ -110,7 +110,7 @@ Invoke-E2eScenario 'measure-tmux' {
     if ($Part -in 'team-ram', 'all') {
         $priv = @{ before = @(); team = @(); killed = @() }
         for ($run = 1; $run -le $Runs; $run++) {
-            $g = Start-BashE2e -NoDump
+            $g = Start-BashE2e -NoDump -ExtraConfig 'windows-tmux-shim = true'
             $leader = [string]@(Get-TmuxPanes $g)[0].pane
             Start-Sleep -Seconds 10
             $adapter = Get-Adapter $g
@@ -158,7 +158,7 @@ Invoke-E2eScenario 'measure-tmux' {
     }
 
     if ($Part -in 'tmux-exe', 'latency', 'all') {
-        $g = Start-BashE2e -NoDump
+        $g = Start-BashE2e -NoDump -ExtraConfig 'windows-tmux-shim = true'
         $leader = [string]@(Get-TmuxPanes $g)[0].pane
         $adapter = Get-Adapter $g
         Start-Sleep -Seconds 3
