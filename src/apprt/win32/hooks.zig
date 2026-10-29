@@ -16,6 +16,7 @@ const Inspector = @import("inspector/Inspector.zig");
 const QuickTerminal = @import("QuickTerminal.zig");
 const SearchBar = @import("SearchBar.zig");
 const about = @import("about.zig");
+const title_edit = @import("title_edit.zig");
 const app_toast = @import("app_toast.zig");
 const badges = @import("badges.zig");
 const bell = @import("bell.zig");
@@ -232,6 +233,8 @@ pub const WindowChange = enum { moved, sized, dpi, minimized, restored, activate
 
 pub fn windowChanged(window: *Window, change: WindowChange) void {
     overlay.windowChanged(window, change);
+    // The editor sits at a pixel rect of the old scale.
+    if (change == .dpi) title_edit.cancel(window);
     if (change == .destroying) link.windowDestroying(window);
     if (change == .destroying) CommandPalette.windowDestroying(window);
     QuickTerminal.windowChanged(window, change);
@@ -241,6 +244,7 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
 /// The tab became the window's visible one (or stopped being it).
 pub fn tabShown(tab: *Tab, shown: bool) void {
     overlay.tabShown(tab, shown);
+    if (!shown) title_edit.cancelForTab(tab.window, tab);
     scrollbar.tabShown(tab, shown);
     tmux_labels.tabShown(tab, shown);
 }

@@ -22,6 +22,7 @@ const Window = @import("../Window.zig");
 const geom = @import("../geom.zig");
 const instance = @import("../instance.zig");
 const theme = @import("../theme.zig");
+const title_edit = @import("../title_edit.zig");
 const protocol = @import("protocol.zig");
 const undo_actions = @import("../actions/undo_actions.zig");
 const Server = @import("Server.zig");
@@ -480,6 +481,9 @@ fn writeWindow(jw: *std.json.Stringify, window: *Window) !void {
     try jw.write(window.active_tab);
 
     try writeStrip(jw, window);
+
+    try jw.objectField("title_edit");
+    try title_edit.writeState(jw, window);
 
     try jw.objectField("tabs");
     try jw.beginArray();
