@@ -59,13 +59,13 @@ Invoke-E2eScenario 'link-windows-path' {
     }
     Send-MouseMove -Hwnd $surface -X 600 -Y 300
 
-    # Group the hit rows into one entry per terminal row: a gap of more than
-    # one probe step starts a new row.
+    # Adjacent link rows give one unbroken run of hits: count the rows by the run length over the cell height.
+    $cell = [int](Get-GhosttyState -Class $g.Class).windows[0].cell[1]
     $rows = New-Object System.Collections.Generic.List[int]
-    $prev = -100
-    foreach ($y in $hits) {
-        if ($y - $prev -gt 4) { $rows.Add($y) }
-        $prev = $y
+    if ($hits.Count -gt 0) {
+        $span = $hits[$hits.Count - 1] - $hits[0] + 4
+        $n = [int][math]::Round($span / $cell)
+        for ($k = 0; $k -lt $n; $k++) { $rows.Add([int]($hits[0] + $k * $cell)) }
     }
     Write-E2eInfo "label rows (first probe y each): $($rows -join ', ')"
     if ($rows.Count -ne 2) {
@@ -76,7 +76,7 @@ Invoke-E2eScenario 'link-windows-path' {
     # Ctrl+click each of the two: the exact text is recorded.
     $want = @('C:\Windows\win.ini:3', '.\x\y.txt')
     for ($i = 0; $i -lt 2; $i++) {
-        $y = $rows[$i] + 2
+        $y = $rows[$i]
         Send-MouseMove -Hwnd $surface -X 20 -Y $y
         Start-Sleep -Milliseconds 200
         Invoke-CtrlHold { Send-MouseClick -Hwnd $surface -X 20 -Y $y }
