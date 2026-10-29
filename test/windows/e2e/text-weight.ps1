@@ -140,10 +140,10 @@ command = direct:"$bash" --noprofile --norc $sampleArg
 
     # Contact sheet: the four crops stacked, each under a label bar.
     $labelH = 20
-    $cropW = ($crops.Values | ForEach-Object { $_.W } | Measure-Object -Maximum).Maximum
+    $cropW = [int](($crops.Values | ForEach-Object { $_.W } | Measure-Object -Maximum).Maximum)
     $sheetH = 0
     foreach ($v in $crops.Keys) { $sheetH += $labelH + $crops[$v].H }
-    $sheet = New-Object System.Drawing.Bitmap $cropW, $sheetH
+    $sheet = New-Object System.Drawing.Bitmap ([int]$cropW), ([int]$sheetH)
     $gfx = [System.Drawing.Graphics]::FromImage($sheet)
     try {
         $gfx.Clear([System.Drawing.Color]::FromArgb(40, 40, 40))
