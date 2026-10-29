@@ -23,6 +23,9 @@ const log = std.log.scoped(.io_handler);
 /// unless all of the member fields are copied.
 pub const StreamHandler = struct {
     alloc: Allocator,
+
+    /// The command is WSL: OSC 7 paths are Linux paths (Windows only).
+    wsl: bool = false,
     size: *renderer.Size,
     terminal: *terminal.Terminal,
 
@@ -1569,7 +1572,9 @@ pub const StreamHandler = struct {
         var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
         // Windows paths come as `file:///C:/x`: no host means this machine.
         const is_windows = comptime builtin.target.os.tag == .windows;
-        const host = if (is_windows and (uri.host == null or uri.host.?.isEmpty()))
+        // A WSL shell reports its own host name (renameable in wsl.conf), so a
+        // WSL pane is not held to this machine's name.
+        const host = if (is_windows and (self.wsl or uri.host == null or uri.host.?.isEmpty()))
             std.Io.net.HostName{ .bytes = "localhost" }
         else std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
             error.UriMissingHost => {
@@ -1611,13 +1616,13 @@ pub const StreamHandler = struct {
         // drive-letter path. A path that is none (UNC and WebDAV included:
         // a working directory there leaks credentials) is no pwd at all.
         const win_path: ?[]u8 = if (comptime builtin.target.os.tag == .windows)
-            try internal_os.pwd_path.translate(self.alloc, raw_path)
+            try internal_os.pwd_path.osc7Path(self.alloc, raw_path, self.wsl)
         else
             null;
         defer if (win_path) |p| self.alloc.free(p);
         if (comptime builtin.target.os.tag == .windows) {
             if (win_path == null) {
-                log.warn("OSC 7 path is not a local drive path, ignored", .{});
+                log.warn("OSC 7 path is not a local drive path (nor a POSIX one in WSL), ignored", .{});
                 return self.resetPwd();
             }
         }

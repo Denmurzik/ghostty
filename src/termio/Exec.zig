@@ -78,6 +78,12 @@ pub fn deinit(self: *Exec) void {
     self.subprocess.deinit();
 }
 
+/// Whether the command is WSL (decides what an OSC 7 path means).
+pub fn isWsl(self: *const Exec) bool {
+    if (comptime builtin.target.os.tag != .windows) return false;
+    return self.subprocess.args.len > 0 and isWslArgv0(self.subprocess.args[0]);
+}
+
 /// Call to initialize the terminal state as necessary for this backend.
 /// This is called before any termio begins. This should not be called
 /// after termio begins because it may put the internal terminal state
@@ -86,7 +92,7 @@ pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
     // If we have an initial pwd requested by the subprocess, then we
     // set that on the terminal now. This allows rapidly initializing
     // new surfaces to use the proper pwd.
-    if (self.subprocess.cwd) |cwd| term.setPwd(cwd) catch |err| {
+    if (self.subprocess.cwd orelse self.subprocess.wsl_pwd) |cwd| term.setPwd(cwd) catch |err| {
         log.warn("error setting initial pwd err={}", .{err});
     };
 
@@ -652,6 +658,9 @@ const Subprocess = struct {
 
     arena: std.heap.ArenaAllocator,
     cwd: ?[:0]const u8,
+    /// The POSIX directory a WSL command starts in through `--cd`; the
+    /// terminal's initial pwd (the process cwd stays the default).
+    wsl_pwd: ?[:0]const u8 = null,
     env: ?EnvMap,
     args: []const [:0]const u8,
     grid_size: renderer.GridSize,
@@ -914,7 +923,7 @@ const Subprocess = struct {
         }
 
         // Build our args list
-        const args: []const [:0]const u8 = execCommand(
+        var args: []const [:0]const u8 = execCommand(
             alloc,
             shell_command,
             internal_os.passwd,
@@ -965,10 +974,15 @@ const Subprocess = struct {
 
         // We have to copy the cwd because there is no guarantee that
         // pointers in full_config remain valid.
-        const cwd: ?[:0]u8 = if (cfg.working_directory) |cwd|
+        var cwd: ?[:0]u8 = if (cfg.working_directory) |cwd|
             try alloc.dupeSentinel(u8, cwd, 0)
         else
             null;
+
+        // A POSIX directory (inherited from a WSL pane) is no Windows cwd:
+        // `wsl.exe --cd` takes it, anything else starts in its default.
+        var wsl_pwd: ?[:0]const u8 = null;
+        if (comptime is_windows) wsl_pwd = try adoptPosixCwd(alloc, &args, &cwd);
 
         // Propagate the current working directory (CWD) to the shell, enabling
         // the shell to display the current directory name rather than the
@@ -990,6 +1004,7 @@ const Subprocess = struct {
             .arena = arena,
             .env = env,
             .cwd = cwd,
+            .wsl_pwd = wsl_pwd,
             .args = args,
             .integration = integration_shell,
 
@@ -3103,6 +3118,137 @@ fn isWslArgv0(argv0: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(dirname, d)) return true;
     }
     return false;
+}
+
+/// A POSIX working directory inherited from a WSL pane (a Windows one never
+/// starts with a slash: the apprt translates `/c/x` before it gets here).
+fn isPosixCwd(cwd: []const u8) bool {
+    return cwd.len > 0 and cwd[0] == '/';
+}
+
+/// Only `wsl.exe` takes `--cd`; the distro launchers and `bash.exe` do not.
+fn isWslCdArgv0(argv0: []const u8) bool {
+    const seps = [_]u8{ 0x5c, '/' };
+    const sep = std.mem.lastIndexOfAny(u8, argv0, &seps);
+    const name = if (sep) |i| argv0[i + 1 ..] else argv0;
+    return std.ascii.eqlIgnoreCase(name, "wsl") or std.ascii.eqlIgnoreCase(name, "wsl.exe");
+}
+
+/// `args` of a `wsl.exe` command starting in the POSIX directory `cwd`: the
+/// value of an existing `--cd` or a lone `~` (both only before `--`/`-e`,
+/// where the Linux command starts) is replaced, otherwise `--cd <cwd>`
+/// becomes argv[1]. `cwd` is one argv element: the command line builder
+/// quotes it.
+fn wslCdArgs(
+    alloc: Allocator,
+    args: []const [:0]const u8,
+    cwd: [:0]const u8,
+) Allocator.Error![]const [:0]const u8 {
+    var out: std.ArrayList([:0]const u8) = try .initCapacity(alloc, args.len + 2);
+    errdefer out.deinit(alloc);
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--") or std.mem.eql(u8, a, "-e") or std.mem.eql(u8, a, "--exec")) break;
+        if (std.mem.eql(u8, a, "--cd")) {
+            // `--cd <x>`: x goes, a trailing `--cd` gets a value.
+            out.appendSliceAssumeCapacity(args[0 .. i + 1]);
+            out.appendAssumeCapacity(cwd);
+            if (i + 1 < args.len) out.appendSliceAssumeCapacity(args[i + 2 ..]);
+            return try out.toOwnedSlice(alloc);
+        }
+        if (std.mem.eql(u8, a, "~")) {
+            out.appendSliceAssumeCapacity(args[0..i]);
+            out.appendAssumeCapacity("--cd");
+            out.appendAssumeCapacity(cwd);
+            out.appendSliceAssumeCapacity(args[i + 1 ..]);
+            return try out.toOwnedSlice(alloc);
+        }
+    }
+
+    out.appendAssumeCapacity(args[0]);
+    out.appendAssumeCapacity("--cd");
+    out.appendAssumeCapacity(cwd);
+    out.appendSliceAssumeCapacity(args[1..]);
+    return try out.toOwnedSlice(alloc);
+}
+
+fn expectWslArgs(want: []const []const u8, input: []const [:0]const u8, cwd: [:0]const u8) !void {
+    const got = try wslCdArgs(std.testing.allocator, input, cwd);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "Exec: wsl --cd from an inherited posix cwd" {
+    try expectWslArgs(&.{ "wsl.exe", "--cd", "/home/u/a b" }, &.{"wsl.exe"}, "/home/u/a b");
+    try expectWslArgs(&.{ "wsl.exe", "--cd", "/home/u", "-d", "Ubuntu" }, &.{ "wsl.exe", "-d", "Ubuntu" }, "/home/u");
+    try expectWslArgs(&.{ "wsl", "-d", "Ubuntu", "--cd", "/p" }, &.{ "wsl", "-d", "Ubuntu", "--cd", "~" }, "/p");
+    try expectWslArgs(&.{ "wsl", "--cd", "/p", "-d", "U" }, &.{ "wsl", "--cd", "/old", "-d", "U" }, "/p");
+    try expectWslArgs(&.{ "wsl", "--cd", "/p" }, &.{ "wsl", "~" }, "/p");
+    try expectWslArgs(&.{ "wsl", "-d", "U", "--cd", "/p" }, &.{ "wsl", "-d", "U", "~" }, "/p");
+    // A trailing `--cd` gets its value.
+    try expectWslArgs(&.{ "wsl", "--cd", "/p" }, &.{ "wsl", "--cd" }, "/p");
+    // After `--`/`-e` a `~` or `--cd` belongs to the Linux command.
+    try expectWslArgs(&.{ "wsl", "--cd", "/p", "--", "ls", "~" }, &.{ "wsl", "--", "ls", "~" }, "/p");
+    try expectWslArgs(&.{ "wsl", "--cd", "/p", "-e", "x", "--cd", "~" }, &.{ "wsl", "-e", "x", "--cd", "~" }, "/p");
+}
+
+/// What a new surface does with an inherited POSIX working directory (Windows
+/// only; see the call in `Subprocess.init`). Returns the directory a WSL
+/// command takes through `--cd`; `cwd` is dropped when it was POSIX.
+fn adoptPosixCwd(
+    alloc: Allocator,
+    args: *[]const [:0]const u8,
+    cwd: *?[:0]u8,
+) Allocator.Error!?[:0]const u8 {
+    const posix_cwd = cwd.* orelse return null;
+    if (!isPosixCwd(posix_cwd)) return null;
+    cwd.* = null;
+    if (args.len > 0 and isWslCdArgv0(args.*[0])) {
+        args.* = try wslCdArgs(alloc, args.*, posix_cwd);
+        return posix_cwd;
+    }
+    log.info("dropping the POSIX working directory, the command is not wsl.exe", .{});
+    return null;
+}
+
+test "Exec: wsl takes --cd, other commands drop a posix cwd" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    {
+        var args: []const [:0]const u8 = &.{"wsl.exe"};
+        var cwd: ?[:0]u8 = try a.dupeSentinel(u8, "/home/u/a b", 0);
+        const pwd = try adoptPosixCwd(a, &args, &cwd);
+        try testing.expectEqualStrings("/home/u/a b", pwd.?);
+        try testing.expect(cwd == null);
+        try testing.expectEqual(@as(usize, 3), args.len);
+        try testing.expectEqualStrings("--cd", args[1]);
+        try testing.expectEqualStrings("/home/u/a b", args[2]);
+    }
+    {
+        var args: []const [:0]const u8 = &.{"cmd.exe"};
+        var cwd: ?[:0]u8 = try a.dupeSentinel(u8, "/home/u", 0);
+        try testing.expect(try adoptPosixCwd(a, &args, &cwd) == null);
+        try testing.expect(cwd == null);
+        try testing.expectEqual(@as(usize, 1), args.len);
+    }
+    {
+        // A Windows directory is left alone, wsl.exe translates it itself.
+        var args: []const [:0]const u8 = &.{"wsl.exe"};
+        var cwd: ?[:0]u8 = try a.dupeSentinel(u8, "C:\\x", 0);
+        try testing.expect(try adoptPosixCwd(a, &args, &cwd) == null);
+        try testing.expectEqualStrings("C:\\x", cwd.?);
+        try testing.expectEqual(@as(usize, 1), args.len);
+    }
+    try testing.expect(isWslCdArgv0("C:/Windows/System32/wsl.exe"));
+    try testing.expect(isWslCdArgv0("WSL"));
+    try testing.expect(!isWslCdArgv0("C:/Windows/System32/bash.exe"));
+    try testing.expect(!isWslCdArgv0("ubuntu.exe"));
 }
 
 fn probeYes(_: []const u8) bool {

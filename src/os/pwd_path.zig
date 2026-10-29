@@ -287,3 +287,69 @@ test "pwd_path: the result fits the CreateProcess limit" {
     try std.testing.expect(got != null);
     try expectTranslate(&cyr, null);
 }
+
+/// The pwd an OSC 7 `path` becomes. On a WSL pane (`wsl`) the shell is a
+/// Linux one: `/mnt/c/x` is the drive path, any other absolute POSIX path is
+/// kept as is (new WSL panes get it as `wsl.exe --cd <path>`). Everywhere
+/// else only `translate`'s drive paths pass. Null: no pwd. Caller owned.
+pub fn osc7Path(alloc: Allocator, path: []const u8, wsl: bool) Allocator.Error!?[]u8 {
+    if (!wsl) return translate(alloc, path);
+    if (std.mem.startsWith(u8, path, "/mnt/")) {
+        if (try translate(alloc, path)) |t| return t;
+    }
+    return posixPath(alloc, path);
+}
+
+/// An absolute POSIX path that is safe to hand over as a process argument:
+/// valid UTF-8, no control or invisible characters, at most `max_input`
+/// bytes, not a `//host` network spelling. Caller owned.
+pub fn posixPath(alloc: Allocator, path: []const u8) Allocator.Error!?[]u8 {
+    if (path.len == 0 or path.len > max_input or path[0] != '/') return null;
+    if (std.mem.startsWith(u8, path, "//")) return null;
+    if (!std.unicode.utf8ValidateSlice(path)) return null;
+    for (path) |c| if (c < 0x20 or c == 0x7f) return null;
+    if (hasInvisible(path)) return null;
+    return try alloc.dupe(u8, path);
+}
+
+fn expectOsc7(raw: []const u8, wsl: bool, want: ?[]const u8) !void {
+    const got = try osc7Path(std.testing.allocator, raw, wsl);
+    defer if (got) |g| std.testing.allocator.free(g);
+    if (want) |w| {
+        try std.testing.expect(got != null);
+        try std.testing.expectEqualStrings(w, got.?);
+    } else {
+        try std.testing.expect(got == null);
+    }
+}
+
+test "windows osc7: wsl pane keeps a posix path" {
+    try expectOsc7("/home/u/proj", true, "/home/u/proj");
+    try expectOsc7("/home/u/my proj", true, "/home/u/my proj");
+    try expectOsc7("/", true, "/");
+    try expectOsc7("/mnt/c/x", true, "C:\\x");
+    // A distro directory named like a drive letter is still the distro's.
+    try expectOsc7("/c/x", true, "/c/x");
+}
+
+test "windows osc7: wsl pane refuses unsafe and network paths" {
+    try expectOsc7("/home/u/a\x1bb", true, null);
+    try expectOsc7("/home/u/a\nb", true, null);
+    try expectOsc7("/home/u/a\x7fb", true, null);
+    try expectOsc7("/home/u/\u{202e}x", true, null);
+    try expectOsc7("//host/share", true, null);
+    try expectOsc7("relative/dir", true, null);
+    try expectOsc7("", true, null);
+    try expectOsc7("/home/\xff", true, null);
+    var big: [4098]u8 = undefined;
+    @memset(&big, 'a');
+    big[0] = '/';
+    try expectOsc7(big[0..4096], true, big[0..4096]);
+    try expectOsc7(big[0..4097], true, null);
+}
+
+test "windows osc7: a non-wsl pane ignores a posix path, msys still translates" {
+    try expectOsc7("/home/u/proj", false, null);
+    try expectOsc7("/c/x", false, "C:\\x");
+    try expectOsc7("/mnt/c/x", false, "C:\\x");
+}

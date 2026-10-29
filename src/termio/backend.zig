@@ -111,6 +111,13 @@ pub const Backend = union(Kind) {
         };
     }
 
+    /// See `termio.Exec.isWsl`.
+    pub fn isWsl(self: *const Backend) bool {
+        return switch (self.*) {
+            .exec => |*exec| exec.isWsl(),
+        };
+    }
+
     /// See `termio.Exec.shellBusy`.
     pub fn shellBusy(self: *Backend) ?bool {
         return switch (self.*) {
