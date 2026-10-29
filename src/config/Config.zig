@@ -3916,7 +3916,9 @@ else
 ///     programs). On the bundled console their runtime loses the first key
 ///     typed after the terminal is resized (a split, a new tab, a window
 ///     resize), so Kitty graphics and underline colours are given up there.
-///     Set `bundled` to have them in Git Bash anyway. The program is
+///     Workaround: set `windows-conpty = bundled` to get Kitty graphics in
+///     Git Bash, at the cost of occasionally lost input right after a
+///     resize, split or tab switch. The program is
 ///     recognised by its path only (a POSIX shell name such as `bash.exe`
 ///     outside `System32`, or a path under `usr\bin` or a Cygwin folder):
 ///     a wrapper such as `cmd /c start-bash.cmd` keeps the bundled console
