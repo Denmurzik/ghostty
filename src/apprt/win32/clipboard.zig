@@ -24,6 +24,7 @@ const hooks_mod = @import("hooks.zig");
 const messages = @import("messages.zig");
 const util = @import("util.zig");
 const secure_input = @import("secure_input.zig");
+const drop = @import("drop.zig");
 
 const log = std.log.scoped(.win32_clipboard);
 
@@ -130,14 +131,45 @@ pub fn request(
     // Lets performable paste bindings fall through when there is nothing
     // to paste (an image, say). An OSC 52 read of such a clipboard is
     // answered with empty contents instead.
-    if (req == .paste and
-        win32.user32.IsClipboardFormatAvailable(win32.user32.CF_UNICODETEXT) == 0)
-    {
+    if (req == .paste and sourceFor(
+        req,
+        win32.user32.IsClipboardFormatAvailable(win32.user32.CF_UNICODETEXT) != 0,
+        win32.user32.IsClipboardFormatAvailable(cf_hdrop) != 0,
+    ) == null) {
         return .unavailable;
     }
 
     try enqueue(surface, .{ .req = req });
     return .started;
+}
+
+const cf_hdrop = win32.ole32.CF_HDROP;
+
+const Source = enum { text, files };
+
+/// What a request reads from the clipboard. Text wins when both formats
+/// exist (Explorer puts only `CF_HDROP` for a file copy). A file list is
+/// only ever offered to a paste: an OSC 52 read never returns one.
+fn sourceFor(req: apprt.ClipboardRequest, has_text: bool, has_files: bool) ?Source {
+    if (has_text) return .text;
+    if (has_files and req == .paste) return .files;
+    return null;
+}
+
+/// The paste text for a `DROPFILES` block: its paths quoted for `kind`,
+/// exactly as a drop is. A path a drag or a copy source could use to break
+/// the quoting (control characters, `"<>|*?`) refuses the whole list.
+fn textFromDropFiles(alloc: Allocator, kind: drop.ShellKind, block: []const u8) ![:0]u8 {
+    const paths = try drop.pathsFromDropFiles(alloc, block);
+    defer drop.freePaths(alloc, paths);
+    for (paths) |p| if (!drop.pathIsSafe(p)) {
+        log.warn("refusing a pasted file list with a path that has control or shell characters", .{});
+        return error.UnsafePath;
+    };
+    const views: []const []const u8 = @ptrCast(paths);
+    const quoted = try drop.quote(alloc, kind, views);
+    defer alloc.free(quoted);
+    return alloc.dupeSentinel(u8, quoted, 0);
 }
 
 /// Core's clipboard write. Text goes straight to the clipboard; with
@@ -236,7 +268,7 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
             // Text handed to `pasteText` travels with the entry; anything
             // else is read from the clipboard now.
             const given = p.text;
-            const maybe_text: ?[:0]u8 = given orelse read(alloc, surface.hwnd) catch |err| blk: {
+            const maybe_text: ?[:0]u8 = given orelse readFor(alloc, surface, p.req) catch |err| blk: {
                 log.warn("clipboard read failed err={}", .{err});
                 break :blk null;
             };
@@ -573,6 +605,28 @@ pub fn read(alloc: Allocator, hwnd: win32.foundation.HWND) !?[:0]u8 {
     while (len < capacity and units[len] != 0) len += 1;
 
     return try utf16ToUtf8(alloc, units[0..len]);
+}
+
+/// What `req` pastes from the clipboard: its text, else (a paste only) the
+/// quoted paths of a copied file list. Null when there is neither.
+fn readFor(alloc: Allocator, surface: *Surface, req: apprt.ClipboardRequest) !?[:0]u8 {
+    if (try read(alloc, surface.hwnd)) |text| return text;
+    if (sourceFor(req, false, win32.user32.IsClipboardFormatAvailable(cf_hdrop) != 0) == null) return null;
+    return readFiles(alloc, surface.hwnd, surface.shell_kind);
+}
+
+/// The quoted paths of the clipboard's `CF_HDROP`, or null without one.
+fn readFiles(alloc: Allocator, hwnd: win32.foundation.HWND, kind: drop.ShellKind) !?[:0]u8 {
+    try openClipboard(hwnd);
+    defer _ = win32.user32.CloseClipboard();
+
+    const handle_ = win32.user32.GetClipboardData(cf_hdrop) orelse return null;
+    const size = win32.kernel32.GlobalSize(handle_);
+    const ptr = win32.kernel32.GlobalLock(handle_) orelse return error.LockFailed;
+    defer _ = win32.kernel32.GlobalUnlock(handle_);
+
+    const bytes: [*]const u8 = @ptrCast(ptr);
+    return try textFromDropFiles(alloc, kind, bytes[0..size]);
 }
 
 /// Open the clipboard for `hwnd`, retrying while another process has it.
@@ -917,4 +971,53 @@ test "win32 clipboard: secure copy adds exclusion formats" {
         try std.testing.expectEqualStrings(want.name, buf[0..n]);
         try std.testing.expectEqual(want.value, extra.value);
     }
+}
+
+fn testDropFiles(alloc: Allocator, paths: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var header: [20]u8 = @splat(0);
+    std.mem.writeInt(u32, header[0..4], 20, .little);
+    std.mem.writeInt(u32, header[16..20], 1, .little);
+    try out.appendSlice(alloc, &header);
+    for (paths) |p| {
+        const w = try std.unicode.utf8ToUtf16LeAlloc(alloc, p);
+        defer alloc.free(w);
+        for (w) |u| try out.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, u)));
+        try out.appendSlice(alloc, &.{ 0, 0 });
+    }
+    try out.appendSlice(alloc, &.{ 0, 0 });
+    return out.toOwnedSlice(alloc);
+}
+
+test "win32 clipboard: a file list pastes as quoted paths" {
+    const alloc = std.testing.allocator;
+    const paths = [_][]const u8{ "C:\\My Files\\a b.txt", "C:\\it's\\x.txt" };
+    const block = try testDropFiles(alloc, &paths);
+    defer alloc.free(block);
+
+    for ([_]drop.ShellKind{ .msys, .pwsh, .cmd }) |kind| {
+        const want = try drop.quote(alloc, kind, &paths);
+        defer alloc.free(want);
+        const got = try textFromDropFiles(alloc, kind, block);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(want, got);
+    }
+
+    // A path that could break the quoting refuses the whole list.
+    const bad = try testDropFiles(alloc, &.{ "C:\\ok.txt", "C:\\a\r\nb.txt" });
+    defer alloc.free(bad);
+    try std.testing.expectError(error.UnsafePath, textFromDropFiles(alloc, .msys, bad));
+}
+
+test "win32 clipboard: text wins over a file list" {
+    const paste: apprt.ClipboardRequest = .{ .paste = .standard };
+    const read52: apprt.ClipboardRequest = .{ .osc_52_read = .standard };
+
+    try std.testing.expectEqual(Source.text, sourceFor(paste, true, true).?);
+    try std.testing.expectEqual(Source.text, sourceFor(read52, true, true).?);
+    try std.testing.expectEqual(Source.files, sourceFor(paste, false, true).?);
+    try std.testing.expect(sourceFor(paste, false, false) == null);
+    // An OSC 52 read never returns a file list.
+    try std.testing.expect(sourceFor(read52, false, true) == null);
 }

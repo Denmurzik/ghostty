@@ -20,6 +20,23 @@ pub fn clickInterval() ?u32 {
             break :macos ms;
         },
 
+        // On Windows, the system double-click time (Settings, Mouse).
+        .windows => windows: {
+            const win = struct {
+                extern "user32" fn GetDoubleClickTime() callconv(.winapi) u32;
+            };
+            break :windows win.GetDoubleClickTime();
+        },
+
         else => null,
     };
+}
+
+test "windows mouse: double-click time" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const win = struct {
+        extern "user32" fn GetDoubleClickTime() callconv(.winapi) u32;
+    };
+    const got = clickInterval() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(win.GetDoubleClickTime(), got);
 }

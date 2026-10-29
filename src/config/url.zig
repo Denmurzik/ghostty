@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const oni = @import("oniguruma");
 
 /// Default URL/path regex. This is used to detect URLs and file paths in
@@ -106,12 +107,69 @@ const bare_relative_path_branch =
     path_chars ++ "+" ++
     no_trailing_colon;
 
-pub const regex =
+// Windows paths (R-M7-6), appended only when building for Windows. Backslash
+// or slash separated, never UNC (`\\server\share`, `\\?\C:\x`): no branch may
+// start right after a path separator, so a link can never contact an SMB
+// share. A trailing `.`/`,`/`:` is not part of the match.
+const win_chars =
+    \\[\w\-.~:\\\/@!$&+;=%#]
+;
+
+const win_dotted_lookahead =
+    \\(?=[\w\-.~:\\\/@!$&+;=%#]*\.)
+;
+
+const win_non_dotted_lookahead =
+    \\(?![\w\-.~:\\\/@!$&+;=%#]*\.)
+;
+
+const win_dotted_space_segments =
+    \\(?:(?<!:) (?!\w+:\/\/)(?![A-Za-z]:[\\\/])(?!\.{0,2}[\\\/])[\w\-.~:\\\/@!$&+;=%#]*[\\\/.])*
+;
+
+const win_any_space_segments =
+    \\(?:(?<!:) (?!\w+:\/\/)(?![A-Za-z]:[\\\/])(?!\.{0,2}[\\\/])[\w\-.~:\\\/@!$&+;=%#]+)*
+;
+
+const win_body =
+    "(?:" ++
+    win_dotted_lookahead ++
+    win_chars ++ "+" ++
+    win_dotted_space_segments ++
+    no_trailing_colon ++
+    "|" ++
+    win_non_dotted_lookahead ++
+    win_chars ++ "+" ++
+    win_any_space_segments ++
+    no_trailing_colon ++
+    ")" ++
+    no_trailing_punctuation;
+
+// Drive-absolute (`C:\`, `C:/`) and dot-relative (`.\`, `..\`) paths.
+const win_rooted_branch =
+    \\(?<![\w\\\/])(?:[A-Za-z]:[\\\/]|\.{1,2}\\)
+++ win_body;
+
+// Bare relative paths with a backslash and a dotted last segment.
+const win_bare_branch =
+    \\(?<![\w\\\/.$~])
+++ win_dotted_lookahead ++
+    \\[\w][\w\-.]*\\
+++ win_chars ++ "+" ++
+    no_trailing_colon ++
+    no_trailing_punctuation;
+
+const posix_regex =
     scheme_url_branch ++
     "|" ++
     rooted_or_relative_path_branch ++
     "|" ++
     bare_relative_path_branch;
+
+pub const regex = if (builtin.target.os.tag == .windows)
+    posix_regex ++ "|" ++ win_rooted_branch ++ "|" ++ win_bare_branch
+else
+    posix_regex;
 
 test "url regex" {
     const testing = std.testing;
@@ -508,6 +566,49 @@ test "url regex" {
         "//foo",
     };
     for (no_match_cases) |input| {
+        var result = re.search(input, .{});
+        if (result) |*reg| {
+            reg.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+test "config url: windows paths" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(
+        regex,
+        .{},
+        oni.Encoding.utf8,
+        oni.Syntax.default,
+        null,
+    );
+    defer re.deinit();
+
+    const cases = [_]struct { input: []const u8, expect: []const u8 }{
+        .{ .input = "at C:\\proj\\a.ts:12 here", .expect = "C:\\proj\\a.ts:12" },
+        .{ .input = "at C:/x/y.zig:3:5 here", .expect = "C:/x/y.zig:3:5" },
+        .{ .input = "open .\\src\\x.zig now", .expect = ".\\src\\x.zig" },
+        .{ .input = "open ..\\a\\b.txt now", .expect = "..\\a\\b.txt" },
+        .{ .input = "open src\\config\\url.zig now", .expect = "src\\config\\url.zig" },
+        .{ .input = "see C:\\work\\file.txt.", .expect = "C:\\work\\file.txt" },
+        .{ .input = "(C:\\a\\b.txt)", .expect = "C:\\a\\b.txt" },
+        .{ .input = "C:\\Program Files\\Git\\bin\\bash.exe", .expect = "C:\\Program Files\\Git\\bin\\bash.exe" },
+    };
+    for (cases) |case| {
+        var reg = try re.search(case.input, .{});
+        defer reg.deinit();
+        const match = case.input[@intCast(reg.starts()[0])..@intCast(reg.ends()[0])];
+        try testing.expectEqualStrings(case.expect, match);
+    }
+
+    // UNC and device paths never match at all: a link must not be able to
+    // contact an SMB share.
+    const unc = [_][]const u8{ "\\\\server\\share\\x.txt", "\\\\?\\C:\\x" };
+    for (unc) |input| {
         var result = re.search(input, .{});
         if (result) |*reg| {
             reg.deinit();
