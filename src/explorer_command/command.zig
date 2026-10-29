@@ -22,9 +22,11 @@ pub const Hooks = struct {
     module_dir: *const fn (buf: []u16) ?usize,
     /// Starts the process. 0 on success, else a Win32 error code.
     launch: *const fn (cmdline: [:0]u16, cwd: [*:0]const u16) u32,
+    /// The file-system path of a folder PIDL, as a `CoTaskMemAlloc` string.
+    pidl_path: *const fn (pidl: *anyopaque) ?com.LPWSTR,
 };
 
-pub var hooks: Hooks = .{ .module_dir = realModuleDir, .launch = realLaunch };
+pub var hooks: Hooks = .{ .module_dir = realModuleDir, .launch = realLaunch, .pidl_path = realPidlPath };
 
 // ---------------------------------------------------------------------------
 // Module counts (DllCanUnloadNow = no objects and no locks).
@@ -39,7 +41,11 @@ pub fn canUnloadNow() HRESULT {
 
 const Command = extern struct {
     vtbl: *const com.IExplorerCommandVtbl,
+    /// The second interface (`IObjectWithSite`) of the same object.
+    site_vtbl: *const com.IObjectWithSiteVtbl,
     refs: u32,
+    /// Explorer's site (owned reference), set through `SetSite`.
+    site: ?*anyopaque = null,
 };
 
 const Factory = extern struct {
@@ -55,7 +61,7 @@ pub fn getClassObject(rclsid: ?*const GUID, riid: ?*const GUID, ppv: ?*?*anyopaq
     const iid = riid orelse return com.E_INVALIDARG;
     if (!clsid.eql(&ids.clsid)) return com.CLASS_E_CLASSNOTAVAILABLE;
 
-    const f = create(Factory, &factory_vtbl) orelse return com.E_OUTOFMEMORY;
+    const f = create(Factory, .{ .vtbl = &factory_vtbl, .refs = 1 }) orelse return com.E_OUTOFMEMORY;
     const hr = factoryQueryInterface(f, iid, out);
     _ = factoryRelease(f);
     return hr;
@@ -69,11 +75,11 @@ extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn HeapAlloc(heap: *anyopaque, flags: u32, bytes: usize) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn HeapFree(heap: *anyopaque, flags: u32, ptr: *anyopaque) callconv(.winapi) i32;
 
-fn create(comptime T: type, vtbl: anytype) ?*T {
+fn create(comptime T: type, init: T) ?*T {
     const heap = GetProcessHeap() orelse return null;
     const mem = HeapAlloc(heap, 0, @sizeOf(T)) orelse return null;
     const obj: *T = @ptrCast(@alignCast(mem));
-    obj.* = .{ .vtbl = vtbl, .refs = 1 };
+    obj.* = init;
     _ = object_count.fetchAdd(1, .acq_rel);
     return obj;
 }
@@ -146,7 +152,7 @@ fn factoryCreateInstance(_: *anyopaque, outer: ?*anyopaque, iid: ?*const GUID, o
     o.* = null;
     if (outer != null) return com.CLASS_E_NOAGGREGATION;
     const i = iid orelse return com.E_INVALIDARG;
-    const c = create(Command, &command_vtbl) orelse return com.E_OUTOFMEMORY;
+    const c = create(Command, .{ .vtbl = &command_vtbl, .site_vtbl = &site_vtbl, .refs = 1 }) orelse return com.E_OUTOFMEMORY;
     const hr = commandQueryInterface(c, i, o);
     _ = commandRelease(c);
     return hr;
@@ -191,6 +197,11 @@ fn commandQueryInterface(c: *Command, iid: *const GUID, out: *?*anyopaque) HRESU
         out.* = c;
         return com.S_OK;
     }
+    if (iid.eql(&com.IID_IObjectWithSite)) {
+        _ = commandAddRef(c);
+        out.* = @ptrCast(&c.site_vtbl);
+        return com.S_OK;
+    }
     return com.E_NOINTERFACE;
 }
 
@@ -200,8 +211,29 @@ fn commandAddRef(c: *Command) u32 {
 
 fn commandRelease(c: *Command) u32 {
     const prev = @atomicRmw(u32, &c.refs, .Sub, 1, .acq_rel);
-    if (prev == 1) destroy(c);
+    if (prev == 1) {
+        if (c.site) |s| unkRelease(s);
+        destroy(c);
+    }
     return prev -% 1;
+}
+
+fn unkRelease(p: *anyopaque) void {
+    const v: *const *const com.IUnknownVtbl = @ptrCast(@alignCast(p));
+    _ = v.*.Release(p);
+}
+
+fn unkAddRef(p: *anyopaque) void {
+    const v: *const *const com.IUnknownVtbl = @ptrCast(@alignCast(p));
+    _ = v.*.AddRef(p);
+}
+
+/// A new reference to `iid` on `p`, or null.
+fn queryInterface(p: *anyopaque, iid: *const GUID) ?*anyopaque {
+    const v: *const *const com.IUnknownVtbl = @ptrCast(@alignCast(p));
+    var out: ?*anyopaque = null;
+    if (!com.succeeded(v.*.QueryInterface(p, iid, &out))) return null;
+    return out;
 }
 
 fn commandQueryInterfaceC(self: *anyopaque, iid: ?*const GUID, out: ?*?*anyopaque) callconv(.winapi) HRESULT {
@@ -217,6 +249,89 @@ fn commandAddRefC(self: *anyopaque) callconv(.winapi) u32 {
 
 fn commandReleaseC(self: *anyopaque) callconv(.winapi) u32 {
     return commandRelease(@ptrCast(@alignCast(self)));
+}
+
+// IObjectWithSite: the same object seen through its second vtable pointer.
+
+const site_vtbl: com.IObjectWithSiteVtbl = .{
+    .unk = .{
+        .QueryInterface = &siteQueryInterface,
+        .AddRef = &siteAddRef,
+        .Release = &siteRelease,
+    },
+    .SetSite = &setSite,
+    .GetSite = &getSite,
+};
+
+fn fromSite(p: *anyopaque) *Command {
+    const field: *const *const com.IObjectWithSiteVtbl = @ptrCast(@alignCast(p));
+    return @constCast(@fieldParentPtr("site_vtbl", field));
+}
+
+fn siteQueryInterface(self: *anyopaque, iid: ?*const GUID, out: ?*?*anyopaque) callconv(.winapi) HRESULT {
+    const o = out orelse return com.E_POINTER;
+    o.* = null;
+    const i = iid orelse return com.E_INVALIDARG;
+    return commandQueryInterface(fromSite(self), i, o);
+}
+
+fn siteAddRef(self: *anyopaque) callconv(.winapi) u32 {
+    return commandAddRef(fromSite(self));
+}
+
+fn siteRelease(self: *anyopaque) callconv(.winapi) u32 {
+    return commandRelease(fromSite(self));
+}
+
+fn setSite(self: *anyopaque, site: ?*anyopaque) callconv(.winapi) HRESULT {
+    const c = fromSite(self);
+    if (site) |s| unkAddRef(s);
+    if (c.site) |old| unkRelease(old);
+    c.site = site;
+    return com.S_OK;
+}
+
+fn getSite(self: *anyopaque, iid: ?*const GUID, out: ?*?*anyopaque) callconv(.winapi) HRESULT {
+    const o = out orelse return com.E_POINTER;
+    o.* = null;
+    const i = iid orelse return com.E_INVALIDARG;
+    const s = fromSite(self).site orelse return com.E_FAIL;
+    o.* = queryInterface(s, i) orelse return com.E_NOINTERFACE;
+    return com.S_OK;
+}
+
+/// The current folder of the Explorer window that hosts the command, for an
+/// invocation with no item array (the desktop and folder backgrounds): site ->
+/// `IServiceProvider` -> top-level `IShellBrowser` -> active view ->
+/// `IFolderView` -> `IPersistFolder2` -> folder PIDL -> file-system path.
+/// The caller frees the string with `CoTaskMemFree`.
+fn siteFolderPath(c: *Command) ?com.LPWSTR {
+    const site = c.site orelse return null;
+    const sp = queryInterface(site, &com.IID_IServiceProvider) orelse return null;
+    defer unkRelease(sp);
+    const spv = @as(*const *const com.IServiceProviderVtbl, @ptrCast(@alignCast(sp))).*;
+    var browser: ?*anyopaque = null;
+    if (!com.succeeded(spv.QueryService(sp, &com.SID_STopLevelBrowser, &com.IID_IShellBrowser, &browser))) return null;
+    const b = browser orelse return null;
+    defer unkRelease(b);
+    const bv = @as(*const *const com.IShellBrowserVtbl, @ptrCast(@alignCast(b))).*;
+    var view: ?*anyopaque = null;
+    if (!com.succeeded(bv.QueryActiveShellView(b, &view))) return null;
+    const v = view orelse return null;
+    defer unkRelease(v);
+    const fv = queryInterface(v, &com.IID_IFolderView) orelse return null;
+    defer unkRelease(fv);
+    const fvv = @as(*const *const com.IFolderViewVtbl, @ptrCast(@alignCast(fv))).*;
+    var folder: ?*anyopaque = null;
+    if (!com.succeeded(fvv.GetFolder(fv, &com.IID_IPersistFolder2, &folder))) return null;
+    const f = folder orelse return null;
+    defer unkRelease(f);
+    const fvt = @as(*const *const com.IPersistFolder2Vtbl, @ptrCast(@alignCast(f))).*;
+    var pidl: ?*anyopaque = null;
+    if (!com.succeeded(fvt.GetCurFolder(f, &pidl))) return null;
+    const p = pidl orelse return null;
+    defer com.CoTaskMemFree(p);
+    return hooks.pidl_path(p);
 }
 
 /// A `CoTaskMemAlloc`'d copy of the concatenated parts (with the NUL).
@@ -237,6 +352,7 @@ fn coJoin(parts: []const []const u16) ?[*:0]u16 {
 
 fn getTitle(_: *anyopaque, _: ?*com.IShellItemArray, out: ?*?com.LPWSTR) callconv(.winapi) HRESULT {
     const o = out orelse return com.E_POINTER;
+    o.* = null;
     o.* = coJoin(&.{title_text}) orelse return com.E_OUTOFMEMORY;
     return com.S_OK;
 }
@@ -247,7 +363,8 @@ fn getIcon(_: *anyopaque, _: ?*com.IShellItemArray, out: ?*?com.LPWSTR) callconv
     var buf: [2048]u16 = undefined;
     const n = hooks.module_dir(&buf) orelse return com.E_FAIL;
     if (n > buf.len) return com.E_FAIL;
-    o.* = coJoin(&.{ u("\""), buf[0..n], exe_name, u("\",0") }) orelse return com.E_OUTOFMEMORY;
+    // The bare `path,index` form, as the in-box commands return it.
+    o.* = coJoin(&.{ buf[0..n], exe_name, u(",0") }) orelse return com.E_OUTOFMEMORY;
     return com.S_OK;
 }
 
@@ -273,15 +390,36 @@ fn onlyItem(array: *com.IShellItemArray) ?*com.IShellItem {
     return item;
 }
 
-fn getState(_: *anyopaque, array: ?*com.IShellItemArray, _: com.BOOL, out: ?*u32) callconv(.winapi) HRESULT {
+/// The file-system path of `item` (`CoTaskMemAlloc`'d), or null.
+fn itemPath(item: *com.IShellItem) ?com.LPWSTR {
+    var name: ?com.LPWSTR = null;
+    if (!com.succeeded(item.vtbl.GetDisplayName(item, com.SIGDN_FILESYSPATH, &name))) return null;
+    return name;
+}
+
+/// `GetState` ignores `fOkToBeSlow`: both checks are cheap for a file-system
+/// item, and a hidden entry on E_PENDING would only add a second call.
+fn getState(self: *anyopaque, array: ?*com.IShellItemArray, _: com.BOOL, out: ?*u32) callconv(.winapi) HRESULT {
     const o = out orelse return com.E_POINTER;
     o.* = com.ECS_HIDDEN;
-    const a = array orelse return com.S_OK;
+    const c: *Command = @ptrCast(@alignCast(self));
+    const a = array orelse {
+        // Folder and desktop backgrounds can come with no items.
+        if (siteFolderPath(c)) |p| {
+            com.CoTaskMemFree(p);
+            o.* = com.ECS_ENABLED;
+        }
+        return com.S_OK;
+    };
     const item = onlyItem(a) orelse return com.S_OK;
     defer item.release();
     var attrs: u32 = 0;
     if (!com.succeeded(item.vtbl.GetAttributes(item, com.SFGAO_FILESYSTEM, &attrs))) return com.S_OK;
-    if (attrs & com.SFGAO_FILESYSTEM != 0) o.* = com.ECS_ENABLED;
+    if (attrs & com.SFGAO_FILESYSTEM == 0) return com.S_OK;
+    // An item can carry the attribute and still have no file-system path.
+    const p = itemPath(item) orelse return com.S_OK;
+    com.CoTaskMemFree(p);
+    o.* = com.ECS_ENABLED;
     return com.S_OK;
 }
 
@@ -300,15 +438,16 @@ fn enumSubCommands(_: *anyopaque, out: ?*?*anyopaque) callconv(.winapi) HRESULT 
 /// command line, and ours adds the exe path and the option name.
 const max_path_len = 30000;
 
-fn invoke(_: *anyopaque, array: ?*com.IShellItemArray, _: ?*anyopaque) callconv(.winapi) HRESULT {
-    const a = array orelse return com.E_INVALIDARG;
+fn invoke(self: *anyopaque, array: ?*com.IShellItemArray, _: ?*anyopaque) callconv(.winapi) HRESULT {
+    const c: *Command = @ptrCast(@alignCast(self));
+    const a = array orelse {
+        const p = siteFolderPath(c) orelse return com.E_INVALIDARG;
+        defer com.CoTaskMemFree(p);
+        return launchIn(std.mem.span(p));
+    };
     const item = onlyItem(a) orelse return com.E_INVALIDARG;
     defer item.release();
-
-    var name: ?com.LPWSTR = null;
-    const hr = item.vtbl.GetDisplayName(item, com.SIGDN_FILESYSPATH, &name);
-    if (!com.succeeded(hr)) return hr;
-    const raw = name orelse return com.E_FAIL;
+    const raw = itemPath(item) orelse return com.E_FAIL;
     defer com.CoTaskMemFree(raw);
     return launchIn(std.mem.span(raw));
 }
@@ -430,6 +569,12 @@ fn realLaunch(cmdline: [:0]u16, cwd: [*:0]const u16) u32 {
     return 0;
 }
 
+fn realPidlPath(pidl: *anyopaque) ?com.LPWSTR {
+    var name: ?com.LPWSTR = null;
+    if (!com.succeeded(com.SHGetNameFromIDList(pidl, com.SIGDN_FILESYSPATH, &name))) return null;
+    return name;
+}
+
 // ---------------------------------------------------------------------------
 // Tests.
 
@@ -529,7 +674,7 @@ const FakeHooks = struct {
 
     fn install() FakeHooks {
         const saved = hooks;
-        hooks = .{ .module_dir = fakeModuleDir, .launch = fakeLaunch };
+        hooks = .{ .module_dir = fakeModuleDir, .launch = fakeLaunch, .pidl_path = fakePidlPath };
         captured_cmd_len = 0;
         captured_cwd_len = 0;
         fake_launch_error = 0;
@@ -655,7 +800,7 @@ test "explorer command: title, icon, flags" {
     try expectCoString("Open Ghostty here", s);
 
     try testing.expectEqual(com.S_OK, v.GetIcon(c, null, &s));
-    try expectCoString("\"C:\\Program Files\\Ghostty\\ghostty.exe\",0", s);
+    try expectCoString("C:\\Program Files\\Ghostty\\ghostty.exe,0", s);
 
     try testing.expectEqual(com.E_NOTIMPL, v.GetToolTip(c, null, &s));
     try testing.expect(s == null);
@@ -712,6 +857,176 @@ test "explorer command: state" {
     try testing.expectEqual(com.S_OK, v.GetState(c, null, 0, &state));
     try testing.expectEqual(com.ECS_HIDDEN, state);
     try testing.expectEqual(com.E_POINTER, v.GetState(c, null, 0, null));
+}
+
+// Fake site chain: site -> IServiceProvider -> IShellBrowser -> view ->
+// IFolderView -> IPersistFolder2. One struct type per interface; the site and
+// the view answer QueryInterface by IID.
+
+const FakeObj = extern struct { vtbl: *const anyopaque };
+
+var fake_site_path: ?[*:0]const u16 = null;
+
+fn fakePidlPath(pidl: *anyopaque) ?com.LPWSTR {
+    if (pidl != fake_pidl_ptr) return null;
+    const src = std.mem.span(fake_site_path orelse return null);
+    const mem = com.CoTaskMemAlloc((src.len + 1) * 2) orelse return null;
+    const dst: [*]u16 = @ptrCast(@alignCast(mem));
+    @memcpy(dst[0..src.len], src);
+    dst[src.len] = 0;
+    return @ptrCast(dst);
+}
+
+var fake_site_obj: FakeObj = undefined;
+var fake_browser_obj: FakeObj = undefined;
+var fake_view_obj: FakeObj = undefined;
+var fake_fv_obj: FakeObj = undefined;
+var fake_pf_obj: FakeObj = undefined;
+var fake_site_released: u32 = 0;
+var fake_site_added: u32 = 0;
+
+fn siteAdd(_: *anyopaque) callconv(.winapi) u32 {
+    fake_site_added += 1;
+    return 2;
+}
+fn siteRel(_: *anyopaque) callconv(.winapi) u32 {
+    fake_site_released += 1;
+    return 1;
+}
+
+fn siteQi(_: *anyopaque, iid: ?*const GUID, out: ?*?*anyopaque) callconv(.winapi) HRESULT {
+    out.?.* = null;
+    if (iid.?.eql(&com.IID_IServiceProvider)) {
+        out.?.* = &fake_site_obj;
+        return com.S_OK;
+    }
+    return com.E_NOINTERFACE;
+}
+
+fn queryService(_: *anyopaque, sid: *const GUID, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+    out.* = null;
+    if (!sid.eql(&com.SID_STopLevelBrowser) or !iid.eql(&com.IID_IShellBrowser)) return com.E_NOINTERFACE;
+    out.* = &fake_browser_obj;
+    return com.S_OK;
+}
+
+fn queryActiveView(_: *anyopaque, out: *?*anyopaque) callconv(.winapi) HRESULT {
+    out.* = &fake_view_obj;
+    return com.S_OK;
+}
+
+fn viewQi(_: *anyopaque, iid: ?*const GUID, out: ?*?*anyopaque) callconv(.winapi) HRESULT {
+    out.?.* = null;
+    if (iid.?.eql(&com.IID_IFolderView)) {
+        out.?.* = &fake_fv_obj;
+        return com.S_OK;
+    }
+    return com.E_NOINTERFACE;
+}
+
+fn getFolderFake(_: *anyopaque, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+    out.* = null;
+    if (!iid.eql(&com.IID_IPersistFolder2)) return com.E_NOINTERFACE;
+    out.* = &fake_pf_obj;
+    return com.S_OK;
+}
+
+fn getCurFolderFake(_: *anyopaque, out: *?*anyopaque) callconv(.winapi) HRESULT {
+    // The code frees the PIDL with CoTaskMemFree, so hand out a real block.
+    const mem = com.CoTaskMemAlloc(1) orelse return com.E_OUTOFMEMORY;
+    out.* = mem;
+    fake_pidl_ptr = mem;
+    return com.S_OK;
+}
+var fake_pidl_ptr: ?*anyopaque = null;
+
+const base_unk: com.IUnknownVtbl = .{ .QueryInterface = @ptrCast(&stub), .AddRef = &siteAdd, .Release = &siteRel };
+
+// The site answers IServiceProvider with itself, so its vtable is the
+// service-provider one and QueryInterface is that vtable's first slot.
+const fake_site_vtbl: com.IServiceProviderVtbl = .{ .unk = .{ .QueryInterface = &siteQi, .AddRef = &siteAdd, .Release = &siteRel }, .QueryService = &queryService };
+
+const fake_browser_vtbl: com.IShellBrowserVtbl = .{
+    .unk = base_unk,
+    .GetWindow = &stub,
+    .ContextSensitiveHelp = &stub,
+    .InsertMenusSB = &stub,
+    .SetMenuSB = &stub,
+    .RemoveMenusSB = &stub,
+    .SetStatusTextSB = &stub,
+    .EnableModelessSB = &stub,
+    .TranslateAcceleratorSB = &stub,
+    .BrowseObject = &stub,
+    .GetViewStateStream = &stub,
+    .GetControlWindow = &stub,
+    .SendControlMsg = &stub,
+    .QueryActiveShellView = &queryActiveView,
+};
+const fake_view_vtbl: com.IUnknownVtbl = .{ .QueryInterface = &viewQi, .AddRef = &siteAdd, .Release = &siteRel };
+const fake_fv_vtbl: com.IFolderViewVtbl = .{
+    .unk = base_unk,
+    .GetCurrentViewMode = &stub,
+    .SetCurrentViewMode = &stub,
+    .GetFolder = &getFolderFake,
+};
+const fake_pf_vtbl: com.IPersistFolder2Vtbl = .{
+    .unk = base_unk,
+    .GetClassID = &stub,
+    .Initialize = &stub,
+    .GetCurFolder = &getCurFolderFake,
+};
+
+test "explorer command: null array resolves the folder from the site" {
+    const fh = FakeHooks.install();
+    defer fh.restore();
+
+    fake_site_obj = .{ .vtbl = &fake_site_vtbl };
+    fake_browser_obj = .{ .vtbl = &fake_browser_vtbl };
+    fake_view_obj = .{ .vtbl = &fake_view_vtbl };
+    fake_fv_obj = .{ .vtbl = &fake_fv_vtbl };
+    fake_pf_obj = .{ .vtbl = &fake_pf_vtbl };
+    fake_site_path = u("C:\\bg dir");
+    fake_site_added = 0;
+    fake_site_released = 0;
+
+    const c = try newCommand();
+    const v = vtblOf(c);
+    var state: u32 = 99;
+
+    // No site yet: hidden, and Invoke refuses.
+    try testing.expectEqual(com.S_OK, v.GetState(c, null, 0, &state));
+    try testing.expectEqual(com.ECS_HIDDEN, state);
+    try testing.expectEqual(com.E_INVALIDARG, v.Invoke(c, null, null));
+
+    // IObjectWithSite through QueryInterface on the same object.
+    const hr_site, const ows = callQi(c, &com.IID_IObjectWithSite);
+    try testing.expectEqual(com.S_OK, hr_site);
+    const ov = @as(*const *const com.IObjectWithSiteVtbl, @ptrCast(@alignCast(ows.?))).*;
+    try testing.expectEqual(com.S_OK, ov.SetSite(ows.?, &fake_site_obj));
+    try testing.expectEqual(@as(u32, 1), fake_site_added);
+
+    var got: ?*anyopaque = null;
+    try testing.expectEqual(com.E_NOINTERFACE, ov.GetSite(ows.?, &com.IID_IClassFactory, &got));
+    try testing.expectEqual(com.S_OK, ov.GetSite(ows.?, &com.IID_IServiceProvider, &got));
+    try testing.expect(got != null);
+
+    try testing.expectEqual(com.S_OK, v.GetState(c, null, 0, &state));
+    try testing.expectEqual(com.ECS_ENABLED, state);
+
+    try testing.expectEqual(com.S_OK, v.Invoke(c, null, null));
+    try testing.expectEqualStrings(
+        "\"C:\\Program Files\\Ghostty\\ghostty.exe\" \"--working-directory=C:\\bg dir\\.\"",
+        captured_cmd[0..captured_cmd_len],
+    );
+    try testing.expectEqualStrings("C:\\bg dir",captured_cwd[0..captured_cwd_len]);
+
+    // The command's last Release drops the site it holds.
+    const released_before = fake_site_released;
+    try testing.expectEqual(@as(u32, 1), release(ows.?)); // the QI reference
+    _ = release(got.?); // GetSite's reference (fake: counts only)
+    try testing.expectEqual(@as(u32, 0), release(c));
+    try testing.expect(fake_site_released > released_before);
+    try testing.expectEqual(com.S_OK, canUnloadNow());
 }
 
 test "explorer command: invoke builds the classic command" {

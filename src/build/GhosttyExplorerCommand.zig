@@ -1,6 +1,6 @@
 //! `ghostty-explorer.dll`: the `IExplorerCommand` COM server of the Windows
 //! 11 top-level "Open Ghostty here" entry. Like `tmux.exe` it imports only
-//! std (no SharedDeps, no libc); it links ole32 for `CoTaskMemAlloc`.
+//! std (no SharedDeps, no libc); it links ole32 (`CoTaskMemAlloc`) and shell32 (`SHGetNameFromIDList`).
 const GhosttyExplorerCommand = @This();
 
 const std = @import("std");
@@ -51,11 +51,9 @@ fn commandModule(b: *std.Build, cfg: *const Config) *std.Build.Module {
         .optimize = cfg.optimize,
         .strip = cfg.strip,
         .link_libc = false,
-        // No DllMain, so no TLS directory: thread-locals in std (panic
-        // state) become plain globals instead of needing `_tls_index`.
-        .single_threaded = true,
     });
     mod.linkSystemLibrary("ole32", .{});
+    mod.linkSystemLibrary("shell32", .{});
     return mod;
 }
 

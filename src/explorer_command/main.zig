@@ -1,6 +1,7 @@
 //! `ghostty-explorer.dll`: the in-process COM server of the Windows 11
 //! top-level "Open Ghostty here" entry. Only the two COM entry points are
 //! exported; registration is the sparse package's job (R-M7-13).
+const builtin = @import("builtin");
 const com = @import("com.zig");
 const command = @import("command.zig");
 
@@ -18,6 +19,11 @@ pub export fn DllCanUnloadNow() callconv(.winapi) com.HRESULT {
 // table; the build disables the entry point (`/NOENTRY`).
 pub fn DllMainCRTStartup() void {}
 pub fn _DllMainCRTStartup() void {}
+
+comptime {
+    // A test build is an exe whose std startup brings its own TLS directory.
+    if (builtin.output_mode == .Lib) _ = @import("tls.zig");
+}
 
 test {
     _ = com;

@@ -135,6 +135,60 @@ pub const IShellItemArray = extern struct {
     vtbl: *const IShellItemArrayVtbl,
 };
 
+
+
+pub const IID_IObjectWithSite = GUID.parse("{FC4801A3-2BA9-11CF-A229-00AA003D7352}");
+pub const IID_IServiceProvider = GUID.parse("{6D5140C1-7436-11CE-8034-00AA006009FA}");
+pub const IID_IShellBrowser = GUID.parse("{000214E2-0000-0000-C000-000000000046}");
+pub const IID_IFolderView = GUID.parse("{CDE725B0-CCC9-4519-917E-325D72FAB4CE}");
+pub const IID_IPersistFolder2 = GUID.parse("{1AC3D9F0-175C-11D1-95BE-00609797EA4F}");
+pub const SID_STopLevelBrowser = GUID.parse("{4C96BE40-915C-11CF-99D3-00AA004AE837}");
+
+pub const IObjectWithSiteVtbl = extern struct {
+    unk: IUnknownVtbl,
+    SetSite: *const fn (*anyopaque, ?*anyopaque) callconv(.winapi) HRESULT,
+    GetSite: *const fn (*anyopaque, ?*const GUID, ?*?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+pub const IServiceProviderVtbl = extern struct {
+    unk: IUnknownVtbl,
+    QueryService: *const fn (*anyopaque, *const GUID, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+/// `IShellBrowser`: only `QueryActiveShellView` (slot 15) is called; the
+/// slots in between keep its position.
+pub const IShellBrowserVtbl = extern struct {
+    unk: IUnknownVtbl,
+    GetWindow: *const anyopaque,
+    ContextSensitiveHelp: *const anyopaque,
+    InsertMenusSB: *const anyopaque,
+    SetMenuSB: *const anyopaque,
+    RemoveMenusSB: *const anyopaque,
+    SetStatusTextSB: *const anyopaque,
+    EnableModelessSB: *const anyopaque,
+    TranslateAcceleratorSB: *const anyopaque,
+    BrowseObject: *const anyopaque,
+    GetViewStateStream: *const anyopaque,
+    GetControlWindow: *const anyopaque,
+    SendControlMsg: *const anyopaque,
+    QueryActiveShellView: *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+pub const IFolderViewVtbl = extern struct {
+    unk: IUnknownVtbl,
+    GetCurrentViewMode: *const anyopaque,
+    SetCurrentViewMode: *const anyopaque,
+    GetFolder: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+pub const IPersistFolder2Vtbl = extern struct {
+    unk: IUnknownVtbl,
+    GetClassID: *const anyopaque,
+    Initialize: *const anyopaque,
+    GetCurFolder: *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+pub extern "shell32" fn SHGetNameFromIDList(pidl: *anyopaque, sigdn: u32, out: *?LPWSTR) callconv(.winapi) HRESULT;
 pub extern "ole32" fn CoTaskMemAlloc(size: usize) callconv(.winapi) ?*anyopaque;
 pub extern "ole32" fn CoTaskMemFree(ptr: ?*anyopaque) callconv(.winapi) void;
 
