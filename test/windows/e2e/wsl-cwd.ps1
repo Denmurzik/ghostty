@@ -62,8 +62,8 @@ public static class FakeWsl {
         }
     }
     function Wait-FakeCount($G, [int]$Count, [string]$What) {
-        $ok = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { (Get-FakeWsl).Count -ge $Count }
-        if (-not $ok) { throw "$What : $((Get-FakeWsl).Count) fake wsl.exe running, expected $Count" }
+        $ok = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { @(Get-FakeWsl).Count -ge $Count }
+        if (-not $ok) { throw "$What : $(@(Get-FakeWsl).Count) fake wsl.exe running, expected $Count" }
     }
     function Get-CdProcs { @(Get-FakeWsl | Where-Object { $_.CommandLine -match '--cd' }) }
 
@@ -73,7 +73,7 @@ public static class FakeWsl {
     # 1. The first pane: no --cd, and the POSIX path is its pwd.
     Wait-FakeCount $g 1 'first pane'
     Wait-Pwd $g 'first pane reports the POSIX path'
-    if ((Get-CdProcs).Count -ne 0) { throw 'the first pane got --cd' }
+    if (@(Get-CdProcs).Count -ne 0) { throw 'the first pane got --cd' }
     Save-Evidence -Tag 'wsl-cwd-first' -G $g -Window
 
     # 2. A split and a tab inherit it through --cd, as one argv element.
@@ -82,7 +82,7 @@ public static class FakeWsl {
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'new_tab')
     Wait-FakeCount $g 3 'tab'
 
-    $ok = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { (Get-CdProcs).Count -ge 2 }
+    $ok = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition { @(Get-CdProcs).Count -ge 2 }
     if (-not $ok) {
         $cmds = (Get-FakeWsl | ForEach-Object { $_.CommandLine }) -join ' || '
         throw "expected 2 panes started with --cd, got: $cmds"
