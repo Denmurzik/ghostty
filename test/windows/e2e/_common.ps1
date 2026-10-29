@@ -213,9 +213,11 @@ function Invoke-E2eScenario {
         } catch {
             if ($_.Exception.Message -like 'E2E-SKIP:*') {
                 $global:E2eSkip = $_.Exception.Message.Substring('E2E-SKIP:'.Length).Trim()
+                Write-E2eInfo ("skip raised at " + ($_.ScriptStackTrace -replace "`r?`n", " < "))
             } else {
                 # What the window shows at the moment of the failure.
                 if ($global:E2eLast) { Save-Evidence 'failure' $global:E2eLast -Window }
+                Write-E2eInfo "failure at $($_.InvocationInfo.ScriptName | Split-Path -Leaf):$($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())"
                 throw
             }
         }
