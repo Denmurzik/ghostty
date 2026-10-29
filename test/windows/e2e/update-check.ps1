@@ -136,9 +136,27 @@ Invoke-E2eScenario 'update-check' {
         $fetchLines = @(Get-FetchLines $g)
 
         # --- Instance C: no current release number (a local build). ---------------
+        # The number comes from the version stamp (-win.N). A stamped release
+        # exe must report its own N; the local outcome is then reached through
+        # an override that is not a number, which test mode reads as "none".
         $srv = Start-FakeRelease -Body (Get-Fixture 'newer')
         $servers += $srv
         $g = Start-E2eGhostty -Env @{ GHOSTTY_WIN32_UPDATE_URL = $srv.Url }
+        $verLine = Wait-Until -TimeoutSec 15 -PollMs 200 -Condition {
+            if (Test-Path -LiteralPath $g.Log) { Select-String -LiteralPath $g.Log -Pattern 'ghostty version=(\S+)' | Select-Object -First 1 }
+        }
+        if (-not $verLine) { throw 'local: no "ghostty version=" line in the log' }
+        $version = $verLine.Matches[0].Groups[1].Value
+        $stampN = if ($version -match '-win\.(\d+)') { [int]$Matches[1] } else { $null }
+        $currentN = (Get-Update $g).current_n
+        if ($currentN -ne $stampN) { throw "local: version $version, current_n is '$currentN', expected '$stampN'" }
+        if ($null -ne $stampN) {
+            Write-E2eInfo "local: stamped build $version (N=$stampN), using a non-numeric override"
+            Invoke-GhosttyAction -Class $g.Class -Action 'quit' | Out-Null
+            [void](Wait-ProcessExit $g 10)
+            $g = Start-E2eGhostty -Env @{ GHOSTTY_WIN32_UPDATE_URL = $srv.Url; GHOSTTY_WIN32_TEST_CURRENT_N = 'none' }
+            if ($null -ne (Get-Update $g).current_n) { throw "local: the override 'none' left current_n at $((Get-Update $g).current_n)" }
+        }
         $r = Invoke-Check $g 'local'
         if ($r.State.last.kind -ne 'local' -or $r.State.last.n -ne 4) { throw "local: last is $($r.State.last | ConvertTo-Json -Compress)" }
         if ($r.State.toasts -ne 0) { throw 'local: a toast was shown' }

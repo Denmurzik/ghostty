@@ -6,10 +6,28 @@
 . (Join-Path $PSScriptRoot '_common.ps1')
 
 Invoke-E2eScenario 'term-terminfo' {
-    $share = Join-Path (Split-Path -Parent (Split-Path -Parent $script:Exe)) 'share\terminfo'
+    # The same lookup as resourcesDir (src/os/resourcesdir.zig): climb from the
+    # exe's folder to the first <dir>\share holding terminfo\ghostty.terminfo.
+    # It finds both zig-out\bin\ghostty.exe + zig-out\share and the portable
+    # layout (share next to ghostty.exe).
+    $share = $null
+    $dir = Split-Path -Parent $script:Exe
+    while ($dir) {
+        if (Test-Path -LiteralPath (Join-Path $dir 'share\terminfo\ghostty.terminfo')) { $share = Join-Path $dir 'share\terminfo'; break }
+        $up = Split-Path -Parent $dir
+        if ($up -eq $dir) { break }
+        $dir = $up
+    }
+    # Ghostty itself would find no resources: a real gap, never a skip.
+    if (-not $share) { throw "no share\terminfo\ghostty.terminfo above $(Split-Path -Parent $script:Exe): ghostty finds no resources" }
     if (-not ((Test-Path -LiteralPath (Join-Path $share '78\xterm-ghostty')) -or (Test-Path -LiteralPath (Join-Path $share 'x\xterm-ghostty')))) {
+        # A source build without tic may lack it; a package (share next to the exe) may not.
+        if ((Split-Path -Parent $share) -ieq (Join-Path (Split-Path -Parent $script:Exe) 'share')) {
+            throw "the package has no compiled xterm-ghostty entry under $share"
+        }
         throw "E2E-SKIP: the compiled xterm-ghostty entry is not installed under $share (no tic at build time)"
     }
+    Write-E2eInfo "terminfo: $share"
     $bashExe = Find-GitBash
     if (-not $bashExe) { throw 'E2E-SKIP: Git for Windows not found' }
     $gitBin = Join-Path (Split-Path -Parent (Split-Path -Parent $bashExe)) 'usr\bin'
