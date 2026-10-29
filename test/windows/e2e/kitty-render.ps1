@@ -53,16 +53,16 @@ Invoke-E2eScenario 'kitty-render' {
     }
 
     function Get-Cell($G) {
-        $w = $null
-        if (-not (Wait-Until -TimeoutSec 15 -PollMs 150 -Condition {
+        # The condition runs in a child scope: its value is what Wait-Until returns.
+        $w = Wait-Until -TimeoutSec 15 -PollMs 150 -Condition {
             $s = Get-GhosttyState -Class $G.Class
             $d = if ($s.PSObject.Properties['data']) { $s.data } else { $s }
-            $w = @($d.windows)[0]
-            $w -and [int]$w.cell[0] -gt 0 -and [int]$w.cell[1] -gt 0
-        })) { throw 'no cell size in the state' }
+            $x = @($d.windows)[0]
+            if ($x -and [int]$x.cell[0] -gt 0 -and [int]$x.cell[1] -gt 0) { $x }
+        }
+        if (-not $w) { throw 'no cell size in the state' }
         , @([int]$w.cell[0], [int]$w.cell[1])
     }
-
     # Share of pixels within 24 of #ff00ff in the 8x2-cell rectangle at 0,0.
     function Measure-Magenta($D, [int[]]$Cell) {
         $w = [Math]::Min($D.Width, 8 * $Cell[0])
