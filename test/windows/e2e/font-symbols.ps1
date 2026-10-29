@@ -2,8 +2,8 @@
 # font-symbols: symbols and emoji come from the system faces (R-M7-3). Git Bash prints
 # the record, check, warning, asterisk, prompt and arrow symbols on the first row, two emoji on the
 # second and a reference row of 40 `M` below; every symbol cell has ink pixels in the frame dump, each
-# emoji cell has at least 20 pixels whose R, G, B differ by more than 40 (colour), and the log reports
-# `directwrite fallback family=Segoe UI Symbol` and `family=Segoe UI Emoji` and names no Noto face.
+# emoji cell has at least 20 pixels whose R, G, B differ by more than 40 (colour), and the log's
+# `directwrite fallback` lines name only Segoe UI Symbol / Emoji (the emoji one is there) and no Noto face.
 . (Join-Path $PSScriptRoot '_common.ps1')
 
 Invoke-E2eScenario 'font-symbols' {
@@ -107,7 +107,11 @@ Invoke-E2eScenario 'font-symbols' {
     }
 
     $log = if (Test-Path $g.Log) { Get-Content -LiteralPath $g.Log -Raw } else { '' }
-    if ($log -notmatch 'directwrite fallback family=Segoe UI Symbol') { throw 'the log has no `directwrite fallback family=Segoe UI Symbol` line' }
-    if ($log -notmatch 'directwrite fallback family=Segoe UI Emoji') { throw 'the log has no `directwrite fallback family=Segoe UI Emoji` line' }
+    # Most symbols are in the primary face or the embedded Symbols Nerd Font and never reach the
+    # fallback; what does reach DirectWrite is answered by the system's Segoe UI faces.
+    if ($log -notmatch 'directwrite fallback family=Segoe UI Emoji cp=1F600') { throw 'the log has no `directwrite fallback family=Segoe UI Emoji cp=1F600` line' }
+    foreach ($m in [regex]::Matches($log, 'directwrite fallback family=(.+?) cp=')) {
+        if ($m.Groups[1].Value -notin 'Segoe UI Symbol', 'Segoe UI Emoji') { throw "a fallback came from '$($m.Groups[1].Value)', expected Segoe UI Symbol or Emoji" }
+    }
     if ($log -match 'Noto') { throw 'the log names a Noto face' }
 }
