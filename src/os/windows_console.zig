@@ -35,11 +35,16 @@ pub fn stderrValid() bool {
 /// actions emit on a tty (e.g. the OSC 8 links in `+version`) render
 /// instead of printing as text.
 fn setFromConsole(which: windows.DWORD, name: [*:0]const u16, vt: bool) void {
+    var sa: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = null,
+        .bInheritHandle = .TRUE,
+    };
     const h = windows.exp.kernel32.CreateFileW(
         name,
         windows.GENERIC_READ | windows.GENERIC_WRITE,
         windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
-        null,
+        &sa,
         windows.OPEN_EXISTING,
         windows.FILE_ATTRIBUTE_NORMAL,
         null,

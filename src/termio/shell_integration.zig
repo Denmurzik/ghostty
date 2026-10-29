@@ -83,7 +83,7 @@ pub fn setup(
             resource_dir,
         ),
 
-        .cmd => try setupCmd(alloc_arena, command, env),
+        .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
         .elvish, .fish => xdg: {
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
@@ -460,10 +460,19 @@ fn pwshRunsCode(arg: []const u8) bool {
 fn setupCmd(
     alloc: Allocator,
     command: config.Command,
+    resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
     const features = env.get("GHOSTTY_SHELL_FEATURES") orelse return null;
     const title = std.mem.indexOf(u8, features, "title") != null;
+    // cmd has no pre-exec hook: the bar stays while a command runs.
+    const cursor: []const u8 = if (std.mem.indexOf(u8, features, "cursor:steady") != null)
+        "$e[6 q"
+    else if (std.mem.indexOf(u8, features, "cursor") != null)
+        "$e[5 q"
+    else
+        "";
+    const ssh = std.mem.indexOf(u8, features, "ssh-") != null;
 
     var iter = try command.argIterator(alloc);
     defer iter.deinit();
@@ -472,6 +481,10 @@ fn setupCmd(
         // /c and /r run one command and exit.
         if (arg.len >= 2 and arg[0] == '/' and (arg[1] == 'c' or arg[1] == 'C' or arg[1] == 'r' or arg[1] == 'R')) return null;
     }
+    // ssh.cmd shadows `ssh` for what cmd resolves itself: its directory goes
+    // first on PATH once, whatever the prompt state.
+    if (ssh) try putCmdSshDir(alloc, resource_dir, env);
+
     // OSC 7 follows the title, as `kitty-shell-cwd://` with no host (this
     // machine): core keeps that path raw, so a name with spaces or a # needs
     // no encoding.
@@ -487,8 +500,18 @@ fn setupCmd(
         try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current[marks.len..] }));
         return try command.clone(alloc);
     }
-    try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current, end }));
+    try env.put("PROMPT", try std.mem.concat(alloc, u8, &.{ prefix, current, cursor, end }));
     return try command.clone(alloc);
+}
+
+/// Puts `<resources>\shell-integration\cmd` (ssh.cmd) first on PATH, unless
+/// it already is.
+fn putCmdSshDir(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
+    const dir = try std.mem.concat(alloc, u8, &.{ std.mem.trimEnd(u8, resource_dir, "\\/"), "\\shell-integration\\cmd" });
+    const path = env.get("PATH") orelse "";
+    if (std.mem.startsWith(u8, path, dir) and
+        (path.len == dir.len or path[dir.len] == std.fs.path.delimiter)) return;
+    try env.put("PATH", try prependEnv(alloc, path, dir));
 }
 
 /// Setup the bash automatic shell integration. This works by
@@ -1354,6 +1377,69 @@ test "windows: pwsh: missing resources" {
     try testing.expect(try setupPwsh(alloc, pwsh, "C:\\no\\such\\dir") == null);
 }
 
+const test_cmd_res = "C:\\g\\share\\ghostty";
+
+test "windows shell integration: cmd cursor in the prompt" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const cmd: config.Command = .{ .direct = &.{"cmd.exe"} };
+
+    const cases = [_]struct { features: []const u8, bar: ?[]const u8 }{
+        .{ .features = "cursor:blink,title", .bar = "$e[5 q" },
+        .{ .features = "cursor:steady,title", .bar = "$e[6 q" },
+        .{ .features = "title", .bar = null },
+    };
+    for (cases) |c| {
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+        try env.put("GHOSTTY_SHELL_FEATURES", c.features);
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+        const p = env.get("PROMPT").?;
+        if (c.bar) |bar| {
+            // Right before the B mark, once, also after a second setup.
+            const end = "$e]133;B$e\\";
+            try testing.expect(std.mem.endsWith(u8, p, end));
+            try testing.expect(std.mem.endsWith(u8, p[0 .. p.len - end.len], bar));
+            try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+            try testing.expectEqual(@as(usize, 1), std.mem.count(u8, env.get("PROMPT").?, " q"));
+        } else {
+            try testing.expect(std.mem.indexOf(u8, p, " q") == null);
+        }
+    }
+}
+
+test "windows shell integration: cmd ssh dir on PATH" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const cmd: config.Command = .{ .direct = &.{"cmd.exe"} };
+    const dir = "C:\\g\\share\\ghostty\\shell-integration\\cmd";
+
+    for ([_][]const u8{ "ssh-env", "ssh-terminfo", "title,ssh-env,ssh-terminfo" }) |features| {
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+        try env.put("GHOSTTY_SHELL_FEATURES", features);
+        try env.put("PATH", "C:\\bin;C:\\tools");
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+        try testing.expectEqualStrings(dir ++ ";C:\\bin;C:\\tools", env.get("PATH").?);
+        // Once only.
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res ++ "\\", &env) != null);
+        try testing.expectEqualStrings(dir ++ ";C:\\bin;C:\\tools", env.get("PATH").?);
+    }
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("GHOSTTY_SHELL_FEATURES", "title,cursor:blink");
+    try env.put("PATH", "C:\\bin;C:\\tools");
+    try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+    try testing.expectEqualStrings("C:\\bin;C:\\tools", env.get("PATH").?);
+}
+
 test "windows: cmd prompt" {
     if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
@@ -1366,28 +1452,28 @@ test "windows: cmd prompt" {
     const cmd: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} };
 
     // Integration is off (the variable is absent): untouched.
-    try testing.expect(try setupCmd(alloc, cmd, &env) == null);
+    try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) == null);
     try testing.expect(env.get("PROMPT") == null);
     try env.put("GHOSTTY_SHELL_FEATURES", "cursor:blink,title");
-    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+    try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
     // The marks, the title, then OSC 7 with no host (raw `kitty-shell-cwd` path).
     const prefix = "$e]133;D$e\\$e]133;A$e\\$e]2;$P$e\\$e]7;kitty-shell-cwd:///$P$e\\";
     const end = "$e]133;B$e\\";
-    try testing.expectEqualStrings(prefix ++ "$P$G" ++ end, env.get("PROMPT").?);
+    try testing.expectEqualStrings(prefix ++ "$P$G$e[5 q" ++ end, env.get("PROMPT").?);
 
     // Set up again, or with a prompt of the user's: wrapped once.
-    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
-    try testing.expectEqualStrings(prefix ++ "$P$G" ++ end, env.get("PROMPT").?);
+    try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+    try testing.expectEqualStrings(prefix ++ "$P$G$e[5 q" ++ end, env.get("PROMPT").?);
     try env.put("PROMPT", "$T $P$G");
-    try testing.expect(try setupCmd(alloc, cmd, &env) != null);
-    try testing.expectEqualStrings(prefix ++ "$T $P$G" ++ end, env.get("PROMPT").?);
+    try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
+    try testing.expectEqualStrings(prefix ++ "$T $P$G$e[5 q" ++ end, env.get("PROMPT").?);
 
     // /c runs one command: no prompt shows.
     var other = EnvMap.init(alloc);
     defer other.deinit();
     try other.put("GHOSTTY_SHELL_FEATURES", "title");
     const run: config.Command = .{ .direct = &.{ "cmd.exe", "/c", "dir" } };
-    try testing.expect(try setupCmd(alloc, run, &other) == null);
+    try testing.expect(try setupCmd(alloc, run, test_cmd_res, &other) == null);
     try testing.expect(other.get("PROMPT") == null);
 }
 
@@ -1404,7 +1490,7 @@ test "windows: cmd prompt marks" {
     const cmd: config.Command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} };
 
     inline for (.{ 0, 1 }) |_| {
-        try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
         const p = env.get("PROMPT").?;
         try testing.expect(std.mem.startsWith(u8, p, "$e]133;D$e\\$e]133;A$e\\"));
         try testing.expect(std.mem.endsWith(u8, p, "$e]133;B$e\\"));
@@ -1426,7 +1512,7 @@ test "windows: cmd marks gain the title part once" {
     try env.put("PROMPT", "$e]133;D$e\\$e]133;A$e\\$P$G$e]133;B$e\\");
     const cmd: config.Command = .{ .direct = &.{"cmd.exe"} };
     inline for (.{ 0, 1 }) |_| {
-        try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
         const p = env.get("PROMPT").?;
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]133;D"));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "$e]2;$P"));
@@ -1446,9 +1532,9 @@ test "windows: cmd marks without the title feature" {
     try env.put("GHOSTTY_SHELL_FEATURES", "cursor");
     const cmd: config.Command = .{ .direct = &.{"cmd.exe"} };
     inline for (.{ 0, 1 }) |_| {
-        try testing.expect(try setupCmd(alloc, cmd, &env) != null);
+        try testing.expect(try setupCmd(alloc, cmd, test_cmd_res, &env) != null);
         try testing.expectEqualStrings(
-            "$e]133;D$e\\$e]133;A$e\\$P$G$e]133;B$e\\",
+            "$e]133;D$e\\$e]133;A$e\\$P$G$e[5 q$e]133;B$e\\",
             env.get("PROMPT").?,
         );
     }

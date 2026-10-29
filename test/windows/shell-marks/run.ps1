@@ -34,6 +34,16 @@ prompt for `confirm-close-surface = true` (Terminal.cursorIsAtPrompt).
   cmd             cmd.exe with the marked PROMPT
   cmd-busy         cmd running `ping -t`: the ping is the shell's only child,
                    the idle prompt has none (what Exec.shellBusy counts)
+  pwsh-cursor     the cursor feature: ESC[5 q before 133;B, ESC[0 q after 133;C
+  pwsh-ssh-env     ssh-env: `ssh -p 2222 'host one'` reaches a fake ssh.exe through
+                   `ghostty +ssh` with SendEnv options and unsplit arguments
+  pwsh-ssh-terminfo  ssh-terminfo: the terminfo goes to the first call's stdin,
+                   the second call is cached (TERM=xterm-ghostty)
+  pwsh-no-ssh      no ssh feature: ssh is the fake itself, no wrapper
+  cmd-cursor       the cursor feature in the cmd PROMPT
+  cmd-ssh-env      ssh-env: shell-integration\cmd\ssh.cmd shadows ssh
+  (the ssh cases need zig-out\bin\ghostty.exe; the fakes are FakeExe.psm1's
+  argv program and a small logging one, compiled with Windows PowerShell 5.1)
 
 Cases whose shell is missing are skipped. Exit code 1 when a case fails.
 Keep this file ASCII only.
@@ -41,6 +51,8 @@ Keep this file ASCII only.
 param(
     [string]$GitDir = 'C:\Program Files\Git',
     [int]$WaitMs = 5000,
+    # Run only the cases whose name matches this wildcard.
+    [string]$Only = '*',
     # Keep the sandbox with the raw output of every case (<case>.bin).
     [switch]$Keep
 )
@@ -116,9 +128,15 @@ public static class ShellMarksPty {
         reader.Start();
         Thread.Sleep(waitMs);
         string before = probe == null ? "" : probe(pi.pid);
-        var b = Encoding.UTF8.GetBytes(input);
-        inFs.Write(b, 0, b.Length);
-        inFs.Flush();
+        // U+0001 in the input is a pause: what follows is typed after waitMs
+        // (a fake ssh.exe reading a stdin line gets it past the line editor).
+        var chunks = input.Split('\u0001');
+        for (int i = 0; i < chunks.Length; i++) {
+            if (i > 0) Thread.Sleep(waitMs);
+            var b = Encoding.UTF8.GetBytes(chunks[i]);
+            inFs.Write(b, 0, b.Length);
+            inFs.Flush();
+        }
         Thread.Sleep(waitMs);
         Probed = probe == null ? null : before + "|" + probe(pi.pid);
         byte[] result;
@@ -145,6 +163,11 @@ $winps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.e
 $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
 # The PROMPT setupCmd builds with the title feature.
 $cmdPrompt = '$e]133;D$e\$e]133;A$e\$e]2;$P$e\$e]7;kitty-shell-cwd:///$P$e\$P$G$e]133;B$e\'
+# The same with the cursor feature (setupCmd puts the bar before the B mark).
+$cmdPromptBar = $cmdPrompt.Replace('$e]133;B', '$e[5 q$e]133;B')
+$ghosttyBin = Join-Path $repo 'zig-out\bin'
+$ghosttyExe = Join-Path $ghosttyBin 'ghostty.exe'
+$winpsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 # The images of the shell's child processes other than console hosts, as
 # Ghostty's close confirmation counts them for cmd (Exec.shellBusy).
@@ -158,6 +181,80 @@ $childProbe = [Func[int, string]] {
 
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("ghostty-shell-marks-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $sandbox | Out-Null
+
+# Fake ssh.exe programs for the ssh cases, built once with Windows PowerShell
+# 5.1 (Add-Type -OutputAssembly does not exist in pwsh 7). The directory of
+# each goes first on the case's PATH, where `ghostty +ssh` finds it as `ssh`.
+#   argv: FakeExe.psm1's program; prints ARGV:, CWD:, TERM:, STDIN: and exits
+#         with FAKE_EXIT.
+#   log:  answers `ssh -G` (user, hostname, port), and appends every other
+#         call to FAKE_LOG: "CALL", the argv, "TERM:<TERM>" and, when stdin
+#         is a pipe (the terminfo install), "STDIN:<first line>".
+$logFakeSource = @'
+using System;
+using System.IO;
+using System.Text;
+
+public static class FakeSsh {
+    public static int Main(string[] args) {
+        if (args.Length > 0 && args[0] == "-G") {
+            Console.Out.Write("user fakeuser\nhostname fakehost\nport 22\n");
+            return 0;
+        }
+        string stdin = null;
+        try { if (Console.IsInputRedirected) stdin = Console.In.ReadLine(); } catch (Exception) { }
+        StringBuilder sb = new StringBuilder("CALL\nARGV:\n");
+        foreach (string a in args) sb.Append(a + "\n");
+        sb.Append("TERM:" + (Environment.GetEnvironmentVariable("TERM") ?? "") + "\n");
+        if (stdin != null) sb.Append("STDIN:" + stdin + "\n");
+        File.AppendAllText(Environment.GetEnvironmentVariable("FAKE_LOG"), sb.ToString());
+        return 0;
+    }
+}
+'@
+
+function New-FakeSshDir([string]$Kind) {
+    $dir = Join-Path $sandbox "fake-$Kind"
+    $exe = Join-Path $dir 'ssh.exe'
+    if (Test-Path -LiteralPath $exe) { return $dir }
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $script = Join-Path $sandbox "build-fake-$Kind.ps1"
+    if ($Kind -eq 'argv') {
+        $module = Join-Path $repo 'test\windows\lib\FakeExe.psm1'
+        $body = "Import-Module '$module' -Force; New-FakeExe -Path '$exe' -Kind argv | Out-Null"
+    } else {
+        $srcFile = Join-Path $sandbox 'fake-ssh-log.cs'
+        [IO.File]::WriteAllText($srcFile, $logFakeSource)
+        $body = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$srcFile')) -Language CSharp -OutputType ConsoleApplication -OutputAssembly '$exe'"
+    }
+    [IO.File]::WriteAllText($script, "`$ErrorActionPreference = 'Stop'`r`n$body`r`n")
+    & $winpsExe -NoProfile -ExecutionPolicy Bypass -File $script | Out-Null
+    if (-not (Test-Path -LiteralPath $exe)) { throw "could not build the fake ssh ($Kind)" }
+    $dir
+}
+
+# The lines between "ARGV:" and "CWD:" of a fake argv program's output.
+function Get-FakeArgv([string]$Text) {
+    $lines = @($Text -split "`r?`n")
+    $i = -1
+    for ($k = 0; $k -lt $lines.Count; $k++) { if ($lines[$k].EndsWith('ARGV:')) { $i = $k; break } }
+    if ($i -lt 0) { return $null }
+    $out = @()
+    for ($j = $i + 1; $j -lt $lines.Count -and -not $lines[$j].StartsWith('CWD:'); $j++) { $out += $lines[$j] }
+    , $out
+}
+
+$sendEnv = @('-o', 'SendEnv=COLORTERM', '-o', 'SendEnv=TERM_PROGRAM', '-o', 'SendEnv=TERM_PROGRAM_VERSION')
+
+# A Check returns the problems of a case: it gets the output text and the home.
+function Test-SshArgv([string]$Text, [string[]]$Want, [string]$Term) {
+    $got = Get-FakeArgv $Text
+    if ($null -eq $got) { return @('no ARGV: from the fake ssh') }
+    $p = @()
+    if (($got -join '|') -ne ($Want -join '|')) { $p += "fake argv is '$($got -join '|')', expected '$($Want -join '|')'" }
+    if ($Term -and $Text.IndexOf("TERM:$Term") -lt 0) { $p += "no TERM:$Term from the fake ssh" }
+    $p
+}
 
 function New-Home([string]$Name, [hashtable]$Files) {
     $h = Join-Path $sandbox $Name
@@ -333,9 +430,97 @@ foreach ($ps in @(@{ Prefix = 'pwsh'; Exe = $pwsh }, @{ Prefix = 'powershell'; E
     )
 }
 
+# cursor: the bar goes out right before B (prompt) and is reset right after C.
+# ConPTY re-orders the bar within the prompt, so it only has to come after A
+# and before the next A/C.
+$barBeforeB = "(?s)`e\]133;A(\x07|`e[\\])((?!`e\]133;B).)*?`e\[5 q"
+$resetAfterC = "`e\]133;C\a`e\[0 q"
+$cases += @(
+    @{
+        Name = 'cmd-cursor'; Exe = $cmd; Args = ''; Input = "echo cmd-%OS%`r"; Home = @{}; Expect = 'cmd-Windows_NT'
+        Env = @{ PROMPT = $cmdPromptBar; GHOSTTY_SHELL_FEATURES = 'cursor:blink,title' }
+        Check = { param($t, $h) if ($t -notmatch $barBeforeB) { 'no ESC[5 q before 133;B' } }
+    }
+)
+foreach ($ps in @(@{ Prefix = 'pwsh'; Exe = $pwsh }, @{ Prefix = 'powershell'; Exe = $winps })) {
+    $integrate = ". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))"
+    $psArgs = "-NoLogo -NoProfile -NoExit -Command `"$integrate`""
+    $cases += @{
+        Name = "$($ps.Prefix)-cursor"; Exe = $ps.Exe; Args = $psArgs; Input = "'ps-' + (40+2)`r"; Home = @{}
+        Env = @{ GHOSTTY_SHELL_FEATURES = 'cursor:blink,title' }; Expect = 'ps-42'
+        Check = {
+            param($t, $h)
+            if ($t -notmatch $barBeforeB) { 'no ESC[5 q before 133;B' }
+            if ($t -notmatch $resetAfterC) { 'no ESC[0 q after 133;C' }
+        }
+    }
+}
+
+# ssh features against a fake ssh.exe (needs the built ghostty.exe: +ssh).
+if (Test-Path -LiteralPath $ghosttyExe) {
+    $argvDir = New-FakeSshDir 'argv'
+    $logDir = New-FakeSshDir 'log'
+    function Get-SshEnv([string]$Dir, [string]$Features, [string]$HomeName, [hashtable]$Extra = @{}) {
+        $h = Join-Path $sandbox $HomeName
+        @{
+            PATH = "$Dir;$env:PATH"; GHOSTTY_BIN_DIR = $ghosttyBin; GHOSTTY_SHELL_FEATURES = $Features
+            LOCALAPPDATA = $h; XDG_STATE_HOME = $h; XDG_CACHE_HOME = $h
+        } + $Extra
+    }
+    foreach ($ps in @(@{ Prefix = 'pwsh'; Exe = $pwsh }, @{ Prefix = 'powershell'; Exe = $winps })) {
+        $integrate = ". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))"
+        $psArgs = "-NoLogo -NoProfile -NoExit -Command `"$integrate`""
+        $cases += @{
+            # The second line of input is the fake's stdin; FAKE_EXIT is $LASTEXITCODE.
+            Name = "$($ps.Prefix)-ssh-env"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Needs = $ghosttyExe
+            Input = "ssh -p 2222 'host one'`r$([char]1)`r$([char]1)'le' + 'c-' + `$LASTEXITCODE`r"
+            Env = (Get-SshEnv $argvDir 'cursor,title,ssh-env' "$($ps.Prefix)-ssh-env" @{ FAKE_EXIT = '7' })
+            Expect = 'lec-7'
+            Check = { param($t, $h) Test-SshArgv $t ($sendEnv + @('-p', '2222', 'host one')) 'xterm-256color' }
+        }
+        $cases += @{
+            Name = "$($ps.Prefix)-no-ssh"; Exe = $ps.Exe; Args = $psArgs; Home = @{}; Needs = $ghosttyExe
+            Input = "ssh -p 1 hostx`r$([char]1)`r$([char]1)'ty-' + (Get-Command ssh).CommandType`r"
+            Env = (Get-SshEnv $argvDir 'cursor,title' "$($ps.Prefix)-no-ssh" @{ TERM = 'xterm-256color' })
+            Expect = 'ty-Application'
+            Check = { param($t, $h) Test-SshArgv $t @('-p', '1', 'hostx') $null }
+        }
+    }
+    $cases += @{
+        # The first call installs the terminfo (its stdin) and is cached; the
+        # second connection to the same host is a session only.
+        Name = 'pwsh-ssh-terminfo'; Exe = $pwsh; Args = "-NoLogo -NoProfile -NoExit -Command `". ([scriptblock]::Create([IO.File]::ReadAllText('$resWin\shell-integration\pwsh\ghostty.ps1')))`""
+        Home = @{}; Needs = $ghosttyExe
+        Input = "ssh hostx`r'one' + '-done'`rssh hostx`r'two' + '-done'`r"
+        Env = (Get-SshEnv $logDir 'cursor,title,ssh-terminfo' 'pwsh-ssh-terminfo' @{ FAKE_LOG = (Join-Path $sandbox 'pwsh-ssh-terminfo.log') })
+        Expect = 'two-done'
+        Check = {
+            param($t, $h)
+            $log = Join-Path $sandbox 'pwsh-ssh-terminfo.log'
+            if (-not (Test-Path -LiteralPath $log)) { return 'the fake ssh logged nothing' }
+            $calls = @((Get-Content -Raw -LiteralPath $log) -split "CALL`r?`n" | Where-Object { $_ })
+            $p = @()
+            $installs = @($calls | Where-Object { $_ -match '(?m)^STDIN:' })
+            if ($installs.Count -ne 1) { $p += "$($installs.Count) terminfo installs, expected 1" }
+            elseif ($installs[0] -notmatch '(?m)^STDIN:xterm-ghostty\|') { $p += 'the install stdin does not start with the terminfo source' }
+            if ($calls.Count -ne 3) { $p += "$($calls.Count) ssh calls, expected 3 (install, session, cached session)" }
+            elseif ($calls[2] -notmatch '(?m)^TERM:xterm-ghostty') { $p += 'the cached session has no TERM=xterm-ghostty' }
+            $p
+        }
+    }
+    $sshCmdDir = "$resWin\shell-integration\cmd"
+    $cases += @{
+        Name = 'cmd-ssh-env'; Exe = $cmd; Args = ''; Home = @{}; Needs = $ghosttyExe
+        Input = "ssh host`r$([char]1)`r$([char]1)echo cmd-%OS%`r"; Expect = 'cmd-Windows_NT'
+        Env = (Get-SshEnv "$sshCmdDir;$argvDir" 'title,ssh-env' 'cmd-ssh-env' @{ PROMPT = $cmdPrompt })
+        Check = { param($t, $h) Test-SshArgv $t ($sendEnv + @('host')) 'xterm-256color' }
+    }
+}
+
 $failed = 0
 try {
     foreach ($c in $cases) {
+        if ($c.Name -notlike $Only) { continue }
         $need = if ($c.Needs) { $c.Needs } else { $c.Exe }
         if (-not (Test-Path -LiteralPath $c.Exe) -or -not (Test-Path -LiteralPath $need)) {
             Write-Host "SKIP $($c.Name): $need not found"
@@ -357,6 +542,7 @@ try {
             $marks = @([regex]::Matches($text, "`e]133;D;(\d+)") | ForEach-Object { $_.Groups[1].Value }) -join ','
             if ($marks -ne $c.Marks) { $problems += "133;D codes are '$marks', expected '$($c.Marks)'" }
         }
+        if ($c.Check) { $problems += @(& $c.Check $text $h | Where-Object { $_ }) }
         if ($text -match "command not found") { $problems += "'command not found' in the output" }
         if (-not (Test-PromptMarked $text)) { $problems += 'the last prompt has no OSC 133 A..B' }
         if ($problems.Count) {

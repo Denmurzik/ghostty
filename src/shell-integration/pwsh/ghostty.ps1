@@ -14,6 +14,12 @@ $global:__ghostty_integrated = $true
 $script:__ghostty_title = $env:GHOSTTY_SHELL_FEATURES -like '*title*'
 $script:__ghostty_esc = [char]27
 $script:__ghostty_bel = [char]7
+# `cursor` feature: a bar in the prompt (ESC[5 q, ESC[6 q when steady), reset
+# (ESC[0 q) when a command starts.
+$script:__ghostty_bar = if ($env:GHOSTTY_SHELL_FEATURES -like '*cursor:steady*') { "$([char]27)[6 q" }
+    elseif ($env:GHOSTTY_SHELL_FEATURES -like '*cursor*') { "$([char]27)[5 q" }
+    else { '' }
+$script:__ghostty_reset = if ($script:__ghostty_bar) { "$([char]27)[0 q" } else { '' }
 # Set when a command was accepted and its end (D) is still to be reported.
 $script:__ghostty_pending = $false
 # $LASTEXITCODE as it was before the command. The variable itself is never
@@ -72,7 +78,7 @@ function global:prompt {
         }
         __ghostty_title $path
     }
-    "$script:__ghostty_esc]133;A$script:__ghostty_bel$result$script:__ghostty_esc]133;B$script:__ghostty_bel"
+    "$script:__ghostty_esc]133;A$script:__ghostty_bel$result$script:__ghostty_bar$script:__ghostty_esc]133;B$script:__ghostty_bel"
 }
 
 # C goes out after the line is accepted, so the wrapper writes it once
@@ -99,7 +105,7 @@ if (Get-Module PSReadLine) {
         if ($line -and $line.Trim()) {
             $script:__ghostty_pending = $true
             $script:__ghostty_saved_exit = Get-Variable -Name LASTEXITCODE -Scope Global -ValueOnly -ErrorAction SilentlyContinue
-            [Console]::Out.Write("$([char]27)]133;C$([char]7)")
+            [Console]::Out.Write("$([char]27)]133;C$([char]7)$script:__ghostty_reset")
         }
         $line
     }
@@ -126,5 +132,48 @@ if ($script:__ghostty_title) {
         }
     } catch {
         # No PSReadLine: only the working directory is titled.
+    }
+}
+
+# `ssh-env` / `ssh-terminfo`: ssh runs through `ghostty +ssh`, which sends the
+# environment and installs xterm-ghostty on the host. ghostty.exe is a GUI
+# subsystem program, so `&` would not wait for it: it is started as a process
+# with the console inherited, waited for, and its exit code is $LASTEXITCODE.
+if ($env:GHOSTTY_SHELL_FEATURES -like '*ssh-*' -and $env:GHOSTTY_BIN_DIR) {
+    # One argument as CommandLineToArgvW reads it back (Windows PowerShell 5.1
+    # has no ProcessStartInfo.ArgumentList).
+    function global:__ghostty_quote_arg([string]$arg) {
+        if ($arg.Length -gt 0 -and $arg -notmatch '[\s"]') { return $arg }
+        $out = New-Object System.Text.StringBuilder
+        [void]$out.Append('"')
+        $slashes = 0
+        foreach ($c in $arg.ToCharArray()) {
+            if ($c -eq '\') {
+                $slashes++
+            } elseif ($c -eq '"') {
+                [void]$out.Append('\', $slashes * 2 + 1).Append('"')
+                $slashes = 0
+            } else {
+                [void]$out.Append('\', $slashes).Append($c)
+                $slashes = 0
+            }
+        }
+        [void]$out.Append('\', $slashes * 2).Append('"')
+        $out.ToString()
+    }
+
+    function global:ssh {
+        $flags = @()
+        if ($env:GHOSTTY_SHELL_FEATURES -notlike '*ssh-env*') { $flags += '--forward-env=false' }
+        if ($env:GHOSTTY_SHELL_FEATURES -notlike '*ssh-terminfo*') { $flags += '--terminfo=false' }
+        $all = @('+ssh') + $flags + @('--') + @($args | ForEach-Object { [string]$_ })
+        $info = New-Object System.Diagnostics.ProcessStartInfo
+        $info.FileName = Join-Path $env:GHOSTTY_BIN_DIR 'ghostty.exe'
+        $info.Arguments = ($all | ForEach-Object { __ghostty_quote_arg $_ }) -join ' '
+        $info.UseShellExecute = $false
+        $process = [System.Diagnostics.Process]::Start($info)
+        $process.WaitForExit()
+        $global:LASTEXITCODE = $process.ExitCode
+        $process.Dispose()
     }
 }
