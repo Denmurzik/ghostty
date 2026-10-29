@@ -104,11 +104,6 @@ Filename: "{app}\ghostty.exe"; Description: "Launch Ghostty"; WorkingDir: "{%USE
 #endif
 
 [UninstallRun]
-#ifndef GhosttyTest
-; The Windows 11 folder-menu package (R-M7-13): removed first, whether or not
-; the task was ticked; no package, or a failed removal, is not an error.
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ""try {{ Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage } catch {{ }; exit 0"""; Flags: runhidden waituntilterminated; RunOnceId: "ExplorerMenuRevert"
-#endif
 ; Always, whether or not the Explorer task was ticked. --only-this-exe keeps a
 ; portable copy's entries; --all also removes the AUMID key and toast icon.
 Filename: "{app}\ghostty.exe"; Parameters: "+uninstall-explorer-integration --all --only-this-exe"; Flags: runhidden waituntilterminated; RunOnceId: "ExplorerRevert"
@@ -148,10 +143,30 @@ begin
   Result := ResultCode;
 end;
 
+// Removes the package only when it is registered for this {app}. No package: nothing
+// happens. A package registered from another (portable) folder is left alone and
+// logged (exit 3); only one registration per user is possible. The result is
+// ignored beyond the log.
 procedure RemoveMenuPackage();
+var
+  App: String;
+  Code: Integer;
 begin
-  // The result is ignored: no package is the usual case.
-  RunPs('try { Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage } catch { }; exit 0');
+  App := RemoveBackslash(ExpandConstant('{app}'));
+  Code := RunPs(
+    '$ErrorActionPreference = ''Stop''; try { ' +
+    '$p = Get-AppxPackage -Name Ghostty.ExplorerMenu | Select-Object -First 1; if (-not $p) { exit 0 }; ' +
+    '$app = ' + PsQuote(App) + '; $locs = @($p.InstallLocation); ' +
+    'try { [void][Windows.Management.Deployment.PackageManager, Windows.Management.Deployment, ContentType=WindowsRuntime]; ' +
+    '$q = (New-Object Windows.Management.Deployment.PackageManager).FindPackageForUser('''', $p.PackageFullName); ' +
+    'if ($q.EffectiveExternalLocation) { $locs += $q.EffectiveExternalLocation.Path } } catch { }; ' +
+    '$mine = @($locs | Where-Object { $_ -and ($_.TrimEnd(''\'') -ieq $app) }); ' +
+    'if (-not $mine) { exit 3 }; ' +
+    'Remove-AppxPackage -ErrorAction Stop -Package $p.PackageFullName; exit 0 } catch { exit 1 }');
+  if Code = 3 then
+    Log('Ghostty.ExplorerMenu is registered from another folder; left in place')
+  else if Code <> 0 then
+    Log(Format('Removing Ghostty.ExplorerMenu failed (code %d)', [Code]));
 end;
 
 function MenuDll(): String;
@@ -294,7 +309,7 @@ end;
 
 #ifndef GhosttyTest
 // usUninstall fires before the [UninstallRun] entries, so the package is removed
-// here too (ExplorerMenuRevert then runs a second, harmless time). A DLL that
+// here (only when it is registered for this folder). A DLL that
 // Explorer still holds is moved aside; usPostUninstall deletes the leftovers
 // and the folder if nothing else is in it (RemoveDir keeps a non-empty one).
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
