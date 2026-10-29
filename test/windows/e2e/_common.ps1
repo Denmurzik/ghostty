@@ -884,7 +884,8 @@ function Assert-ShellText([string]$Path, [string]$Expected, [string]$What) {
 function Start-BashE2e([string]$ConfigName = 'gitbash-de', [switch]$NoDump, [string]$ExtraConfig) {
     $text = Get-Content -LiteralPath (Get-ConfigPath $ConfigName) -Raw -Encoding UTF8
     if ($ExtraConfig) { $text = $text.TrimEnd() + "`n" + $ExtraConfig + "`n" }
-    $g = Start-E2eGhostty -ConfigText $text -NoDump:$NoDump
+    # An outer Ghostty with the tmux shim leaks TMUX into the runner: a pane starts clean.
+    $g = Start-E2eGhostty -ConfigText $text -NoDump:$NoDump -Env @{ TMUX = $null; TMUX_PANE = $null }
     Wait-BashReady $g
     $g
 }
