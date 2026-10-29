@@ -109,6 +109,18 @@ if ($SelfTest) {
         $got = Get-TemplateFailures $bad
         Check ('rule "' + $m[0] + '" misses its breakage') ($got -contains $m[0])
     }
+    # The PE reader (package.ps1's import check) against a built DLL, when there is one.
+    $dll = Join-Path $PSScriptRoot '..\..\..\zig-out\bin\ghostty-explorer.dll'
+    if (Test-Path -LiteralPath $dll -PathType Leaf) {
+        $imp = @(Get-PeImports $dll)
+        Check 'PE reader: imports include kernel32' ($imp -contains 'kernel32.dll')
+        Check 'PE reader: machine is x64 or arm64' ((Get-PeMachine $dll) -in @(0x8664, 0xAA64))
+        $threw = $false
+        try { $null = Get-PeImports $template } catch { $threw = $true }
+        Check 'PE reader: a non-PE file throws' $threw
+    } else {
+        Write-Host 'build-sparse: selftest: no built ghostty-explorer.dll, PE reader case skipped'
+    }
     foreach ($n in $assetNames) {
         Check ('asset missing: ' + $n) (Test-Path -LiteralPath (Join-Path $assets $n) -PathType Leaf)
     }

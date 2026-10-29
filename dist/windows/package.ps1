@@ -245,10 +245,7 @@ try {
 
     # The staged DLL must be built for -Arch (an x64 DLL in an arm64 package
     # would register and never load).
-    $dllBytes = [IO.File]::ReadAllBytes((Join-Path $stage 'ghostty-explorer.dll'))
-    $peOff = if ($dllBytes.Length -gt 0x40) { [BitConverter]::ToInt32($dllBytes, 0x3C) } else { -1 }
-    if ($peOff -lt 0 -or $peOff + 6 -gt $dllBytes.Length) { Fail 'ghostty-explorer.dll is not a PE file' }
-    $machine = [BitConverter]::ToUInt16($dllBytes, $peOff + 4)
+    try { $machine = Get-PeMachine (Join-Path $stage 'ghostty-explorer.dll') } catch { Fail ('ghostty-explorer.dll: ' + $_.Exception.Message) }
     $wantMachine = if ($Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
     if ($machine -ne $wantMachine) { Fail ('ghostty-explorer.dll machine 0x{0:X4} <> {1}' -f $machine, $Arch) }
 
@@ -277,37 +274,13 @@ try {
         }
     }
 
-    # Imports (M4, M5).
-    $dumpbin = $null
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path -LiteralPath $vswhere) {
-        $saved = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        $inst = @(& $vswhere -latest -products '*' -property installationPath 2>$null)
-        $ErrorActionPreference = $saved
-        if ($inst.Count -gt 0 -and $inst[0] -and (Test-Path -LiteralPath (Join-Path $inst[0] 'VC\Tools\MSVC'))) {
-            $cands = @(Get-ChildItem -LiteralPath (Join-Path $inst[0] 'VC\Tools\MSVC') -Recurse -Filter 'dumpbin.exe' -ErrorAction SilentlyContinue |
-                Sort-Object FullName -Descending)
-            $pick = $cands | Where-Object { $_.FullName -match '\\Hostx64\\x64\\' } | Select-Object -First 1
-            if (-not $pick) { $pick = $cands | Select-Object -First 1 }
-            if ($pick) { $dumpbin = $pick.FullName }
-        }
-    }
+    # Imports (M4, M5, M7). Read from the PE tables (no dumpbin needed); a file
+    # that cannot be parsed fails the package.
     if ($Local) {
         Write-Host 'package: SKIP imports (-Local)'
-    } elseif (-not $dumpbin) {
-        Fail 'imports: dumpbin not found (Visual Studio build tools); the imports of ghostty-explorer.dll cannot be checked'
     } else {
         function Get-Imports([string]$exePath) {
-            $tmpLog = Join-Path $OutDir 'dumpbin.tmp.log'
-            Remove-Item -LiteralPath $tmpLog -Force -ErrorAction SilentlyContinue
-            $rc = Invoke-Native -Exe $dumpbin -Args @('/nologo', '/imports', $exePath) -Log $tmpLog -Quiet
-            if ($rc -ne 0) { Fail "dumpbin /imports failed (exit $rc) for $exePath" }
-            $names = @{}
-            foreach ($l in (Get-Content -LiteralPath $tmpLog)) {
-                if ($l -match '^\s{4}(\S+\.dll)\s*$') { $names[$Matches[1].ToLowerInvariant()] = $true }
-            }
-            Remove-Item -LiteralPath $tmpLog -Force -ErrorAction SilentlyContinue
-            return @($names.Keys)
+            try { return @(Get-PeImports $exePath) } catch { Fail "imports: cannot read $exePath ($($_.Exception.Message))" }
         }
         $gi = Get-Imports (Join-Path $stage 'ghostty.exe')
         foreach ($bad in 'winhttp.dll', 'dbghelp.dll') {
@@ -320,6 +293,7 @@ try {
         }
         # The DLL loads into Explorer: no CRT, only kernel32, ole32, shell32 (R-M7-13).
         $ei = Get-Imports (Join-Path $stage 'ghostty-explorer.dll')
+        if ($ei.Count -eq 0) { Fail 'imports: ghostty-explorer.dll has no imports (reader problem)' }
         foreach ($d in $ei) {
             if ($d -notin @('kernel32.dll', 'ole32.dll', 'shell32.dll')) { Fail "imports: ghostty-explorer.dll imports $d" }
         }

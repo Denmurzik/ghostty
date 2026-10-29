@@ -262,4 +262,81 @@ function Invoke-PrivacySelfTest {
     return $true
 }
 
-Export-ModuleMember -Function Find-GitBash, Invoke-Native, Get-FreeMemoryMB, Test-Privacy
+function Read-PeHeader {
+    # Parses a PE file's section table and data directories; throws on anything malformed.
+    param([byte[]]$Bytes)
+    $n = $Bytes.Length
+    if ($n -lt 0x100 -or $Bytes[0] -ne 0x4D -or $Bytes[1] -ne 0x5A) { throw 'not a PE file (no MZ header)' }
+    $pe = [BitConverter]::ToInt32($Bytes, 0x3C)
+    if ($pe -lt 0 -or $pe + 24 -gt $n -or [BitConverter]::ToUInt32($Bytes, $pe) -ne 0x00004550) { throw 'not a PE file (no PE signature)' }
+    $nsec = [BitConverter]::ToUInt16($Bytes, $pe + 6)
+    $osz = [BitConverter]::ToUInt16($Bytes, $pe + 20)
+    $opt = $pe + 24
+    if ($opt + $osz + 40 * $nsec -gt $n) { throw 'PE headers run past the end of the file' }
+    $magic = [BitConverter]::ToUInt16($Bytes, $opt)
+    if ($magic -ne 0x20B -and $magic -ne 0x10B) { throw 'unknown PE optional header' }
+    $dd = $opt + $(if ($magic -eq 0x20B) { 112 } else { 96 })
+    $secs = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $nsec; $i++) {
+        $o = $opt + $osz + 40 * $i
+        $secs.Add([pscustomobject]@{
+                VA  = [BitConverter]::ToUInt32($Bytes, $o + 12)
+                VS  = [Math]::Max([BitConverter]::ToUInt32($Bytes, $o + 8), [BitConverter]::ToUInt32($Bytes, $o + 16))
+                Raw = [BitConverter]::ToUInt32($Bytes, $o + 20)
+            })
+    }
+    return [pscustomobject]@{
+        Machine = [BitConverter]::ToUInt16($Bytes, $pe + 4)
+        DataDir = $dd
+        Count   = [BitConverter]::ToUInt32($Bytes, $dd - 4)
+        Sections = $secs
+    }
+}
+
+function ConvertTo-PeOffset {
+    param($Hdr, [uint32]$Rva, [int]$Length)
+    foreach ($s in $Hdr.Sections) {
+        if ($Rva -ge $s.VA -and $Rva -lt ([uint64]$s.VA + $s.VS)) {
+            $off = [uint64]$Rva - $s.VA + $s.Raw
+            if ($off -lt $Length) { return [int]$off }
+        }
+    }
+    throw ('PE address 0x{0:X} is outside every section' -f $Rva)
+}
+
+function Get-PeMachine {
+    <# The PE machine type: 0x8664 (x64), 0xAA64 (arm64). Throws on a malformed file. #>
+    param([Parameter(Mandatory)][string]$Path)
+    return (Read-PeHeader ([IO.File]::ReadAllBytes($Path))).Machine
+}
+
+function Get-PeImports {
+    <# Lower-case DLL names a PE file imports (normal and delay-load tables).
+       Replaces dumpbin /imports; throws on anything malformed (fail closed). #>
+    param([Parameter(Mandatory)][string]$Path)
+    $b = [IO.File]::ReadAllBytes($Path)
+    $h = Read-PeHeader $b
+    $names = @{}
+    # Directory 1 = import (20-byte descriptors, name at +12); 13 = delay import (32-byte, name at +4).
+    foreach ($d in @(@{ Idx = 1; Size = 20; NameAt = 12 }, @{ Idx = 13; Size = 32; NameAt = 4 })) {
+        if ($h.Count -le $d.Idx) { continue }
+        $rva = [BitConverter]::ToUInt32($b, $h.DataDir + 8 * $d.Idx)
+        if ($rva -eq 0) { continue }
+        $o = ConvertTo-PeOffset $h $rva $b.Length
+        for ($k = 0; $k -lt 4096; $k++) {
+            if ($o + $d.Size -gt $b.Length) { throw 'import table runs past the end of the file' }
+            $nameRva = [BitConverter]::ToUInt32($b, $o + $d.NameAt)
+            if ($nameRva -eq 0) { break }
+            $so = ConvertTo-PeOffset $h $nameRva $b.Length
+            $e = $so
+            while ($e -lt $b.Length -and $b[$e] -ne 0) { $e++ }
+            if ($e -ge $b.Length -or $e -eq $so -or $e - $so -gt 255) { throw 'bad import name' }
+            $names[[Text.Encoding]::ASCII.GetString($b, $so, $e - $so).ToLowerInvariant()] = $true
+            $o += $d.Size
+        }
+        if ($k -ge 4096) { throw 'import table has no end' }
+    }
+    return @($names.Keys | Sort-Object)
+}
+
+Export-ModuleMember -Function Find-GitBash, Invoke-Native, Get-FreeMemoryMB, Test-Privacy, Get-PeImports, Get-PeMachine
