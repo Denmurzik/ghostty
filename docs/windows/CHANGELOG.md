@@ -435,4 +435,9 @@ arches; privacy scan clean on all artifacts; ConPTY signatures valid; `+version`
 fully commented out. The rehearsal found two script bugs, both fixed: the test jobs are limited to `-Jobs 2` (memory), and the
 notes step clashed on `$v1`/`-V1`. The first release is `N = 1`: version `1.3.2-dev-win.1`, tag `win-1.3.2-dev-1`.
 
-<pending: `package-portable` and `installer-test` on the rehearsal output; RAM and latency rows of Task 11; ARM64 device result>
+On the rehearsal output: `package-portable` PASS (version stamp `1.3.2-dev-win.0`, 819 themes, a folder with a non-ASCII name) and
+`explorer-cli` PASS. `installer-test` PASS on the test setup built from the rehearsal zip: a silent setup with Ghostty running
+exits 7 and a silent uninstall exits 1, both changing nothing; install, upgrade (`InstallDelete`) and uninstall with
+`--only-this-exe` work; the real HKCU is unchanged. Budgets are the M5 rows in `ram-baseline.csv` and `latency-baseline.csv`
+(one surface 66.4 MB, key echo owned p95 up to 5.6 ms) with the known limits `tui-latency` and `split-many` (SPEC R-M5-15, 16).
+ARM64 on a device is an owner check and does not block the release.
