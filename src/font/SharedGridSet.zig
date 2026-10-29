@@ -373,8 +373,16 @@ fn collection(
     }
 
     // Emoji fallback. We don't include this on Mac since Mac is expected
-    // to always have the Apple Emoji available on the system.
-    if (comptime !builtin.target.os.tag.isDarwin() or Discover == void) {
+    // to always have the Apple Emoji available on the system. On Windows
+    // the system faces (Segoe UI Emoji / Symbol) are used, and the embedded
+    // pair only stays when DirectWrite is unusable (R-M7-3).
+    if (comptime !builtin.target.os.tag.isDarwin() or Discover == void) embedded_emoji: {
+        if (comptime builtin.target.os.tag == .windows and Discover != void) {
+            if (try self.discover()) |disco| {
+                if (disco.dw != null) break :embedded_emoji;
+            }
+        }
+
         _ = try c.add(
             self.alloc,
             try .init(
@@ -850,4 +858,41 @@ test SharedGridSet {
     // If I deref grid1 then we should have a count of 0
     set.deref(key1);
     try testing.expectEqual(@as(usize, 0), set.count());
+}
+
+fn testEmbeddedEmojiCount(dw_usable: bool) !usize {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var set = try SharedGridSet.init(alloc);
+    defer set.deinit();
+    set.font_discover = .init(set.font_lib);
+    if (set.font_discover.?.dw == null and dw_usable) return error.SkipZigTest;
+    if (!dw_usable) {
+        if (set.font_discover.?.dw) |*dw| dw.deinit();
+        set.font_discover.?.dw = null;
+    }
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var keycfg = try DerivedConfig.init(alloc, &cfg);
+    defer keycfg.deinit();
+
+    const key, const grid = try set.ref(&keycfg, .{ .points = 12 });
+    defer set.deref(key);
+    return grid.resolver.collection.faces.get(.regular).count();
+}
+
+test "windows font: no embedded Noto when DirectWrite works" {
+    if (comptime builtin.target.os.tag != .windows or Discover == void) return error.SkipZigTest;
+    const with_dw = try testEmbeddedEmojiCount(true);
+    const without_dw = try testEmbeddedEmojiCount(false);
+    try std.testing.expectEqual(without_dw, with_dw + 2);
+}
+
+test "windows font: embedded Noto kept when DirectWrite is unusable" {
+    if (comptime builtin.target.os.tag != .windows or Discover == void) return error.SkipZigTest;
+    const with_dw = try testEmbeddedEmojiCount(true);
+    const without_dw = try testEmbeddedEmojiCount(false);
+    try std.testing.expect(without_dw >= with_dw + 2);
 }

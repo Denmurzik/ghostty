@@ -19,6 +19,7 @@ const DirectWrite = if (options.backend == .freetype_windows)
 else
     void;
 const global = @import("../global.zig");
+const uucode = @import("uucode");
 
 const log = std.log.scoped(.discovery);
 
@@ -977,8 +978,9 @@ pub const Windows = struct {
     /// Null when DirectWrite is unusable; the file index is used instead.
     dw: ?DirectWrite,
 
-    /// Families tried first by `discoverFallback`, in order (SPEC section 9).
-    const fallback_families = [_][]const u8{
+    /// Families tried by `discoverFallback`, in order (SPEC section 9), for a
+    /// codepoint whose default presentation is emoji (R-M7-3).
+    const fallback_families_emoji = [_][]const u8{
         "Segoe UI Emoji",
         "Segoe UI Symbol",
         "Cascadia Mono",
@@ -988,6 +990,28 @@ pub const Windows = struct {
         "Microsoft YaHei",
         "SimSun",
     };
+
+    /// The same list for a text-presentation codepoint: the monochrome
+    /// symbol face goes before the colour emoji one.
+    const fallback_families_text = [_][]const u8{
+        "Segoe UI Symbol",
+        "Segoe UI Emoji",
+        "Cascadia Mono",
+        "Consolas",
+        "Yu Gothic",
+        "Malgun Gothic",
+        "Microsoft YaHei",
+        "SimSun",
+    };
+
+    /// The fixed fallback list ordered for the codepoint's default
+    /// presentation.
+    fn fallbackFamilies(codepoint: u32) []const []const u8 {
+        return if (uucode.get(.is_emoji_presentation, @intCast(codepoint)))
+            &fallback_families_emoji
+        else
+            &fallback_families_text;
+    }
 
     pub fn init(lib: Library) Windows {
         return .{ .lib = lib, .dw = DirectWrite.init() };
@@ -1027,7 +1051,7 @@ pub const Windows = struct {
             var buf: [256]u8 = undefined;
             var first = try dw.fallback(alloc, self.lib, primaryFamily(collection, &buf), desc);
             errdefer first.deinit();
-            var second = try dw.discoverFamilies(alloc, self.lib, &fallback_families, desc);
+            var second = try dw.discoverFamilies(alloc, self.lib, fallbackFamilies(desc.codepoint), desc);
             errdefer second.deinit();
             var walk_desc = desc;
             walk_desc.monospace = false;
@@ -1332,7 +1356,7 @@ pub const Windows = struct {
             }
             std.sort.block(u32, order.items, rank, Rank.lessThan);
 
-            if (fallback) try promoteFallbacks(alloc, index, &order);
+            if (fallback) try promoteFallbacks(alloc, index, &order, desc.codepoint);
 
             return .{
                 .lib = lib,
@@ -1350,6 +1374,7 @@ pub const Windows = struct {
             alloc: Allocator,
             index: *const Index,
             order: *std.ArrayList(u32),
+            codepoint: u32,
         ) !void {
             var result: std.ArrayList(u32) = try .initCapacity(alloc, order.items.len);
             errdefer result.deinit(alloc);
@@ -1357,7 +1382,8 @@ pub const Windows = struct {
             defer alloc.free(taken);
             @memset(taken, false);
 
-            for (fallback_families) |family| {
+            const families = Windows.fallbackFamilies(codepoint);
+            for (families) |family| {
                 for (order.items, 0..) |i, pos| {
                     if (taken[pos]) continue;
                     if (!index.entries[i].matchesFamily(family)) continue;
@@ -1574,6 +1600,99 @@ test "windows font: emoji fallback prefers Segoe UI Emoji" {
     const name = (try testFirstFileName(&iter, &buf)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("seguiemj.ttf", name);
+}
+
+fn testFallbackFirst(cp: u32, buf: []u8) ![]const u8 {
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var collection: Collection = .init();
+    var iter = try disco.discoverFallback(std.testing.allocator, &collection, .{
+        .codepoint = cp,
+    });
+    defer iter.deinit();
+    const name = (try testFirstFileName(&iter, buf)) orelse
+        return error.TestUnexpectedResult;
+    return name;
+}
+
+test "windows font: text symbols prefer Segoe UI Symbol" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    try testSystemFontPresent("seguisym.ttf");
+
+    // Check the fixed list itself (the system's MapCharacters choice, which
+    // comes first, is not ours to order): the text list leads with Symbol.
+    try std.testing.expectEqualStrings("Segoe UI Symbol", Windows.fallback_families_text[0]);
+    try std.testing.expectEqualStrings("Segoe UI Emoji", Windows.fallback_families_emoji[0]);
+
+    var lib: Library = try .init(std.testing.allocator);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    const dw = disco.dw orelse return error.SkipZigTest;
+    for ([_]u32{ 0x2714, 0x26A0, 0x273B }) |cp| {
+        var iter = try dw.discoverFamilies(
+            std.testing.allocator,
+            lib,
+            &Windows.fallback_families_text,
+            .{ .codepoint = cp },
+        );
+        defer iter.deinit();
+        var buf: [256]u8 = undefined;
+        var face = (try iter.next()) orelse return error.TestUnexpectedResult;
+        defer face.deinit();
+        const base = std.fs.path.basenameWindows(face.win.?.path);
+        try std.testing.expectEqualStrings("seguisym.ttf", std.ascii.lowerString(&buf, base));
+    }
+}
+
+test "windows font: record symbol resolves to a system face" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    try testSystemFontPresent("seguisym.ttf");
+
+    var buf: [256]u8 = undefined;
+    const name = try testFallbackFirst(0x23FA, &buf);
+    try std.testing.expect(
+        std.mem.eql(u8, name, "seguisym.ttf") or std.mem.eql(u8, name, "seguiemj.ttf"),
+    );
+}
+
+test "windows font: Segoe UI Emoji renders in colour" {
+    if (options.backend != .freetype_windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    try testSystemFontPresent("seguiemj.ttf");
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+    var disco: Windows = .init(lib);
+    defer disco.deinit();
+    var iter = try disco.discover(alloc, .{
+        .family = "Segoe UI Emoji",
+        .codepoint = 0x1F600,
+    });
+    defer iter.deinit();
+    var deferred = (try iter.next()) orelse return error.SkipZigTest;
+    defer deferred.deinit();
+    var face = try deferred.load(lib, .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } });
+    defer face.deinit();
+
+    face.ft_mutex.lockUncancelable(global.io());
+    defer face.ft_mutex.unlock(global.io());
+    const glyph_id = face.glyphIndex(0x1F600).?;
+    try face.face.loadGlyph(glyph_id, .{ .color = true, .render = true, .no_svg = true });
+    const bitmap = face.face.handle.*.glyph.*.bitmap;
+    // FT_PIXEL_MODE_BGRA is 7.
+    try std.testing.expectEqual(@as(u8, 7), bitmap.pixel_mode);
+    var coloured = false;
+    const pitch: usize = @intCast(bitmap.pitch);
+    for (0..bitmap.rows) |y| {
+        for (0..bitmap.width) |x| {
+            const px = bitmap.buffer[y * pitch + x * 4 ..][0..4];
+            if (px[3] != 0 and (px[0] != px[1] or px[1] != px[2])) coloured = true;
+        }
+    }
+    try std.testing.expect(coloured);
 }
 
 test "windows font: font in a non-ASCII directory loads" {
