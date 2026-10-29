@@ -423,14 +423,6 @@ function Invoke-Preflight {
         $problems.Add($msg)
     }
 
-    # makeappx (the sparse package of the Explorer menu)
-    $sp = Invoke-Logged -Exe 'powershell.exe' -ArgList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'sparse\build-sparse.ps1'), '-Probe') -TimeoutSec 60 -Quiet
-    if ($sp.Code -ne 0) {
-        $msg = (($sp.Text -split "`r?`n") | Where-Object { $_ -like 'makeappx.exe not found*' } | Select-Object -First 1)
-        if (-not $msg) { $msg = 'makeappx.exe not found; install the Windows SDK or set MAKEAPPX' }
-        $problems.Add($msg)
-    }
-
     # ConPTY
     $src = $ConptyPackage
     if (-not $src) {

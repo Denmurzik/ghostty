@@ -4,10 +4,12 @@
 #   package.ps1 (-Prefix <dir with bin\ and share\> | -FromZip <zip>)
 #               -Version <v> -Arch x64|arm64 -OutDir <dir>
 #               [-Installer] [-Test] [-Symbols] [-NoPdbOk]
-#               [-SignCommand '<cmd with {file}>'] [-AllowNoTic] [-NoConpty]
+#               [-SignCommand '<cmd with {file}>'] [-AllowNoTic] [-NoConpty] [-Win11Menu]
 #
-# The stage also carries ghostty-explorer.dll and the unsigned sparse package
-# ghostty-explorer.msix (sparse\build-sparse.ps1).
+# With -Win11Menu the stage also carries ghostty-explorer.dll and the unsigned
+# sparse package ghostty-explorer.msix (sparse\build-sparse.ps1). Off by default:
+# Windows refuses an unsigned sparse package with executable activations
+# (0x80073D2B), so releases need a signing certificate before it can ship.
 #
 # Every failed check prints "package: FAIL <check>" and exits 1. Exit 2 is
 # installer\build.ps1's "no ISCC", passed through.
@@ -25,6 +27,9 @@ param(
     [string]$SignCommand = '',
     [switch]$AllowNoTic,
     [switch]$NoConpty,
+    # Ship the Windows 11 Explorer menu DLL and sparse package (off: Windows refuses
+    # an unsigned sparse package with executable activations, 0x80073D2B).
+    [switch]$Win11Menu,
     # Local runs only (release.ps1 never passes it): skip the VERSIONINFO and
     # imports checks, for an exe that does not meet them yet.
     [switch]$Local
@@ -63,6 +68,8 @@ function Get-Rel([string]$root, [string]$path) {
 try {
     # ---- parameters ------------------------------------------------------
     if ($Local) { Write-Host 'package: LOCAL BUILD (not for release): VERSIONINFO and imports checks skipped' }
+    $signExes = @('ghostty.exe', 'tmux.exe')
+    if ($Win11Menu) { $signExes += 'ghostty-explorer.dll' }
     if ($Version -notmatch '^[^+\s\\/:]+-win\.(0|[1-9][0-9]*)$') {
         Fail "version '$Version' (must end in -win.<N>, N canonical, no +)"
     }
@@ -88,7 +95,8 @@ try {
         if (-not (Test-Path -LiteralPath $Prefix -PathType Container)) { Fail "-Prefix $Prefix (no such folder)" }
         $Prefix = (Resolve-Path -LiteralPath $Prefix).Path
         $bin = Join-Path $Prefix 'bin'
-        $binFiles = @('ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll')
+        $binFiles = @('ghostty.exe', 'tmux.exe')
+        if ($Win11Menu) { $binFiles += 'ghostty-explorer.dll' }
         if (-not $NoConpty) { $binFiles += @('conpty.dll', 'OpenConsole.exe') }
         foreach ($f in $binFiles) {
             $src = Join-Path $bin $f
@@ -157,7 +165,7 @@ try {
 
     Require-File 'ghostty.exe'
     Require-File 'tmux.exe'
-    Require-File 'ghostty-explorer.dll'
+    if ($Win11Menu) { Require-File 'ghostty-explorer.dll' }
     Require-File 'LICENSE'
     Require-File 'README-windows.txt'
     Require-File 'THIRD_PARTY_NOTICES.txt'
@@ -176,7 +184,7 @@ try {
     # VersionInfo of both exes (R-M6-2).
     if (-not $Local) {
         $wantName = 'Ghostty ' + [char]0x2014 + ' Unofficial Windows port'
-        foreach ($exe in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll') {
+        foreach ($exe in $signExes) {
             $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $stage $exe))
             if ($vi.ProductVersion -ne $Version) { Fail "$exe ProductVersion '$($vi.ProductVersion)' <> '$Version'" }
             if ([string]$vi.FilePrivatePart -ne $verN) { Fail "$exe FilePrivatePart $($vi.FilePrivatePart) <> $verN" }
@@ -190,6 +198,7 @@ try {
     # the stage from a prefix (a zip already carries the one that was built),
     # never signed. Either way it is verified: name, CLSIDs, version, arch and
     # publisher against ids.zig and the version, and every entry privacy-scanned.
+    if ($Win11Menu) {
     $vm = [regex]::Match($Version, '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[^+\s]+)?-win\.(0|[1-9][0-9]*)$')
     if (-not $vm.Success) { Fail "version '$Version' has no X.Y.Z base for the sparse package" }
     $ver4 = '{0}.{1}.{2}.{3}' -f $vm.Groups[1].Value, $vm.Groups[2].Value, $vm.Groups[3].Value, $vm.Groups[5].Value
@@ -248,6 +257,7 @@ try {
     try { $machine = Get-PeMachine (Join-Path $stage 'ghostty-explorer.dll') } catch { Fail ('ghostty-explorer.dll: ' + $_.Exception.Message) }
     $wantMachine = if ($Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
     if ($machine -ne $wantMachine) { Fail ('ghostty-explorer.dll machine 0x{0:X4} <> {1}' -f $machine, $Arch) }
+    }
 
     # The bundled ConPTY: pinned hashes (vendor/conpty/README.md) and a
     # Microsoft Authenticode signature (R-M6-12).
@@ -291,11 +301,13 @@ try {
             # advapi32 since M5 Task 17 (owner-SID check on the external pipe).
             if ($d -notin @('kernel32.dll', 'ntdll.dll', 'advapi32.dll')) { Fail "imports: tmux.exe imports $d" }
         }
-        # The DLL loads into Explorer: no CRT, only kernel32, ole32, shell32 (R-M7-13).
-        $ei = Get-Imports (Join-Path $stage 'ghostty-explorer.dll')
-        if ($ei.Count -eq 0) { Fail 'imports: ghostty-explorer.dll has no imports (reader problem)' }
-        foreach ($d in $ei) {
-            if ($d -notin @('kernel32.dll', 'ole32.dll', 'shell32.dll')) { Fail "imports: ghostty-explorer.dll imports $d" }
+        if ($Win11Menu) {
+            # The DLL loads into Explorer: no CRT, only kernel32, ole32, shell32 (R-M7-13).
+            $ei = Get-Imports (Join-Path $stage 'ghostty-explorer.dll')
+            if ($ei.Count -eq 0) { Fail 'imports: ghostty-explorer.dll has no imports (reader problem)' }
+            foreach ($d in $ei) {
+                if ($d -notin @('kernel32.dll', 'ole32.dll', 'shell32.dll')) { Fail "imports: ghostty-explorer.dll imports $d" }
+            }
         }
     }
 
@@ -350,7 +362,7 @@ try {
     # ---- 4. sign ---------------------------------------------------------
     if ($SignCommand) {
         $cmd = Get-Command cmd.exe
-        foreach ($exe in 'ghostty.exe', 'tmux.exe', 'ghostty-explorer.dll') {
+        foreach ($exe in $signExes) {
             $line = $SignCommand.Replace('{file}', '"' + (Join-Path $stage $exe) + '"')
             $rc = Invoke-Native -Exe $cmd.Source -CmdLine ('/d /s /c "' + $line + '"') -Log $log -HideCmdLine
             if ($rc -ne 0) { Fail "sign $exe (exit $rc)" }

@@ -223,7 +223,10 @@ begin
         mbInformation, MB_OK, IDOK);
     end;
 
-    // Windows 11 top-level entry. A failure leaves the classic verb in place.
+#ifdef GhosttyWin11Menu
+    // Windows 11 top-level entry. Off by default: Windows refuses an unsigned
+    // sparse package with executable activations (0x80073D2B). A failure
+    // leaves the classic verb in place.
     GetWindowsVersionEx(WinVer);
     if WinVer.Build >= 22000 then
     begin
@@ -238,10 +241,11 @@ begin
         Log(Format('Add-AppxPackage failed (code %d)', [ResultCode]));
         SuppressibleMsgBox('Ghostty was installed, but the Windows 11 folder-menu entry could not be added ' +
           '(the classic "Show more options" entry still works). ' +
-          'The package may need Developer Mode to be turned on in Windows settings.',
+          'The package could not be registered.',
           mbInformation, MB_OK, IDOK);
       end;
     end;
+#endif
   end;
   if CurStep = ssPostInstall then
     DeleteOldMenuDlls();
