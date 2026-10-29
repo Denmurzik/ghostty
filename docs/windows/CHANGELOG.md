@@ -506,6 +506,12 @@ unless the environment already has it. `tmux.exe` stays in the zip and the insta
   passthrough is not unwrapped: with `windows-tmux-shim = true` the shim answers `allow-passthrough off`, so images stay off in
   Claude Code (`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` is the Claude Code override).
 - **cmd cursor.** cmd has no pre-execution hook: the bar stays while a command runs.
+- **Text presentation of emoji.** VS15 on an emoji-default codepoint (for example U+1F600 U+FE0E) has no text glyph on Windows:
+  Segoe UI Emoji is colour-only and the embedded Noto Emoji is not loaded, so the cell shows a replacement glyph.
+- **ssh in pwsh and cmd.** pwsh: `ssh` typed at the prompt goes through `ghostty +ssh`; a call that is piped, fed from a
+  pipeline, captured (`$x = ssh ...`) or made from a script runs the real `ssh.exe` unchanged. cmd: the `ssh.cmd` shim folder stays
+  on `PATH` for every child of the pane, so an `ssh` that tools start from that pane (`cmd /c ssh`, scripts) also goes through
+  `ghostty +ssh`.
 - **WSL cwd.** A distro with a custom `hostname` in `wsl.conf` is not accepted by the host check and the new tab starts in the
   default directory. An OSC 7 path such as `/c/x` is mapped to `C:\x` only for drive paths; other POSIX paths are kept for WSL
   panes and dropped for the rest (one log line).

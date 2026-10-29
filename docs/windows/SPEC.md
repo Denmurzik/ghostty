@@ -434,7 +434,8 @@ faces (Noto) are added on Windows only when DirectWrite is unusable (`Windows.dw
 list by the requested presentation (text: Segoe UI Symbol before Segoe UI Emoji; emoji: Segoe UI Emoji first); `MapCharacters` stays in
 front. Measured (`e2e/font-symbols`): `✓ ⚠ ❯ →` come from JetBrains Mono / the Nerd symbols font, `⏺` and colour emoji from Segoe UI
 Emoji (COLR v0 layers render as colour through the FreeType path), no Noto. New Unicode emoji that Segoe UI Emoji lacks show as
-missing glyphs; `font-codepoint-map` is the override. `font-thicken` works on Windows: outline glyphs only,
+missing glyphs; `font-codepoint-map` is the override. VS15 on an emoji-default codepoint (U+1F600 U+FE0E) has no text glyph: Segoe UI Emoji
+is colour-only and Noto Emoji is not loaded. `font-thicken` works on Windows: outline glyphs only,
 `FT_Outline_EmboldenXY` with `x = y = 16 + strength * 48 / 255` (26.6 units; 1/4 px at 0, 1 px at 255) after the synthetic-bold
 step; advance and cell metrics are unchanged, colour and bitmap glyphs untouched. The text-weight comparison (`e2e/text-weight`:
 A `linear-corrected`, B `native`, C = A + `font-thicken`, D = B + `font-thicken`) ended with the owner choosing A: no default change.
@@ -694,7 +695,7 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
   Unticking `explorermenu` on an upgrade removes the package (user intent; the classic verb is untouched as in R-M6-4).
 - Upgrade over a loaded DLL: `PrepareToInstall` removes the package, then deletes `ghostty-explorer.dll`, else renames it to
   `ghostty-explorer.dll.old-<tick>`, else loops on Retry/Cancel (silent: Setup stops); `ssPostInstall` deletes `*.old-*` best effort.
-  Uninstall: `[UninstallRun]` removes the package first (`ExplorerMenuRevert`) and then runs `ExplorerRevert`; a held DLL is renamed
+  Uninstall: `usUninstall` removes the package first, and then `[UninstallRun]` runs `ExplorerRevert`; a held DLL is renamed
   aside (a leftover can keep `{app}` until the next install).
 - `/DGhosttyTest` installs both files and contains no package code. The portable README gives the two PowerShell lines;
   `+install-explorer-integration` does not register packages. Residual risk: the package path was tested only on the owner's machine.
