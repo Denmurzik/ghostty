@@ -392,11 +392,12 @@ A release is a GitHub **pre-release** with six artifacts and one checksum file. 
   and tagged `win-<zon>-<N>`. `N` starts at 1, counts across the whole fork and is never reused; a bad release loses its GitHub
   release but keeps its tag. Both exes carry a version resource (`FILEVERSION` = `major.minor.patch.N`, product name
   "Ghostty — Unofficial Windows port"). The update check compares only `N`; `auto-update = off` turns it off and
-  `auto-update-channel = stable` skips pre-releases.
+  `auto-update-channel = stable` still offers `win-` releases (only rc/alpha/beta/pre tags are tip-only).
 - **Bundled console.** The package holds Microsoft's `conpty.dll` and `OpenConsole.exe` (1.25.260930003, MIT, Microsoft
-  signature checked at packaging), used by default (`windows-conpty = bundled`): Kitty graphics and SGR 58 work. The MSYS2
-  first-key caveat of the bundled console: see M5 above and "Known limitations" below. <final decision: dbg-e2e fix landed or
-  caveat documented>
+  signature checked at packaging). The default `windows-conpty = auto` uses them for PowerShell, cmd, WSL and other native
+  programs (Kitty graphics and SGR 58 work there) and the inbox console for MSYS2/Cygwin programs such as Git Bash, because the
+  bundled one loses the first key typed after a resize in MSYS2. So Kitty graphics and SGR 58 do not work in Git Bash;
+  `windows-conpty = bundled` brings them there at the cost of that loss. See "Known limitations" of M5 above.
 - **Third-party notices.** `THIRD_PARTY_NOTICES.txt` lists the licence of every library, font, colour scheme, Zig package,
   toolchain runtime and the bundled console that ends up in the files. Packaging fails if a dependency has no section.
 - **Release path.** The owner's GitHub Actions minutes are used up, so a release is built locally by `dist/windows/release.ps1`
@@ -428,5 +429,10 @@ A release is a GitHub **pre-release** with six artifacts and one checksum file. 
 
 ### Acceptance
 
-<rehearsal: Task 9 results (artifact list, sizes, unit-test counts per group, e2e `package-portable` and `installer-test`,
-RAM and latency rows of Task 11, ARM64 outcome) go here>
+Rehearsal (Task 9, `release.ps1 -Rehearsal -N 0` on `763d3fb29`): all nine steps ran. Unit groups 640/641, 354/355 and
+3653/3687 (skips only), then `test-tmux-shim`; x64 and ARM64 (`aarch64-windows-gnu`) built; zip, symbols zip and setup for both
+arches; privacy scan clean on all artifacts; ConPTY signatures valid; `+version` prints `1.3.2-dev-win.0`; `publish.txt` is
+fully commented out. The rehearsal found two script bugs, both fixed: the test jobs are limited to `-Jobs 2` (memory), and the
+notes step clashed on `$v1`/`-V1`. The first release is `N = 1`: version `1.3.2-dev-win.1`, tag `win-1.3.2-dev-1`.
+
+<pending: `package-portable` and `installer-test` on the rehearsal output; RAM and latency rows of Task 11; ARM64 device result>

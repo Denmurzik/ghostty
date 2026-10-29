@@ -640,7 +640,7 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
   `package.ps1 -FromZip` repackages an existing zip for later signing.
 - Bundled ConPTY (R-M6-12): `conpty.dll` + `OpenConsole.exe` from NuGet `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (MIT),
   per arch, next to `ghostty.exe` (`-Dconpty-dir`); version, SHA-256 and the Microsoft Authenticode signature are checked in the
-  preflight and again when packaging; `windows-conpty = inbox` is the fallback.
+  preflight and again when packaging; `windows-conpty = auto` (default) uses the inbox console for MSYS2/Cygwin programs (R-M5-17), `inbox` forces it everywhere.
 - Third-party notices (R-M6-10): `THIRD_PARTY_NOTICES.txt` at the zip root and in the install dir; `third-party-check.ps1` fails
   packaging when a dependency, a toolchain runtime of the arch or `microsoft/terminal` has no section.
 - Unsigned (R-M6-9): SmartScreen shows "Unknown publisher" (More info, Run anyway); Smart App Control blocks the build with no
