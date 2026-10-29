@@ -49,3 +49,22 @@ The feature checklist and CHANGELOG lagged behind M5 (undo, update check, secure
 list, profiles, Explorer, `+edit-config`); the M5 docs commits add them, including the 19.n batches and the bundled ConPTY.
 Still open after this update: UI Automation screen reader, `window-save-state` restore, IPC scripting (all post-v1);
 GUI proof for About, `initial-window`, Kitty graphics and SGR 58 on the bundled console.
+
+## Update after win.2 (2026-10-29, `1.3.2-dev-win.2`)
+
+| Gap | Now | Evidence |
+| --- | --- | --- |
+| Kitty graphics in pwsh/cmd | done: images draw, the `a=q` reply reaches the program (the earlier "done via bundled ConPTY" meant only that the bytes cross the console) | `e2e/kitty-render` (5/5 cases), `vt-smoke/kitty-image`, `conpty-probe/RESULT.md` |
+| Kitty graphics in Git Bash | gap by default: `windows-conpty = auto` keeps MSYS on the inbox console, which drops the query; opt-in with `windows-conpty = bundled`, which loses input lines under MSYS (7-16 of 36 per run) | `docs/windows/m7/msys-key-loss.md` |
+| Kitty `t=s`, MSYS paths for `t=f`/`t=t`, DCS `tmux;` passthrough | gap (upstream parity; the shim is off by default, so no wrapping) | R-M7-11 |
+| Emoji: Noto instead of Segoe UI Emoji | done: Segoe UI Symbol/Emoji (colour, COLR v0), Noto only without DirectWrite | `e2e/font-symbols`, `vt-smoke/symbols` |
+| `font-thicken` | done: works on Windows (outline glyphs); no default change (owner pick) | `e2e/text-weight` |
+| Tab rename look | done: themed borderless popup, no white box | `e2e/tab-rename` |
+| Windows paths in links, `C:\x:12` | done | `e2e/link-windows-path`; unit: url.zig |
+| Paste of files copied in Explorer (`CF_HDROP`) | done | `e2e/paste-files`; unit: drop.zig |
+| `click-repeat-interval` | done: follows the system double-click time | unit: os/mouse.zig |
+| pwsh `cursor`/`ssh-env`/`ssh-terminfo`, cmd `cursor`/`ssh-env`/`ssh-terminfo` | done; cmd cursor stays while a command runs (no pre-exec hook) | `shell-marks`, headless cases |
+| WSL tab/split start directory | done; custom `wsl.conf` hostname is a limit | `e2e/wsl-cwd` |
+| Windows 11 top-level "Open Ghostty here" | done for folders and folder backgrounds (drives: classic verb); unsigned package, one-machine test | `installer-test`, `package-portable`, G4 owner check |
+| Tmux shim default | off; `windows-tmux-shim = true` for Claude Code agent teams | `e2e/tmux-env` |
+| IME, ligatures, Kitty keyboard protocol, UI Automation, `window-save-state`, IPC scripting | unchanged (manual / post-v1) | this audit above |

@@ -8,7 +8,8 @@ The owner's runbook. A release is built on the owner's machine by `dist/windows/
 2. `gh repo view Denmurzik/ghostty --json visibility` must print `PUBLIC`. The in-app update check and the downloads need a public repository.
 3. In the fork's GitHub Settings, Actions, turn the upstream workflows off. They ask for runners the fork does not have, and some also run on tag pushes.
 4. Download the NuGet package `Microsoft.Windows.Console.ConPTY` **1.25.260930003** (the `.nupkg` file). Pass it as `-ConptyPackage`. If you omit the parameter, the script uses the vendored copy under `vendor/conpty`, which holds the same version (hashes pinned in `vendor/conpty/README.md`). The script checks the version, the hashes and the Microsoft signature of all four files either way.
-5. Inno Setup 6.4+ is already installed per user. The Visual Studio ARM64 component (`Microsoft.VisualStudio.Component.VC.Tools.ARM64`, admin install) is needed only for `-Arm64Abi msvc`. The default `-Arm64Abi gnu` needs nothing.
+5. The Windows SDK provides `makeappx.exe`, which builds the Explorer sparse package `ghostty-explorer.msix`. Install the "Windows SDK" component (any 10.0.22000 or newer), or set the `MAKEAPPX` environment variable to the exe. Without it the release preflight stops with `makeappx.exe not found`.
+6. Inno Setup 6.4+ is already installed per user. The Visual Studio ARM64 component (`Microsoft.VisualStudio.Component.VC.Tools.ARM64`, admin install) is needed only for `-Arm64Abi msvc`. The default `-Arm64Abi gnu` needs nothing.
 
 ## 2. Push first
 
@@ -26,6 +27,7 @@ Then:
 
 ```
 PS> dist/windows/release.ps1 -N <N> -ConptyPackage <path to .nupkg> [-V1] [-Arm64TestExe]
+# for example win.2:  dist/windows/release.ps1 -N 2 -ConptyPackage <path to .nupkg>
 ```
 
 - It takes about 1 to 2 hours. Run no other builds meanwhile: the script waits when free memory is below its gate (`-MinFreeGB`, default 7: the G1 build peak of 4.9 GB plus 2 GB) and stops after 15 minutes.
@@ -35,6 +37,8 @@ PS> dist/windows/release.ps1 -N <N> -ConptyPackage <path to .nupkg> [-V1] [-Arm6
 - `-Arm64TestExe` also builds an ARM64 test exe and zips it as `ghostty-<v>-windows-arm64-tests.zip`. It is local only: not in `SHA256SUMS.txt` and not in `publish.txt`. Run it on an ARM64 device (exit 0 = PASS; a failure is recorded, not blocking). Put its result into the notes with `-Arm64Result '<text>'`, or edit `release-notes.md` before you run `publish.txt`.
 
 Output, under `zig-out\release\<version>\`: six artifacts, `SHA256SUMS.txt`, `release-notes.md`, `publish.txt`, `tests.txt`, `release.log`. The `package.log` and `release.log` files are for you; never upload them.
+
+Before you run `publish.txt` (the lead does this step in a release like win.2): open `release-notes.md` and add the highlights of the release and the residual-risk line (for win.2: the Windows 11 top-level menu uses an unsigned sparse package and was tested only on the owner's machine). Then re-run the privacy check on the edited file (`Test-Privacy -Path release-notes.md`, after `Import-Module dist/windows/lib/Native.psm1`; it prints nothing when clean), because the notes are uploaded as written. If the notes embed checksums, do not change those lines.
 
 ## 4. Smoke the local artifacts
 

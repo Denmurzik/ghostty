@@ -223,6 +223,10 @@ Verdict, bundled console:
 
 Consequence for Task 12: the condition "plain is lost and wrapped arrives" is
 false for the bundled console; Task 12 is Step 4 only (no wrapping code).
-Limits: the host here does not send `CSI ? 9001 h` handshakes beyond what
-OpenConsole asks for; a missing Kitty image in Ghostty with Claude Code is then
-not explained by the reply being lost in ConPTY input.
+Limits: this probe answers one question, whether a reply written to the
+input reaches a program through ConPTY. It does not start Ghostty, so it cannot
+say whether Ghostty parses the query or draws the image; `e2e/kitty-render`
+covers that. The host here sends no `CSI ? 9001 h` of its own, so the
+win32-input-mode cells only show how the console decodes character records.
+A missing Kitty image in Claude Code is therefore not explained by a reply lost
+in ConPTY input on the bundled console.

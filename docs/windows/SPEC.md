@@ -429,6 +429,15 @@ Emoji: Win11 Segoe UI Emoji is COLRv1; FreeType's `FT_LOAD_COLOR` path covers CO
 rendering and, if it fails, ships monochrome system emoji as a known gap (embedded Noto Color Emoji stays available) until
 M3. M3: DirectWrite discovery + `IDWriteFontFallback::MapCharacters` [platform §4.2]; rasterization stays
 FreeType + HarfBuzz.
+M7 (R-M7-3, R-M7-5): symbols and emoji follow macOS and Windows Terminal. In `SharedGridSet` the embedded `emoji` and `emoji_text`
+faces (Noto) are added on Windows only when DirectWrite is unusable (`Windows.dw == null`). `Windows.discoverFallback` orders its fixed
+list by the requested presentation (text: Segoe UI Symbol before Segoe UI Emoji; emoji: Segoe UI Emoji first); `MapCharacters` stays in
+front. Measured (`e2e/font-symbols`): `✓ ⚠ ❯ →` come from JetBrains Mono / the Nerd symbols font, `⏺` and colour emoji from Segoe UI
+Emoji (COLR v0 layers render as colour through the FreeType path), no Noto. New Unicode emoji that Segoe UI Emoji lacks show as
+missing glyphs; `font-codepoint-map` is the override. `font-thicken` works on Windows: outline glyphs only,
+`FT_Outline_EmboldenXY` with `x = y = 16 + strength * 48 / 255` (26.6 units; 1/4 px at 0, 1 px at 255) after the synthetic-bold
+step; advance and cell metrics are unchanged, colour and bitmap glyphs untouched. The text-weight comparison (`e2e/text-weight`:
+A `linear-corrected`, B `native`, C = A + `font-thicken`, D = B + `font-thicken`) ended with the owner choosing A: no default change.
 
 ## 10. Child environment
 - Base: `global.environMap()` (Ghostty's own env) minus nothing Windows-specific in M1.
@@ -439,7 +448,7 @@ FreeType + HarfBuzz.
   host without the entry forwards a `TERM` the remote may not know (Windows OpenSSH from pwsh in particular).
   `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`, `TERM_PROGRAM_VERSION`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`
   unchanged from core.
-- PATH: core appends the exe dir. Windows (M4, `windows-tmux-shim = true`, the default, R-M4-11): the exe dir is **moved
+- PATH: core appends the exe dir. Windows (M4, with `windows-tmux-shim = true`; the default is `false` since M7, R-M7-1; R-M4-11): the exe dir is **moved
   to the front** of PATH (shim dir = exe dir, DECISIONS; a login shell such as Git Bash may reorder PATH in its profile: check
   `command -v tmux`) and every surface gets `TMUX=\\.\pipe\ghostty-tmux-<pid>-<16 hex nonce>,<pid>,0` and `TMUX_PANE=%<n>` (§12).
   Order: Ghostty's environment, the tmux client's environment (split-window/respawn-pane send theirs; `=C:`-style and
@@ -450,6 +459,15 @@ FreeType + HarfBuzz.
 - Git Bash: `CHERE_INVOKING=1` (§8.3). MSYS-facing path vars (`GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`) use the mixed `C:/a/b` form
   when bash integration applies; `TERMINFO` uses `/c/a/b` (R-M5-8). Under MSYS the exe dir is already first on PATH (M4), so the bash
   `path` feature is skipped.
+- M7 (R-M7-1): with `windows-tmux-shim = true` panes also get `CLAUDE_CODE_TMUX_TRUECOLOR=1` unless the inherited environment already
+  has it (the shim's "outer terminal" is Ghostty, which is truecolor). With the key off nothing of the shim touches the environment.
+- WSL directory (M7, R-M7-10): in a surface whose command is WSL (argv0 basename `wsl`/`wsl.exe`, or System32 `bash.exe`), an OSC 7
+  path that `pwd_path.translate` rejects but that is an absolute POSIX path (no control characters, <= 4096 bytes) and whose host is
+  empty, `localhost` or the computer name is stored as the pwd as is; any other host stays rejected (a distro with a custom
+  `wsl.conf` hostname is a documented limit; `/c/x` is mapped to `C:\x`). A new WSL surface that inherits a POSIX
+  `working-directory` gets `wsl.exe --cd <path>` as argv[1] (an existing `--cd <x>` or lone `~` is replaced) and starts in the default
+  process directory; a non-WSL surface drops the POSIX path with one log line. Palette, proxy icon and `window-subtitle` ignore
+  a non-drive pwd.
 - zsh from Git Bash (M5, task #53): while the bash startup files run, a DEBUG trap (`set -T` temporarily) arms the handoff right
   before an `[exec] [path/]zsh[.exe]` command only: the user's `ZDOTDIR` at that moment goes to `GHOSTTY_ZSH_ZDOTDIR` (restored by our
   `.zshenv` before the user's files) and `ZDOTDIR` points at the zsh integration. After a returning zsh and at the end `ZDOTDIR` is the
@@ -498,6 +516,13 @@ FreeType + HarfBuzz.
   out with no dump.
 
 ## 12. Built-in tmux shim (M4)
+
+**Default off since M7 (R-M7-1, owner 2026-10-29).** `windows-tmux-shim` defaults to `false`: `env.apply` leaves `TMUX`, `TMUX_PANE` and
+`PATH` as inherited. The tmux pipe server still starts (a reload with the key on uses it for new surfaces; cost about 0), `tmux.exe`
+stays in the zip and the installer, and `package-portable` checks it with the key on. Claude Code agent teams need
+`windows-tmux-shim = true`; the tmux e2e scenarios enable it. With the key on, panes get `CLAUDE_CODE_TMUX_TRUECOLOR=1` (§10). The shim
+answers `allow-passthrough off`, so Kitty images stay off in Claude Code with the shim on; DCS `tmux;` passthrough is not unwrapped
+(R-M7-11).
 
 ### 12.1 Processes and transport
 - `tmux.exe` (console subsystem, no SharedDeps, no libc; imports only kernel32 and ntdll; measured: -V p50 21 ms (the process-creation floor), peak
@@ -602,8 +627,8 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
 - Inno Setup (`dist/windows/installer/ghostty.iss`, built by `installer/build.ps1`), R-M6-4: per-user only
   (`PrivilegesRequired=lowest`, `{autopf}\Ghostty` = `%LOCALAPPDATA%\Programs\Ghostty`; per-machine is a v1.0 gap), fixed
   `AppId={{37134A5A-16BD-4127-9CC0-134E0CF32BA5}`, `MinVersion=10.0.17763`, English, no licence page. Start Menu shortcut with AUMID
-  `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut (`desktopicon`, unticked), optional task `explorer`
-  (unticked): after install `{app}\ghostty.exe +install-explorer-integration` runs hidden; a failure warns and does not fail Setup.
+  `com.mitchellh.ghostty.windows-unofficial`, optional desktop shortcut (`desktopicon`, unticked), optional task `explorer` (M7: renamed `explorermenu` and ticked, §13.1)
+  (unticked in M6): after install `{app}\ghostty.exe +install-explorer-integration` runs hidden; a failure warns and does not fail Setup.
   Explorer "Open Ghostty here" (R-M5-5) keys: HKCU `Software\Classes\{Directory,Directory\Background,Drive}\shell\GhosttyOpenHere`
   with `(default)` = `Open Ghostty here`, `Icon` = `"<exe>",0` and `command\(default)` = `"<exe>" "--working-directory=%V\."`
   (the `\.` keeps a drive root's backslash away from the closing quote; `Overrides.parse` normalises it with `GetFullPathNameW`).
@@ -647,6 +672,34 @@ process; `windows-single-instance = false` opts out (GTK `gtk-single-instance` p
   override ("not supported with Smart App Control on").
 - No GitHub Actions workflow in M6 (the owner's minutes are exhausted; upstream workflows stay untouched and are switched
   off in the fork's settings). A `workflow_dispatch`-only `windows-ci.yml` with ARM64 unit tests is a backlog line.
+
+### 13.1 M7 amendments (win.2, R-M7-2, R-M7-13, R-M7-14)
+- Zip additions: `ghostty-explorer.dll` and `ghostty-explorer.msix` next to `ghostty.exe` (per arch); `package.ps1` builds the `.msix` with
+  `makeappx pack /nv` (Windows SDK, never signed), verifies the staged file on every path (all entries scanned for the privacy
+  check, imports and machine type of the DLL read with a PowerShell PE reader, the DLL signed when `-SignCommand` is given).
+- Explorer command (`src/explorer_command/`, std-only Zig like `tmux.exe`): exports `DllGetClassObject` and `DllCanUnloadNow`; one
+  `IExplorerCommand` class with a fixed CLSID (`ids.zig`), `ThreadingModel = STA`; `GetState` enabled for exactly one file-system item
+  (null item array: the folder is resolved from the site, `IObjectWithSite`); `Invoke` starts `"<dll dir>\ghostty.exe"
+  "--working-directory=<path>\."` with the path as cwd and no inherited handles, outside the package's job (breakaway, so the
+  launched `ghostty.exe` has no package identity).
+- Sparse package: `Identity Name="Ghostty.ExplorerMenu"`, publisher `CN=Ghostty Windows port (unofficial)` plus the unsigned-namespace OID
+  `2.25.311729368913984317654407730594956997722=1`, `uap10:AllowExternalContent`, `TargetDeviceFamily` 10.0.22000.0, `runFullTrust`,
+  `windows.fileExplorerContextMenus` for **`Directory` and `Directory\Background` only** (the schema rejects `Drive`; drives keep the
+  classic verb), `windows.comServer` surrogate for the DLL. `ghostty.exe` has no `<msix>` manifest element: AUMID, toasts, jump list and
+  taskbar grouping are as in v1.0.
+- Installer: task `explorer` is renamed `explorermenu` and ticked by default (Inno remembers tasks by name, so an upgrade from v1.0
+  shows it ticked once). It installs the classic verbs and, on Windows build >= 22000, `Add-AppxPackage -Path <app>\ghostty-explorer.msix
+  -ExternalLocation <app> -AllowUnsigned -ForceUpdateFromAnyVersion` through hidden `powershell.exe` (errors stop the script; Unicode
+  apostrophes in paths are quoted). A failure is logged and shown as a suppressible note; Setup succeeds and the classic verb stays.
+  Unticking `explorermenu` on an upgrade removes the package (user intent; the classic verb is untouched as in R-M6-4).
+- Upgrade over a loaded DLL: `PrepareToInstall` removes the package, then deletes `ghostty-explorer.dll`, else renames it to
+  `ghostty-explorer.dll.old-<tick>`, else loops on Retry/Cancel (silent: Setup stops); `ssPostInstall` deletes `*.old-*` best effort.
+  Uninstall: `[UninstallRun]` removes the package first (`ExplorerMenuRevert`) and then runs `ExplorerRevert`; a held DLL is renamed
+  aside (a leftover can keep `{app}` until the next install).
+- `/DGhosttyTest` installs both files and contains no package code. The portable README gives the two PowerShell lines;
+  `+install-explorer-integration` does not register packages. Residual risk: the package path was tested only on the owner's machine.
+- Release (R-M7-14): `release.ps1 -N 2`, tag `win-1.3.2-dev-2`, no upstream merge; the lead adds the win.2 highlights and the
+  residual-risk line to `release-notes.md` and re-runs `Test-Privacy` before the owner runs `publish.txt`.
 
 ## 14. RAM budget
 Measured by `test/windows/measure-ram.ps1`: launches `ghostty.exe` with `XDG_CONFIG_HOME` pointing at a temp config
@@ -820,6 +873,11 @@ Exit: each feature has a test or scripted screenshot; update check tested agains
 (x64 + ARM64), version resource, third-party notices, bundled ConPTY, a local release script that prints the publish commands
 (no CI: R-M6-6), pre-release published by the owner, v1.0 gate of DECISIONS (feature checklist closed, RAM rows, Claude Code run,
 owner smoke). Exit: owner sign-off.
+
+**M7 — win.2 (`1.3.2-dev-win.2`, plan `docs/windows/plans/M7-win2.md`, rulings R-M7-1…14 in §18; "done" is recorded in Task 18, `docs/windows/m7/acceptance.md`).** tmux shim off by default,
+Kitty in pwsh/cmd (render and `a=q` reply measured), symbols/emoji from Segoe UI Symbol/Emoji, `font-thicken`, tab rename popup, Windows paths in links,
+`CF_HDROP` paste, system double-click time, pwsh/cmd `cursor`/`ssh-env`/`ssh-terminfo`, WSL start directory, Windows 11 top-level "Open Ghostty here"
+(sparse package), installer task `explorermenu`. MSYS stays on the inbox console (limit, `docs/windows/m7/msys-key-loss.md`).
 
 ## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
 1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
@@ -1103,7 +1161,7 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       `GHOSTTY_TMUX_STATS=1` (`peak_private_kb`, `wall_ms`, `build`).
     - R-M4-10, DCS `tmux;`: core already dispatches the unwrapped inner sequence (stream tests); the inbox ConPTY drops
       an ST-terminated inner OSC 777 and forwards a BEL-terminated OSC 9 as a bare OSC 9 (Task 2): documented gap (§12.4).
-    - R-M4-11, the key `windows-tmux-shim = true|false` (default true, Windows only, app-wide, read when a surface starts):
+    - R-M4-11, the key `windows-tmux-shim = true|false` (default true in M4-M6, **false since M7**, R-M7-1; Windows only, app-wide, read when a surface starts):
       false sets/removes neither `TMUX` nor `TMUX_PANE` and does not change PATH.
     - Acceptance (M4 Task 15): the budgets and the real runs are in §17; the RAM rows are tagged `m4-*` in
       `docs/windows/ram-baseline.csv`, the latency rows `m4-tmux`/`m4-a`/`m4-base` in `latency-baseline.csv`.
@@ -1220,3 +1278,25 @@ Rulings for M3 (architect-m3, 2026-10-27; lead/owner may overturn; recorded here
       - R-M6-11, ARM64 release ABI `aarch64-windows-gnu` (amends R3; owner sign-off pending). Cost if wrong: add the VS ARM64 component
         (admin, once) and pass `-Arm64Abi msvc`.
       - R-M6-12, bundled ConPTY ships (owner approval 2026-10-28), package 1.25.260930003, signature and hashes checked.
+
+Rulings for M7 (plan-m7 and lead, 2026-10-29; the owner may overturn; full text in `docs/windows/plans/M7-win2.md`, as built here):
+- R-M7-1, tmux shim off by default; `CLAUDE_CODE_TMUX_TRUECOLOR=1` with the key on; the pipe server still starts (§10, §12).
+- R-M7-2, installer task `explorer` renamed `explorermenu`, ticked by default; unticking on an upgrade removes the top-level package
+  (deviates from the plan wording, which kept everything; the classic verb is untouched) (§13.1).
+- R-M7-3, symbols and emoji from Segoe UI Symbol/Emoji, embedded Noto only without DirectWrite; colour check passed (COLR v0), so no Noto fallback (§9).
+- R-M7-4, tab rename in an owned borderless popup. **As built: focus loss cancels** (the existing tested behaviour), not commits as the plan text said.
+  A translucent window keeps the popup opaque; its scenario phase checks only no-white and visible text.
+- R-M7-5, `font-thicken` on Windows; the comparison ended with the owner's pick of variant A: no default change (§9).
+- R-M7-6, Windows paths in links (`X:\…`, `X:/…`, `.\…`, `..\…`, `dir\file.ext`), never UNC or `\?\`, `:line[:col]` kept.
+- R-M7-7, `CF_HDROP` paste when no text is on the clipboard; text wins.
+- R-M7-8, `click-repeat-interval = 0` follows `GetDoubleClickTime()`.
+- R-M7-9, pwsh `cursor`/`ssh-env`/`ssh-terminfo` (a synchronous `ssh` function), cmd `cursor` (stays during commands) and `ssh-*` (`ssh.cmd` on the pane `PATH`).
+- R-M7-10, WSL start directory with an OSC 7 host check; custom `wsl.conf` hostname and `/c/x` mapping are documented limits (§10).
+- R-M7-11, Kitty: no DCS `tmux;` unwrap; the `a=q` reply needs no code (the headless probe: plain reply arrives on the bundled console, so
+  Task 12 was only the end-to-end case); `t=s` and MSYS paths stay out.
+- R-M7-12, MSYS stays on the inbox console under `auto` (documented limit): the bundled console lost whole lines in 7-16 of 36 checks per run, with
+  VT or win32-input-mode keys, against 0 of 48 on inbox; Windows Terminal does not show it. Kitty in Git Bash is opt-in with
+  `windows-conpty = bundled`. `docs/windows/m7/msys-key-loss.md` has the measurements and the unsent bug-report text.
+- R-M7-13, the Windows 11 top-level menu: `ghostty-explorer.dll` + unsigned sparse package; **folders and folder backgrounds only, drives keep the
+  classic verb** (schema limit); tested only on the owner's machine (§13.1).
+- R-M7-14, release `release.ps1 -N 2`, no upstream merge; the lead adds highlights and the residual-risk line to `release-notes.md`.

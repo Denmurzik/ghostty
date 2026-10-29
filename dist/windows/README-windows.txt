@@ -26,7 +26,9 @@ these next to it, so keep the folder together:
 
 Without conpty.dll and OpenConsole.exe, set "windows-conpty = inbox" in the
 config to use the console of Windows itself. Kitty graphics and underline
-colors (SGR 58) need the bundled pair.
+colors (SGR 58) need the bundled pair. Git Bash uses the console of Windows
+by default, so it shows no images; "windows-conpty = bundled" changes that
+but can lose typed input lines there (see the change log).
 
 Files
 -----
@@ -37,18 +39,40 @@ Explorer integration (optional)
 -------------------------------
   ghostty.exe +install-explorer-integration
 
-adds "Open Ghostty here" to Explorer for the current user. Undo it with
+adds "Open Ghostty here" (the classic menu, "Show more options" on
+Windows 11) for the current user. Undo it with
 
   ghostty.exe +uninstall-explorer-integration --all --only-this-exe
 
 If you used it from a portable copy, run the undo command BEFORE you delete
 the folder.
 
+Windows 11 top-level menu (optional)
+------------------------------------
+ghostty-explorer.dll and ghostty-explorer.msix add "Open Ghostty here" to
+the top-level menu of folders and folder backgrounds (drives keep the
+classic entry). The package is unsigned, and Windows may need Developer Mode
+for it. In PowerShell, from this folder:
+
+  Add-AppxPackage -Path .\ghostty-explorer.msix `
+    -ExternalLocation $PWD.Path -AllowUnsigned
+  Get-AppxPackage -Name Ghostty.ExplorerMenu | Remove-AppxPackage
+
+The first command adds the entry, the second removes it. Remove it BEFORE
+you delete or move the folder. The installer does this when the task
+"explorermenu" is ticked.
+
 tmux.exe
 --------
 tmux.exe is a small tmux compatible shim for programs that expect a tmux
-command, for example Claude Code agent teams. For the external tmux mode,
-put this folder on your PATH.
+command. It is OFF by default: panes get no TMUX variable and this folder
+is not put in front of PATH. For Claude Code agent teams (teammateMode
+"tmux") add to the config
+
+  windows-tmux-shim = true
+
+and open a new window. For the external tmux mode, put this folder on your
+PATH.
 
 Updates
 -------

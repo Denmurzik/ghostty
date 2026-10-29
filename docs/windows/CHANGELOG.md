@@ -441,3 +441,77 @@ exits 7 and a silent uninstall exits 1, both changing nothing; install, upgrade 
 `--only-this-exe` work; the real HKCU is unchanged. Budgets are the M5 rows in `ram-baseline.csv` and `latency-baseline.csv`
 (one surface 66.4 MB, key echo owned p95 up to 5.6 ms) with the known limits `tui-latency` and `split-many` (SPEC R-M5-15, 16).
 ARM64 on a device is an owner check and does not block the release.
+
+## M7 — win.2 (`1.3.2-dev-win.2`, 2026-10-29)
+
+**The tmux shim is off by default.** `windows-tmux-shim` is now `false`: panes no longer get `TMUX`, `TMUX_PANE` or the exe
+directory at the front of `PATH`, so tools that look for tmux (Kitty-graphics tools, Claude Code) behave as in any plain
+terminal. Claude Code agent teams with `teammateMode: "tmux"` need it on:
+
+```
+windows-tmux-shim = true
+```
+
+then open a new window (the key is read when a surface starts). With the key on, panes also get `CLAUDE_CODE_TMUX_TRUECOLOR=1`
+unless the environment already has it. `tmux.exe` stays in the zip and the installer.
+
+### What changed
+
+- **Kitty graphics in pwsh and cmd.** Images draw on the bundled console (G1/G3 pixel check, `e2e/kitty-render`), and the
+  `a=q` query reply reaches the program (the headless probe shows the plain reply arrives intact on the bundled ConPTY, so no
+  code was needed; `kitty-render` has the case). This corrects the M5/M6 wording "Kitty graphics work there": the headless
+  probe proved the bytes cross the console, not that a program receives the reply or that an image is drawn. Git Bash: see
+  the limitations below.
+- **Symbols and emoji look like Windows Terminal.** The embedded Noto Color Emoji is used on Windows only when DirectWrite is
+  unusable. `✓ ⚠ ❯ →` come from JetBrains Mono (the embedded font, as on macOS); `⏺` and colour emoji come from Segoe UI
+  Emoji; Segoe UI Symbol is tried first for text presentation.
+- **`font-thicken` works on Windows** (outline glyphs, 1/4 px at strength 0 to 1 px at 255; colour and bitmap glyphs
+  untouched). The text-weight comparison (`text-weight` scenario: `linear-corrected` and `native`, each with and without
+  `font-thicken`) was judged by the owner: **no default change** (variant A, today's). Set `font-thicken = true` for
+  heavier text.
+- **Tab rename** edits in a themed, borderless popup over the tab (tab title font, centred, no white box), like macOS.
+  Enter commits, Esc cancels, an empty commit clears the title, and **losing focus cancels** (as before).
+- **Links and paste.** `C:\path\file.ext:12:3`, `.\x`, `..\x` and `src\a\b.zig` are links (never UNC paths). Pasting files
+  copied in Explorer (`CF_HDROP`, no text) pastes their quoted paths. `click-repeat-interval = 0` follows the system
+  double-click time.
+- **pwsh and cmd shell features.** pwsh: `cursor` (bar at the prompt), `ssh-env` and `ssh-terminfo`. cmd: `cursor`,
+  `ssh-env` and `ssh-terminfo` (an `ssh.cmd` shim on the pane's `PATH`).
+- **WSL.** A new tab or split of a WSL profile starts in the directory the WSL shell last reported (`wsl.exe --cd <dir>`).
+  Only an OSC 7 host that is empty, `localhost` or the computer name is accepted.
+- **Explorer.** The installer task is renamed `explorermenu` and is **ticked by default** (an upgrade from v1.0 shows it
+  ticked once). On Windows 11 it also registers a top-level "Open Ghostty here" (no "Show more options") through
+  `ghostty-explorer.dll` and an unsigned sparse package `ghostty-explorer.msix`. Unticking the task on an upgrade removes the
+  top-level entry (the classic verb is not touched, as before); the uninstaller removes both.
+- **Portable zip** contains `ghostty-explorer.dll` and `ghostty-explorer.msix`; `README-windows.txt` has the two PowerShell lines.
+- Tests: scenarios `font-symbols`, `kitty-render`, `text-weight`, `link-windows-path`, `paste-files`, `wsl-cwd`; `FakeExe.psm1`;
+  the tmux scenarios enable the shim; `resize-input` has a `bundled` variant.
+
+### Changes you may notice
+
+- Symbols and emoji (`✓`, `⚠`, `⏺`, emoji) look like Windows Terminal, not like the embedded Noto set.
+- The tab editor is a popup that looks like the tab label made editable.
+- The Explorer task is ticked in the installer, and on Windows 11 the entry is in the top-level menu for folders and folder
+  backgrounds.
+- A bar cursor at the pwsh and cmd prompt (`shell-integration-features = cursor`, on by default).
+- Tools that detect tmux no longer see it unless `windows-tmux-shim = true`.
+
+### Known limitations
+
+- **Git Bash and Kitty images.** `windows-conpty = auto` keeps MSYS2/Cygwin programs on the inbox console, which drops the
+  Kitty query: no images in Git Bash by default. The bundled console loses the first key (in practice whole input lines, 7-16
+  of 36 per run) under MSYS, with VT keys and with win32-input-mode keys alike (Task 13: the key encoding is not the cause);
+  Windows Terminal does not show it. For Kitty in Git Bash set `windows-conpty = bundled` and open a new pane, at the price of
+  that loss. Measurements and a bug-report text: `docs/windows/m7/msys-key-loss.md` (not filed).
+- Kitty `t=s` (shared memory) and MSYS path translation for `t=f`/`t=t` are not supported (upstream parity). DCS `tmux;`
+  passthrough is not unwrapped: with `windows-tmux-shim = true` the shim answers `allow-passthrough off`, so images stay off in
+  Claude Code (`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` is the Claude Code override).
+- **cmd cursor.** cmd has no pre-execution hook: the bar stays while a command runs.
+- **WSL cwd.** A distro with a custom `hostname` in `wsl.conf` is not accepted by the host check and the new tab starts in the
+  default directory. An OSC 7 path such as `/c/x` is mapped to `C:\x` only for drive paths; other POSIX paths are kept for WSL
+  panes and dropped for the rest (one log line).
+- **Windows 11 top-level menu.** Folders and folder backgrounds only; **drives keep the classic verb** (the package schema
+  rejects the `Drive` class). The package is unsigned (`Add-AppxPackage -AllowUnsigned`; a machine may need Developer Mode,
+  then the install logs it and keeps the classic verb) and was **tested only on the owner's machine**. A DLL that Explorer
+  still holds on an upgrade or uninstall is renamed to `ghostty-explorer.dll.old-<n>`; a leftover file can keep the install
+  folder until the next install or a manual delete.
+- Everything in the v1.0 "Gaps" list that is not named above is unchanged (unsigned builds, per-user install, winget).

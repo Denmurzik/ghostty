@@ -472,3 +472,34 @@ rc files.
   "desktop busy") when a foreign window overlaps. Delete any image that shows anything else.
 - **No distro, no touch keyboard.** No WSL distro is started; `osk` never starts TabTip; dumps are checked for the pty
   marker string; processes are killed only if the run started them.
+
+## M7 scenarios (win.2)
+
+Run with `e2e.ps1 -Milestone M7` or by name. All follow the safety rules above; none writes the real HKCU or starts a WSL distro.
+
+- `font-symbols`: Git Bash prints the symbol row and two emoji; reads the font-fallback log and checks pixels; passes when the symbols come from
+  JetBrains Mono / the symbols font, `⏺` and the emoji from Segoe UI Emoji (colour), and no Noto face is named.
+- `kitty-render`: the Kitty image drawn by a pwsh pane and a Git Bash pane on the bundled console (pixel check of the image
+  area), the inbox console showing nothing, and the `a=q` reply read back by the program (`i=31;OK`). Needs a ReleaseFast exe and an
+  unobstructed Ghostty window; a foreign window over the capture area is a SKIP.
+- `text-weight`: four variants (A `linear-corrected`, B `native`, C and D the same with `font-thicken`) of one sample file; writes a PNG per
+  variant, a contact sheet and ink coverage per row. It decides nothing; the owner looks at the sheet.
+- `link-windows-path`: cmd types a file that holds `C:\Windows\win.ini:3`, `.\x\y.txt` and other Windows paths; the hover labels (link rows) are counted, and a UNC path gets none.
+- `paste-files`: puts `CF_HDROP` on the (backed-up) clipboard and pastes: quoted paths for the pane's shell; text wins when both exist.
+- `wsl-cwd`: a fake `wsl.exe` (`FakeExe.psm1`) records its argv; checks the `--cd <dir>` argument, the host check for OSC 7 (computer
+  name accepted, a foreign host rejected).
+- `tab-rename` (M2 scenario, rewritten for the popup): types into the popup editor; an opaque phase (no white pixel, typed text visible) and a translucent phase
+  over a backdrop that checks no white box and visible text only (the editor stays opaque).
+
+`lib/FakeExe.psm1` (`New-FakeExe -Path <exe> -Kind argv|osc7|vtreader`) compiles tiny console programs with `Add-Type` (no Zig, no installed tool): `argv` prints `ARGV:`, one
+argument per line, then `CWD:`, `TERM:` and the first stdin line; `osc7` writes an OSC 7 first; `vtreader` enables VT input, writes `FAKE_QUERY` and prints `GOT:` and the hex
+of what arrived within `FAKE_WAIT_MS`. `New-FakeExe -SelfTest` checks them without a window.
+
+Variants: `GHOSTTY_E2E_VARIANT=bundled` makes `resize-input` run on the bundled console (the MSYS key-loss measurement,
+`docs/windows/m7/msys-key-loss.md`) next to the default (`auto`, inbox for MSYS); `kitty-render` and the tmux scenarios set
+`windows-conpty` and `windows-tmux-shim` themselves. The tmux scenarios enable the shim (it is off by default).
+
+**Package-registration safety rule.** No scenario registers or removes the Windows 11 Explorer package
+(`Add-AppxPackage` / `Remove-AppxPackage`) on the owner's machine, and the `/DGhosttyTest` installer contains no package code.
+`installer-test` and `package-portable` only inspect the files and the manifest. Registering the real package is the owner's
+manual check (G4) or a hand-run of the lines in `README-windows.txt`.

@@ -723,3 +723,24 @@ Merged from the audit report below (§ 6a).
 | Symbols/emoji | Skip embedded Noto on Windows like macOS: Segoe UI Symbol / Segoe UI Emoji (§ 4) |
 | win.2 scope | Small fixes (above + `C:\path:12` links, Explorer file drop `CF_HDROP`, `click-repeat-interval`) + Kitty (tmux off, `a=q` reply path, GUI render check) + shells (pwsh/cmd `ssh-env`/`ssh-terminfo`/`cursor`, WSL cwd) |
 | Win11 top-level "Open Ghostty here" | In win.2. `IExplorerCommand` COM DLL + unsigned sparse package (publisher with the unsigned-namespace OID `2.25.311729368913984317654407730594956997722=1`, `windows.fileExplorerContextMenus`), registered/removed by the installer (`Add-AppxPackage -ExternalLocation`), classic verb kept for Windows 10. DLL replacement on upgrade goes through the existing Retry loop. Tested only on the owner's machine (no clean/foreign machine available): residual risk noted in the release notes. Effort M (~2–3 days) |
+
+### Status after win.2 (`1.3.2-dev-win.2`, 2026-10-29)
+
+`done` = shipped in win.2; `limit` = documented, no fix planned; `open` = later.
+
+| Item | Status | Task and outcome |
+|---|---|---|
+| 1 Claude Code colours | done (no code) | Task 4/11: the four-variant `text-weight` comparison; the owner kept variant A. `font-thicken` now works on Windows (Task 4). Tmux shim off (Task 1) sets `CLAUDE_CODE_TMUX_TRUECOLOR=1` only with the key on |
+| 1b Git Bash prompt colours | done (no change) | owner: the upstream palette stays, as on macOS |
+| 2 Kitty images (pwsh, cmd) | done | Tasks 1, 5, 9, 12: shim off, `kitty-render` draws on the bundled console, the `a=q` reply arrives (probe: no code needed) |
+| 2 Kitty images (Git Bash) | limit | Tasks 13, 16: the bundled console loses input lines under MSYS (7-16 of 36), also with win32-input-mode keys; `auto` keeps MSYS on inbox. Opt-in `windows-conpty = bundled`. `docs/windows/m7/msys-key-loss.md`. Bug not filed; open for win.3 |
+| 2 Kitty `t=s`, MSYS paths, DCS `tmux;` passthrough | limit | R-M7-11 |
+| 3 Tab rename white box, invisible text | done | Task 3: borderless themed popup; focus loss cancels |
+| 4 Symbols and emoji | done | Task 2: Segoe UI Symbol/Emoji, no Noto with DirectWrite |
+| 5 Explorer entry missing | done | Tasks 10, 14, 15: installer task `explorermenu` ticked; Windows 11 top-level entry for folders and backgrounds (drives: classic verb); unsigned, one-machine test |
+| 6 `C:\path:12` links | done | Task 6 |
+| 6 Paste of files copied in Explorer | done | Task 6 |
+| 6 `click-repeat-interval` | done | Task 6 (system double-click time) |
+| 6 pwsh/cmd `cursor`, `ssh-env`, `ssh-terminfo` | done | Task 7 (cmd cursor stays while a command runs: limit) |
+| 6 WSL working directory | done | Task 8 (custom `wsl.conf` hostname: limit) |
+| DirectWrite rasterizer, full win32-input-mode key encoding (audit 2.1) | open | not in win.2 (Task 13 showed the key encoding is not the MSYS cause) |

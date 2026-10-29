@@ -15,6 +15,8 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 ## Features
 - All cross-platform Ghostty features 1:1 (VT, config, fonts, tabs, splits, multiple windows, quick terminal, command palette, search, inspector, shell integration, themes, custom shaders, Kitty graphics, background image, keybinds/key tables, notifications, URL hover/open, config reload, resize overlay…).
 - macOS-only features get Windows analogs (e.g. AppleScript → CLI/IPC, Secure Keyboard Entry → analog, Quick Look → none), plus Windows extras: jump lists, shell profiles (WSL distros / pwsh / cmd / Git Bash) in a new-tab menu, Explorer "Open Ghostty here".
+- 2026-10-29 (owner, win.2): symbols and emoji follow macOS and Windows Terminal: Segoe UI Symbol / Segoe UI Emoji on Windows, the embedded Noto emoji only without DirectWrite. Text weight: the owner compared the four `text-weight` variants and kept today's rendering (`linear-corrected`, no `font-thicken`); `font-thicken = true` now works on Windows for those who want heavier text.
+- 2026-10-29 (owner, win.2): Explorer "Open Ghostty here" is also in the Windows 11 top-level menu (folders and folder backgrounds; drives keep the classic verb) through an unsigned sparse package registered by the installer (`Add-AppxPackage -ExternalLocation`); the installer task `explorermenu` is ticked by default. Residual risk accepted: tested only on the owner's machine; the classic verb stays for Windows 10 and as the fallback.
 - Config: exactly ONE path on Windows: `%USERPROFILE%\.config\ghostty\config.ghostty` (if `XDG_CONFIG_HOME` is set it replaces the `%USERPROFILE%\.config` base, like Linux). No legacy `config` filename fallback on Windows, no AppData, no `~/.ghostty`.
 - Default shell order: Git Bash → pwsh (PowerShell 7) → cmd.
 - Updates: check GitHub Releases, notify via toast (`auto-update = check|off`). No auto-install.
@@ -23,6 +25,7 @@ Owner decisions (user, 2026-10-25). These are the spec authority; changing any o
 - Ship `tmux.exe` (Zig) next to `ghostty.exe`. It implements the tmux CLI by talking to the running Ghostty over a named pipe and mapping tmux commands onto native Ghostty splits/tabs/windows. No tmux server, no detach/attach persistence.
 - Inside Ghostty sessions: `TMUX` and `TMUX_PANE` are set, the shim directory is PREPENDED to PATH (only inside Ghostty sessions).
 - Primary acceptance: Claude Code agent teams with `teammateMode: "tmux"` work fully and correctly. Exact contract: `docs/windows/recon/tmux.md`.
+- 2026-10-29 (owner, win.2): the shim is **off by default** (`windows-tmux-shim = false`): panes get no `TMUX`/`TMUX_PANE` and `PATH` is unchanged, so tools that detect tmux (Kitty graphics, Claude Code) behave as in a plain terminal. `tmux.exe` stays in the package; Claude Code agent teams need `windows-tmux-shim = true`. (Amends "Inside Ghostty sessions: `TMUX` and `TMUX_PANE` are set…", which applies with the key on.)
 
 ## Release
 - Portable zip + Inno Setup installer (shortcuts, "Open Ghostty here", uninstall), built by GitHub Actions on tag. No code signing certificate (SmartScreen warning accepted).
