@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const wuffs = @import("wuffs");
@@ -11,6 +12,29 @@ const Texture = GraphicsAPI.Texture;
 const Overlay = @import("Overlay.zig");
 
 const log = std.log.scoped(.renderer_image);
+
+/// Windows binds the linear-clamp sampler at slot 0 explicitly instead of
+/// relying on the unbound default (issues-after-v1 2a.4).
+const explicit_sampler = builtin.os.tag == .windows;
+
+/// The render step that draws one image.
+fn imageStep(
+    pipeline: GraphicsAPI.Pipeline,
+    buffers: @FieldType(GraphicsAPI.RenderPass.Step, "buffers"),
+    textures: @FieldType(GraphicsAPI.RenderPass.Step, "textures"),
+    samplers: @FieldType(GraphicsAPI.RenderPass.Step, "samplers"),
+) GraphicsAPI.RenderPass.Step {
+    return .{
+        .pipeline = pipeline,
+        .buffers = buffers,
+        .textures = textures,
+        .samplers = samplers,
+        .draw = .{
+            .type = .triangle_strip,
+            .vertex_count = 4,
+        },
+    };
+}
 
 /// Generic image rendering state for the renderer. This stores all
 /// images and their placements and exposes only a limited public API
@@ -47,6 +71,10 @@ pub const State = struct {
     /// Overlays
     overlay_placements: std.ArrayListUnmanaged(Placement),
 
+    /// The linear-clamp sampler the image step binds explicitly (Windows
+    /// only; created on first draw, dropped with the device).
+    sampler: ?GraphicsAPI.Sampler,
+
     pub const empty: State = .{
         .images = .empty,
         .kitty_placements = .empty,
@@ -55,6 +83,7 @@ pub const State = struct {
         .kitty_placements_generation = 0,
         .kitty_storage_generation = 0,
         .overlay_placements = .empty,
+        .sampler = null,
     };
 
     pub fn deinit(self: *State, alloc: Allocator) void {
@@ -65,6 +94,7 @@ pub const State = struct {
         }
         self.kitty_placements.deinit(alloc);
         self.overlay_placements.deinit(alloc);
+        if (self.sampler) |s| s.deinit();
     }
 
     /// The graphics device was replaced: every texture belonged to the old
@@ -73,6 +103,8 @@ pub const State = struct {
     /// so they are uploaded to the new device. Backends whose textures
     /// survive never call this.
     pub fn deviceChanged(self: *State, alloc: Allocator) void {
+        if (self.sampler) |s| s.deinit();
+        self.sampler = null;
         var it = self.images.iterator();
         while (it.next()) |kv| kv.value_ptr.image.deinit(alloc);
         self.images.clearRetainingCapacity();
@@ -145,6 +177,19 @@ pub const State = struct {
             .overlay => self.overlay_placements.items,
         };
 
+        if (comptime explicit_sampler) {
+            if (self.sampler == null) {
+                self.sampler = GraphicsAPI.Sampler.init(api.samplerOptions()) catch |err| err: {
+                    log.warn("error creating image sampler err={}", .{err});
+                    break :err null;
+                };
+            }
+        }
+
+        const sampler_slot = [1]?GraphicsAPI.Sampler{self.sampler};
+        const samplers: @FieldType(GraphicsAPI.RenderPass.Step, "samplers") =
+            if (comptime explicit_sampler) &sampler_slot else &.{};
+
         for (placements) |p| {
             // Look up the image
             const image = self.images.get(p.image_id) orelse {
@@ -196,15 +241,7 @@ pub const State = struct {
             };
             defer buf.deinit();
 
-            pass.step(.{
-                .pipeline = pipeline,
-                .buffers = &.{buf.buffer},
-                .textures = &.{texture},
-                .draw = .{
-                    .type = .triangle_strip,
-                    .vertex_count = 4,
-                },
-            });
+            pass.step(imageStep(pipeline, &.{buf.buffer}, &.{texture}, samplers));
         }
     }
 
@@ -1441,6 +1478,29 @@ test "kitty renderer uploads the current animation frame" {
         &.{ 0, 0, 255, 255 },
         entry.image.pending.dataSlice(),
     );
+}
+
+test "d3d11 image: the image step binds its sampler" {
+    const D3D11 = @import("D3D11.zig");
+    if (comptime GraphicsAPI != D3D11) return error.SkipZigTest;
+    const testing = std.testing;
+
+    D3D11.Device.preferWarp();
+    defer D3D11.Device.resetPreferWarp();
+    defer D3D11.Device.shutdown();
+    var api: D3D11 = .{
+        .alloc = testing.allocator,
+        .blending = .native,
+        .device = try D3D11.Device.acquire(testing.allocator),
+    };
+    defer D3D11.Device.release(api.device);
+
+    const sampler = try GraphicsAPI.Sampler.init(api.samplerOptions());
+    defer sampler.deinit();
+
+    const step = imageStep(undefined, &.{}, &.{}, &.{sampler});
+    try testing.expectEqual(@as(usize, 1), step.samplers.len);
+    try testing.expectEqual(sampler.sampler, step.samplers[0].?.sampler);
 }
 
 test "d3d11 device: images re-uploaded after recovery" {

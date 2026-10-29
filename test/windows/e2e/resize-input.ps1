@@ -12,7 +12,12 @@
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\GhosttyIpc.psm1') -Force
 
 Invoke-E2eScenario 'resize-input' {
-    $st = @{ Bad = (New-Object System.Collections.Generic.List[string]); Checks = 0 }
+    $st = @{ Bad = (New-Object System.Collections.Generic.List[string]); Checks = 0; Total = 0; Lost = 0 }
+    $variant = if ($env:GHOSTTY_E2E_VARIANT) { $env:GHOSTTY_E2E_VARIANT } else { 'default' }
+    # bundled: Git Bash gets the bundled OpenConsole (windows-conpty = bundled)
+    # instead of the inbox one that `auto` gives it.
+    $bashExtra = if ($variant -eq 'bundled') { 'windows-conpty = bundled' } else { $null }
+    try {
 
     function Get-Win($G) {
         $s = Get-GhosttyState -Class $G.Class
@@ -29,6 +34,7 @@ Invoke-E2eScenario 'resize-input' {
     # into $Surface (0: the focused one) and checks the file.
     function Test-Line($G, [string]$Line, [string]$Name, [string]$What, [int]$Surface = 0) {
         $st.Checks++
+        $st.Total++
         [void](Invoke-GhosttyAction -Class $G.Class -Surface $Surface -Action ('text:' + ($Line -f $Name) + '\r'))
         $f = Join-Path $G.Sandbox.Tmp "$Name.txt"
         $got = $null
@@ -37,6 +43,7 @@ Invoke-E2eScenario 'resize-input' {
             $got = (Read-ShellFile $f).Utf8.Trim()
         }
         if ($got -ne $Name) {
+            $st.Lost++
             $st.Bad.Add("$Name ($What): $(if ($null -eq $got) { 'no file (the line did not run)' } else { "wrote '$got'" })")
             [void](Invoke-GhosttyAction -Class $G.Class -Surface $Surface -Action 'text:\x03')
             Start-Sleep -Milliseconds 400
@@ -77,7 +84,7 @@ Invoke-E2eScenario 'resize-input' {
     # --- Git Bash: the losing case. 50 ms is after the state forms; 300 ms
     # is a person typing after a drag.
     $bashLine = 'echo {0} > \"$TEMP/{0}.txt\"'
-    $g = Start-BashE2e
+    $g = Start-BashE2e -ExtraConfig $bashExtra
     Invoke-Cycles $g 'bash' $bashLine @(50, 300) 10
     $first = @(@((Get-Win $g).tabs)[0].surfaces)[0].id
 
@@ -137,5 +144,8 @@ Invoke-E2eScenario 'resize-input' {
         [void](Wait-ProcessExit $g 5)
     } else {
         Write-E2eInfo 'pwsh not found; pwsh case skipped'
+    }
+    } finally {
+        Write-E2eInfo "resize-input variant=$variant lost=$($st.Lost)/$($st.Total)"
     }
 }
