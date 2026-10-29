@@ -524,6 +524,20 @@ pub const Face = struct {
             _ = freetype.c.FT_Outline_Embolden(&glyph.*.outline, @intFromFloat(amount));
         }
 
+        // font-thicken (Windows only): embolden the outline by a quarter
+        // pixel at strength 0 up to a full pixel at 255. The advance and
+        // cell metrics come from the face, so they don't change. Colour
+        // and bitmap glyphs have no outline here and are left alone.
+        if (comptime builtin.os.tag == .windows) {
+            if (opts.thicken and
+                glyph.*.format == freetype.c.FT_GLYPH_FORMAT_OUTLINE)
+            {
+                const amount: freetype.c.FT_Pos =
+                    16 + @divTrunc(@as(freetype.c.FT_Pos, opts.thicken_strength) * 48, 255);
+                _ = freetype.c.FT_Outline_EmboldenXY(&glyph.*.outline, amount, amount);
+            }
+        }
+
         // We get a rect that represents the position
         // and size of the glyph before constraints.
         const rect = getGlyphSize(glyph);
@@ -1513,4 +1527,94 @@ test "bitmap glyph OTB" {
             );
         }
     }
+}
+
+/// Render `cp` into a fresh grayscale atlas and return the coverage sum.
+fn thickenCoverage(
+    alloc: Allocator,
+    ft_font: *Face,
+    cp: u32,
+    thicken: bool,
+    strength: u8,
+) !u64 {
+    var atlas = try font.Atlas.init(alloc, 512, .grayscale);
+    defer atlas.deinit(alloc);
+
+    _ = try ft_font.renderGlyph(
+        alloc,
+        &atlas,
+        ft_font.glyphIndex(cp).?,
+        .{
+            .grid_metrics = font.Metrics.calc(ft_font.getMetrics()),
+            .thicken = thicken,
+            .thicken_strength = strength,
+        },
+    );
+
+    var sum: u64 = 0;
+    for (atlas.data) |b| sum += b;
+    return sum;
+}
+
+test "windows font: thicken adds ink" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var ft_font = try Face.init(
+        lib,
+        font.embedded.regular,
+        .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
+    );
+    defer ft_font.deinit();
+
+    for ([_]u32{ 'l', 'm' }) |cp| {
+        const off = try thickenCoverage(alloc, &ft_font, cp, false, 255);
+        const lo = try thickenCoverage(alloc, &ft_font, cp, true, 0);
+        const hi = try thickenCoverage(alloc, &ft_font, cp, true, 255);
+        try testing.expect(off > 0);
+        try testing.expect(lo > off);
+        try testing.expect(hi > lo);
+    }
+
+    // Cell metrics (and so the advance) do not depend on the render.
+    const before = ft_font.getMetrics();
+    _ = try thickenCoverage(alloc, &ft_font, 'm', true, 255);
+    const after = ft_font.getMetrics();
+    try testing.expectEqual(before.cell_width, after.cell_width);
+}
+
+test "windows font: thicken leaves colour glyphs alone" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var ft_font = try Face.init(
+        lib,
+        font.embedded.emoji,
+        .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
+    );
+    defer ft_font.deinit();
+
+    const cp: u32 = 0x1F978;
+    var plain = try font.Atlas.init(alloc, 512, .bgra);
+    defer plain.deinit(alloc);
+    var thick = try font.Atlas.init(alloc, 512, .bgra);
+    defer thick.deinit(alloc);
+
+    const gm = font.Metrics.calc(ft_font.getMetrics());
+    _ = try ft_font.renderGlyph(alloc, &plain, ft_font.glyphIndex(cp).?, .{ .grid_metrics = gm });
+    _ = try ft_font.renderGlyph(alloc, &thick, ft_font.glyphIndex(cp).?, .{
+        .grid_metrics = gm,
+        .thicken = true,
+        .thicken_strength = 255,
+    });
+    try testing.expect(ft_font.isColorGlyph(ft_font.glyphIndex(cp).?));
+    try testing.expectEqualSlices(u8, plain.data, thick.data);
 }
