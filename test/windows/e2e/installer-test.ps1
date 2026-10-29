@@ -91,6 +91,8 @@ function Get-RealSnapshot {
 
 # Read-only: the registered Ghostty.ExplorerMenu package (this variant never registers one).
 function Get-MenuPackageSnapshot {
+    # Fails (rather than reading as empty) when the Appx module does not load.
+    $null = Get-Command Get-AppxPackage -ErrorAction Stop
     $p = @(Get-AppxPackage -Name 'Ghostty.ExplorerMenu' -ErrorAction SilentlyContinue | ForEach-Object { $_.PackageFullName })
     'appx: ' + ($p -join '|')
 }

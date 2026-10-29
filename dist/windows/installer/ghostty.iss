@@ -130,6 +130,11 @@ var
 begin
   T := S;
   StringChangeEx(T, '''', '''''', True);
+  // PowerShell also takes these as single quotes.
+  StringChangeEx(T, #$2018, #$2018#$2018, True);
+  StringChangeEx(T, #$2019, #$2019#$2019, True);
+  StringChangeEx(T, #$201A, #$201A#$201A, True);
+  StringChangeEx(T, #$201B, #$201B#$201B, True);
   Result := '''' + T + '''';
 end;
 
@@ -208,7 +213,9 @@ begin
     if WinVer.Build >= 22000 then
     begin
       App := ExpandConstant('{app}');
-      ResultCode := RunPs('try { Add-AppxPackage -Path ' + PsQuote(App + '\ghostty-explorer.msix') +
+      // A registration from another folder would make Add-AppxPackage fail.
+      RemoveMenuPackage();
+      ResultCode := RunPs('try { Add-AppxPackage -ErrorAction Stop -Path ' + PsQuote(App + '\ghostty-explorer.msix') +
         ' -ExternalLocation ' + PsQuote(App) +
         ' -AllowUnsigned -ForceUpdateFromAnyVersion; exit 0 } catch { exit 1 }');
       if ResultCode <> 0 then
@@ -286,12 +293,21 @@ begin
 end;
 
 #ifndef GhosttyTest
-// The package is gone by now (ExplorerMenuRevert); a DLL Explorer still holds
-// is moved aside so the uninstaller does not trip over it. The leftover
-// ghostty-explorer.dll.old-* can keep the folder until the next install.
+// usUninstall fires before the [UninstallRun] entries, so the package is removed
+// here too (ExplorerMenuRevert then runs a second, harmless time). A DLL that
+// Explorer still holds is moved aside; usPostUninstall deletes the leftovers
+// and the folder if nothing else is in it (RemoveDir keeps a non-empty one).
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
+    RemoveMenuPackage();
     MoveDllAside();
+  end;
+  if CurUninstallStep = usPostUninstall then
+  begin
+    DeleteOldMenuDlls();
+    RemoveDir(ExpandConstant('{app}'));
+  end;
 end;
 #endif
