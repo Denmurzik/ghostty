@@ -4,6 +4,7 @@
 #   release.ps1 -N <string> [-ConptyPackage <nupkg or dir>] [-Rehearsal] [-V1]
 #               [-OutDir <dir>] [-Force] [-SignCommand '<cmd with {file}>']
 #               [-Arm64Abi gnu|msvc] [-Arm64TestExe] [-Arm64Result <text>]
+#               [-NoArm64]
 #               [-SkipTests] [-DryRun] [-Zig <path>] [-Lock <path>]
 #               [-MinFreeGB <n>] [-Jobs <n>]
 #
@@ -28,6 +29,7 @@ param(
     [ValidateSet('gnu', 'msvc')][string]$Arm64Abi = 'gnu',
     [switch]$Arm64TestExe,
     [string]$Arm64Result = '',
+    [switch]$NoArm64,
     [switch]$SkipTests,
     [switch]$DryRun,
     [switch]$SelfTest,
@@ -197,8 +199,13 @@ function Invoke-ReleaseSelfTest {
     if (-not (Test-CachedRun $cached)) { $fail += 'cached text not detected' }
     $ba = Get-BuildArgs 'x86_64-windows-msvc' 'P' 'B'
     if ($ba -notcontains "-Dconpty-dir=B") { $fail += "conpty-dir is not the root passed in" }
+    if (@(Get-ArtifactNames).Count -ne 6) { $fail += 'default artifact list is not both arches' }
+    $verStr = '0'
+    $NoArm64 = [switch]$true
+    $x64Only = @(Get-ArtifactNames)
+    if ($x64Only.Count -ne 3 -or @($x64Only | Where-Object { $_ -like '*arm64*' }).Count -ne 0) { $fail += '-NoArm64 artifact list has arm64 files' }
     if ($fail.Count -gt 0) { Write-Host ('release self-test FAIL: ' + ($fail -join '; ')); return $false }
-    Write-Host 'release self-test: 5 checks passed'
+    Write-Host 'release self-test: 7 checks passed'
     return $true
 }
 
@@ -440,7 +447,7 @@ function Invoke-Preflight {
     }
 
     # VS ARM64 component (msvc only)
-    if ($Arm64Abi -eq 'msvc') {
+    if (-not $NoArm64 -and $Arm64Abi -eq 'msvc') {
         $vsw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
         $have = ''
         if (Test-Path -LiteralPath $vsw) {
@@ -461,7 +468,8 @@ function Invoke-Preflight {
         throw ("preflight found {0} problem(s)" -f $problems.Count)
     }
     Write-Host "  version-string $verStr, tag $tag, sha $sha"
-    Write-Host "  zig $zigExe; tic $tic; ConPTY $($conpty.Version) ($($conpty.Label)); Arm64 ABI $Arm64Abi"
+    $armDesc = if ($NoArm64) { "Arm64 skipped (-NoArm64)" } else { "Arm64 ABI $Arm64Abi" }
+    Write-Host "  zig $zigExe; tic $tic; ConPTY $($conpty.Version) ($($conpty.Label)); $armDesc"
     Write-Log "version-string $verStr tag $tag sha $sha"
     foreach ($h in $conpty.Hashes) { Write-Log "conpty $h" }
 }
@@ -471,6 +479,7 @@ function Invoke-Preflight {
 function Get-ArtifactNames {
     $x = "ghostty-$verStr-windows-x64"
     $a = "ghostty-$verStr-windows-arm64"
+    if ($NoArm64) { return @("$x.zip", "$x-setup.exe", "$x-symbols.zip") }
     return @("$x.zip", "$x-setup.exe", "$x-symbols.zip", "$a.zip", "$a-setup.exe", "$a-symbols.zip")
 }
 
@@ -530,6 +539,9 @@ $failed = $false
 try {
     if ($SkipTests -and -not $Rehearsal) { throw '-SkipTests is only allowed with -Rehearsal (a release always runs the unit tests)' }
     if ($N -eq '') { throw '-N must not be empty' }
+    if ($NoArm64 -and ($Arm64TestExe -or $Arm64Result -ne '' -or $PSBoundParameters.ContainsKey('Arm64Abi'))) {
+        throw '-NoArm64 cannot be combined with -Arm64Abi, -Arm64TestExe or -Arm64Result (no arm64 build is made)'
+    }
     if ($MinFreeGB -lt 3) { throw '-MinFreeGB must be at least 3 (the RAM gate has a 3 GB floor)' }
 
     Start-Step 1
@@ -628,8 +640,12 @@ try {
 
     # ---- step 4: build arm64 ------------------------------------------------
     Start-Step 4
-    $ba = Get-BuildArgs $armTarget $prefArm $conptyBase
     $noPdb = $false
+    if ($NoArm64) {
+        Write-Host '  skipped: -NoArm64 (this release is x64 only)'
+        Write-Log 'step 4 skipped: -NoArm64'
+    } else {
+    $ba = Get-BuildArgs $armTarget $prefArm $conptyBase
     if ($DryRun) { Show-ZigCommand $ba 3000 } else {
         $r = Invoke-Zig 'build arm64' $ba 3000
         if ($r.Code -ne 0) { throw "arm64 build failed (exit $($r.Code)); see release.log" }
@@ -644,6 +660,7 @@ try {
             Write-Host '  arm64 build gave no PDB: -NoPdbOk (the arm64 symbols zip is left out)'
             Write-Log 'arm64 build gave no PDB: -NoPdbOk'
         }
+    }
     }
     $armTestZip = "ghostty-$verStr-windows-arm64-tests.zip"
     if ($Arm64TestExe) {
@@ -677,9 +694,11 @@ try {
     if (-not $DryRun) { Assert-TreeUnchanged }
     if ($DryRun) {
         Show-PackageCommand 'x64' $prefX64
-        Show-PackageCommand 'arm64' $prefArm
+        if (-not $NoArm64) { Show-PackageCommand 'arm64' $prefArm }
     } else {
-        foreach ($pair in @(@('x64', $prefX64, $false), @('arm64', $prefArm, $noPdb))) {
+        $pairs = @(,@('x64', $prefX64, $false))
+        if (-not $NoArm64) { $pairs += ,@('arm64', $prefArm, $noPdb) }
+        foreach ($pair in $pairs) {
             $pa = Get-PackageArgs $pair[0] $pair[1] $pair[2]
             if ($SignCommand) {
                 $r = Invoke-Logged -Exe 'powershell.exe' -ArgList $pa -TimeoutSec 1800 -Quiet -HideCmdLine
@@ -736,6 +755,7 @@ try {
             $testsText = (($testRecords | ForEach-Object { '- {0}: {1}' -f $_.Label, $_.Line }) -join "`n")
         }
         $armLine = "ARM64: built (``$armTarget``); unit tests are an owner check."
+        if ($NoArm64) { $armLine = 'This release is x64 only (ARM64 builds are not published).' }
         if ($Arm64Result) { $armLine += " Owner result: $Arm64Result" }
         if ($noPdb) { $armLine += ' -NoPdbOk: this ABI gave no PDB, so there is no arm64 symbols zip.' }
         $cp = New-Object System.Text.StringBuilder

@@ -35,6 +35,7 @@ PS> dist/windows/release.ps1 -N <N> -ConptyPackage <path to .nupkg> [-V1] [-Arm6
 - `-Rehearsal -N 0` builds into `zig-out\release\rehearsal-<zon>\` and marks the printed commands `REHEARSAL - do not run`.
 - `-SignCommand '<command with {file}>'` signs `ghostty.exe`, `tmux.exe`, `setup.exe` and the uninstaller (never the Microsoft ConPTY files).
 - `-Arm64TestExe` also builds an ARM64 test exe and zips it as `ghostty-<v>-windows-arm64-tests.zip`. It is local only: not in `SHA256SUMS.txt` and not in `publish.txt`. Run it on an ARM64 device (exit 0 = PASS; a failure is recorded, not blocking). Put its result into the notes with `-Arm64Result '<text>'`, or edit `release-notes.md` before you run `publish.txt`.
+- `-NoArm64` makes an x64-only release: step 4 is skipped, only the three x64 files are packaged, listed in `SHA256SUMS.txt` and `publish.txt`, and the notes say ARM64 builds are not published. It is rejected together with `-Arm64Abi`, `-Arm64TestExe` or `-Arm64Result`.
 
 Output, under `zig-out\release\<version>\`: six artifacts, `SHA256SUMS.txt`, `release-notes.md`, `publish.txt`, `tests.txt`, `release.log`. The `package.log` and `release.log` files are for you; never upload them.
 
