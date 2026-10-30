@@ -12,7 +12,7 @@ ledger M7 (`.superpowers/sdd/M7-win2/progress.md`), финальное ревь�
    - Код готов: `src/explorer_command/` (DLL прошла ревью), `dist/windows/sparse/`, ветка регистрации в установщике сейчас выключена.
    - Проверить, что `ghostty.exe`, запущенный из меню, не получает identity пакета: `ENABLE_PROCESS_TREE` действует только на детей.
 2. **Подпись сборок** (audit 7.1): SmartScreen «Unknown publisher», Smart App Control. Тот же сертификат, что и в п. 1.
-3. **Kitty-картинки и SGR 58 в Git Bash.**
+3. **Kitty-картинки и SGR 58 в Git Bash.** Эксперимент 2026-10-30 (ветка `exp/conpty-msys`, отчёт `.superpowers/sdd/M7-win2/exp-conpty-report.md`): теряется только ПЕРВАЯ клавиша после ресайза (не вся строка; `msys-key-loss.md` исправить), и только когда bash не обработал SIGWINCH сразу; встроенная консоль после каждого ресайза шлёт `CSI 6 n` (её GetConsoleScreenBufferInfo ждёт CPR, GH#18725), его вызывает проверка размера Cygwin. ShowHide/Reparent, duplex-канал, коалесинг ресайзов, Shift-wake не помогли. Дальше: трассировка на стороне MSYS; перепроверить WT скриптом, а не руками.
    - На встроенном ConPTY MSYS теряет целые строки после ресайза, сплита и смены вкладки (7–16 из 36). С win32-input-mode то же самое.
    - В Windows Terminal потерь нет. Главная открытая зацепка: как Ghostty вызывает `ResizePseudoConsole` (сколько раз за одно перетаскивание, в какие моменты) по сравнению с WT. Измерить и повторить поведение WT.
    - Текст баг-репорта для msys2-runtime лежит в `m7/msys-key-loss.md`, он не отправлен.
