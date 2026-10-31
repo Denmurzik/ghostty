@@ -48,3 +48,55 @@ ledger M7 (`.superpowers/sdd/M7-win2/progress.md`), финальное ревь�
 27. Ручные проверки владельца: Retry установщика при запущенном Ghostty; ARM64 на устройстве.
 28. Ссылки от Claude Code на `C:\...` подсвечиваются, но по Ctrl+клику не открываются; тот же путь из `printf` в Git Bash открывается. Выяснить: OSC 8 с неподходящим адресом или путь, разбитый переносом. Ghostty отклоняет ссылку молча: показывать причину отказа (toast или строка в логе релизной сборки).
 29. Лаг ввода, копящийся во вкладке Git Bash (zsh) на `windows-conpty = bundled`: не проходит после новой сессии Claude Code, `/exit` и очистки прокрутки; новая вкладка без лага. ЦП при вводе низкий (claude ≤25 %, ghostty ≤19 %, OpenConsole ≤2 %). Вероятно, та же пара MSYS + встроенный OpenConsole, что в п. 3. Проверка владельца: `auto` на долгой сессии.
+
+## Upstream Ghostty 1.4.0 (вышла 2026-10-27)
+
+Источник: https://ghostty.org/docs/install/release-notes/1-4-0 (7 месяцев, 2889 коммитов).
+
+**Что это значит для порта.** Ветка `windows` уже стоит на upstream `68640f304` (26.10). До тега `v1.4.0` от него всего 6 коммитов: смена версии, польский перевод, тесты NSPasteboard для macOS, VOUCHED. Значит, почти всё ядро 1.4 уже в win.2, включая исправления безопасности. Rebase на `v1.4.0` тривиальный: конфликт только в `build.zig.zon` (версия). После него следующий релиз будет `1.4.0-win.1`. С 26.10 в `upstream/main` пришло 77 коммитов, их тоже взять при rebase.
+
+### Исправления безопасности (в ядре, уже в нашей базе)
+- Защита вставки не считала CR концом строки: вставка могла выполнить команду без подтверждения (GHSA-4hwh-wx3w-3fqg).
+- Kitty graphics: падения, зависания, огромные выделения памяти, а в отдельных случаях чтение и удаление файлов вне temp (GHSA-mhff-mv4q-fp63).
+- tmux control mode: падения (GHSA-hcr9-7hcr-mjm8, GHSA-hp9c-qp4q-cpw3).
+- Очистка экрана в scrollback при маленьком `scrollback-limit` портила память (GHSA-w9q4-5jvv-mcv4).
+- zsh-интеграция: подобранное имя каталога могло отправить произвольные escape-последовательности, например OSC 52 (GHSA-2r63-vmw6-3m3c). У нас zsh под Git Bash: проверить, что наша копия скрипта совпадает с исправленной.
+- Только macOS: OSC 8 и `link` открывали небезопасные локальные файлы и схемы, drag-and-drop обходил защиту вставки, имена файлов с управляющими символами. **Сверить с нашей политикой** `src/apprt/win32/shell_open.zig` и путём drop на Windows.
+
+### Новое в ядре: на Windows работает или заработает само
+- Kitty graphics: анимация, относительные размещения (`P=`, `Q=`, `H=`, `V=`), transient-изображения, полное соответствие спецификации, разбор в 16 раз быстрее. Проверить анимацию на D3D11 и паузу, когда вкладка скрыта.
+- Сжатие scrollback в простое (`scrollback-compression`, физическая память −70–90 %). Upstream уже поддерживает Windows (`DiscardVirtualMemory`, `src/terminal/mem.zig`). Лимит по умолчанию 10 → 50 МБ. `scrollback-limit` переименован в `scrollback-limit-bytes`, новый `scrollback-limit-lines`.
+- Производительность: ASCII-парсинг ×5,7, ресайз с большим scrollback ×6, рендерер в 2,7–11 раз меньше держит lock, большие OSC ×30. Пересчитать наши `latency-baseline.csv` и `ram-baseline.csv`.
+- VT: mode 2033 (отчёт о видимости), `CSI 8;rows;cols t` (`vt-window-resize-allowed`), DECSTR, DECBKM, DECRQCRA/XTCHECKSUM, `CSI 19 t`, DECXCPR, overline в terminfo, OSC 133 `click_events=2`, Unicode 18, десятки исправлений совместимости с xterm. Ctrl+L на prompt переносит вывод в scrollback.
+- Клавиатура: `modifyOtherKeys` 2 как в xterm, F13–F25, UTF-8 для alt+не-ASCII.
+- `+ssh` (у нас уже есть) и `ssh-env`/`ssh-terminfo` через `+ssh`. У `+ssh-cache` позиционные аргументы и `--prune`. `ssh-env` больше не перекрывает `SetEnv`. Сверить с нашими pwsh/cmd обёртками.
+- `+explain-config`, пейджер для `+show-config` (`GHOSTTY_PAGER`). `GHOSTTY_SURFACE_ID` выставляется в окружении процессов, у нас уже есть.
+- bash-интеграция: реальный код выхода на Bash 4.4+, исправления `PROMPT_COMMAND` и ble.sh. zsh: исправлен `{` в prompt.
+- Конфиг: `copy-on-select` теперь `none|primary|clipboard|both` (на Windows по умолчанию `none`), `link-osc8`, `clipboard-write-limit-bytes`, `window-padding-balance = equal`, `~` в `theme`, `command-palette-entry = clear`. Исправлен разбор конфига на границе буфера.
+- Темы: +356 (iTerm2-Color-Schemes), 10 изменили цвета.
+
+### Новое, где нужна работа в win32 apprt (upstream сделал для macOS/GTK)
+- **Kitty clipboard protocol OSC 5522** (картинки, HTML, события вставки, `clipboard-read`/`clipboard-write`, превью при чтении). У нас `.unsupported` (audit 2.5).
+- **Перетаскивание сплитов** (`drag-handle = auto|always|never`): по сплитам, вкладкам и окнам, процессы переезжают вместе со сплитом. У нас нет (audit 3.2, 9.3).
+- **`middle-click-action`** (`primary-paste|clipboard-paste|ignore`): проверить, читает ли его win32.
+- **Скрытые вкладки освобождают GPU-ресурсы** и не рендерятся: проверить наш D3D11 и win32 (энергия, память).
+- **Отчёт о видимости (mode 2033)**: apprt должен сообщать, когда поверхность скрыта или видна.
+- **Палитра команд**: подсветка совпадений, поиск по инициалам и описаниям, ранжирование (macOS). Перевод палитры на новые языки; у нас i18n на Windows выключен (audit 8.3).
+- **Полоса «процесс завершился»** внизу терминала, красная для быстрого или неудачного выхода (`abnormal-command-exit-runtime`, macOS): аналог `show_child_exited` по стилю macOS.
+- **«Review Windows…»** при выходе, если в нескольких окнах идут процессы (macOS).
+- **Поиск запоминает последний запрос** (macOS).
+- Новые actions `move_tab_to_new_window` и `set_window_title` у нас уже реализованы. `prompt_window_title` (GTK) сверить с нашим `prompt_title`.
+- `+new-tab` и `+toggle-quick-terminal` (GTK, через запущенный экземпляр): аналог для Windows через наш IPC.
+
+### Изменения поведения, которые надо учесть
+- Сочетания по умолчанию: GTK `ctrl+shift+page_up/down` теперь `move_tab`, а `jump_to_prompt` на `ctrl+shift+arrow_up/down`. Решить, следуем ли GTK (у нас Windows-раскладка на основе GTK-сочетаний).
+- terminfo `Se` возвращает курсор к настроенному `cursor-style`.
+- Лимиты: OSC ≤ 8 МиБ, kitty-payload ≤ 65 МиБ, ≤ 64 комбинирующих символа на ячейку.
+- В разделе «Windows» release notes: «No Windows GUI roadmap; libghostty supports Windows and is tested in CI». Upstream собирает libghostty-vt под MSVC и GNU, а GUI остаётся нашей задачей.
+
+### План для следующей версии
+1. Rebase на `upstream/main` после `v1.4.0` (77 коммитов), версия `1.4.0-win.1`.
+2. Прогнать все unit-группы и e2e `-Milestone all`.
+3. Проверить на Windows: анимацию Kitty (D3D11), сжатие scrollback (память в `ram-baseline`), mode 2033, `CSI 8 t`.
+4. Сверить исправления безопасности по ссылкам и вставке с нашей политикой `shell_open` и drop.
+5. Из пунктов для apprt взять в работу OSC 5522, перетаскивание сплитов и освобождение GPU у скрытых вкладок.
