@@ -46,8 +46,7 @@ ledger M7 (`.superpowers/sdd/M7-win2/progress.md`), финальное ревь�
 25. Claude Code на Windows рисует ASCII-заглушки `( )` вместо `◯`: его `is-unicode-supported` на win32 знает только WT_SESSION, vscode, `TERM=xterm-256color` и т. п., а `TERM=xterm-ghostty` нет. Обход: `env = TERMINUS_SUBLIME=1` (переменная используется только этой проверкой). Решить: выставлять её по умолчанию на Windows или отправить фикс в is-unicode-supported (проверка `TERM_PROGRAM=ghostty`).
 26. Тесты: нестабильный сценарий scrollbar; латентность на 60 Гц (ограничена кадром); split-many teardown на границе 100 мс; шум запуска процессов в tmux-cli.
 27. Ручные проверки владельца: Retry установщика при запущенном Ghostty; ARM64 на устройстве.
-28. Ссылки от Claude Code на `C:\...` подсвечиваются, но по Ctrl+клику не открываются; тот же путь из `printf` в Git Bash открывается. Выяснить: OSC 8 с неподходящим адресом или путь, разбитый переносом. Ghostty отклоняет ссылку молча: показывать причину отказа (toast или строка в логе релизной сборки).
-29. Лаг ввода, копящийся во вкладке Git Bash (zsh) на `windows-conpty = bundled`: не проходит после новой сессии Claude Code, `/exit` и очистки прокрутки; новая вкладка без лага. ЦП при вводе низкий (claude ≤25 %, ghostty ≤19 %, OpenConsole ≤2 %). Вероятно, та же пара MSYS + встроенный OpenConsole, что в п. 3. Проверка владельца: `auto` на долгой сессии.
+28. Лаг ввода, копящийся во вкладке Git Bash (zsh) на `windows-conpty = bundled`: не проходит после новой сессии Claude Code, `/exit` и очистки прокрутки; новая вкладка без лага. ЦП при вводе низкий (claude ≤25 %, ghostty ≤19 %, OpenConsole ≤2 %). Вероятно, та же пара MSYS + встроенный OpenConsole, что в п. 3. Проверка владельца: `auto` на долгой сессии.
 
 ## Upstream Ghostty 1.4.0 (вышла 2026-10-27)
 
