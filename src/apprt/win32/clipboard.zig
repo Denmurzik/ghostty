@@ -1021,3 +1021,9 @@ test "win32 clipboard: text wins over a file list" {
     // An OSC 52 read never returns a file list.
     try std.testing.expect(sourceFor(read52, false, true) == null);
 }
+
+test {
+    _ = @import("clipboard_html.zig");
+    _ = @import("clipboard_image.zig");
+    _ = @import("clipboard_mime.zig");
+}
