@@ -101,12 +101,17 @@ test "win32 util: utf16 rejects unpaired surrogate" {
 
 test "win32 util: serviceSentMessages leaves the posted queue alone" {
     const user32 = win32.user32;
-    // A posted thread message stays queued: only sent messages are handled.
-    _ = user32.PostMessageW(null, user32.WM_APP + 1, 0, 0);
-    serviceSentMessages();
+    // Other tests on this thread may leave posted messages behind: this one
+    // looks only at its own id and drains that id before and after.
+    const probe_msg: u32 = user32.WM_APP + 0x1A5;
     var msg: user32.MSG = undefined;
-    try std.testing.expect(user32.PeekMessageW(&msg, null, 0, 0, user32.PM_REMOVE) != 0);
-    try std.testing.expectEqual(@as(u32, user32.WM_APP + 1), msg.message);
+    while (user32.PeekMessageW(&msg, null, probe_msg, probe_msg, user32.PM_REMOVE) != 0) {}
+    defer while (user32.PeekMessageW(&msg, null, probe_msg, probe_msg, user32.PM_REMOVE) != 0) {};
+    // A posted thread message stays queued: only sent messages are handled.
+    _ = user32.PostMessageW(null, probe_msg, 0, 0);
+    serviceSentMessages();
+    try std.testing.expect(user32.PeekMessageW(&msg, null, probe_msg, probe_msg, user32.PM_REMOVE) != 0);
+    try std.testing.expectEqual(probe_msg, msg.message);
 }
 
 test "win32 util: serviceSentMessages answers a message sent from another thread" {
