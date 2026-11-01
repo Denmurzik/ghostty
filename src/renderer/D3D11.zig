@@ -398,24 +398,25 @@ pub fn dropSwapChain(self: *D3D11) void {
 /// attached to its DirectComposition visual (no new hand-off). The next frame
 /// regrows it: `SwapChain.copyToBackbuffer` resizes to the target's size.
 pub fn surfaceHidden(self: *D3D11) void {
+    if (!shrink_hidden_chains) return;
     const target = self.present_target orelse return;
     self.device.lockContext();
     defer self.device.unlockContext();
 
+    const hwnd: win32.foundation.HWND = @ptrCast(target.hwnd);
+    const window_visible = win32.user32.IsWindowVisible(hwnd) != 0;
+    const mode = if (self.swap_chain) |*sc| sc.mode else .hwnd;
+    if (!shrinkOnHide(self.swap_chain != null, window_visible, mode)) return;
+
     // The replacement it waited for is not coming while hidden.
     self.releaseRetired();
 
-    const sc = if (self.swap_chain) |*sc| sc else return;
-    const hwnd: win32.foundation.HWND = @ptrCast(target.hwnd);
-    const window_visible = win32.user32.IsWindowVisible(hwnd) != 0;
-    if (!shrink_hidden_chains or !shrinkOnHide(true, window_visible, sc.mode)) return;
-    sc.shrink() catch |err| {
-        self.logSwapChainFailure("shrink", err);
-        return;
-    };
-    // Gives the driver the released back buffers now rather than at the next
-    // surface close.
-    self.device.trimDriver();
+    // A lost device fails the resize; the recovery replaces the chain.
+    if (self.device.isLost()) return;
+    self.swap_chain.?.shrink() catch |err| self.logSwapChainFailure("shrink", err);
+    // No driver trim here: `Window.syncOcclusion` schedules the debounced
+    // `App.scheduleMemoryRelease`, so a burst of tab switches trims once and
+    // never under the lock a newly shown tab's first frame waits for.
 }
 
 /// Pure decision of `surfaceHidden`: only a chain whose window is hidden is
@@ -430,6 +431,9 @@ pub fn shrinkOnHide(has_chain: bool, window_visible: bool, mode: SwapChain.Mode)
 /// For tests (the test IPC): takes the context lock, so not from a thread
 /// that holds it.
 pub fn chainPx(self: *D3D11) [2]u32 {
+    // The render thread may swap the device (`recoverDevice`) meanwhile.
+    self.device_mutex.lockUncancelable(global.io());
+    defer self.device_mutex.unlock(global.io());
     self.device.lockContext();
     defer self.device.unlockContext();
     const sc = if (self.swap_chain) |*sc| sc else return .{ 0, 0 };

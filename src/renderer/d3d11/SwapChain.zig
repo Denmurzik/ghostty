@@ -436,20 +436,23 @@ pub fn present(self: *Self, vsync: bool) Error!void {
 /// to its DirectComposition visual and an hwnd chain to its window. The next
 /// `copyToBackbuffer` regrows it to the target size.
 ///
-/// The chain holds no frame worth keeping (it is hidden), and nothing waits
-/// for one: the pacer is reset like an idle chain's (`resyncIdle`), so a
-/// signal of a frame queued before the shrink that arrives later is a surplus
-/// the idle resync of the next present takes. The frame latency waitable
-/// itself survives `ResizeBuffers`. The caller holds the context lock; the
-/// context is cleared and flushed first because `ResizeBuffers` fails while
-/// it still references a back buffer.
+/// The frame latency waitable survives `ResizeBuffers`, so the pacer is left
+/// alone unless the chain is idle already (`idle`: every frame retired, the
+/// signals it holds are a surplus, `resyncIdle`). A chain with a frame in
+/// flight keeps its pending count: that frame's signal is still to come and
+/// resyncing now would turn it into a surplus, one frame of extra latency
+/// after the reshow for as long as the surface animates without a pause. The
+/// chain is idle by the time it is shown again, so the first
+/// `D3D11.waitFrameSlot` after the show resyncs it. The caller holds the
+/// context lock; the context is cleared and flushed first because
+/// `ResizeBuffers` fails while it still references a back buffer.
 pub fn shrink(self: *Self) Error!void {
     self.device.assertContextLocked();
     if (self.width == 1 and self.height == 1) return;
     self.device.context.clearState();
     self.device.context.flush();
     try self.resize(1, 1);
-    _ = self.resyncIdle();
+    if (self.idle()) _ = self.resyncIdle();
 }
 
 /// Resizes the back buffers, repeating the creation flags. No reference to
@@ -727,8 +730,6 @@ fn expectShrinkAndRegrow(mode: Mode) !void {
     try testing.expectEqual(created.Format, small.Format);
     try testing.expectEqual(created.AlphaMode, small.AlphaMode);
     try testing.expect(chain.waitable != null);
-    // The pacer owes nothing to a chain nobody waits on.
-    try testing.expect(!chain.waitArmed());
 
     // A second shrink is a no-op.
     try chain.shrink();
@@ -752,6 +753,38 @@ test "d3d11 swapchain: shrink keeps creation flags and the next copy regrows it"
 
 test "d3d11 swapchain: shrink of a composition chain" {
     try expectShrinkAndRegrow(.composition);
+}
+
+test "d3d11 pacer: shrink with a frame in flight keeps the pending count, an idle chain is resynced" {
+    const device = try Device.init(testing.allocator, .{ .driver = .warp });
+    defer device.deinit(testing.allocator);
+    var window: TestWindow = try .init();
+    defer window.deinit();
+
+    var chain = try init(device, window.hwnd, 64, 32, .hwnd);
+    device.lockContext();
+    defer device.unlockContext();
+    defer chain.deinit();
+
+    // In flight: the last present is in the future, so the chain is not idle
+    // however slow the machine is. Its signal is still to come.
+    chain.pacer.presented(0);
+    chain.pacer.presented(0);
+    chain.pacer.last_present_ns.store(nowNs() + 3600 * std.time.ns_per_s, .release);
+    try testing.expect(!chain.idle());
+    try chain.shrink();
+    try testing.expectEqual(@as(u32, 1), chain.width);
+    try testing.expectEqual(@as(u32, 2), chain.pacer.pending.load(.monotonic));
+
+    // Idle: every frame is retired, nothing is owed any more.
+    var target = try Target.init(.{ .device = device, .width = 64, .height = 32, .srgb = false });
+    defer target.deinit();
+    try chain.copyToBackbuffer(device.context, &target);
+    chain.pacer.last_present_ns.store(0, .release);
+    try testing.expect(chain.idle());
+    try chain.shrink();
+    try testing.expectEqual(@as(u32, 0), chain.pacer.pending.load(.monotonic));
+    try testing.expect(!chain.waitArmed());
 }
 
 test "d3d11 swapchain: zero size is rejected" {
