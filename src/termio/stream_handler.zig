@@ -2082,6 +2082,90 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
 }
 
+/// Feeds a committed OSC 5522 write of `total` bytes, in wdata chunks of
+/// `chunk` raw bytes (4 KiB of base64 per OSC, as the e2e scenario sends),
+/// through the real parser and handler. Returns what the terminal answered.
+fn kittyWriteThroughStream(
+    alloc: std.mem.Allocator,
+    limit: usize,
+    total: usize,
+    chunk: usize,
+    read_size: usize,
+) ![]u8 {
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+    var handler: StreamHandler = undefined;
+    handler.alloc = alloc;
+    handler.termio_mailbox = &mailbox;
+    handler.renderer_state = &renderer_state;
+    handler.termio_messaged = false;
+    handler.clipboard_write = .allow;
+    handler.clipboard_write_limit = limit;
+    handler.kitty_clipboard_write = null;
+
+    var stream: StreamHandler.Stream = .init(.{ .allocator = alloc, .handler = handler });
+    defer {
+        stream.handler.kittyClipboardWriteAbort();
+        stream.parser.deinit();
+    }
+
+    const b64 = std.base64.standard.Encoder;
+    const raw = try alloc.alloc(u8, chunk);
+    defer alloc.free(raw);
+    @memset(raw, 'A');
+    const enc = try alloc.alloc(u8, b64.calcSize(chunk));
+    defer alloc.free(enc);
+    _ = b64.encode(enc, raw);
+
+    var feed: std.Io.Writer.Allocating = .init(alloc);
+    defer feed.deinit();
+    try feed.writer.writeAll("\x1b]5522;type=write\x1b\\");
+    var sent: usize = 0;
+    while (sent < total) : (sent += chunk) {
+        // "text/plain"
+        try feed.writer.writeAll("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;");
+        try feed.writer.writeAll(enc);
+        try feed.writer.writeAll("\x1b\\");
+    }
+    try feed.writer.writeAll("\x1b]5522;type=wdata\x1b\\");
+    // The pty delivers its output in reads of a few KiB, which cut OSCs anywhere.
+    var at: usize = 0;
+    while (at < feed.written().len) : (at += read_size) {
+        stream.nextSlice(feed.written()[at..@min(at + read_size, feed.written().len)]);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    while (mailbox.spsc.queue.pop(global.io())) |msg| {
+        defer msg.deinit();
+        switch (msg) {
+            .write_alloc => |v| try out.appendSlice(alloc, v.data),
+            else => {},
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test "windows kitty clipboard write: 2 MiB under a 1 MiB limit is answered EFBIG through the stream" {
+    const testing = std.testing;
+    // Whole, in the reads of the pty, and in odd pieces.
+    for ([_]usize{ 1 << 30, 4096, 1000, 97 }) |read_size| {
+        const reply = try kittyWriteThroughStream(testing.allocator, 1 << 20, 2 << 20, 3072, read_size);
+        defer testing.allocator.free(reply);
+        try testing.expect(std.mem.indexOf(u8, reply, "status=EFBIG") != null);
+        // One answer: the data that follows the refusal is ignored.
+        try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, reply, "status=DONE"));
+    }
+}
 test "windows osc7: a WSL pane is held to this machine's host name" {
     if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;

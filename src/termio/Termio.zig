@@ -933,3 +933,33 @@ test "termio renderer wakeup notifies the original Async" {
     try loop.run(.until_done);
     try testing.expect(fired);
 }
+
+test "windows termio config: clipboard-write-limit-bytes reaches the termio config" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try configpkg.Config.default(alloc);
+    defer cfg.deinit();
+    {
+        var derived = try DerivedConfig.init(alloc, &cfg);
+        defer derived.deinit();
+        try testing.expectEqual(@as(usize, 64 * 1024 * 1024), derived.clipboard_write_limit);
+    }
+
+    const Iter = struct {
+        data: []const []const u8,
+        i: usize = 0,
+        pub fn next(self: *@This()) ?[]const u8 {
+            if (self.i >= self.data.len) return null;
+            defer self.i += 1;
+            return self.data[self.i];
+        }
+    };
+    // As the config file of the e2e scenario sets them.
+    var it: Iter = .{ .data = &.{ "--clipboard-write=allow", "--clipboard-write-limit-bytes=1048576" } };
+    try cfg.loadIter(alloc, &it);
+    var derived = try DerivedConfig.init(alloc, &cfg);
+    defer derived.deinit();
+    try testing.expectEqual(@as(usize, 1048576), derived.clipboard_write_limit);
+    try testing.expectEqual(configpkg.ClipboardAccess.allow, derived.clipboard_write);
+}
