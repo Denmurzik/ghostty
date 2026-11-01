@@ -26,6 +26,8 @@ const util = @import("util.zig");
 const secure_input = @import("secure_input.zig");
 const drop = @import("drop.zig");
 const clipboard_formats = @import("clipboard_formats.zig");
+const selection_store = @import("selection_store.zig");
+const App = @import("App.zig");
 
 const log = std.log.scoped(.win32_clipboard);
 
@@ -130,9 +132,12 @@ pub const State = struct {
 pub const listMimes = clipboard_formats.list;
 pub const readMime = clipboard_formats.readMime;
 
-/// Whether `t` exists on Windows: only the standard clipboard does.
+/// Whether `t` exists on Windows: the standard clipboard and the selection
+/// clipboard, which is Ghostty's own in-process store (as on macOS) and never
+/// the Windows clipboard. The X11 primary selection does not exist (a Kitty
+/// `loc=primary` is answered ENOSYS).
 pub fn supports(t: apprt.Clipboard) bool {
-    return t == .standard;
+    return t == .standard or t == .selection;
 }
 
 /// Handle a window message for `surface`. Null means not handled, and the
@@ -157,12 +162,12 @@ pub fn request(
     t: apprt.Clipboard,
     req: apprt.ClipboardRequest,
 ) !apprt.ClipboardReadResult {
-    if (admission(t, req)) |answer| return answer;
+    if (preflight(&surface.app.selection, t, req)) |answer| return answer;
 
     // Lets performable paste bindings fall through when there is nothing
     // to paste (an image, say). An OSC 52 read of such a clipboard is
     // answered with empty contents instead.
-    if (req == .paste and sourceFor(
+    if (req == .paste and t == .standard and sourceFor(
         req,
         win32.user32.IsClipboardFormatAvailable(win32.user32.CF_UNICODETEXT) != 0,
         win32.user32.IsClipboardFormatAvailable(cf_hdrop) != 0,
@@ -172,6 +177,19 @@ pub fn request(
 
     try enqueue(surface, .{ .req = req });
     return .started;
+}
+
+/// `admission`, plus the selection clipboard: a paste from an empty one is
+/// `.unavailable`, so a binding (middle click) falls through (R-M8-9). The
+/// system clipboard is checked by `request` itself.
+fn preflight(
+    selection: *const selection_store.Store,
+    t: apprt.Clipboard,
+    req: apprt.ClipboardRequest,
+) ?apprt.ClipboardReadResult {
+    if (admission(t, req)) |answer| return answer;
+    if (req == .paste and t == .selection and selection.get("text/plain") == null) return .unavailable;
+    return null;
 }
 
 /// The answer to a request that is turned away before anything is queued
@@ -228,6 +246,10 @@ pub fn setClipboard(
 ) !void {
     if (!supports(t)) return error.Unsupported;
 
+    // The selection clipboard never leaves the process: no Windows
+    // clipboard, no toast, no secure-input markers.
+    if (t == .selection and !confirm) return setSelection(surface.app, contents);
+
     if (!confirm) {
         const alloc = surface.app.core_app.alloc;
         var p = try clipboard_formats.plan(alloc, contents);
@@ -249,6 +271,15 @@ pub fn setClipboard(
     const copy = try alloc.dupeSentinel(u8, text, 0);
     errdefer alloc.free(copy);
     try enqueue(surface, .{ .req = .{ .osc_52_write = t }, .text = copy });
+}
+
+/// Replace the selection clipboard with `contents`.
+fn setSelection(app: *App, contents: []const apprt.ClipboardContent) !void {
+    var buf: [selection_store.max_contents]selection_store.Content = undefined;
+    const n = @min(contents.len, buf.len);
+    for (contents[0..n], buf[0..n]) |c, *slot| slot.* = .{ .mime = c.mime, .data = c.data };
+    if (n == 0) return error.NothingToWrite;
+    try app.selection.set(app.core_app.alloc, buf[0..n]);
 }
 
 /// Deny every clipboard request still pending for `surface`. Called before
@@ -329,7 +360,7 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
         .kitty_read => |kitty| {
             var entry = p;
             const started: std.Io.Timestamp = .now(global.io(), .awake);
-            entry.gathered = gather(alloc, kitty, ClipboardReader{ .hwnd = surface.hwnd }) catch |err| {
+            entry.gathered = gatherFor(alloc, surface, kitty) catch |err| {
                 log.warn("clipboard read failed err={}", .{err});
                 surface.core_surface.denyClipboardRequest(p.req);
                 return true;
@@ -353,7 +384,7 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
             // Text handed to `pasteText` travels with the entry; anything
             // else is read from the clipboard now.
             const given = p.text;
-            const maybe_text: ?[:0]u8 = given orelse readFor(alloc, surface, p.req) catch |err| blk: {
+            const maybe_text: ?[:0]u8 = given orelse readTextFor(alloc, surface, p.req) catch |err| blk: {
                 log.warn("clipboard read failed err={}", .{err});
                 break :blk null;
             };
@@ -490,6 +521,58 @@ const ClipboardReader = struct {
     }
 };
 
+/// Where a Kitty read finds the selection clipboard: the in-process store.
+const StoreReader = struct {
+    store: *const selection_store.Store,
+
+    fn read(self: StoreReader, alloc: Allocator, mime: []const u8) !?[]u8 {
+        const data = self.store.get(mime) orelse return null;
+        return try alloc.dupe(u8, data);
+    }
+
+    fn list(
+        self: StoreReader,
+        buf: *[clipboard_formats.max_listing][]const u8,
+        names: *clipboard_formats.NameBuf,
+    ) ![]const []const u8 {
+        _ = names;
+        return self.store.mimes(buf);
+    }
+};
+
+/// `gather` from the clipboard `kitty` names.
+fn gatherFor(
+    alloc: Allocator,
+    surface: *Surface,
+    kitty: *const apprt.ClipboardRequest.KittyRead,
+) Allocator.Error!Gathered {
+    if (kitty.location == .selection) {
+        return gather(alloc, kitty, StoreReader{ .store = &surface.app.selection });
+    }
+    return gather(alloc, kitty, ClipboardReader{ .hwnd = surface.hwnd });
+}
+
+/// The text a paste or an OSC 52 read of `req` finds: the selection
+/// clipboard's, or the system clipboard's (`readFor`).
+fn readTextFor(alloc: Allocator, surface: *Surface, req: apprt.ClipboardRequest) !?[:0]u8 {
+    const t: apprt.Clipboard = switch (req) {
+        .paste, .osc_52_read => |c| c,
+        else => .standard,
+    };
+    if (t == .selection) return readSelection(alloc, &surface.app.selection);
+    return readFor(alloc, surface, req);
+}
+
+/// The first text of the selection clipboard, made valid UTF-8 as an OSC 52
+/// payload is. Null when it holds none. Caller owns the result.
+fn readSelection(alloc: Allocator, store: *const selection_store.Store) Allocator.Error!?[:0]u8 {
+    const text = store.get("text/plain") orelse return null;
+    const clean = try sanitize(alloc, text);
+    defer alloc.free(clean);
+    if (clean.len == 0) return null;
+    return try alloc.dupeSentinel(u8, clean, 0);
+}
+
 /// The name a representation is served under: every text alias is
 /// `text/plain` (core matches the aliases itself), anything else keeps the
 /// request's spelling.
@@ -521,12 +604,10 @@ fn gather(
         } else false;
         if (again) continue;
 
-        const got = reader.read(alloc, name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                log.warn("clipboard representation not read err={}", .{err});
-                continue;
-            },
+        const got = reader.read(alloc, name) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            log.warn("clipboard representation not read err={}", .{err});
+            continue;
         };
         const data = got orelse continue;
         errdefer alloc.free(data);
@@ -569,6 +650,9 @@ const ListFlow = struct {
         buf: *[clipboard_formats.max_listing][]const u8,
         names: *clipboard_formats.NameBuf,
     ) ![]const []const u8 {
+        if (self.p.req == .list and self.p.req.list == .selection) {
+            return self.surface.app.selection.mimes(buf);
+        }
         return listMimes(self.surface.hwnd, buf, names);
     }
 
@@ -1669,7 +1753,72 @@ test "win32 clipboard kitty: list never prompts" {
     try std.testing.expectEqual(@as(usize, 1), lost.denied);
 }
 
+test "win32 clipboard: selection is supported, primary is not" {
+    try std.testing.expect(supports(.standard));
+    try std.testing.expect(supports(.selection));
+    try std.testing.expect(!supports(.primary));
+}
+
+test "win32 clipboard: empty selection paste is unavailable" {
+    var store: selection_store.Store = .{};
+    defer store.deinit();
+
+    // Nothing stored: a middle click falls through.
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unavailable),
+        preflight(&store, .selection, .{ .paste = .selection }),
+    );
+
+    // A store without text is as good as empty for a paste.
+    try store.set(std.testing.allocator, &.{.{ .mime = "image/png", .data = "PNG" }});
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unavailable),
+        preflight(&store, .selection, .{ .paste = .selection }),
+    );
+
+    // With text the request is queued; so is an OSC 52 read (answered with
+    // empty contents when there is nothing).
+    try store.set(std.testing.allocator, &.{.{ .mime = "text/plain", .data = "word" }});
+    try std.testing.expect(preflight(&store, .selection, .{ .paste = .selection }) == null);
+    store.clear();
+    try std.testing.expect(preflight(&store, .selection, .{ .osc_52_read = .selection }) == null);
+
+    // The X11 primary selection never exists.
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unsupported),
+        preflight(&store, .primary, .{ .paste = .primary }),
+    );
+}
+
+test "win32 clipboard: the selection serves paste text, a Kitty read and a listing" {
+    const alloc = std.testing.allocator;
+    var store: selection_store.Store = .{};
+    defer store.deinit();
+    try std.testing.expect((try readSelection(alloc, &store)) == null);
+
+    try store.set(alloc, &.{
+        .{ .mime = "text/plain", .data = "a\xffb\x00tail" },
+        .{ .mime = "text/html", .data = "<b>a</b>" },
+    });
+    const text = (try readSelection(alloc, &store)).?;
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("a\u{FFFD}b", text);
+
+    var kitty: apprt.ClipboardRequest.KittyRead = undefined;
+    kitty.mimes = &[_][:0]const u8{ "UTF8_STRING", "text/html", "image/png" };
+    kitty.list = true;
+    var g = try gather(alloc, &kitty, StoreReader{ .store = &store });
+    defer g.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), g.contents.len);
+    try std.testing.expectEqualStrings("text/plain", g.contents[0].mime);
+    try std.testing.expectEqualStrings("<b>a</b>", g.contents[1].data);
+    try std.testing.expectEqual(@as(usize, 2), g.available.len);
+    try std.testing.expectEqualStrings("text/plain", g.available[0]);
+    try std.testing.expectEqualStrings("text/html", g.available[1]);
+}
+
 test {
+    _ = selection_store;
     _ = @import("clipboard_formats.zig");
     _ = @import("clipboard_html.zig");
     _ = @import("clipboard_image.zig");

@@ -47,6 +47,7 @@ const tray_mod = @import("tray.zig");
 const util = @import("util.zig");
 const visibility_mod = @import("visibility.zig");
 const screen_state = @import("screen_state.zig");
+const selection_store = @import("selection_store.zig");
 const Config = configpkg.Config;
 
 const log = std.log.scoped(.win32_app);
@@ -105,6 +106,11 @@ recovery: recovery_mod.State = .{},
 visibility: visibility_mod.State = .{},
 shell_open: shell_open_mod.State = .{},
 composition: composition_mod.AppState = .{},
+
+/// M8: the selection clipboard (copy-on-select primary, middle click): an
+/// in-process store shared by all windows, never the Windows clipboard.
+/// Main thread only.
+selection: selection_store.Store = .{},
 
 /// M8: the split drag session, while one runs.
 split_drag: ?split_drag_input.Session = null,
@@ -269,6 +275,7 @@ pub fn terminate(self: *App) void {
     _ = win32.user32.DestroyWindow(self.msg_hwnd);
     profiles_mod.deinit(self);
     self.undo.stack.deinit(self.core_app.alloc);
+    self.selection.deinit();
     self.config.deinit();
     win32.ole32.OleUninitialize();
 }
@@ -994,6 +1001,7 @@ test {
     _ = actions;
     _ = ipc.ops;
     _ = screen_state;
+    _ = selection_store;
 }
 
 test "win32 app: last window policy" {
