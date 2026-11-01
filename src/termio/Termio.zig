@@ -538,7 +538,7 @@ pub fn resyncPtySize(self: *Termio, td: *ThreadData) !void {
         const handler = &self.terminal_stream.handler;
         handler.resize_echoes.rearm();
         try self.backend.resize(grid_size, self.size.terminal());
-        if (handler.resize_echoes.record(grid_size.columns, grid_size.rows)) {
+        if (handler.resize_echoes.record(grid_size.columns, grid_size.rows, termio.ResizeEchoes.nowMs())) {
             log.debug("CSI 8 t echo expected for pty re-sync cols={} rows={}", .{ grid_size.columns, grid_size.rows });
         }
     }
@@ -562,7 +562,7 @@ pub fn resize(
         // its redraw cannot be parsed against the old terminal dimensions.
         try self.backend.resize(grid_size, size.terminal());
         if (comptime builtin.os.tag == .windows) {
-            if (self.terminal_stream.handler.resize_echoes.record(grid_size.columns, grid_size.rows)) {
+            if (self.terminal_stream.handler.resize_echoes.record(grid_size.columns, grid_size.rows, termio.ResizeEchoes.nowMs())) {
                 log.debug("CSI 8 t echo expected for pty resize cols={} rows={}", .{ grid_size.columns, grid_size.rows });
             }
         }

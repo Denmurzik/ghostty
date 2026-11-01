@@ -326,7 +326,7 @@ pub const StreamHandler = struct {
             .size_report => self.sendSizeReport(value),
             .resize_window => {
                 if (comptime builtin.os.tag == .windows) {
-                    if (self.resize_echoes.consume(value.columns, value.rows)) {
+                    if (self.resize_echoes.consume(value.columns, value.rows, ResizeEchoes.nowMs())) {
                         log.debug("CSI 8 t echo of a pty resize ignored cols={} rows={}", .{ value.columns, value.rows });
                         return;
                     }
