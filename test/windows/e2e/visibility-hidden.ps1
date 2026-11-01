@@ -60,7 +60,8 @@ function Get-AppState($G) {
 
 function Get-QuickWindowId($G) {
     $q = (Get-AppState $G).m3.quick
-    if ($q) { $q.window }
+    # No `window` property while no quick window exists (StrictMode throws).
+    if ($q -and $q.PSObject.Properties['window']) { $q.window }
 }
 
 # The surfaces (core_visible, visible) of the tab at `$Index` of the first
