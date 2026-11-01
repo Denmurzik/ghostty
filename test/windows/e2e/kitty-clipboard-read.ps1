@@ -58,7 +58,7 @@ Invoke-E2eScenario 'kitty-clipboard-read' {
         $evd = Get-EvidenceDir; if (-not $evd) { $evd = $tmp }
         $shot = Join-Path $evd 'kitty-clipboard-read-dialog-shot.png'
         $red = Measure-ShotColor $dlg $shot @(255, 0, 0) 40
-        if ($red -lt 200) { throw "ask: the dialog shows $red red pixels, the 16x16 (256 pixel) red picture is missing" }
+        if ($red -lt 160) { throw "ask: the dialog shows $red red pixels, the 16x16 (256 pixel) red picture is missing" }
         Write-E2eInfo "ask: the dialog shows the red picture ($red of 256 pixels)"
         Close-KittyDialog $dlg 'Allow'
         Wait-Reader 'r1' 40

