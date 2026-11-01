@@ -67,6 +67,8 @@ pub const State = struct {
     in_band: bool = false,
     /// A drag from this handle is running (set by `split_drag_input`).
     dragging: bool = false,
+    /// The left press on the handle was eaten; its release is eaten too.
+    press_eaten: bool = false,
     anim: Anim = .{},
 };
 
@@ -107,6 +109,24 @@ pub fn visibleCount(leaves: anytype) usize {
 pub fn levelFor(mode: grab_handle.Mode, has_area: bool, in: grab_handle.Inputs) grab_handle.Ellipsis {
     if (!has_area) return .hidden;
     return grab_handle.ellipsis(mode, in);
+}
+
+/// What a left-button message does at the handle.
+pub const LeftRoute = enum {
+    /// Not ours: the terminal gets it as before.
+    terminal,
+    /// A press (or the second click of a double click) on the handle.
+    grab_press,
+    /// The release of a press the handle ate.
+    swallow_release,
+};
+
+/// Routes a left press (`down`) or release: a press on the handle, a second
+/// click of a double click included, goes to the drag and its release is
+/// swallowed; a press that reached the terminal always gets its release.
+pub fn leftRoute(down: bool, hit: bool, press_eaten: bool) LeftRoute {
+    if (down) return if (hit) .grab_press else .terminal;
+    return if (press_eaten) .swallow_release else .terminal;
 }
 
 // -- Surface state --------------------------------------------------------------
@@ -369,4 +389,15 @@ test "win32 grab overlay: only visible leaves count" {
 
 test {
     _ = grab_handle;
+}
+
+test "win32 grab overlay: an eaten press eats its release, a double click is a press" {
+    // Down on the handle: the drag gets it, down elsewhere: the terminal.
+    try testing.expectEqual(LeftRoute.grab_press, leftRoute(true, true, false));
+    try testing.expectEqual(LeftRoute.terminal, leftRoute(true, false, false));
+    // The release follows the press: eaten only after an eaten press.
+    try testing.expectEqual(LeftRoute.swallow_release, leftRoute(false, true, true));
+    try testing.expectEqual(LeftRoute.swallow_release, leftRoute(false, false, true));
+    try testing.expectEqual(LeftRoute.terminal, leftRoute(false, true, false));
+    try testing.expectEqual(LeftRoute.terminal, leftRoute(false, false, false));
 }

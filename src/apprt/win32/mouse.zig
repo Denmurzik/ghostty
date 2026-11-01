@@ -126,13 +126,20 @@ pub fn handle(
             return 0;
         },
 
-        // A press in a divider's grab zone, which overlaps the pane,
-        // starts a divider drag instead.
-        user32.WM_LBUTTONDOWN => {
-            if (surface.tab.beginDragFrom(surface.hwnd, user32.getXLparam(lparam), user32.getYLparam(lparam))) return 0;
-            // The grab handle takes the left press; the terminal never sees it.
-            if (grab_overlay.hitHandle(surface, user32.getXLparam(lparam), user32.getYLparam(lparam))) {
-                split_drag_input.press(surface, user32.getXLparam(lparam), user32.getYLparam(lparam));
+        // A press in a divider's grab zone, which overlaps the pane, starts a
+        // divider drag instead. A second click of a double click is a press
+        // like the first (but never starts a divider drag, as before).
+        user32.WM_LBUTTONDOWN, user32.WM_LBUTTONDBLCLK => {
+            const x = user32.getXLparam(lparam);
+            const y = user32.getYLparam(lparam);
+            surface.grab.press_eaten = false;
+            if (msg == user32.WM_LBUTTONDOWN and surface.tab.beginDragFrom(surface.hwnd, x, y)) return 0;
+            // The grab handle takes the left press; the terminal never sees it
+            // or its release.
+            const hit = grab_overlay.hitHandle(surface, x, y);
+            surface.grab.press_eaten = hit;
+            if (grab_overlay.leftRoute(true, hit, false) == .grab_press) {
+                split_drag_input.press(surface, x, y);
                 return 0;
             }
             const ev = buttonEvent(msg, wparam) orelse return null;
@@ -140,14 +147,22 @@ pub fn handle(
             return 0;
         },
 
-        user32.WM_LBUTTONDBLCLK,
+        user32.WM_LBUTTONUP => {
+            if (grab_overlay.leftRoute(false, false, surface.grab.press_eaten) == .swallow_release) {
+                surface.grab.press_eaten = false;
+                return 0;
+            }
+            const ev = buttonEvent(msg, wparam) orelse return null;
+            handleButton(surface, ev.button, ev.state, lparam);
+            return 0;
+        },
+
         user32.WM_RBUTTONDOWN,
         user32.WM_RBUTTONDBLCLK,
         user32.WM_MBUTTONDOWN,
         user32.WM_MBUTTONDBLCLK,
         user32.WM_XBUTTONDOWN,
         user32.WM_XBUTTONDBLCLK,
-        user32.WM_LBUTTONUP,
         user32.WM_RBUTTONUP,
         user32.WM_MBUTTONUP,
         user32.WM_XBUTTONUP,
@@ -174,6 +189,7 @@ pub fn handle(
         // Capture taken away (alt-tab, a modal dialog): the button-up
         // will never arrive, so release what core thinks is held.
         user32.WM_CAPTURECHANGED => {
+            surface.grab.press_eaten = false;
             releaseHeld(surface);
             return 0;
         },
