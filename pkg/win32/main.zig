@@ -23,6 +23,7 @@ pub const comdlg32 = @import("comdlg32.zig");
 pub const shobjidl = @import("shobjidl.zig");
 pub const winhttp = @import("winhttp.zig");
 pub const tip = @import("tip.zig");
+pub const wtsapi32 = @import("wtsapi32.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

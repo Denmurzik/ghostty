@@ -46,6 +46,7 @@ const tmux_labels_mod = @import("tmux/labels.zig");
 const tray_mod = @import("tray.zig");
 const util = @import("util.zig");
 const visibility_mod = @import("visibility.zig");
+const screen_state = @import("screen_state.zig");
 const Config = configpkg.Config;
 
 const log = std.log.scoped(.win32_app);
@@ -58,6 +59,10 @@ pub const WM_GHOSTTY_IPC = messages.WM_GHOSTTY_IPC;
 /// Timer id on `msg_hwnd` for the delayed quit after the last window.
 const quit_timer_id: usize = messages.timers.msg_window.quit;
 const release_memory_timer_id: usize = messages.timers.msg_window.release_memory;
+const cloak_debounce_timer_id: usize = messages.timers.msg_window.cloak_debounce;
+
+/// A cloak lasting less than this (Alt+Tab, Task View) never reaches core.
+const cloak_debounce_ms = 250;
 
 /// How long surfaces must stop closing before their memory is given back.
 const release_memory_delay_ms = 300;
@@ -103,6 +108,11 @@ composition: composition_mod.AppState = .{},
 
 /// M8: the split drag session, while one runs.
 split_drag: ?split_drag_input.Session = null,
+
+/// M8: nothing can be seen (locked, display off, disconnected), and the
+/// notifications that keep it current. Main thread only.
+screen: screen_state.Screen = .{},
+screen_notify: ScreenNotify = .{},
 
 /// M4 tmux state: the tmux pipe, the pane registry, pane input timing and
 /// the pane labels.
@@ -186,6 +196,9 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     errdefer self.stopServer();
     if (self.forwarded) return;
 
+    self.registerScreenNotifications();
+    errdefer self.unregisterScreenNotifications();
+
     // Before the first window, so that its first pane already gets `TMUX`.
     tmux_Server.start(self);
     errdefer tmux_Server.stop(self);
@@ -234,6 +247,7 @@ pub fn run(self: *App) !void {
 
 pub fn terminate(self: *App) void {
     hooks.appStopping(self);
+    self.unregisterScreenNotifications();
     tray_mod.deinit(self);
 
     // The message loop is over: no WM_GHOSTTY_IPC can touch a freed request.
@@ -680,8 +694,22 @@ fn msgWndProc(
             return 0;
         },
 
+        win32.user32.WM_WTSSESSION_CHANGE => {
+            self.setScreen(screen_state.onSession(self.screen, wparam));
+            return 0;
+        },
+
+        win32.user32.WM_POWERBROADCAST => if (wparam == win32.user32.PBT_POWERSETTINGCHANGE and lparam != 0) {
+            const setting: *const win32.user32.POWERBROADCAST_SETTING = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (screen_state.displayStateOf(setting)) |state| self.setScreen(screen_state.onDisplayState(self.screen, state));
+            return 1;
+        },
+
         win32.user32.WM_TIMER => if (wparam == release_memory_timer_id) {
             self.releaseMemory();
+            return 0;
+        } else if (wparam == cloak_debounce_timer_id) {
+            self.flushCloakPending();
             return 0;
         } else if (wparam == quit_timer_id) {
             self.stopQuitTimer();
@@ -695,6 +723,151 @@ fn msgWndProc(
     }
 
     return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/// What `registerScreenNotifications` registered.
+const ScreenNotify = struct {
+    session: bool = false,
+    power: ?win32.user32.HPOWERNOTIFY = null,
+    cloak_hook: ?win32.user32.HWINEVENTHOOK = null,
+    /// Windows whose cloak waits for `cloak_debounce_ms`.
+    pending: std.ArrayList(win32.foundation.HWND) = .empty,
+};
+
+/// The App the cloak hook reports to (a WinEvent callback has no context).
+/// One App per process; main thread only.
+var screen_hook_app: ?*App = null;
+
+/// Session, display power and DWM cloak notifications, all delivered to the
+/// message window. Failures only cost the feature: windows then render as
+/// before.
+fn registerScreenNotifications(self: *App) void {
+    const n = &self.screen_notify;
+    n.session = win32.wtsapi32.WTSRegisterSessionNotification(
+        self.msg_hwnd,
+        win32.wtsapi32.NOTIFY_FOR_THIS_SESSION,
+    ) != 0;
+    if (!n.session) log.warn("unable to watch the session err={}", .{win32.kernel32.GetLastError()});
+
+    // The current display state arrives at once.
+    n.power = win32.user32.RegisterPowerSettingNotification(
+        self.msg_hwnd,
+        &screen_state.GUID_CONSOLE_DISPLAY_STATE,
+        win32.user32.DEVICE_NOTIFY_WINDOW_HANDLE,
+    );
+    if (n.power == null) log.warn("unable to watch the display err={}", .{win32.kernel32.GetLastError()});
+
+    screen_hook_app = self;
+    n.cloak_hook = win32.user32.SetWinEventHook(
+        win32.user32.EVENT_OBJECT_CLOAKED,
+        win32.user32.EVENT_OBJECT_UNCLOAKED,
+        null,
+        cloakEventProc,
+        win32.kernel32.GetCurrentProcessId(),
+        0,
+        win32.user32.WINEVENT_OUTOFCONTEXT,
+    );
+    if (n.cloak_hook == null) log.warn("unable to watch window cloaking err={}", .{win32.kernel32.GetLastError()});
+
+    log.info("screen notifications registered on=msg session={} display={} cloak={}", .{
+        n.session,
+        n.power != null,
+        n.cloak_hook != null,
+    });
+}
+
+fn unregisterScreenNotifications(self: *App) void {
+    const n = &self.screen_notify;
+    if (n.cloak_hook) |hook| _ = win32.user32.UnhookWinEvent(hook);
+    n.cloak_hook = null;
+    screen_hook_app = null;
+    if (n.power) |power| _ = win32.user32.UnregisterPowerSettingNotification(power);
+    n.power = null;
+    if (n.session) _ = win32.wtsapi32.WTSUnRegisterSessionNotification(self.msg_hwnd);
+    n.session = false;
+    _ = win32.user32.KillTimer(self.msg_hwnd, cloak_debounce_timer_id);
+    n.pending.deinit(self.core_app.alloc);
+    n.pending = .empty;
+}
+
+/// Apply a new session or display state: log a transition and tell every
+/// window (parked ones too: they come back with the right state).
+fn setScreen(self: *App, next: screen_state.Screen) void {
+    const prev = self.screen;
+    self.screen = next;
+    if (std.meta.eql(prev, next)) return;
+    log.info("screen state locked={} display_off={} disconnected={}", .{
+        next.locked,
+        next.display_off,
+        next.disconnected,
+    });
+    self.syncAllOcclusion();
+}
+
+/// Give every window the current `screen_off` and let it re-evaluate which
+/// surfaces are visible. Idempotent.
+pub fn syncAllOcclusion(self: *App) void {
+    const off = screen_state.off(self.screen);
+    var it = self.forEachWindow(true);
+    while (it.next()) |window| {
+        window.screen_off = off;
+        window.syncOcclusion();
+    }
+}
+
+fn windowByHwnd(self: *App, hwnd: win32.foundation.HWND) ?*Window {
+    var it = self.forEachWindow(true);
+    while (it.next()) |window| {
+        if (window.hwnd == hwnd) return window;
+    }
+    return null;
+}
+
+fn cloakEventProc(
+    hook: win32.user32.HWINEVENTHOOK,
+    event: u32,
+    hwnd: ?win32.foundation.HWND,
+    id_object: i32,
+    id_child: i32,
+    event_thread: u32,
+    event_time: u32,
+) callconv(.winapi) void {
+    _ = hook;
+    _ = event_thread;
+    _ = event_time;
+    const self = screen_hook_app orelse return;
+    const cloaked = screen_state.isCloakEvent(event, id_object, id_child) orelse return;
+    self.onCloak(hwnd orelse return, cloaked);
+}
+
+/// A window was cloaked or uncloaked by the shell (another virtual desktop,
+/// Alt+Tab, Task View). Uncloaking is immediate; a cloak waits so that one
+/// that ends within `cloak_debounce_ms` changes nothing.
+fn onCloak(self: *App, hwnd: win32.foundation.HWND, cloaked: bool) void {
+    const window = self.windowByHwnd(hwnd) orelse return;
+    if (!cloaked) return window.syncOcclusion();
+
+    const n = &self.screen_notify;
+    if (std.mem.indexOfScalar(win32.foundation.HWND, n.pending.items, hwnd) != null) return;
+    n.pending.append(self.core_app.alloc, hwnd) catch return window.syncOcclusion();
+    if (n.pending.items.len > 1) return;
+    if (win32.user32.SetTimer(self.msg_hwnd, cloak_debounce_timer_id, cloak_debounce_ms, null) == 0) {
+        n.pending.clearRetainingCapacity();
+        window.syncOcclusion();
+    }
+}
+
+/// The debounce elapsed: every pending window that still exists re-reads
+/// its live cloak state (`Window.screenState`), so a cloak that ended is a
+/// no-op.
+fn flushCloakPending(self: *App) void {
+    _ = win32.user32.KillTimer(self.msg_hwnd, cloak_debounce_timer_id);
+    var pending = self.screen_notify.pending;
+    self.screen_notify.pending = .empty;
+    defer pending.deinit(self.core_app.alloc);
+    for (pending.items) |hwnd| {
+        if (self.windowByHwnd(hwnd)) |window| window.syncOcclusion();
+    }
 }
 
 /// Handle a `quit` request on the UI thread. Like GTK, ask first when a
@@ -820,6 +993,7 @@ test {
     _ = Window;
     _ = actions;
     _ = ipc.ops;
+    _ = screen_state;
 }
 
 test "win32 app: last window policy" {
@@ -954,4 +1128,52 @@ test "win32 app: forEachWindow walks parked windows only when asked" {
     try std.testing.expectEqual(live, it.next().?);
     try std.testing.expectEqual(parked, it.next().?);
     try std.testing.expect(it.next() == null);
+}
+
+test "win32 screen: a message-only window gets the display state at registration" {
+    // The message window of the App is message-only: the design relies on
+    // it receiving `WM_POWERBROADCAST` (the session notification has no
+    // synchronous answer and is covered by the documentation).
+    const Probe = struct {
+        var state: ?u32 = null;
+
+        fn proc(
+            hwnd: win32.foundation.HWND,
+            msg: u32,
+            wparam: win32.foundation.WPARAM,
+            lparam: win32.foundation.LPARAM,
+        ) callconv(.winapi) win32.foundation.LRESULT {
+            if (msg == win32.user32.WM_POWERBROADCAST and wparam == win32.user32.PBT_POWERSETTINGCHANGE and lparam != 0) {
+                const setting: *const win32.user32.POWERBROADCAST_SETTING = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                if (screen_state.displayStateOf(setting)) |s| state = s;
+                return 1;
+            }
+            return win32.user32.DefWindowProcW(hwnd, msg, wparam, lparam);
+        }
+    };
+    const class = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyScreenProbe");
+    const hinstance = win32.kernel32.GetModuleHandleW(null).?;
+    try util.registerClass(&.{ .lpfnWndProc = Probe.proc, .hInstance = hinstance, .lpszClassName = class });
+    const hwnd = win32.user32.CreateWindowExW(0, class, null, 0, 0, 0, 0, 0, win32.user32.HWND_MESSAGE, null, hinstance, null) orelse
+        return error.CreateWindowFailed;
+    defer _ = win32.user32.DestroyWindow(hwnd);
+
+    const reg = win32.user32.RegisterPowerSettingNotification(
+        hwnd,
+        &screen_state.GUID_CONSOLE_DISPLAY_STATE,
+        win32.user32.DEVICE_NOTIFY_WINDOW_HANDLE,
+    ) orelse return error.SkipZigTest;
+    defer _ = win32.user32.UnregisterPowerSettingNotification(reg);
+
+    var msg: win32.user32.MSG = undefined;
+    var waited: u32 = 0;
+    while (Probe.state == null and waited < 3000) : (waited += 10) {
+        while (win32.user32.PeekMessageW(&msg, null, 0, 0, win32.user32.PM_REMOVE) != 0) {
+            _ = win32.user32.DispatchMessageW(&msg);
+        }
+        win32.kernel32.Sleep(10);
+    }
+    std.debug.print("display state notification after {d} ms: {?d}\n", .{ waited, Probe.state });
+    const state = Probe.state orelse return error.SkipZigTest;
+    try std.testing.expect(state <= 2);
 }

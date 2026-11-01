@@ -1035,3 +1035,58 @@ pub fn IsWindowArranged(hwnd: HWND) bool {
     const f = S.proc orelse return false;
     return f(hwnd) != 0;
 }
+
+// -- Screen state: session, display power, DWM cloak -------------------------
+
+pub const WM_WTSSESSION_CHANGE = 0x02B1;
+pub const WM_POWERBROADCAST = 0x0218;
+pub const PBT_POWERSETTINGCHANGE = 0x8013;
+
+/// `DEVICE_NOTIFY_WINDOW_HANDLE`: the recipient is a window handle.
+pub const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
+pub const HPOWERNOTIFY = *opaque {};
+
+/// `lParam` of `WM_POWERBROADCAST` with `PBT_POWERSETTINGCHANGE`; `Data`
+/// is `DataLength` bytes long.
+pub const POWERBROADCAST_SETTING = extern struct {
+    PowerSetting: foundation.GUID,
+    DataLength: u32,
+    Data: [1]u8,
+};
+
+pub extern "user32" fn RegisterPowerSettingNotification(
+    recipient: HANDLE,
+    setting: *const foundation.GUID,
+    flags: u32,
+) callconv(.winapi) ?HPOWERNOTIFY;
+pub extern "user32" fn UnregisterPowerSettingNotification(HPOWERNOTIFY) callconv(.winapi) BOOL;
+
+pub const HWINEVENTHOOK = *opaque {};
+pub const WINEVENTPROC = *const fn (
+    hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: ?HWND,
+    id_object: i32,
+    id_child: i32,
+    event_thread: u32,
+    event_time: u32,
+) callconv(.winapi) void;
+
+pub const EVENT_OBJECT_CLOAKED: u32 = 0x8017;
+pub const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
+/// The callback runs on the thread that installed the hook, from its
+/// message loop.
+pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+pub const OBJID_WINDOW: i32 = 0;
+pub const CHILDID_SELF: i32 = 0;
+
+pub extern "user32" fn SetWinEventHook(
+    event_min: u32,
+    event_max: u32,
+    module: ?foundation.HMODULE,
+    proc: WINEVENTPROC,
+    process_id: u32,
+    thread_id: u32,
+    flags: u32,
+) callconv(.winapi) ?HWINEVENTHOOK;
+pub extern "user32" fn UnhookWinEvent(HWINEVENTHOOK) callconv(.winapi) BOOL;
