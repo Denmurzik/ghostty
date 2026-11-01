@@ -51,7 +51,8 @@ pub const WM_GHOSTTY_UPDATE_RESULT = win32.user32.WM_APP + 16;
 /// surfaces are on screen (`Window.syncOcclusion`); coalesces cloak, minimise
 /// and parking changes.
 pub const WM_GHOSTTY_SYNC_OCCLUSION = win32.user32.WM_APP + 17;
-/// Posted to a top-level window when one of its surfaces presented a frame
+/// Posted by the render thread to the presenting surface's own window (stable
+/// across a re-parent), which forwards it to its top-level window
 /// (wparam = surface id); ends the raise gate after a tab switch.
 pub const WM_GHOSTTY_PRESENTED = win32.user32.WM_APP + 18;
 // WM_APP + 19 ... WM_APP + 31 are reserved for later milestones.
