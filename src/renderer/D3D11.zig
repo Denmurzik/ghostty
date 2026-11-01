@@ -413,8 +413,10 @@ pub fn dropSwapChain(self: *D3D11) void {
 
 /// Render thread, from the generic renderer's `setVisible(false)` (draw mutex
 /// held, context lock NOT held). Shrinks the swap chain to 1x1 when the
-/// surface's window is hidden (`IsWindowVisible` false: inactive tab, hidden
-/// window, hidden quick terminal, parked). A minimized or merely occluded
+/// surface is hidden as an inactive tab of a window that is shown (the
+/// surface is not visible, its top-level window is). A window hidden as a whole
+/// (quick terminal, toggle_visibility, parked) keeps its chain: its reshow is
+/// not gated. A minimized or merely occluded
 /// window keeps its chain: DWM's live preview and Alt+Tab show its last frame
 /// (R-M8-26). The chain is shrunk, not dropped, so a composition chain stays
 /// attached to its DirectComposition visual (no new hand-off). The next frame
@@ -426,9 +428,14 @@ pub fn surfaceHidden(self: *D3D11) void {
     defer self.device.unlockContext();
 
     const hwnd: win32.foundation.HWND = @ptrCast(target.hwnd);
-    const window_visible = win32.user32.IsWindowVisible(hwnd) != 0;
+    const surface_visible = win32.user32.IsWindowVisible(hwnd) != 0;
+    // The top-level window: its own hide (quick terminal, toggle_visibility,
+    // parked) is not an inactive tab, and only a tab switch is covered by the
+    // RaiseGate when the surface comes back.
+    const root = win32.user32.GetAncestor(hwnd, win32.user32.GA_ROOT);
+    const top_visible = if (root) |r| win32.user32.IsWindowVisible(r) != 0 else false;
     const mode = if (self.swap_chain) |*sc| sc.mode else .hwnd;
-    if (!shrinkOnHide(self.swap_chain != null, window_visible, mode)) return;
+    if (!shrinkOnHide(self.swap_chain != null, surface_visible, top_visible, mode)) return;
 
     // The replacement it waited for is not coming while hidden.
     self.releaseRetired();
@@ -445,12 +452,20 @@ pub fn surfaceHidden(self: *D3D11) void {
     // never under the lock a newly shown tab's first frame waits for.
 }
 
-/// Pure decision of `surfaceHidden`: only a chain whose window is hidden is
-/// shrunk. A visible window (minimized, occluded, cloaked) keeps it, whatever
-/// the mode.
-pub fn shrinkOnHide(has_chain: bool, window_visible: bool, mode: SwapChain.Mode) bool {
+/// Pure decision of `surfaceHidden`: only a chain whose surface is hidden as
+/// an inactive tab of a window that is itself shown is shrunk. A visible
+/// surface (minimized, occluded, cloaked window) keeps it, and so does one
+/// hidden with its whole window (quick terminal, toggle_visibility, parked,
+/// being restored): those come back without a RaiseGate, so a 1x1 chain would
+/// show a stretched frame. Whatever the mode.
+pub fn shrinkOnHide(
+    has_chain: bool,
+    surface_visible: bool,
+    top_visible: bool,
+    mode: SwapChain.Mode,
+) bool {
     _ = mode;
-    return has_chain and !window_visible;
+    return has_chain and !surface_visible and top_visible;
 }
 
 /// The size of the swap chain's back buffers, `.{ 0, 0 }` without a chain.
@@ -910,12 +925,15 @@ fn testApi(blending: configpkg.Config.AlphaBlending) !D3D11 {
 test "d3d11 api: shrink on hide only for a hidden window with a chain" {
     for ([_]SwapChain.Mode{ .hwnd, .composition }) |mode| {
         // No chain: nothing to shrink.
-        try std.testing.expect(!shrinkOnHide(false, false, mode));
-        try std.testing.expect(!shrinkOnHide(false, true, mode));
-        // A visible window (minimized, occluded, cloaked) keeps its chain.
-        try std.testing.expect(!shrinkOnHide(true, true, mode));
-        // A hidden one shrinks it.
-        try std.testing.expect(shrinkOnHide(true, false, mode));
+        try std.testing.expect(!shrinkOnHide(false, false, true, mode));
+        try std.testing.expect(!shrinkOnHide(false, true, true, mode));
+        // A visible surface (minimized, occluded, cloaked window) keeps its chain.
+        try std.testing.expect(!shrinkOnHide(true, true, true, mode));
+        // An inactive tab of a shown window shrinks it.
+        try std.testing.expect(shrinkOnHide(true, false, true, mode));
+        // A window hidden as a whole (quick terminal, toggle_visibility,
+        // parked) keeps it: nothing gates its reshow.
+        try std.testing.expect(!shrinkOnHide(true, false, false, mode));
     }
     try std.testing.expect(shrink_hidden_chains);
 }
