@@ -3,6 +3,7 @@
 const std = @import("std");
 const apprt = @import("../../apprt.zig");
 const internal_os = @import("../../os/main.zig");
+const dialogs = @import("dialogs.zig");
 
 pub const max_len = 2048;
 
@@ -79,18 +80,26 @@ pub fn isDriveAbsolute(p: []const u8) bool {
     return p.len >= 3 and std.ascii.isAlphabetic(p[0]) and p[1] == ':' and isSlash(p[2]);
 }
 
-/// U+200E/200F, U+202A..202E, U+2066..2069, U+2028/2029, U+061C and U+0085 in UTF-8.
-pub fn hasBidiControl(path: []const u8) bool {
+/// Whether `s` holds a character that hides text or reorders it (see
+/// `dialogs.isDeceptive` with `.link`: C1, U+061C, zero width characters,
+/// bidi controls, LS/PS, word joiner, BOM). Invalid UTF-8 is not deceptive
+/// here: callers that need valid text check that themselves.
+pub fn hasInvisible(s: []const u8) bool {
     var i: usize = 0;
-    while (i + 2 < path.len) : (i += 1) {
-        if (path[i] != 0xE2) continue;
-        const b1 = path[i + 1];
-        const b2 = path[i + 2];
-        if (b1 == 0x80 and (b2 == 0x8E or b2 == 0x8F or (b2 >= 0xA8 and b2 <= 0xAE))) return true;
-        if (b1 == 0x81 and b2 >= 0xA6 and b2 <= 0xA9) return true;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) break;
+        const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+            i += 1;
+            continue;
+        };
+        if (dialogs.isDeceptive(cp, .link)) return true;
+        i += len;
     }
-    // U+061C and U+0085.
-    return std.mem.indexOf(u8, path, "\xd8\x9c") != null or std.mem.indexOf(u8, path, "\xc2\x85") != null;
+    return false;
 }
 
 /// A reserved device name (`CON`, `COM1`, `LPT¹`, ...) with any extension;
@@ -111,4 +120,23 @@ test "win32 link policy: device names include the superscript forms" {
     try std.testing.expect(isDeviceName("LPT\u{b2}.log"));
     try std.testing.expect(!isDeviceName("COM10"));
     try std.testing.expect(!isDeviceName("comet"));
+}
+
+test "win32 link policy: invisible characters" {
+    try std.testing.expect(hasInvisible("x\u{200B}"));
+    try std.testing.expect(hasInvisible("\u{FEFF}x"));
+    try std.testing.expect(hasInvisible("\u{2060}"));
+    try std.testing.expect(hasInvisible("a\u{200D}b"));
+    try std.testing.expect(hasInvisible("a\u{202E}b"));
+    try std.testing.expect(hasInvisible("a\u{061C}"));
+    try std.testing.expect(hasInvisible("a\u{85}b"));
+    try std.testing.expect(hasInvisible("a\u{2029}"));
+    try std.testing.expect(!hasInvisible("Привет/😀.txt"));
+    try std.testing.expect(!hasInvisible("C:\\a\u{A0}b"));
+    try std.testing.expect(!hasInvisible(""));
+    // Invalid or cut UTF-8 is no crash and not deceptive on its own.
+    try std.testing.expect(!hasInvisible("a\xffb"));
+    try std.testing.expect(!hasInvisible("a\xe2\x80"));
+    try std.testing.expect(!hasInvisible("\xc2"));
+    try std.testing.expect(hasInvisible("\xff\xe2\x80\x8b"));
 }

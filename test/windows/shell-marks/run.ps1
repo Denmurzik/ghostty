@@ -51,7 +51,7 @@ Keep this file ASCII only.
 param(
     [string]$GitDir = 'C:\Program Files\Git',
     [int]$WaitMs = 5000,
-    # Run only the cases whose name matches this wildcard.
+    # Run only the cases whose name matches this wildcard (or one of several, comma-separated).
     [string]$Only = '*',
     # Keep the sandbox with the raw output of every case (<case>.bin).
     [switch]$Keep
@@ -298,6 +298,23 @@ function Test-PromptMarked([string]$Text) {
     $Text.IndexOf("`e]133;B", $a) -ge 0
 }
 
+# The prompt of Git for Windows' /etc/profile.d/git-prompt.sh (the title,
+# the user, MSYSTEM and the working directory, without the git status).
+$gitPrompt = (@(
+        'TITLEPREFIX=MINGW64'
+        'PS1=''\[\033]0;$TITLEPREFIX:$PWD\007\]'''
+        'PS1="$PS1"''\n'''
+        'PS1="$PS1"''\[\033[32m\]'''
+        'PS1="$PS1"''\u@\h '''
+        'PS1="$PS1"''\[\033[35m\]'''
+        'PS1="$PS1"''$MSYSTEM '''
+        'PS1="$PS1"''\[\033[33m\]'''
+        'PS1="$PS1"''\w'''
+        'PS1="$PS1"''\[\033[0m\]'''
+        'PS1="$PS1"''\n'''
+        'PS1="$PS1"''$ '''
+    ) -join "`n") + "`n"
+
 $cases = @(
     @{
         Name = 'bash'; Exe = $bash; Args = '--posix'; Input = "echo sum-`$((40+2))`r"
@@ -355,6 +372,40 @@ $cases = @(
         Name = 'bash-last-arg'; Exe = $bash; Args = '--posix'; Input = "echo at-`${PWD##*/}`r"
         Home = @{ '.bashrc' = 'mkdir -p "$HOME/under"' + "`n" + 'cd "$_"' + "`nPS1='bash$ '`n" }
         Env = (Get-BashEnv); Expect = 'at-under'
+    },
+    @{
+        # Git for Windows' default prompt (/etc/profile.d/git-prompt.sh) titles
+        # the window with a raw $PWD. A directory name with BEL and ESC would end
+        # that OSC 0 and start an OSC 52 clipboard write; the integration
+        # strips the control bytes from the PS1 it finds.
+        Name = 'bash-git-title-inject'; Exe = $bash; Args = '--posix'; Input = "echo gt-`$((40+2))`r"
+        Home = @{ '.bashrc' = ($gitPrompt + 'd="$HOME/$(printf ''inj\a\033]52;c;SGVsbG8=\a'')"' + "`nmkdir -p `"`$d`"`ncd `"`$d`"`n") }
+        Env = ((Get-BashEnv) + @{ GHOSTTY_SHELL_FEATURES = 'cursor,title' }); Expect = 'gt-42'
+        Check = {
+            param($t, $h)
+            $p = @()
+            if ($t.Contains("`e]52;")) { $p += 'an OSC 52 reached the terminal' }
+            $m = [regex]::Matches($t, "\e\]0;MINGW64:([^\a\e]*)\a")
+            if ($m.Count -eq 0) { $p += 'no OSC 0 title that runs to its own BEL' }
+            elseif (-not $m[$m.Count - 1].Groups[1].Value.Contains('inj')) { $p += 'the title lost the directory name' }
+            $o = [regex]::Matches($t, "\e\]7;kitty-shell-cwd://([^\a]*)\a")
+            if ($o.Count -eq 0) { $p += 'no OSC 7' }
+            elseif ($o[$o.Count - 1].Groups[1].Value -match '[\x00-\x1f\x7f]') { $p += 'the OSC 7 holds a control byte' }
+            $p
+        }
+    },
+    @{
+        # The same prompt in an ordinary directory: the title is unchanged.
+        Name = 'bash-git-title-plain'; Exe = $bash; Args = '--posix'; Input = "echo gp-`$((40+2))`r"
+        Home = @{ '.bashrc' = ($gitPrompt + "mkdir -p `"`$HOME/plain`"`ncd `"`$HOME/plain`"`n") }
+        Env = ((Get-BashEnv) + @{ GHOSTTY_SHELL_FEATURES = 'cursor,title' }); Expect = 'gp-42'
+        Check = {
+            param($t, $h)
+            $m = [regex]::Matches($t, "\e\]0;MINGW64:([^\a\e]*)\a")
+            if ($m.Count -eq 0) { return 'no OSC 0 title' }
+            $v = $m[$m.Count - 1].Groups[1].Value
+            if ($v -notmatch '^/.*/plain$') { "the title is '$v', expected MINGW64:/.../plain" }
+        }
     },
     @{
         Name = 'zsh-drive'; Exe = $zsh; Args = '-i'; Input = "echo in-`$ZSH_NAME`r"
@@ -528,7 +579,8 @@ if (Test-Path -LiteralPath $ghosttyExe) {
 $failed = 0
 try {
     foreach ($c in $cases) {
-        if ($c.Name -notlike $Only) { continue }
+        $name = $c.Name
+        if (-not (@($Only -split ',') | Where-Object { $name -like $_ })) { continue }
         $need = if ($c.Needs) { $c.Needs } else { $c.Exe }
         if (-not (Test-Path -LiteralPath $c.Exe) -or -not (Test-Path -LiteralPath $need)) {
             Write-Host "SKIP $($c.Name): $need not found"

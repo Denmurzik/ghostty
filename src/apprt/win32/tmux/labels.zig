@@ -21,7 +21,7 @@ const theme = @import("../theme.zig");
 const commands = @import("commands.zig");
 const format = @import("../../../tmux_shim/format.zig");
 const color = @import("../../../terminal/color.zig");
-const link_policy = @import("../link_policy.zig");
+const dialogs = @import("../dialogs.zig");
 const win32 = @import("win32");
 
 const log = std.log.scoped(.win32_tmux_labels);
@@ -158,7 +158,7 @@ pub fn sanitize(arena: Allocator, s: []const u8) Allocator.Error![]const u8 {
             const cp = std.unicode.utf8Decode(piece) catch 0xFFFD;
             if (cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp <= 0x9f)) {
                 piece = " ";
-            } else if (link_policy.hasBidiControl(piece)) {
+            } else if (dialogs.isDeceptive(cp, .paste)) {
                 continue;
             }
         }

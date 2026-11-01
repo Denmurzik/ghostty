@@ -207,6 +207,15 @@ _ghostty_last_reported_cwd=""
 function __ghostty_precmd() {
   local ret="${1:-$?}"
   if test "$_ghostty_executing" != "0"; then
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+      # Git for Windows' default prompt (/etc/profile.d/git-prompt.sh) titles
+      # the window with a raw $PWD; a directory name with BEL/ESC (MSYS allows
+      # them) would end that OSC 0 and start its own, e.g. an OSC 52 clipboard
+      # write. Pattern matching only, no fork.
+      [[ "$PS1" == *'$TITLEPREFIX:$PWD'* ]] &&
+        PS1=${PS1//'$TITLEPREFIX:$PWD'/'$TITLEPREFIX:${PWD//[[:cntrl:]]/}'}
+    fi
+
     _GHOSTTY_SAVE_PS1="$PS1"
     _GHOSTTY_SAVE_PS2="$PS2"
 

@@ -4,7 +4,9 @@
 # pointer leaves. Ctrl+click records the URL in `m3.opened` with verdict
 # `open` (test mode records, nothing is launched). An OSC 8 `ms-settings:`
 # link shows the confirmation dialog; cancelling it records
-# {verdict: confirm, outcome: cancelled}. Interactive only.
+# {verdict: confirm, outcome: cancelled}. An OSC 8 link with U+202E in its URI
+# is refused on Ctrl+click and its label shows <U+202E> (evidence shot).
+# Interactive only.
 . (Join-Path $PSScriptRoot '_common.ps1')
 Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\GhosttyIpc.psm1') -Force
@@ -90,4 +92,36 @@ Invoke-E2eScenario 'link-hover-open' {
     }
     if (-not $rec) { throw "cancel was not recorded: $((Get-Opened $g) | ConvertTo-Json -Compress -Depth 4)" }
     Write-E2eInfo 'confirm cancelled recorded'
+
+    # --- an OSC 8 link whose URI holds U+202E (right-to-left override) -----------------
+    # The label must show it as <U+202E> (checked on the evidence shot: the
+    # test-ops state has no label text), and Ctrl+click is refused, never opened.
+    Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+l'
+    Start-Sleep -Milliseconds 300
+    # The override as UTF-8 bytes (E2 80 AE) in a printf escape: the script stays ASCII.
+    Send-Line $g.Hwnd ("printf '\033]8;;https://example.com/\xe2\x80\xaegpj.exe\033\bidi-link\033]8;;\033\\n'")
+    Start-Sleep -Milliseconds 800
+    $hovered = $false
+    [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+    try {
+        foreach ($y in 20..300 | Where-Object { $_ % 10 -eq 0 }) {
+            Send-MouseMove -Hwnd $surface -X 30 -Y $y
+            if (Wait-Until -TimeoutSec 0.5 -PollMs 50 -Condition { @(Get-VisibleLabels).Count -ge 1 }) { $hovered = $true; $row = $y; break }
+        }
+    } finally { [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero) }
+    if (-not $hovered) {
+        Save-Evidence 'no-label-bidi' $g -Window
+        throw 'no link label within 1 s of hovering the OSC 8 link with U+202E'
+    }
+    Save-Evidence 'hover-bidi' $g -Window
+    Send-MouseMove -Hwnd $surface -X 30 -Y $row
+    Start-Sleep -Milliseconds 200
+    [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+    try { Send-MouseClick -Hwnd $surface -X 30 -Y $row } finally { [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero) }
+    $rec = Wait-Until -TimeoutSec 5 -PollMs 100 -Condition {
+        Get-Opened $g | Where-Object { $_.url -like 'https://example.com/*gpj.exe' -and $_.verdict -eq 'refuse' } | Select-Object -First 1
+    }
+    if (-not $rec) { throw "the U+202E link was not recorded as refused: $((Get-Opened $g) | ConvertTo-Json -Compress -Depth 4)" }
+    if (@(Get-Opened $g | Where-Object { $_.url -like 'https://example.com/*gpj.exe' -and $_.verdict -ne 'refuse' }).Count -ne 0) { throw 'the U+202E link was opened or confirmed' }
+    Write-E2eInfo 'U+202E link refused'
 }

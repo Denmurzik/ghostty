@@ -2,7 +2,8 @@
 # drop-files: files and folders dragged from an OLE source onto a surface are
 # pasted as shell-quoted, space-separated paths: Windows paths in Git Bash, the
 # Windows paths in pwsh and cmd. There is no highlight (as on macOS);
-# the drop never presses Enter; in a two-split tab the text lands
+# the drop never presses Enter; a path with a C1 control character (U+009B)
+# is refused whole; in a two-split tab the text lands
 # in the split under the pointer, which becomes focused; the tab strip refuses
 # the drop. Interactive desktop only (a real OLE drag with the real mouse).
 # Keep this file ASCII only (Windows PowerShell 5.1 reads a BOM-less script as ANSI).
@@ -161,6 +162,26 @@ Invoke-E2eScenario 'drop-files' {
         } else {
             Write-E2eInfo 'no tab strip above the surfaces; strip refusal not checked'
         }
+
+        # A path with a C1 control character (U+009B, CSI) is refused as a whole:
+        # nothing is typed and the log says why.
+        $c1Path = Join-Path $tmp ('drop\c1' + [string][char]0x9B + 'x.txt')
+        $mid = Get-SurfaceBoxes (Get-SplitState $g) | Select-Object -First 1
+        Remove-Item -LiteralPath $oracle -Force -ErrorAction SilentlyContinue
+        Send-Typed $g.Hwnd "printf '%s\n' "
+        Start-Sleep -Milliseconds 300
+        $drag = Start-OleFileDrag -Files @($c1Path) -ToHwnd $g.Hwnd -X ([int](($mid.L + $mid.R) / 2)) -Y ([int](($mid.T + $mid.B) / 2))
+        try { Start-Sleep -Milliseconds 300 } finally { Stop-OleFileDrag $drag }
+        Start-Sleep -Milliseconds 800
+        Send-Typed $g.Hwnd ' > "$TEMP/gt-drop.txt"'
+        Invoke-SendInput -Hwnd $g.Hwnd -Keys 'enter'
+        if (-not (Wait-File $oracle 20)) { throw 'c1: the oracle file was not written' }
+        Start-Sleep -Milliseconds 500
+        $lines = @(Read-OracleLines $oracle)
+        if ($lines.Count -ne 0) { throw "c1: the refused drop typed text: $($lines -join ' | ')" }
+        $logText = if (Test-Path -LiteralPath $g.Log) { Get-Content -LiteralPath $g.Log -Raw } else { '' }
+        if ($logText -notmatch 'refusing a drop with a path that has control') { throw 'c1: no refusal line in the log' }
+        Write-E2eInfo 'C1 path refused'
         $ran++
         Stop-OwnGhostty
     } else {

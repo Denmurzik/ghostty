@@ -91,10 +91,10 @@ pub fn postedDialog(window: *Window, lparam: win32.foundation.LPARAM) void {
 
     const alloc = app.core_app.alloc;
     // The whole URL (it is at most link_policy.max_len): what is opened is what is shown.
-    const shown = dialogs.previewText(alloc, payload.url, link_policy.max_len) catch return;
+    const shown = dialogs.escapeDeceptive(alloc, payload.url, .link, link_policy.max_len) catch return;
     defer alloc.free(shown);
     const scheme = if (link_policy.schemeEnd(payload.url)) |end| payload.url[0..end] else "unknown";
-    const shown_scheme = dialogs.previewText(alloc, scheme, 40) catch return;
+    const shown_scheme = dialogs.escapeDeceptive(alloc, scheme, .link, 40) catch return;
     defer alloc.free(shown_scheme);
     const body = std.fmt.allocPrint(
         alloc,
@@ -126,10 +126,7 @@ pub fn hover(app: *App, target: apprt.Target, value: apprt.Action.Value(.mouse_o
     }
 
     const alloc = app.core_app.alloc;
-    const shortened = try middleEllipsis(alloc, value.url, label_chars);
-    defer alloc.free(shortened);
-    // Control characters become visible symbols; none may reach the label.
-    const safe = try dialogs.previewText(alloc, shortened, label_chars + 1);
+    const safe = try labelText(alloc, value.url);
     defer alloc.free(safe);
 
     const label = try ensureLabel(alloc, surface);
@@ -139,6 +136,16 @@ pub fn hover(app: *App, target: apprt.Target, value: apprt.Action.Value(.mouse_o
     label.popup.size = .{ .w = labelWidth(label.text[0..n], surface.window.dpi), .h = height_px };
     try label.popup.show();
     return true;
+}
+
+/// What the hover label shows for `url`: shortened to the label width, with
+/// control characters as visible symbols and invisible or reordering ones
+/// (bidi, zero width, C1, BOM) as `<U+XXXX>`; none may reach the label.
+/// Caller owns the result.
+pub fn labelText(alloc: Allocator, url: []const u8) ![]u8 {
+    const shortened = try middleEllipsis(alloc, url, label_chars);
+    defer alloc.free(shortened);
+    return dialogs.escapeDeceptive(alloc, shortened, .link, label_chars + 1);
 }
 
 /// Logical width of a label with `text`: the measured text and the padding.
@@ -266,6 +273,29 @@ test "win32 link: label text ellipsis" {
     defer alloc.free(wide_cut);
     try std.testing.expect(std.unicode.utf8ValidateSlice(wide_cut));
     try std.testing.expectEqual(@as(usize, 79 * 2 + ellipsis.len), wide_cut.len);
+}
+
+test "win32 link: label escapes bidi" {
+    const alloc = std.testing.allocator;
+
+    const bidi = try labelText(alloc, "https://a.b/\u{202E}gpj.exe");
+    defer alloc.free(bidi);
+    try std.testing.expectEqualStrings("https://a.b/<U+202E>gpj.exe", bidi);
+
+    // Control characters, zero width characters and the BOM are shown too.
+    const hidden = try labelText(alloc, "a\nb\u{200B}\u{FEFF}\u{85}");
+    defer alloc.free(hidden);
+    try std.testing.expectEqualStrings("a\u{240A}b<U+200B><U+FEFF><U+0085>", hidden);
+
+    // An escaped label stays within the label buffer.
+    const many = try alloc.alloc(u8, 3 * 200);
+    defer alloc.free(many);
+    for (0..200) |i| @memcpy(many[i * 3 ..][0..3], "\u{202E}");
+    const long = try labelText(alloc, many);
+    defer alloc.free(long);
+    var units: [label_chars * 2]u16 = undefined;
+    const n = try std.unicode.utf8ToUtf16Le(&units, long);
+    try std.testing.expect(n <= label_chars * 2);
 }
 
 test "win32 link: open returns true for refuse and on worker-queue overflow" {

@@ -263,6 +263,54 @@ pub fn previewText(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+/// Which prompt the text is for. `.link` also counts U+200D (zero width
+/// joiner) as deceptive: a link has no use for it, while a pasted emoji
+/// sequence does.
+pub const DeceptiveSet = enum { paste, link };
+
+/// Whether `cp` hides text or changes its apparent order: C1 controls,
+/// U+061C, U+200B/200C, U+200E/200F, U+2028..202E, U+2060, U+2066..2069 and
+/// U+FEFF (macOS `UntrustedURL.isUnsafeCharacter`); `.link` adds U+200D.
+/// C0 and DEL are not listed: `previewText` draws them as symbols.
+pub fn isDeceptive(cp: u21, set: DeceptiveSet) bool {
+    return switch (cp) {
+        0x0080...0x009F,
+        0x061C,
+        0x200B,
+        0x200C,
+        0x200E,
+        0x200F,
+        0x2028...0x202E,
+        0x2060,
+        0x2066...0x2069,
+        0xFEFF,
+        => true,
+        0x200D => set == .link,
+        else => false,
+    };
+}
+
+/// `text` with every deceptive codepoint written out as `<U+XXXX>`, then
+/// `previewText` (control symbols, at most `max_chars` characters of the
+/// escaped text). Caller owns the result.
+pub fn escapeDeceptive(alloc: Allocator, text: []const u8, set: DeceptiveSet, max_chars: usize) ![]u8 {
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        const cp = dtext.nextCodepoint(text, &i);
+        if (isDeceptive(cp, set)) {
+            var buf: [16]u8 = undefined;
+            const tag = std.fmt.bufPrint(&buf, "<U+{X:0>4}>", .{cp}) catch unreachable;
+            try escaped.appendSlice(alloc, tag);
+        } else {
+            try appendCodepoint(alloc, &escaped, cp);
+        }
+    }
+    return previewText(alloc, escaped.items, max_chars);
+}
+
 fn appendCodepoint(alloc: Allocator, out: *std.ArrayList(u8), cp: u21) !void {
     var buf: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
@@ -316,6 +364,47 @@ test "win32 dialogs: preview escapes control characters and truncates" {
         defer alloc.free(empty);
         try std.testing.expectEqualStrings("", empty);
     }
+}
+
+test "win32 dialogs: deceptive codepoints" {
+    const listed = [_]u21{
+        0x80,   0x85,   0x9F,   0x061C, 0x200B, 0x200C, 0x200E, 0x200F,
+        0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2060,
+        0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF,
+    };
+    for (listed) |cp| {
+        try std.testing.expect(isDeceptive(cp, .link));
+        try std.testing.expect(isDeceptive(cp, .paste));
+    }
+    // Text people write, and the neighbours of the ranges.
+    for ([_]u21{ 'a', ' ', 0xA0, 0xE9, 0x416, 0x1F600, 0x061B, 0x200A, 0x2010, 0x2027, 0x202F, 0x205F, 0x2065, 0x206A, 0xFEFE }) |cp| {
+        try std.testing.expect(!isDeceptive(cp, .link));
+        try std.testing.expect(!isDeceptive(cp, .paste));
+    }
+    // The joiner only matters in a link.
+    try std.testing.expect(isDeceptive(0x200D, .link));
+    try std.testing.expect(!isDeceptive(0x200D, .paste));
+}
+
+test "win32 dialogs: escapeDeceptive shows hidden characters" {
+    const alloc = std.testing.allocator;
+
+    const out = try escapeDeceptive(alloc, "a\u{202E}b\u{200B}c\u{85}\n", .link, 512);
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("a<U+202E>b<U+200B>c<U+0085>\u{240A}", out);
+
+    // The set matters, plain text and invalid UTF-8 pass through previewText.
+    const joiner = try escapeDeceptive(alloc, "a\u{200D}b\xff", .paste, 512);
+    defer alloc.free(joiner);
+    try std.testing.expectEqualStrings("a\u{200D}b\u{FFFD}", joiner);
+    const tagged = try escapeDeceptive(alloc, "a\u{200D}b", .link, 512);
+    defer alloc.free(tagged);
+    try std.testing.expectEqualStrings("a<U+200D>b", tagged);
+
+    // The limit counts the escaped text.
+    const cut = try escapeDeceptive(alloc, "\u{202E}\u{202E}", .link, 10);
+    defer alloc.free(cut);
+    try std.testing.expectEqualStrings("<U+202E><U…", cut);
 }
 
 test "win32 dialogs: every close kind has its own sentence" {

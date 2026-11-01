@@ -281,14 +281,17 @@ fn utf16ToUtf8Lossy(alloc: Allocator, bytes: []const u8) Allocator.Error![]u8 {
 
 /// Whether a dropped path is a plausible Windows path. The text is pasted
 /// without the unsafe-paste prompt and a drag source can send any string, so
-/// a path with a control character (CR runs a command) or one of `"<>|*?`
+/// a path with a control character (CR runs a command; C0, DEL and the C1
+/// range U+0080..U+009F, as UTF-8 `C2 80`..`C2 9F`) or one of `"<>|*?`
 /// (breaks quoting, redirects) is refused. A `\\?\` prefix may carry `?`.
+/// U+00A0 and later codepoints are ordinary text.
 pub fn pathIsSafe(path: []const u8) bool {
     var rest = path;
     if (std.mem.startsWith(u8, rest, "\\\\?\\")) rest = rest[4..];
-    for (rest) |c| {
+    for (rest, 0..) |c, i| {
         if (c < 0x20 or c == 0x7F) return false;
         if (std.mem.indexOfScalar(u8, "\"<>|*?", c) != null) return false;
+        if (c == 0xC2 and i + 1 < rest.len and rest[i + 1] >= 0x80 and rest[i + 1] <= 0x9F) return false;
     }
     return true;
 }
@@ -768,6 +771,15 @@ test "win32 drop: unsafe paths are refused" {
     try testing.expect(!pathIsSafe("C:\\a*b"));
     try testing.expect(!pathIsSafe("C:\\a?b"));
     try testing.expect(!pathIsSafe("\\\\?\\C:\\a?b"));
+    // C1 controls (U+0080..U+009F) are refused.
+    try testing.expect(!pathIsSafe("C:\\a\u{9B}b"));
+    try testing.expect(!pathIsSafe("C:\\a\u{85}"));
+    try testing.expect(!pathIsSafe("C:\\a\u{80}"));
+    try testing.expect(!pathIsSafe("\u{9F}C:\\a"));
+    // Their neighbours and other lead bytes are not.
+    try testing.expect(pathIsSafe("C:\\Ж\\é"));
+    try testing.expect(pathIsSafe("C:\\a\u{A0}b"));
+    try testing.expect(pathIsSafe("C:\\a\u{7FF}b\u{100}"));
 }
 
 test "win32 drop: ordinary paths are accepted" {

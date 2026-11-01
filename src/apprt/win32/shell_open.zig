@@ -167,16 +167,14 @@ fn isExploitScheme(scheme: []const u8) bool {
     return false;
 }
 
-/// Control characters (C0, DEL and C1), quotes and bidi controls.
+/// Control characters (C0, DEL), quotes, and the characters that hide text
+/// or reorder it (C1, bidi controls, zero width characters, BOM; see
+/// `link_policy.hasInvisible`).
 pub fn hasForbidden(s: []const u8) bool {
     for (s) |c| {
         if (c < 0x20 or c == 0x7f or c == '"') return true;
     }
-    var i: usize = 0;
-    while (i + 1 < s.len) : (i += 1) {
-        if (s[i] == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) return true;
-    }
-    return link_policy.hasBidiControl(s);
+    return link_policy.hasInvisible(s);
 }
 
 /// `file:///C:/x`, `file://localhost/C:/x`. Decoded once.
@@ -955,6 +953,13 @@ test "win32 shell_open: control characters and length" {
     try check(.osc8, "https://a/\nb", .refuse, null);
     try check(.osc8, "https://a/\xc2\x85b", .refuse, null);
     try check(.osc8, "https://a/\"b", .refuse, null);
+    // Characters that hide text: zero width, BOM, word joiner, bidi.
+    try check(.osc8, "C:\\a\\x.exe\u{200B}", .refuse, null);
+    try check(.unknown, "file:///C:/a%E2%80%8Bb.txt", .refuse, null);
+    try check(.osc8, "foo:x\u{FEFF}", .refuse, null);
+    try check(.osc8, "https://a.b/\u{2060}x", .refuse, null);
+    try check(.osc8, "https://a.b/\u{202E}gpj.exe", .refuse, null);
+    try check(.osc8, "https://a.b/\u{200D}x", .refuse, null);
     try check(.osc8, "", .refuse, null);
     const long = try std.testing.allocator.alloc(u8, link_policy.max_len + 1);
     defer std.testing.allocator.free(long);
