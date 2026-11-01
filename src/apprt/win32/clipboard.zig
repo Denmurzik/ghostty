@@ -25,6 +25,7 @@ const messages = @import("messages.zig");
 const util = @import("util.zig");
 const secure_input = @import("secure_input.zig");
 const drop = @import("drop.zig");
+const clipboard_formats = @import("clipboard_formats.zig");
 
 const log = std.log.scoped(.win32_clipboard);
 
@@ -93,6 +94,10 @@ pub const State = struct {
         self.queue = .empty;
     }
 };
+
+/// The MIME types the clipboard offers, and one representation of it.
+pub const listMimes = clipboard_formats.list;
+pub const readMime = clipboard_formats.readMime;
 
 /// Whether `t` exists on Windows: only the standard clipboard does.
 pub fn supports(t: apprt.Clipboard) bool {
@@ -183,17 +188,22 @@ pub fn setClipboard(
 ) !void {
     if (!supports(t)) return error.Unsupported;
 
-    // Only text can be put on the clipboard; a write with nothing else to
-    // offer is an error core can report (kitty answers EIO).
-    const text: [:0]const u8 = for (contents) |content| {
-        if (terminal.clipboard.isTextMime(content.mime)) break content.data;
-    } else return error.NoTextContent;
-
     if (!confirm) {
-        try write(surface.hwnd, text, secure_input.copying(surface.app));
-        if (t == .standard) hooks_mod.clipboardWritten(surface, text.len == 0);
+        const alloc = surface.app.core_app.alloc;
+        var p = try clipboard_formats.plan(alloc, contents);
+        defer p.deinit(alloc);
+        // A write with nothing the clipboard can hold is an error core can
+        // report (kitty answers EIO).
+        if (p.entries.len == 0) return error.NothingToWrite;
+        try clipboard_formats.writePlan(surface.hwnd, p, secure_input.copying(surface.app));
+        hooks_mod.clipboardWritten(surface, p.cleared);
         return;
     }
+
+    // Behind a confirmation only OSC 52 text is written.
+    const text: [:0]const u8 = for (contents) |content| {
+        if (terminal.clipboard.isTextMime(content.mime)) break content.data;
+    } else return error.NothingToWrite;
 
     const alloc = surface.app.core_app.alloc;
     const copy = try alloc.dupeSentinel(u8, text, 0);
@@ -407,49 +417,9 @@ fn confirmWith(
 /// opened without one cannot be given data.
 pub fn write(hwnd: win32.foundation.HWND, text_utf8: []const u8, secure: bool) !void {
     const alloc = global.alloc();
-    const clean = try sanitize(alloc, text_utf8);
-    defer alloc.free(clean);
-    const wide = try util.utf16z(alloc, clean);
-    defer alloc.free(wide);
-
-    var lone_lf: usize = 0;
-    for (wide, 0..) |c, i| {
-        if (c == '\n' and (i == 0 or wide[i - 1] != '\r')) lone_lf += 1;
-    }
-
-    const bytes = (wide.len + lone_lf + 1) * @sizeOf(u16);
-    const mem = win32.kernel32.GlobalAlloc(win32.kernel32.GMEM_MOVEABLE, bytes) orelse
-        return error.OutOfMemory;
-    // The clipboard owns the memory once SetClipboardData succeeds.
-    var owned = false;
-    defer if (!owned) {
-        _ = win32.kernel32.GlobalFree(mem);
-    };
-
-    {
-        const ptr = win32.kernel32.GlobalLock(mem) orelse return error.LockFailed;
-        defer _ = win32.kernel32.GlobalUnlock(mem);
-        const dst: [*]u16 = @ptrCast(@alignCast(ptr));
-        var n: usize = 0;
-        for (wide, 0..) |c, i| {
-            if (c == '\n' and (i == 0 or wide[i - 1] != '\r')) {
-                dst[n] = '\r';
-                n += 1;
-            }
-            dst[n] = c;
-            n += 1;
-        }
-        dst[n] = 0;
-    }
-
-    try openClipboard(hwnd);
-    defer _ = win32.user32.CloseClipboard();
-
-    if (win32.user32.EmptyClipboard() == 0) return error.EmptyClipboardFailed;
-    if (win32.user32.SetClipboardData(win32.user32.CF_UNICODETEXT, mem) == null)
-        return error.SetClipboardFailed;
-    owned = true;
-    for (extraFormats(secure)) |extra| setExtraFormat(extra);
+    var p = try clipboard_formats.textPlan(alloc, text_utf8);
+    defer p.deinit(alloc);
+    try clipboard_formats.writePlan(hwnd, p, secure);
 }
 
 /// A DWORD-valued clipboard format registered by name. Clipboard monitors
@@ -475,7 +445,7 @@ pub fn extraFormats(secure: bool) []const ExtraFormat {
 
 /// Adds `extra` to the open clipboard. Best effort: the copy itself has
 /// succeeded and a missing marker must not undo it.
-fn setExtraFormat(extra: ExtraFormat) void {
+pub fn setExtraFormat(extra: ExtraFormat) void {
     const format = win32.user32.RegisterClipboardFormatW(extra.name.ptr);
     if (format == 0) {
         log.warn("unable to register a clipboard format err={}", .{win32.kernel32.GetLastError()});
@@ -500,7 +470,7 @@ fn setExtraFormat(extra: ExtraFormat) void {
 /// What an OSC 52 payload may carry that the clipboard cannot: invalid
 /// UTF-8 becomes U+FFFD, and an embedded NUL ends the text (a Windows
 /// clipboard string is NUL terminated). Caller owns the result.
-fn sanitize(alloc: Allocator, text: []const u8) ![]u8 {
+pub fn sanitize(alloc: Allocator, text: []const u8) ![]u8 {
     var end = text.len;
     if (std.mem.indexOfScalar(u8, text, 0)) |nul| {
         log.warn("clipboard text has an embedded NUL, truncated at byte {}", .{nul});
@@ -630,7 +600,7 @@ fn readFiles(alloc: Allocator, hwnd: win32.foundation.HWND, kind: drop.ShellKind
 }
 
 /// Open the clipboard for `hwnd`, retrying while another process has it.
-fn openClipboard(hwnd: win32.foundation.HWND) !void {
+pub fn openClipboard(hwnd: win32.foundation.HWND) !void {
     var attempt: usize = 0;
     while (win32.user32.OpenClipboard(hwnd) == 0) : (attempt += 1) {
         if (attempt >= open_retries) {
@@ -1022,7 +992,100 @@ test "win32 clipboard: text wins over a file list" {
     try std.testing.expect(sourceFor(read52, false, true) == null);
 }
 
+fn testPng(alloc: Allocator) ![:0]u8 {
+    const image = @import("clipboard_image.zig");
+    var px = [_]u8{
+        255, 0, 0,   255, 0,   255, 0,   255,
+        0,   0, 255, 255, 255, 255, 255, 128,
+    };
+    const png = try image.encodePng(alloc, .{ .width = 2, .height = 2, .pixels = &px });
+    defer alloc.free(png);
+    return alloc.dupeSentinel(u8, png, 0);
+}
+
+test "win32 clipboard: multi-format roundtrip" {
+    const alloc = std.testing.allocator;
+    const hwnd = try testWindow();
+    defer _ = win32.user32.DestroyWindow(hwnd);
+    const saved = try SavedClipboard.save(hwnd);
+    defer saved.restore(hwnd);
+
+    const png = try testPng(alloc);
+    defer alloc.free(png);
+
+    var p = try clipboard_formats.plan(alloc, &.{
+        .{ .mime = "text/plain", .data = "rich Ж\nline2" },
+        .{ .mime = "text/html", .data = "<b>rich</b>" },
+        .{ .mime = "image/png", .data = png },
+    });
+    defer p.deinit(alloc);
+    try clipboard_formats.writePlan(hwnd, p, false);
+
+    const text = (try readMime(alloc, hwnd, "text/plain")).?;
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("rich Ж\nline2", text);
+
+    const frag = (try readMime(alloc, hwnd, "text/html")).?;
+    defer alloc.free(frag);
+    try std.testing.expectEqualStrings("<b>rich</b>", frag);
+
+    const back = (try readMime(alloc, hwnd, "image/png")).?;
+    defer alloc.free(back);
+    try std.testing.expectEqualSlices(u8, png, back);
+
+    try std.testing.expect(try readMime(alloc, hwnd, "image/gif") == null);
+    try std.testing.expect(try readMime(alloc, hwnd, "text/uri-list") == null);
+
+    var buf: [clipboard_formats.max_listing][]const u8 = undefined;
+    var names: clipboard_formats.NameBuf = .{};
+    const mimes = try listMimes(hwnd, &buf, &names);
+    try std.testing.expectEqual(@as(usize, 3), mimes.len);
+    try std.testing.expectEqualStrings("text/plain", mimes[0]);
+    try std.testing.expectEqualStrings("text/html", mimes[1]);
+    try std.testing.expectEqualStrings("image/png", mimes[2]);
+
+    // Programs without PNG support get a DIB (the system derives CF_DIB).
+    try std.testing.expect(win32.user32.IsClipboardFormatAvailable(8) != 0);
+    try std.testing.expect(win32.user32.IsClipboardFormatAvailable(17) != 0);
+}
+
+test "win32 clipboard: png served from a dib" {
+    const alloc = std.testing.allocator;
+    const image = @import("clipboard_image.zig");
+    const hwnd = try testWindow();
+    defer _ = win32.user32.DestroyWindow(hwnd);
+    const saved = try SavedClipboard.save(hwnd);
+    defer saved.restore(hwnd);
+
+    // A 2x2, 24 bpp, bottom-up BI_RGB DIB: rows padded to 8 bytes.
+    var dib: [40 + 16]u8 = @splat(0);
+    std.mem.writeInt(u32, dib[0..4], 40, .little);
+    std.mem.writeInt(i32, dib[4..8], 2, .little);
+    std.mem.writeInt(i32, dib[8..12], 2, .little);
+    std.mem.writeInt(u16, dib[12..14], 1, .little);
+    std.mem.writeInt(u16, dib[14..16], 24, .little);
+    std.mem.writeInt(u32, dib[20..24], 16, .little);
+    // Bottom row first, BGR: blue, white; then top row: red, green.
+    const rows = [_]u8{ 255, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 0 };
+    @memcpy(dib[40..], &rows);
+
+    var entries = [_]clipboard_formats.Entry{.{ .format = .{ .standard = 8 }, .bytes = &dib }};
+    try clipboard_formats.writePlan(hwnd, .{ .entries = &entries, .cleared = false }, false);
+
+    const png = (try readMime(alloc, hwnd, "image/png")).?;
+    defer alloc.free(png);
+    var got = try image.decode(alloc, "image/png", png);
+    defer got.deinit(alloc);
+    var want = try image.fromDib(alloc, &dib);
+    defer want.deinit(alloc);
+    try std.testing.expect(got.eql(want));
+    try std.testing.expectEqual(@as(u32, 2), got.width);
+    // Top-left pixel is the red one.
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, got.pixels[0..4]);
+}
+
 test {
+    _ = @import("clipboard_formats.zig");
     _ = @import("clipboard_html.zig");
     _ = @import("clipboard_image.zig");
     _ = @import("clipboard_mime.zig");
