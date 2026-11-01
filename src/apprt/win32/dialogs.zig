@@ -265,8 +265,9 @@ pub const ClipboardPart = struct {
 
 pub const ClipboardAnswer = struct {
     allow: bool,
-    /// The "remember" switch was on when the dialog closed; always false
-    /// when the prompt had no switch.
+    /// The "remember" switch was on when the dialog was accepted. Always
+    /// false for a denial (a refusal is never remembered, as on macOS), when
+    /// the prompt had no switch, and for the message box fallback.
     remember: bool,
 };
 
@@ -314,10 +315,20 @@ fn clipboardBody(kind: ClipboardKind) []const u8 {
     };
 }
 
-fn mimeIs(mime: []const u8, prefix: []const u8) bool {
+/// The type of `mime` without parameters, trimmed.
+fn mimeBase(mime: []const u8) []const u8 {
     const semi = std.mem.indexOfScalar(u8, mime, ';') orelse mime.len;
-    const base = std.mem.trim(u8, mime[0..semi], " \t");
-    return base.len >= prefix.len and std.ascii.eqlIgnoreCase(base[0..prefix.len], prefix);
+    return std.mem.trim(u8, mime[0..semi], " \t");
+}
+
+/// Whether the whole type of `mime` is `full` (ignoring case and parameters).
+fn mimeIs(mime: []const u8, full: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mimeBase(mime), full);
+}
+
+fn mimeIsImage(mime: []const u8) bool {
+    const base = mimeBase(mime);
+    return base.len > "image/".len and std.ascii.eqlIgnoreCase(base[0.."image/".len], "image/");
 }
 
 /// "7 bytes", "1.2 KB", "3.4 MB": binary units, one decimal.
@@ -354,7 +365,7 @@ fn buildClipboardPrompt(
     errdefer if (image) |*i| i.deinit(alloc);
     var image_part: ?usize = null;
     for (parts, 0..) |part, i| {
-        if (!mimeIs(part.mime, "image/")) continue;
+        if (!mimeIsImage(part.mime)) continue;
         var rgba = clipboard_image.decode(alloc, part.mime, part.data) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => continue,
@@ -376,20 +387,20 @@ fn buildClipboardPrompt(
         try list.appendSlice(alloc, mime);
         try list.appendSlice(alloc, " \u{2014} ");
         try list.appendSlice(alloc, sizeText(&size_buf, part.data.len));
-        if (mimeIs(part.mime, "image/") and image_part != i) try list.appendSlice(alloc, " (no preview)");
+        if (mimeIsImage(part.mime) and image_part != i) try list.appendSlice(alloc, " (no preview)");
     }
 
     // The first text: text/plain, else any part that is valid UTF-8.
     var text: ?[]const u8 = null;
     for (parts) |part| {
-        if (mimeIs(part.mime, "text/plain")) {
+        if (mimeIs(part.mime, "text/plain") and part.data.len > 0) {
             text = part.data;
             break;
         }
     }
     if (text == null) for (parts) |part| {
-        if (mimeIs(part.mime, "image/")) continue;
-        if (std.unicode.utf8ValidateSlice(part.data)) {
+        if (mimeIsImage(part.mime)) continue;
+        if (part.data.len > 0 and std.unicode.utf8ValidateSlice(part.data)) {
             text = part.data;
             break;
         }
@@ -467,7 +478,15 @@ pub fn confirmClipboard(
         defer alloc.free(text);
         return .{ .allow = fallbackBox(owner, prompt.title, text), .remember = false };
     };
-    return .{ .allow = answer == button_accept, .remember = can_remember and remember };
+    return clipboardAnswer(answer, can_remember, remember);
+}
+
+/// What the pressed button and the switch mean. Only an acceptance can be
+/// remembered: a ticked switch on Deny, Esc or close must not turn into a
+/// session-long grant.
+fn clipboardAnswer(pressed: i32, can_remember: bool, ticked: bool) ClipboardAnswer {
+    const allow = pressed == button_accept;
+    return .{ .allow = allow, .remember = allow and can_remember and ticked };
 }
 
 fn ownerDpi(owner: win32.foundation.HWND) u32 {
@@ -653,6 +672,37 @@ fn testPng(alloc: Allocator) ![]u8 {
     for (&pixels, 0..) |*p, i| p.* = @truncate(i *% 37);
     const img: clipboard_image.Rgba = .{ .width = 8, .height = 8, .pixels = &pixels };
     return clipboard_image.encodePng(alloc, img);
+}
+
+test "win32 dialogs: only an acceptance is remembered" {
+    try std.testing.expectEqual(ClipboardAnswer{ .allow = true, .remember = true }, clipboardAnswer(button_accept, true, true));
+    try std.testing.expectEqual(ClipboardAnswer{ .allow = true, .remember = false }, clipboardAnswer(button_accept, true, false));
+    try std.testing.expectEqual(ClipboardAnswer{ .allow = true, .remember = false }, clipboardAnswer(button_accept, false, true));
+    // Deny, Esc and the close button with the switch ticked.
+    try std.testing.expectEqual(ClipboardAnswer{ .allow = false, .remember = false }, clipboardAnswer(button_cancel, true, true));
+    try std.testing.expectEqual(ClipboardAnswer{ .allow = false, .remember = false }, clipboardAnswer(Dialog.cancel_id, true, true));
+}
+
+test "win32 dialogs: mime matching" {
+    try std.testing.expect(mimeIs("text/plain", "text/plain"));
+    try std.testing.expect(mimeIs(" Text/Plain ; charset=utf-8", "text/plain"));
+    try std.testing.expect(!mimeIs("text/plainx", "text/plain"));
+    try std.testing.expect(!mimeIs("text/plain-evil", "text/plain"));
+    try std.testing.expect(mimeIsImage("image/png"));
+    try std.testing.expect(mimeIsImage("IMAGE/svg+xml; x=y"));
+    try std.testing.expect(!mimeIsImage("image/"));
+    try std.testing.expect(!mimeIsImage("imagex/png"));
+}
+
+test "win32 dialogs: an empty text/plain does not hide the next text" {
+    const alloc = std.testing.allocator;
+    const parts = [_]ClipboardPart{
+        .{ .mime = "text/plain", .data = "" },
+        .{ .mime = "text/html", .data = "<i>x</i>" },
+    };
+    var prompt = try buildClipboardPrompt(alloc, .read, &parts, 500, 200);
+    defer prompt.deinit(alloc);
+    try std.testing.expect(std.mem.endsWith(u8, prompt.list, "\n\n<i>x</i>"));
 }
 
 test "win32 dialogs: size text" {
