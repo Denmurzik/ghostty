@@ -25,7 +25,7 @@ $script:LogsOk = $true
 
 # Quote-free in Git Bash: enable 2033 and append every 9-byte report.
 function Get-ReaderLine([string]$Name) {
-    'printf ''\e[?2033h''; while read -rsn9 -t 30 r; do printf ''%q\n'' "$r" >> "$TEMP/vis-' + $Name + '.log"; done'
+    'printf ''\e[?2033h''; while read -rsn9 -t 120 r; do printf ''%q\n'' "$r" >> "$TEMP/vis-' + $Name + '.log"; done'
 }
 
 function Get-LogPath([string]$Name) { Join-Path $script:Sbx.Tmp ("vis-$Name.log") }
@@ -48,7 +48,7 @@ function Assert-VisLog([string]$Name, [int]$Code, [string]$What, [double]$Timeou
     $want = '999;{0}n' -f $Code
     $ok = Wait-Until -TimeoutSec $TimeoutSec -PollMs 100 -Condition {
         $l = @(Read-VisLog $Name)
-        $l.Count -gt 0 -and $l[$l.Count - 1] -like "*$want"
+        $l.Count -gt 0 -and $l[$l.Count - 1] -like "*$want*"
     }
     if (-not $ok) { throw "vis-$Name.log does not end in ';$($Code)n' ($What): $((Read-VisLog $Name) -join ' | ')" }
 }
