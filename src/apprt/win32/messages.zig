@@ -47,7 +47,14 @@ pub const WM_GHOSTTY_OVERLAY_CMD = win32.user32.WM_APP + 15;
 /// Posted to the message window by the update worker (lparam = heap
 /// `Updater.Result`, freed by the receiver).
 pub const WM_GHOSTTY_UPDATE_RESULT = win32.user32.WM_APP + 16;
-// WM_APP + 17 ... WM_APP + 31 are reserved for M5 and later.
+/// Posted to a top-level window (no parameters) to re-evaluate which of its
+/// surfaces are on screen (`Window.syncOcclusion`); coalesces cloak, minimise
+/// and parking changes.
+pub const WM_GHOSTTY_SYNC_OCCLUSION = win32.user32.WM_APP + 17;
+/// Posted to a top-level window when one of its surfaces presented a frame
+/// (wparam = surface id); ends the raise gate after a tab switch.
+pub const WM_GHOSTTY_PRESENTED = win32.user32.WM_APP + 18;
+// WM_APP + 19 ... WM_APP + 31 are reserved for later milestones.
 
 /// `WM_TIMER` ids, unique per window class (a timer id is only meaningful
 /// to the window that owns the timer).
@@ -67,6 +74,9 @@ pub const timers = struct {
         pub const undo_expire: usize = 6;
         /// Delay before the jump list is rebuilt (`jumplist.zig`).
         pub const jumplist_delay: usize = 7;
+        /// Debounce of the DWM cloak notifications; the App keeps the pending
+        /// windows (`App.zig`).
+        pub const cloak_debounce: usize = 8;
     };
     pub const tab = struct {
         /// Throttled relayout while a split divider is dragged.
@@ -83,6 +93,9 @@ pub const timers = struct {
         pub const decor: usize = 2;
         /// End of the wait for a first title; the ghost shows after it.
         pub const title_grace: usize = 3;
+        /// 16 ms frames of the grab handle fade, 150 ms in total
+        /// (`grab_overlay.zig`).
+        pub const grab_fade: usize = 4;
     };
     /// The overlay windows (`overlay.zig`).
     pub const overlay = struct {
@@ -112,6 +125,12 @@ pub const timers = struct {
         pub const tab_anim: usize = 0x2701;
         /// Slide animation and autohide of the quick terminal.
         pub const quick_slide: usize = 2;
+        /// 16 ms tick, 100 ms cap: holds the raise of a tab until its first
+        /// frame is presented.
+        pub const raise_gate: usize = 3;
+        /// 500 ms spring-loaded tab switch while a split is dragged over a
+        /// tab chip (`split_drag_input.zig`).
+        pub const split_drag_spring: usize = 4;
     };
 };
 
@@ -184,4 +203,50 @@ test "win32 skeleton: M5 ids" {
     try std.testing.expectEqual(@as(usize, 5), timers.msg_window.update);
     try std.testing.expectEqual(@as(usize, 6), timers.msg_window.undo_expire);
     try std.testing.expectEqual(@as(usize, 7), timers.msg_window.jumplist_delay);
+}
+
+test "win32 skeleton: M8 message and timer ids are unique" {
+    try std.testing.expectEqual(win32.user32.WM_APP + 17, WM_GHOSTTY_SYNC_OCCLUSION);
+    try std.testing.expectEqual(win32.user32.WM_APP + 18, WM_GHOSTTY_PRESENTED);
+    try std.testing.expectEqual(@as(usize, 8), timers.msg_window.cloak_debounce);
+    try std.testing.expectEqual(@as(usize, 3), timers.window.raise_gate);
+    try std.testing.expectEqual(@as(usize, 4), timers.window.split_drag_spring);
+    try std.testing.expectEqual(@as(usize, 4), timers.surface.grab_fade);
+
+    const msgs = [_]u32{
+        WM_GHOSTTY_WAKEUP,
+        WM_GHOSTTY_CLIPBOARD_READ,
+        WM_GHOSTTY_QUIT_TIMER,
+        WM_GHOSTTY_QUIT,
+        WM_GHOSTTY_IPC,
+        WM_GHOSTTY_CLOSE_SURFACE,
+        WM_GHOSTTY_CLOSE_TAB,
+        WM_GHOSTTY_TITLE_EDIT_DONE,
+        WM_GHOSTTY_TRAY,
+        WM_GHOSTTY_DROP,
+        WM_GHOSTTY_CLOSE_ALL,
+        WM_GHOSTTY_NOTIFY_CLICK,
+        WM_GHOSTTY_SET_CONTENT,
+        WM_GHOSTTY_POSTED_DIALOG,
+        WM_GHOSTTY_OVERLAY_CMD,
+        WM_GHOSTTY_UPDATE_RESULT,
+        WM_GHOSTTY_SYNC_OCCLUSION,
+        WM_GHOSTTY_PRESENTED,
+    };
+    for (msgs, 0..) |id, i| {
+        try std.testing.expect(id <= win32.user32.WM_APP + 31);
+        for (msgs[i + 1 ..]) |other| try std.testing.expect(id != other);
+    }
+
+    // Unique within each window class, the M8 members included.
+    const classes = .{
+        [_]usize{ timers.msg_window.quit, timers.msg_window.recovery, timers.msg_window.release_memory, timers.msg_window.tmux_keys, timers.msg_window.update, timers.msg_window.undo_expire, timers.msg_window.jumplist_delay, timers.msg_window.cloak_debounce },
+        [_]usize{ timers.surface.resize, timers.surface.decor, timers.surface.title_grace, timers.surface.grab_fade },
+        [_]usize{ timers.window.strip_autoscroll, timers.window.taskbar_stale, timers.window.quick_slide, timers.window.title_debounce, timers.window.tab_tooltip, timers.window.tab_anim, timers.window.raise_gate, timers.window.split_drag_spring },
+    };
+    inline for (classes) |ids| {
+        for (ids, 0..) |id, i| {
+            for (ids[i + 1 ..]) |other| try std.testing.expect(id != other);
+        }
+    }
 }

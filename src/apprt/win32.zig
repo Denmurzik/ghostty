@@ -26,6 +26,8 @@ test {
     _ = @import("win32/taskbar.zig");
     _ = @import("win32/resize_overlay.zig");
     _ = @import("win32/tab_drag.zig");
+    _ = @import("win32/grab_handle.zig");
+    _ = @import("win32/split_drag.zig");
     _ = @import("win32/drag_ghost.zig");
     _ = @import("win32/drop.zig");
     _ = @import("win32/ipc/protocol.zig");
