@@ -855,13 +855,41 @@ fn onCloak(self: *App, hwnd: win32.foundation.HWND, cloaked: bool) void {
     if (!cloaked) return window.syncOcclusion();
 
     const n = &self.screen_notify;
-    if (std.mem.indexOfScalar(win32.foundation.HWND, n.pending.items, hwnd) != null) return;
-    n.pending.append(self.core_app.alloc, hwnd) catch return window.syncOcclusion();
-    if (n.pending.items.len > 1) return;
+    const added = addCloakPending(&n.pending, self.core_app.alloc, hwnd) catch return window.syncOcclusion();
+    if (!added) return;
+    // A newly cloaked window restarts the timer (same id), so it gets the
+    // full debounce too; the ones before it only wait a little longer.
     if (win32.user32.SetTimer(self.msg_hwnd, cloak_debounce_timer_id, cloak_debounce_ms, null) == 0) {
         n.pending.clearRetainingCapacity();
         window.syncOcclusion();
     }
+}
+
+/// Records `hwnd` as waiting for the debounce. True when it is new, i.e. the
+/// debounce timer must be (re)started for it; a window already waiting keeps
+/// its deadline.
+fn addCloakPending(
+    pending: *std.ArrayList(win32.foundation.HWND),
+    alloc: Allocator,
+    hwnd: win32.foundation.HWND,
+) Allocator.Error!bool {
+    if (std.mem.indexOfScalar(win32.foundation.HWND, pending.items, hwnd) != null) return false;
+    try pending.append(alloc, hwnd);
+    return true;
+}
+
+test "win32 app: every newly cloaked window restarts the debounce" {
+    const a: win32.foundation.HWND = @ptrFromInt(0x10);
+    const b: win32.foundation.HWND = @ptrFromInt(0x20);
+    var pending: std.ArrayList(win32.foundation.HWND) = .empty;
+    defer pending.deinit(std.testing.allocator);
+    try std.testing.expect(try addCloakPending(&pending, std.testing.allocator, a));
+    // The same window again: no restart.
+    try std.testing.expect(!try addCloakPending(&pending, std.testing.allocator, a));
+    // A second window restarts the timer (the old code only started it for
+    // the first).
+    try std.testing.expect(try addCloakPending(&pending, std.testing.allocator, b));
+    try std.testing.expectEqual(@as(usize, 2), pending.items.len);
 }
 
 /// The debounce elapsed: every pending window that still exists re-reads
