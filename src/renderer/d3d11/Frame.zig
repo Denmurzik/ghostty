@@ -1063,6 +1063,58 @@ test "d3d11 frame: complete presents into a lazily created swap chain" {
     try testing.expectEqual(@as(usize, 1), fx.recorder.count);
 }
 
+test "d3d11 frame: surfaceHidden then draw regrows the chain" {
+    var fx: Fixture = try .init(.native, 16, 8);
+    defer fx.deinit();
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var packed_size: std.atomic.Value(u64) = .init(D3D11.packSize(16, 8));
+    fx.api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    defer fx.api.threadExit();
+
+    // No chain yet: nothing to shrink.
+    fx.api.surfaceHidden();
+    try testing.expectEqual([2]u32{ 0, 0 }, fx.api.chainPx());
+
+    for (0..2) |round| {
+        {
+            fx.api.drawFrameStart();
+            defer fx.api.drawFrameEnd();
+            var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+            var pass = frame.renderPass(&.{.{
+                .target = .{ .target = fx.target },
+                .clear_color = .{ 1, 0, 0, 1 },
+            }});
+            pass.complete();
+            frame.complete(false);
+        }
+        try testing.expectEqual([2]u32{ 16, 8 }, fx.api.chainPx());
+        try testing.expectEqual(@as(u64, round * 2 + 1), fx.api.presents.load(.monotonic));
+
+        // The test window is not visible, like a hidden tab's.
+        fx.api.surfaceHidden();
+        try testing.expectEqual([2]u32{ 1, 1 }, fx.api.chainPx());
+        try testing.expect(fx.api.swap_chain != null);
+
+        // The frame after the reshow regrows it.
+        {
+            fx.api.drawFrameStart();
+            defer fx.api.drawFrameEnd();
+            var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+            var pass = frame.renderPass(&.{.{
+                .target = .{ .target = fx.target },
+                .clear_color = .{ 0, 1, 0, 1 },
+            }});
+            pass.complete();
+            frame.complete(false);
+        }
+        try testing.expectEqual([2]u32{ 16, 8 }, fx.api.chainPx());
+        try testing.expectEqual(@as(u64, round * 2 + 2), fx.api.presents.load(.monotonic));
+    }
+    try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
+}
+
 test "d3d11 frame: bmp header" {
     var out: [bmp_header_len + 8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&out);

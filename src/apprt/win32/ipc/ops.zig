@@ -577,6 +577,12 @@ fn writeSurface(jw: *std.json.Stringify, window: *Window, s: *Surface, focused: 
     // What core believes (the occlusion callback), as opposed to `visible`.
     try jw.objectField("core_visible");
     try jw.write(s.core_surface.visible);
+    // The renderer's successful presents and the size of its DXGI swap chain
+    // (`[1, 1]` while the surface is hidden, `[0, 0]` without a chain).
+    try jw.objectField("presents");
+    try jw.write(s.core_surface.renderer.api.presents.load(.monotonic));
+    try jw.objectField("chain_px");
+    try jw.write(s.core_surface.renderer.api.chainPx());
     try jw.objectField("focused");
     try jw.write(focused);
     try jw.objectField("title");

@@ -1351,6 +1351,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
                 self.releaseGpuResources();
+                if (comptime @hasDecl(GraphicsAPI, "surfaceHidden")) self.api.surfaceHidden();
             }
         }
 

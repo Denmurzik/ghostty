@@ -430,6 +430,28 @@ pub fn present(self: *Self, vsync: bool) Error!void {
     if (hr != dxgi.STATUS_OCCLUDED) self.pacer.presented(nowNs());
 }
 
+/// Shrinks the back buffers to 1x1 (`ResizeBuffers` with the creation flags)
+/// for a surface that is hidden: the two full-size buffers go back to the
+/// driver while the chain itself stays, so a composition chain stays attached
+/// to its DirectComposition visual and an hwnd chain to its window. The next
+/// `copyToBackbuffer` regrows it to the target size.
+///
+/// The chain holds no frame worth keeping (it is hidden), and nothing waits
+/// for one: the pacer is reset like an idle chain's (`resyncIdle`), so a
+/// signal of a frame queued before the shrink that arrives later is a surplus
+/// the idle resync of the next present takes. The frame latency waitable
+/// itself survives `ResizeBuffers`. The caller holds the context lock; the
+/// context is cleared and flushed first because `ResizeBuffers` fails while
+/// it still references a back buffer.
+pub fn shrink(self: *Self) Error!void {
+    self.device.assertContextLocked();
+    if (self.width == 1 and self.height == 1) return;
+    self.device.context.clearState();
+    self.device.context.flush();
+    try self.resize(1, 1);
+    _ = self.resyncIdle();
+}
+
 /// Resizes the back buffers, repeating the creation flags. No reference to
 /// a back buffer may be alive.
 fn resize(self: *Self, width: u32, height: u32) Error!void {
@@ -671,6 +693,65 @@ test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
         try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, &px);
         try chain.present(true);
     }
+}
+
+fn expectShrinkAndRegrow(mode: Mode) !void {
+    const device = try Device.init(testing.allocator, .{ .driver = .warp });
+    defer device.deinit(testing.allocator);
+    var window: TestWindow = try .init();
+    defer window.deinit();
+
+    var target = try Target.init(.{ .device = device, .width = 64, .height = 32, .srgb = false });
+    defer target.deinit();
+    var chain = try init(device, window.hwnd, 64, 32, mode);
+
+    device.lockContext();
+    defer device.unlockContext();
+    defer chain.deinit();
+
+    const created = try chain.chain.asSwapChain1().getDesc1();
+
+    // A frame was presented, then the surface was hidden.
+    clearTarget(device, &target, .{ 1, 0, 0, 1 });
+    try chain.copyToBackbuffer(device.context, &target);
+    try chain.present(true);
+
+    try chain.shrink();
+    try testing.expectEqual(@as(u32, 1), chain.width);
+    try testing.expectEqual(@as(u32, 1), chain.height);
+    const small = try chain.chain.asSwapChain1().getDesc1();
+    try testing.expectEqual(@as(u32, 1), small.Width);
+    try testing.expectEqual(@as(u32, 1), small.Height);
+    try testing.expectEqual(created.Flags, small.Flags);
+    try testing.expectEqual(created.BufferCount, small.BufferCount);
+    try testing.expectEqual(created.Format, small.Format);
+    try testing.expectEqual(created.AlphaMode, small.AlphaMode);
+    try testing.expect(chain.waitable != null);
+    // The pacer owes nothing to a chain nobody waits on.
+    try testing.expect(!chain.waitArmed());
+
+    // A second shrink is a no-op.
+    try chain.shrink();
+    try testing.expectEqual(@as(u32, 1), chain.width);
+
+    // The next frame regrows the chain.
+    clearTarget(device, &target, .{ 1, 0, 0, 1 });
+    try chain.copyToBackbuffer(device.context, &target);
+    const grown = try chain.chain.asSwapChain1().getDesc1();
+    try testing.expectEqual(@as(u32, 64), grown.Width);
+    try testing.expectEqual(@as(u32, 32), grown.Height);
+    try testing.expectEqual(created.Flags, grown.Flags);
+    const px = try readBackbuffer(&chain);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, &px);
+    try chain.present(true);
+}
+
+test "d3d11 swapchain: shrink keeps creation flags and the next copy regrows it" {
+    try expectShrinkAndRegrow(.hwnd);
+}
+
+test "d3d11 swapchain: shrink of a composition chain" {
+    try expectShrinkAndRegrow(.composition);
 }
 
 test "d3d11 swapchain: zero size is rejected" {

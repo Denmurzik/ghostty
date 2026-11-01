@@ -51,6 +51,13 @@ const log = std.log.scoped(.d3d11);
 /// stall the thread, which also has to notice that it should exit.
 const frame_slot_wait_ms = 100;
 
+/// R-M8-21: a hidden surface (`surfaceHidden`) shrinks its swap chain to 1x1,
+/// so the two full-size back buffers go back to the driver. The one switch to
+/// turn it off: the chain then keeps its size while hidden. The reshow regrows
+/// the chain inside the first frame's `copyToBackbuffer` (`SwapChain.shrink`);
+/// the apprt hides the 1x1 frame until that frame presented (Task 17).
+pub const shrink_hidden_chains = true;
+
 /// Where the swap chain presents. Provided by the apprt through an optional
 /// `d3d11PresentTarget` decl on its Surface; null means headless.
 pub const PresentTarget = struct {
@@ -87,8 +94,12 @@ pub const PresentTarget = struct {
     /// `CreateSwapChainForHwnd` fails (WINDOW_ALREADY_COMPOSED) while the
     /// window is composed, and would be retried on every drawn frame.
     /// A minimised window needs no throttle here: the apprt's occlusion
-    /// path (`Window.setMinimized` -> `Tab.applyOcclusion` -> core
-    /// `visible = false`) stops drawing, and the restore redraws.
+    /// path (`Window.syncOcclusion` -> `Tab.applyOcclusion` -> core
+    /// `visible = false`) stops drawing, and the restore redraws. Its swap
+    /// chain keeps its size too (DWM's live preview and Alt+Tab show the
+    /// last frame, R-M8-26); only a surface whose window is hidden
+    /// (`IsWindowVisible` false: inactive tab, hidden window, parked)
+    /// shrinks its chain to 1x1 (`surfaceHidden`).
     mode: ?*const std.atomic.Value(u8) = null,
 
     /// Receives every composition swap chain once its first frame was
@@ -160,6 +171,10 @@ vsync: bool = true,
 /// Set once a swap chain failure was logged, so a broken swap chain logs
 /// once rather than once per frame.
 swap_chain_failure_logged: bool = false,
+
+/// Successful presents of this renderer, for tests (monotonic, atomic: the
+/// UI thread reads it for the test IPC).
+presents: std.atomic.Value(u64) = .init(0),
 
 /// The size `setViewport` last reported. Headless `surfaceSize` returns it.
 viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
@@ -374,6 +389,53 @@ pub fn dropSwapChain(self: *D3D11) void {
     self.swap_chain = null;
 }
 
+/// Render thread, from the generic renderer's `setVisible(false)` (draw mutex
+/// held, context lock NOT held). Shrinks the swap chain to 1x1 when the
+/// surface's window is hidden (`IsWindowVisible` false: inactive tab, hidden
+/// window, hidden quick terminal, parked). A minimized or merely occluded
+/// window keeps its chain: DWM's live preview and Alt+Tab show its last frame
+/// (R-M8-26). The chain is shrunk, not dropped, so a composition chain stays
+/// attached to its DirectComposition visual (no new hand-off). The next frame
+/// regrows it: `SwapChain.copyToBackbuffer` resizes to the target's size.
+pub fn surfaceHidden(self: *D3D11) void {
+    const target = self.present_target orelse return;
+    self.device.lockContext();
+    defer self.device.unlockContext();
+
+    // The replacement it waited for is not coming while hidden.
+    self.releaseRetired();
+
+    const sc = if (self.swap_chain) |*sc| sc else return;
+    const hwnd: win32.foundation.HWND = @ptrCast(target.hwnd);
+    const window_visible = win32.user32.IsWindowVisible(hwnd) != 0;
+    if (!shrink_hidden_chains or !shrinkOnHide(true, window_visible, sc.mode)) return;
+    sc.shrink() catch |err| {
+        self.logSwapChainFailure("shrink", err);
+        return;
+    };
+    // Gives the driver the released back buffers now rather than at the next
+    // surface close.
+    self.device.trimDriver();
+}
+
+/// Pure decision of `surfaceHidden`: only a chain whose window is hidden is
+/// shrunk. A visible window (minimized, occluded, cloaked) keeps it, whatever
+/// the mode.
+pub fn shrinkOnHide(has_chain: bool, window_visible: bool, mode: SwapChain.Mode) bool {
+    _ = mode;
+    return has_chain and !window_visible;
+}
+
+/// The size of the swap chain's back buffers, `.{ 0, 0 }` without a chain.
+/// For tests (the test IPC): takes the context lock, so not from a thread
+/// that holds it.
+pub fn chainPx(self: *D3D11) [2]u32 {
+    self.device.lockContext();
+    defer self.device.unlockContext();
+    const sc = if (self.swap_chain) |*sc| sc else return .{ 0, 0 };
+    return .{ sc.width, sc.height };
+}
+
 /// Whether a failed present may come from a window that changed parents
 /// since the swap chain was bound to it. Only then is the chain recreated:
 /// a bump alone does not break presenting. Returns true when the chain was
@@ -404,6 +466,7 @@ pub fn presentGeneration(self: *const D3D11) u32 {
 /// Called after a successful present with the generation read before it: the
 /// chain worked with that window state, so older bumps need no recreation.
 pub fn presentSucceeded(self: *D3D11, generation: u32) void {
+    _ = self.presents.fetchAdd(1, .monotonic);
     self.swap_chain_generation = generation;
     // The replacement showed a frame: the old chain is no longer needed.
     self.releaseRetired();
@@ -801,6 +864,19 @@ fn testApi(blending: configpkg.Config.AlphaBlending) !D3D11 {
         .blending = blending,
         .device = device,
     };
+}
+
+test "d3d11 api: shrink on hide only for a hidden window with a chain" {
+    for ([_]SwapChain.Mode{ .hwnd, .composition }) |mode| {
+        // No chain: nothing to shrink.
+        try std.testing.expect(!shrinkOnHide(false, false, mode));
+        try std.testing.expect(!shrinkOnHide(false, true, mode));
+        // A visible window (minimized, occluded, cloaked) keeps its chain.
+        try std.testing.expect(!shrinkOnHide(true, true, mode));
+        // A hidden one shrinks it.
+        try std.testing.expect(shrinkOnHide(true, false, mode));
+    }
+    try std.testing.expect(shrink_hidden_chains);
 }
 
 test "d3d11 api: draw frame start and end own the context lock" {
