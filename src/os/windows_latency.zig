@@ -169,7 +169,11 @@ pub const Tracer = struct {
     }
 
     pub fn slotWait(self: *Tracer, ns: u64) void {
-        if (!self.open or self.t_render == null) return;
+        // From the parse on: the render thread waits for its slot before
+        // `renderStart`, so a wait that holds the echo back is booked here
+        // too. Before the parse it belongs to a frame that is not this
+        // sample's (the keypress repaint).
+        if (!self.open or self.t_parsed == null) return;
         self.slot_wait += ns;
         self.events.add('S', ns);
     }
@@ -485,6 +489,23 @@ test "windows latency: a complete key sample has ordered stages" {
     try std.testing.expectEqual(@as(u32, 7), s.surface);
     try std.testing.expectEqual(@as(u64, 3), s.output_bytes);
     try std.testing.expect(!t.open);
+}
+
+test "windows latency: a slot wait between parse and render start is booked" {
+    var t: Tracer = .{};
+    _ = t.input(0, .key);
+    t.write(1 * ms_ns, 1);
+    // A wait of the keypress repaint frame, before anything was parsed,
+    // is not the echo's.
+    t.slotWait(5 * ms_ns);
+    _ = t.output(2 * ms_ns, 1);
+    t.parsed(3 * ms_ns, 1, 0);
+    // The render thread waits for its slot, then starts the frame.
+    t.slotWait(7 * ms_ns);
+    t.renderStart(10 * ms_ns);
+    const s = t.present(11 * ms_ns, 0).?;
+    try std.testing.expectEqual(@as(u64, 7 * ms_ns), s.slot_wait_ns);
+    try std.testing.expectEqual(@as(u64, 7 * ms_ns), s.parsed_to_render_ns);
 }
 
 test "windows latency: present before output does not close the sample" {
