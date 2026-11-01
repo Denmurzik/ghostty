@@ -455,7 +455,7 @@ fn hitFor(window: *Window, pt: tab_drag.Point) tab_drag.Hit {
     return hit;
 }
 
-fn windowById(app: *App, id: u32) ?*Window {
+pub fn windowById(app: *App, id: u32) ?*Window {
     for (app.windows.items) |w| {
         if (w.id == id) return w;
     }
@@ -496,6 +496,16 @@ fn dragTo(window: *Window, x: i32, y: i32) void {
         d.current = s.machine.index;
     }
     Chrome.invalidate(window);
+}
+
+/// Shows the insertion marker at `index` in the strip of window `window_id`,
+/// or removes it (null). Another feature's drag (a split dropped on the
+/// strip) uses it; the caller clears the marker of the window it left.
+pub fn showDropMarker(app: *App, window_id: u32, index: ?usize) void {
+    const w = windowById(app, window_id) orelse return;
+    if (w.strip_input.drop_index == index) return;
+    w.strip_input.drop_index = index;
+    Chrome.invalidate(w);
 }
 
 const Marker = struct { window: u32, index: usize };

@@ -32,6 +32,7 @@ const notify_mod = @import("notify.zig");
 const profiles_mod = @import("profiles.zig");
 const Overrides = @import("Overrides.zig");
 const secure_input_mod = @import("secure_input.zig");
+const split_drag_input = @import("split_drag_input.zig");
 const undo_actions_mod = @import("actions/undo_actions.zig");
 const Updater = @import("update/Updater.zig");
 const jumplist = @import("jumplist.zig");
@@ -99,6 +100,9 @@ recovery: recovery_mod.State = .{},
 visibility: visibility_mod.State = .{},
 shell_open: shell_open_mod.State = .{},
 composition: composition_mod.AppState = .{},
+
+/// M8: the split drag session, while one runs.
+split_drag: ?split_drag_input.Session = null,
 
 /// M4 tmux state: the tmux pipe, the pane registry, pane input timing and
 /// the pane labels.
