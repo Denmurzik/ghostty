@@ -131,7 +131,7 @@ pub fn mimesFor(formats: []const Format, buf: [][]const u8) []const []const u8 {
         if (!mime_names.isMimeName(name)) continue;
         // `text/plain` is the text formats' name; a registered format of
         // that name is not served by `readMime`.
-        if (std.ascii.eqlIgnoreCase(name, "text/plain")) continue;
+        if (isPlainMime(name)) continue;
         var dup = false;
         for (buf[0..n]) |have| {
             if (std.ascii.eqlIgnoreCase(have, name)) {
@@ -294,10 +294,14 @@ pub fn readMime(alloc: Allocator, hwnd: win32.foundation.HWND, mime: []const u8)
         block = try copyBlock(alloc, src.id);
     }
     const bytes = block orelse return null;
-    defer alloc.free(bytes);
+    var owned = true;
+    defer if (owned) alloc.free(bytes);
 
     switch (src.kind) {
-        .raw => return try alloc.dupe(u8, bytes),
+        .raw => {
+            owned = false;
+            return bytes;
+        },
         .html => {
             // A NUL ends the block (the clipboard string is terminated).
             const frag = html.fragment(bytes) orelse return null;
@@ -455,7 +459,7 @@ const Builder = struct {
         try self.list.append(self.alloc, .{ .format = format, .bytes = bytes });
     }
 
-    /// A raw block, copied, with `terminator` bytes of NUL after it.
+    /// A raw block, copied, with a NUL after it when `nul` is set.
     fn addCopy(self: *Builder, format: FormatRef, data: []const u8, nul: bool) !void {
         const bytes = try self.alloc.alloc(u8, data.len + @intFromBool(nul));
         @memcpy(bytes[0..data.len], data);
@@ -607,13 +611,20 @@ pub fn writePlan(hwnd: win32.foundation.HWND, p: Plan, secure: bool) !void {
         _ = win32.kernel32.GlobalFree(mem);
     };
 
+    var prepared: usize = 0;
     for (p.entries, 0..) |e, i| {
         ids[i] = switch (e.format) {
             .standard => |id| id,
-            .registered => |name| try registerFormat(alloc, name),
+            .registered => |name| registerForWrite(name) orelse {
+                log.warn("clipboard format {s} skipped", .{name});
+                continue;
+            },
         };
         mems[i] = try globalFrom(e.bytes);
+        prepared += 1;
     }
+    // Nothing to set: leave the clipboard as it is.
+    if (prepared == 0 and p.entries.len > 0) return error.NothingToWrite;
 
     try clipboard.openClipboard(hwnd);
     defer _ = win32.user32.CloseClipboard();
@@ -634,13 +645,72 @@ pub fn writePlan(hwnd: win32.foundation.HWND, p: Plan, secure: bool) !void {
     for (clipboard.extraFormats(secure)) |extra| clipboard.setExtraFormat(extra);
 }
 
-fn registerFormat(alloc: Allocator, name: []const u8) !u32 {
-    const wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, name);
+/// Most distinct program-supplied format names a process registers.
+/// `RegisterClipboardFormatW` atoms live in the session's atom table
+/// (about 16K entries shared by every program) and are never freed.
+pub const max_program_names = 128;
+
+/// The program-supplied names registered so far (UI thread only), which
+/// `registerCapped` counts against `max_program_names`.
+pub const NameSet = struct {
+    storage: [max_program_names][mime_names.max_name_len]u8 = undefined,
+    lens: [max_program_names]u8 = undefined,
+    count: usize = 0,
+    warned: bool = false,
+
+    fn find(self: *const NameSet, name: []const u8) bool {
+        for (0..self.count) |i| {
+            if (std.ascii.eqlIgnoreCase(self.storage[i][0..self.lens[i]], name)) return true;
+        }
+        return false;
+    }
+};
+
+/// The id of format `name` through `register_fn`, for a name a program
+/// chose. A name registered before costs nothing; a new one is refused
+/// (null, logged once) when `max_program_names` are already in use.
+pub fn registerCapped(
+    set: *NameSet,
+    name: []const u8,
+    comptime register_fn: fn ([]const u8) ?u32,
+) ?u32 {
+    if (name.len == 0 or name.len > mime_names.max_name_len) return null;
+    if (set.find(name)) return register_fn(name);
+    if (set.count >= max_program_names) {
+        if (!set.warned) {
+            set.warned = true;
+            log.warn("clipboard: {} program-chosen format names are registered, no more are", .{max_program_names});
+        }
+        return null;
+    }
+    const id = register_fn(name) orelse return null;
+    @memcpy(set.storage[set.count][0..name.len], name);
+    set.lens[set.count] = @intCast(name.len);
+    set.count += 1;
+    return id;
+}
+
+var program_names: NameSet = .{};
+
+fn isMappedName(name: []const u8) bool {
+    return isKnownName(name);
+}
+
+/// The clipboard format id for a registered name of a plan entry: mapped
+/// names freely, anything else through the process-wide cap.
+fn registerForWrite(name: []const u8) ?u32 {
+    if (isMappedName(name)) return registerFormat(name);
+    return registerCapped(&program_names, name, registerFormat);
+}
+
+fn registerFormat(name: []const u8) ?u32 {
+    const alloc = global.alloc();
+    const wide = std.unicode.utf8ToUtf16LeAllocZ(alloc, name) catch return null;
     defer alloc.free(wide);
     const id = win32.user32.RegisterClipboardFormatW(wide.ptr);
     if (id == 0) {
         log.warn("unable to register a clipboard format err={}", .{win32.kernel32.GetLastError()});
-        return error.RegisterFormatFailed;
+        return null;
     }
     return id;
 }
@@ -662,7 +732,7 @@ test "win32 clipboard formats: listing order and mapping" {
         .{ .id = cf_hdrop },
         .{ .id = 0xC003, .name = "image/svg+xml" },
         // Not MIME-shaped, so not offered.
-        .{ .id = 0xC004, .name = null },
+        .{ .id = 0xC004, .name = "Chromium Web Custom MIME Data Format" },
         .{ .id = 0xC005, .name = "Rich Text Format" },
     };
     var buf: [max_listing][]const u8 = undefined;
@@ -838,4 +908,41 @@ test "win32 clipboard formats: text plan is the text a copy has always put" {
     try std.testing.expectEqual(@as(usize, 1), p.entries.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), p.entries[0].bytes[0 .. want.len * 2]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, p.entries[0].bytes[want.len * 2 ..]);
+}
+
+var fake_calls: usize = 0;
+
+fn fakeRegister(name: []const u8) ?u32 {
+    _ = name;
+    fake_calls += 1;
+    return 0xC000 + @as(u32, @intCast(fake_calls));
+}
+
+test "win32 clipboard formats: program format names are capped" {
+    const set = try std.testing.allocator.create(NameSet);
+    defer std.testing.allocator.destroy(set);
+    set.* = .{};
+    fake_calls = 0;
+
+    var buf: [32]u8 = undefined;
+    for (0..max_program_names) |i| {
+        const name = try std.fmt.bufPrint(&buf, "application/x-n{d}", .{i});
+        try std.testing.expect(registerCapped(set, name, fakeRegister) != null);
+    }
+    try std.testing.expectEqual(@as(usize, max_program_names), set.count);
+    try std.testing.expectEqual(@as(usize, max_program_names), fake_calls);
+
+    // A new name over the cap is refused without registering anything.
+    try std.testing.expect(registerCapped(set, "application/x-new", fakeRegister) == null);
+    try std.testing.expect(registerCapped(set, "application/x-new2", fakeRegister) == null);
+    try std.testing.expectEqual(@as(usize, max_program_names), fake_calls);
+    try std.testing.expect(set.warned);
+
+    // A name registered before still works (case-insensitive, as Windows is).
+    try std.testing.expect(registerCapped(set, "application/x-n5", fakeRegister) != null);
+    try std.testing.expect(registerCapped(set, "APPLICATION/X-N7", fakeRegister) != null);
+    try std.testing.expectEqual(@as(usize, max_program_names), set.count);
+
+    // Names that cannot be registered at all.
+    try std.testing.expect(registerCapped(set, "", fakeRegister) == null);
 }
