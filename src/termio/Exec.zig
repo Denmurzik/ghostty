@@ -3070,9 +3070,17 @@ const xterm_ghostty = "xterm-ghostty";
 /// `( )` instead of the Unicode symbols. `TERMINUS_SUBLIME` is the one flag that
 /// changes nothing else: unlike `WT_SESSION` or `TERM_PROGRAM` it does not change
 /// how programs detect the terminal (still Ghostty through TERM and
-/// XTVERSION). Opt out with a different TERM or a non-empty value such as
-/// `env = TERMINUS_SUBLIME=0` (an empty `env` value only deletes the key from
-/// the config map, so it does not opt out).
+/// XTVERSION).
+///
+/// The package only tests `Boolean(env.TERMINUS_SUBLIME)`: any non-empty string
+/// counts, `"0"` included, so a user value never turns Unicode off, and
+/// `TERM=xterm-256color` is on its list too. Nothing in the package switches
+/// Unicode off on purpose; it is off only when none of its conditions match.
+/// What opts out here: `unset TERMINUS_SUBLIME` (or an empty export) in the
+/// shell rc while TERM stays `xterm-ghostty`, or a TERM that is not on the
+/// package's list (that costs the Ghostty terminfo). An empty `env =
+/// TERMINUS_SUBLIME=` only deletes the key from the config map, and this
+/// function then adds it again.
 fn windowsUnicodeHint(env: *EnvMap) !void {
     const term = env.get("TERM") orelse return;
     if (!std.mem.eql(u8, term, xterm_ghostty)) return;

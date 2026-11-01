@@ -538,9 +538,11 @@ they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, 
   send the log with the pacing variable on.
 - **Claude Code symbols.** Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is
   not set (inherited or by `env`). Claude Code's `is-unicode-supported` check then draws `◯ ✔ ❯` instead of ASCII stand-ins such as
-  `( )`. A value you set is never overridden and there is no config key. Opt out with another `TERM` (`env = TERM=xterm-256color`),
-  with a **non-empty** value (`env = TERMINUS_SUBLIME=0`; an empty `env = TERMINUS_SUBLIME=` deletes the key and does **not** opt
-  out), or `unset TERMINUS_SUBLIME` in the shell rc.
+  `( )`. A value you set is never overridden and there is no config key. The package tests only whether the variable is non-empty,
+  so a value such as `0` does **not** turn the symbols off, and neither does `env = TERM=xterm-256color` (also on its list). To get
+  the ASCII stand-ins back, run `unset TERMINUS_SUBLIME` in the shell rc (TERM stays `xterm-ghostty`), or set a `TERM` that is not on
+  the package's list (this costs the Ghostty terminfo). An empty `env = TERMINUS_SUBLIME=` deletes the key and Ghostty adds it
+  again. Checked against `is-unicode-supported` 1.3.0 and 2.1.0.
 
 ### What is new
 

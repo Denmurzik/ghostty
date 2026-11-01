@@ -164,7 +164,7 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Split grab handle (every pane, hover reveal, `drag-handle`) | M8 | unit: win32 grab handle, win32 grab overlay; e2e/split-drag | done (GUI proof pending) |
 | Split drag onto panes, the tab strip, another window, out to a new window; tmux-shim panes move | M8 | unit: win32 split drag, win32 split drag input; e2e/split-drag | done (GUI proof pending) |
 | Undo of a split move | M8 | R-M8-30 | gap (next version) |
-| `TERMINUS_SUBLIME=1` for Windows children on `TERM=xterm-ghostty` (Claude Code symbols); opt-out by another `TERM` or a non-empty value | M8 | unit: windows unicode hint | done (owner check of Claude Code pending) |
+| `TERMINUS_SUBLIME=1` for Windows children on `TERM=xterm-ghostty` (Claude Code symbols); opt-out: `unset TERMINUS_SUBLIME` in the shell rc or a `TERM` off the package list | M8 | unit: windows unicode hint | done (owner check of Claude Code pending) |
 | Git for Windows prompt `$PWD` cannot inject escapes into the window title | M8 | shell-marks `bash-git-title-inject`; e2e/title-inject | done |
 | Invisible characters in links refused or shown escaped; C1 in dropped paths refused | M8 | unit: win32 link policy, shell_open, dialogs, drop; e2e/link-hover-open, e2e/drop-files | done |
 | Scrollback default 50 MB (`scrollback-limit-bytes`) | M8 | upstream default (R-M8-39); RAM row `scrollback` re-measured in the M8 batch | done |

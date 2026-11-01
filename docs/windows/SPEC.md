@@ -516,9 +516,10 @@ A `linear-corrected`, B `native`, C = A + `font-thicken`, D = B + `font-thicken`
   unchanged from core.
 - `TERMINUS_SUBLIME` (M8, R-M8-3): a Windows child gets `TERMINUS_SUBLIME=1` when the **final** `TERM` is `xterm-ghostty` and the variable is not
   already set (inherited or by the user's `env`); a user value is never overridden and there is no config key (`Exec.windowsUnicodeHint`, after the Windows
-  `TERM` block). Node CLIs (Claude Code, via `is-unicode-supported`) take it as "Unicode symbols are fine". Opt-out: another `TERM`
-  (`env = TERM=xterm-256color`), a **non-empty** value (`env = TERMINUS_SUBLIME=0`; an empty `env = TERMINUS_SUBLIME=` deletes the key and does **not**
-  opt out), or `unset TERMINUS_SUBLIME` in the shell rc. Suggested upstream text only in `next-version.md` (R-M8-4).
+  `TERM` block). Node CLIs (Claude Code, via `is-unicode-supported`, which tests `Boolean(env.TERMINUS_SUBLIME)` on win32) take any non-empty value as
+  "Unicode symbols are fine"; `"0"` is truthy, and `TERM=xterm-256color` is on the package's list too, so neither opts out. Opt-out: `unset TERMINUS_SUBLIME`
+  (or an empty export) in the shell rc while `TERM` stays `xterm-ghostty`, or a `TERM` that is not on the package's list (costs the Ghostty terminfo); an empty
+  `env = TERMINUS_SUBLIME=` deletes the key and the hint adds it again (checked against `is-unicode-supported` 1.3.0 and 2.1.0). Suggested upstream text only in `next-version.md` (R-M8-4).
 - PATH: core appends the exe dir. Windows (M4, with `windows-tmux-shim = true`; the default is `false` since M7, R-M7-1; R-M4-11): the exe dir is **moved
   to the front** of PATH (shim dir = exe dir, DECISIONS; a login shell such as Git Bash may reorder PATH in its profile: check
   `command -v tmux`) and every surface gets `TMUX=\\.\pipe\ghostty-tmux-<pid>-<16 hex nonce>,<pid>,0` and `TMUX_PANE=%<n>` (§12).
@@ -1383,7 +1384,7 @@ Rulings for M7 (plan-m7 and lead, 2026-10-29; the owner may overturn; full text 
 Rulings for M8 (plan-m8, 2026-11-01; owner answers where given, else the design's recommendation; the lead or owner may overturn; full text in `docs/windows/plans/M8-win14.md`, as built here):
 - R-M8-1, scope = merge upstream 1.4 plus quick fixes (Claude Code symbols, 1.4 security cross-check, RAM/latency baselines), OSC 5522, split drag, GPU release for hidden tabs, mode 2033 and the long-tab lag fix (owner).
 - R-M8-2, **version `1.4.1-dev-win.3`, tag `win-1.4.1-dev-3`** (owner, 2026-11-01). The owner asked for `win.1`, but the update check compares releases by `N` only (`update/release.zig`) and `release-version.ps1` refuses an `N` not above the highest tag (`win-1.3.2-dev-2`); `N = 3` needs no code change. The conditional Task 23 (compare by zon and `N`) is skipped. `build.zig.zon` carries `1.4.1-dev`; `release.ps1 -N 3` adds the suffix.
-- R-M8-3, Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is unset; a user value is never overridden; no config knob; opt-out = another `TERM` or a non-empty value (§10).
+- R-M8-3, Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is unset; a user value is never overridden; no config knob; the package only tests non-empty, so a value never opts out; opt-out = `unset TERMINUS_SUBLIME` in the shell rc or a `TERM` off the package's list (§10; corrected after the final review, I5).
 - R-M8-4, no PR or issue to `is-unicode-supported` or `git-for-windows`; suggested upstream texts only in `next-version.md` (AGENTS.md).
 - R-M8-5, split drag with full parity: within a tab, onto another tab, into another window, out to a new window; the process moves with the pane (§7.7).
 - R-M8-6, keybindings: the GTK 1.4 defaults (`ctrl+shift+page_up/down` = `move_tab`, `ctrl+shift+arrow_up/down` = `jump_to_prompt`) are in the tree since win.1; the merge changes no binding; `jump_to_prompt` stays non-performable (upstream core).
