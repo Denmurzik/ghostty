@@ -337,13 +337,11 @@ pub const StreamHandler = struct {
                     // request before it passed it on. Whether the window
                     // follows is the apprt's call (config, guards); when it
                     // does not, the console must go back to our grid. The
-                    // re-sync is queued first: a window resize that follows
-                    // posts its own size later, and resizes coalesce to the
-                    // last one.
+                    // termio thread does that (skipping it while a newer
+                    // resize waits to be applied), see `Termio.resyncPtySize`.
                     const grid = self.size.grid();
                     if (ResizeEchoes.needsResync(grid.columns, grid.rows, value.columns, value.rows)) {
-                        self.resize_echoes.rearm();
-                        self.messageWriter(.{ .resize = self.size.* });
+                        self.messageWriter(.resync_pty_size);
                     }
                 }
                 self.surfaceMessageWriter(.{ .resize_window = value });

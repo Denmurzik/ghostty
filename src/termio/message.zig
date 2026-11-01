@@ -48,6 +48,12 @@ pub const Message = union(enum) {
     /// Resize the window.
     resize: renderer.Size,
 
+    /// Windows only: set the pseudo console back to the size the terminal
+    /// has now (an application's `CSI 8 t` made the console resize its own
+    /// buffer). The termio thread skips it while a `resize` is still waiting
+    /// out its coalesce window, whose size is the newer one.
+    resync_pty_size,
+
     /// Request a size report is sent to the PTY ([in-band
     /// size report, mode 2048](https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83) and
     /// [XTWINOPS](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h4-Functions-using-CSI-_-ordered-by-the-final-character-lparen-s-rparen:CSI-Ps;Ps;Ps-t.1EB0)).

@@ -324,6 +324,7 @@ fn drainMailbox(
             },
             .inspector => |v| self.flags.has_inspector = v,
             .resize => |v| self.handleResize(cb, v),
+            .resync_pty_size => self.handleResyncPtySize(cb),
             .size_report => |v| try io.sizeReport(data, v),
             .clear_screen => |v| try io.clearScreen(data, v.history),
             .scroll_viewport => |v| io.scrollViewport(v),
@@ -403,6 +404,26 @@ fn handleResize(self: *Thread, cb: *CallbackData, resize: renderer.Size) void {
         cb,
         coalesceCallback,
     );
+}
+
+/// Whether a pty size re-sync may run now: not while a real resize waits in
+/// the coalesce window, which carries a newer size than the one applied.
+fn resyncWanted(resize_pending: bool) bool {
+    return !resize_pending;
+}
+
+/// Windows only (the message is never sent elsewhere).
+fn handleResyncPtySize(self: *Thread, cb: *CallbackData) void {
+    if (comptime builtin.os.tag != .windows) return;
+    if (!resyncWanted(self.coalesce_data.resize != null)) return;
+    cb.io.resyncPtySize(&cb.data) catch |err| {
+        log.warn("error during pty size re-sync err={}", .{err});
+    };
+}
+
+test "windows termio thread: a pty re-sync waits for a pending resize" {
+    try std.testing.expect(resyncWanted(false));
+    try std.testing.expect(!resyncWanted(true));
 }
 
 fn syncResetCallback(

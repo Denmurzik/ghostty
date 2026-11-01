@@ -523,6 +523,27 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
 }
 
 /// Resize the terminal.
+/// Windows: set the pseudo console to the size applied now, grid and pixels
+/// as `resize` sent them last. The console resizes its own buffer on an
+/// application's `CSI 8 t`; this snaps it back. The echo filter is re-armed,
+/// the console echoes the size with a `CSI 8 t` of its own.
+pub fn resyncPtySize(self: *Termio, td: *ThreadData) !void {
+    _ = td;
+    if (comptime builtin.os.tag == .windows) {
+        const grid_size = self.size.grid();
+
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        const handler = &self.terminal_stream.handler;
+        handler.resize_echoes.rearm();
+        try self.backend.resize(grid_size, self.size.terminal());
+        if (handler.resize_echoes.record(grid_size.columns, grid_size.rows)) {
+            log.debug("CSI 8 t echo expected for pty re-sync cols={} rows={}", .{ grid_size.columns, grid_size.rows });
+        }
+    }
+}
+
 pub fn resize(
     self: *Termio,
     td: *ThreadData,
