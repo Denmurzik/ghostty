@@ -557,6 +557,19 @@ pub fn tabShown(tab: *Tab, shown: bool) void {
     }
 }
 
+/// The resize overlay is part of its window (`Window.overlay`), not of a
+/// surface: it stays with that window, whichever pane it last named.
+fn isWindowLevel(p: *const Popup, window: *const Window) bool {
+    return p == &window.overlay.popup;
+}
+
+/// A window-level popup whose pane moved away: hidden and no longer naming
+/// the pane (it would dangle once the pane closes in its new window).
+fn releaseWindowLevel(p: *Popup) void {
+    p.hide();
+    p.surface = null;
+}
+
 pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     var i: usize = 0;
     while (i < from.overlays.popups.items.len) {
@@ -566,6 +579,11 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
             continue;
         };
         if (s.tab != tab) {
+            i += 1;
+            continue;
+        }
+        if (isWindowLevel(p, from)) {
+            releaseWindowLevel(p);
             i += 1;
             continue;
         }
@@ -593,6 +611,11 @@ fn reownSurface(s: *Surface, from: *Window, to: *Window, tab_hidden: bool) void 
     while (i < from.overlays.popups.items.len) {
         const p = from.overlays.popups.items[i];
         if (p.surface != s) {
+            i += 1;
+            continue;
+        }
+        if (isWindowLevel(p, from)) {
+            if (from != to) releaseWindowLevel(p);
             i += 1;
             continue;
         }
@@ -874,12 +897,25 @@ test "win32 overlay: popups of a moved pane follow it to its new window" {
     try theirs.show();
     defer theirs.destroy();
 
+    // The resize overlay of the source window names the moved pane (it
+    // reported the pane's size) but belongs to that window.
+    a.window.overlay.popup = a.popup(.label);
+    a.window.overlay.popup.surface = moved;
+    try a.window.overlay.popup.show();
+    defer a.window.overlay.popup.destroy();
+    try std.testing.expectEqual(@as(usize, 3), a.window.overlays.popups.items.len);
+
     reownSurface(moved, &a.window, &b.window, true);
+    try std.testing.expect(a.window.overlay.popup.window == &a.window);
+    try std.testing.expect(a.window.overlay.popup.surface == null);
+    try std.testing.expect(!a.window.overlay.popup.visible);
+    try std.testing.expectEqual(@as(?HWND, a.hwnd), user32.GetWindow(a.window.overlay.popup.hwnd.?, user32.GW_OWNER));
     try std.testing.expectEqual(@as(?HWND, b.hwnd), user32.GetWindow(mine.hwnd.?, user32.GW_OWNER));
     try std.testing.expectEqual(@as(?HWND, a.hwnd), user32.GetWindow(theirs.hwnd.?, user32.GW_OWNER));
     try std.testing.expect(mine.tab_hidden);
     try std.testing.expect(!theirs.tab_hidden);
-    try std.testing.expectEqual(@as(usize, 1), a.window.overlays.popups.items.len);
+    // The other pane's popup and the window-level one stay in `a`.
+    try std.testing.expectEqual(@as(usize, 2), a.window.overlays.popups.items.len);
     try std.testing.expectEqual(@as(usize, 1), b.window.overlays.popups.items.len);
     try std.testing.expect(mine.window == &b.window);
 
