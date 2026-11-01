@@ -130,8 +130,9 @@ pub fn init(
     };
     // The waitable is a counting semaphore that starts at 1. Nothing was
     // presented yet, so no wait ever matches that signal; left in place it
-    // would allow one more frame in flight for the life of the chain
-    // (Microsoft's sample waits once before the first frame as well).
+    // would allow one more frame in flight than `Pacer.max_in_flight` for the
+    // life of the chain (Microsoft's sample waits once before the first frame
+    // as well). The two frames in flight are the pacer's own budget.
     if (waitable) |h| _ = kernel32.WaitForSingleObjectEx(h, 0, 0);
 
     log.info("d3d11 swap chain created mode={s} size={d}x{d} tearing={}", .{
@@ -165,9 +166,10 @@ pub fn deinit(self: *Self) void {
     self.* = undefined;
 }
 
-/// Waits until the swap chain can take another frame, for at most
-/// `timeout_ms` (0 polls). Does nothing unless a present is waiting to be
-/// matched, and never blocks after the chain sat idle (`Pacer.idle_ns`).
+/// Waits until the swap chain can take another frame (fewer than
+/// `Pacer.max_in_flight` presents in flight), for at most
+/// `timeout_ms` (0 polls). Does nothing unless the limit is reached, and
+/// never blocks after the chain sat idle (`Pacer.idle_ns`).
 /// Returns whether a slot is free. A timed out wait leaves the present
 /// pending (the next wait still has to consume it), so the waitable's count
 /// does not drift. Does not touch the context: the caller may have released
@@ -294,6 +296,15 @@ pub const Pacer = struct {
         }
     };
 
+    /// Frames the pacer lets be in flight (presented, not yet retired): the
+    /// back buffer count, as before the pacer counted presents. The budget is
+    /// kept in `pending` (a fresh or idle chain owes nothing, so its first
+    /// `max_in_flight - 1` frames never wait), not in a spare signal of the
+    /// waitable: the idle resync takes every signal, so a spare one would be
+    /// gone exactly when the first frame after the idle (the key echo) needs
+    /// it, and a spare nobody counts is what left frames queued behind it.
+    pub const max_in_flight: u32 = buffer_count;
+
     /// A chain that presented nothing for this long has no frame queued;
     /// the vblank is 16.7 ms at 60 Hz and the compositor may add frames.
     pub const idle_ns: u64 = 50 * ns_per_ms;
@@ -331,25 +342,27 @@ pub const Pacer = struct {
             now -| self.last_present_ns.load(.acquire) >= idle_ns;
     }
 
-    /// `waiter.wait(timeout_ms)` returns a `WaitResult`. An idle chain is
-    /// only polled: its frame is long gone, blocking would be for nothing.
-    ///
-    /// With several presents pending, the signals that are there are taken
-    /// first (polls), so a backlog after a stall converges to one frame in
-    /// flight within this call; only the last one is waited for.
+    /// `waiter.wait(timeout_ms)` returns a `WaitResult`. Lets a frame through
+    /// while fewer than `max_in_flight` presents are pending, so the key echo
+    /// behind a keypress repaint does not sit behind a vblank. With more
+    /// pending, takes one signal per excess present (each wait returns at
+    /// once when its signal is there, so a backlog after a stall converges
+    /// within this call). An idle chain is only polled: its frames are long
+    /// gone, blocking would be for nothing.
     pub fn wait(self: *Pacer, now: u64, timeout_ms: u32, waiter: anytype) bool {
-        if (self.pending.load(.monotonic) == 0) return true;
-        while (self.pending.load(.monotonic) > 1) {
-            const polled = waiter.wait(0);
-            self.book(polled);
-            if (polled != .signaled) break;
+        while (self.needsSlot()) {
+            const effective = if (self.isIdle(now)) 0 else timeout_ms;
+            const result = waiter.wait(effective);
+            if (result == .timeout and effective > 0) self.noteTimeout();
+            self.book(result);
+            if (result == .timeout) return false;
         }
-        if (self.pending.load(.monotonic) == 0) return true;
-        const effective = if (self.isIdle(now)) 0 else timeout_ms;
-        const result = waiter.wait(effective);
-        if (result == .timeout and effective > 0) self.noteTimeout();
-        self.book(result);
-        return result != .timeout;
+        return true;
+    }
+
+    /// Whether the next frame has to wait for a present to retire.
+    pub fn needsSlot(self: *const Pacer) bool {
+        return self.pending.load(.monotonic) >= max_in_flight;
     }
 
     /// The chain is idle (`isIdle`): every frame it presented is retired, so
@@ -614,11 +627,16 @@ test "d3d11 swapchain: waitForSlot only waits after a present" {
     try testing.expect(chain.waitForSlot(5000));
     try testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 1000);
 
-    // A present arms the wait, and the wait disarms it.
+    // One present arms the pacer, but a second frame may go out behind it.
+    chain.pacer.presented(nowNs());
+    try testing.expect(chain.waitForSlot(0));
+    try testing.expectEqual(@as(u32, 1), chain.pacer.pending.load(.monotonic));
+
+    // With two in flight the wait takes a signal; only a consumed one
+    // lowers the count, a timeout leaves it pending.
     chain.pacer.presented(nowNs());
     const acquired = chain.waitForSlot(0);
-    // Only a consumed slot disarms the wait; a timeout leaves it pending.
-    try testing.expectEqual(@as(u32, if (acquired) 0 else 1), chain.pacer.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, if (acquired) 1 else 2), chain.pacer.pending.load(.monotonic));
 }
 
 test "d3d11 swapchain: presents without waits leave no surplus signal" {
@@ -649,17 +667,22 @@ test "d3d11 swapchain: presents without waits leave no surplus signal" {
     const io = @import("../../global.zig").io();
     const start = std.Io.Timestamp.now(io, .awake);
     var rounds: usize = 0;
-    while (chain.waitArmed() and start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 5000) : (rounds += 1) {
+    while (chain.pacer.needsSlot() and start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 5000) : (rounds += 1) {
         _ = chain.waitForSlot(100);
-        if (chain.waitArmed()) std.Thread.yield() catch {};
+        if (chain.pacer.needsSlot()) std.Thread.yield() catch {};
     }
-    try testing.expect(!chain.waitArmed());
+    // One frame may stay in flight; the last frame's signal then arrives
+    // and is the only one the waitable holds.
+    try testing.expect(!chain.pacer.needsSlot());
+    try testing.expectEqual(@as(u32, 1), chain.pacer.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, k32.WAIT_OBJECT_0), k32.WaitForSingleObjectEx(handle, 5000, 0));
     try testing.expectEqual(@as(u32, k32.WAIT_TIMEOUT), k32.WaitForSingleObjectEx(handle, 0, 0));
 
-    // A resync of a chain that owes nothing finds nothing either.
+    // A resync finds the one owed present and no surplus signal.
     const found = chain.resyncIdle();
-    try testing.expectEqual(@as(u32, 0), found.pending);
+    try testing.expectEqual(@as(u32, 1), found.pending);
     try testing.expectEqual(@as(u32, 0), found.drained);
+    try testing.expectEqual(@as(u32, 0), found.surplus());
 }
 
 test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
@@ -817,33 +840,87 @@ const FakeRef = struct {
     }
 };
 
+/// The waitable as a counting semaphore next to the frames behind it: a
+/// present puts a frame in flight, the compositor retires the oldest one at
+/// a vblank and that adds a signal, a wait takes a signal.
+const SemModel = struct {
+    signals: u32 = 0,
+    in_flight: u32 = 0,
+
+    pub fn wait(self: *SemModel, _: u32) Pacer.WaitResult {
+        if (self.signals == 0) return .timeout;
+        self.signals -= 1;
+        return .signaled;
+    }
+
+    fn present(self: *SemModel, p: *Pacer, now: u64) void {
+        p.presented(now);
+        self.in_flight += 1;
+    }
+
+    /// A vblank: the oldest frame leaves the queue.
+    fn vblank(self: *SemModel) void {
+        if (self.in_flight == 0) return;
+        self.in_flight -= 1;
+        self.signals += 1;
+    }
+};
+
+const SemRef = struct {
+    s: *SemModel,
+
+    pub fn wait(self: SemRef, timeout_ms: u32) Pacer.WaitResult {
+        return self.s.wait(timeout_ms);
+    }
+};
+
 test "d3d11 swapchain: pending presents are counted, not a bool" {
     var p: Pacer = .{};
     p.presented(0);
     p.presented(1);
     try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
 
-    // Two pending, two signals there: one wait takes both.
-    var w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .timeout, .timeout, .signaled } };
+    // Two in flight is the limit: the wait takes one signal and lets the
+    // frame through behind the other.
+    var w: FakeWaiter = .{ .results = &.{ .signaled, .timeout, .timeout, .signaled } };
     try testing.expect(p.wait(2, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 100), w.timeouts[0]);
 
-    // Timed out waits keep the present pending and never underflow.
+    // Timed out waits keep the presents pending and never underflow.
     p.presented(3);
     try testing.expect(!p.wait(4, 100, FakeRef{ .inner = &w }));
     try testing.expect(!p.wait(5, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
     try testing.expect(p.wait(6, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
 
-    // Nothing pending: the waiter is not even asked.
+    // Below the limit: the waiter is not even asked.
     try testing.expect(p.wait(7, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(usize, 5), w.calls);
+    try testing.expectEqual(@as(usize, 4), w.calls);
 
     // Every present is counted, past the back buffers too.
     for (0..10) |i| p.presented(i);
-    try testing.expectEqual(@as(u32, 10), p.pending.load(.monotonic));
-    try testing.expectEqual(@as(u32, 8), p.capped_presents.load(.monotonic));
+    try testing.expectEqual(@as(u32, 11), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 9), p.capped_presents.load(.monotonic));
+}
+
+test "d3d11 pacer: a fresh chain lets the first two frames through" {
+    var p: Pacer = .{};
+    var none: FakeWaiter = .{ .results = &.{} };
+
+    // Frame 1 and frame 2 (a keypress repaint and the echo) never wait.
+    try testing.expect(p.wait(0, 100, FakeRef{ .inner = &none }));
+    p.presented(0);
+    try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &none }));
+    p.presented(ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), none.calls);
+
+    // Frame 3 waits for the first frame to retire.
+    var third: FakeWaiter = .{ .results = &.{.timeout} };
+    try testing.expect(!p.wait(2 * ns_per_ms, 100, FakeRef{ .inner = &third }));
+    try testing.expectEqual(@as(u32, 100), third.timeouts[0]);
+    try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
 }
 
 test "d3d11 pacer: presents beyond the back buffer count are all matched" {
@@ -851,45 +928,64 @@ test "d3d11 pacer: presents beyond the back buffer count are all matched" {
     for (0..5) |i| p.presented(i);
     try testing.expectEqual(@as(u32, 5), p.pending.load(.monotonic));
 
-    // Five signals match the five presents; nothing is left to wait for.
-    var w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .signaled, .signaled, .signaled } };
+    // Four signals match four of the five presents; one frame stays in
+    // flight, which is allowed.
+    var w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .signaled, .signaled } };
     try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
-    try testing.expectEqual(@as(usize, 5), w.calls);
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(usize, 4), w.calls);
     try testing.expect(p.wait(2 * ns_per_ms, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(usize, 5), w.calls);
+    try testing.expectEqual(@as(usize, 4), w.calls);
 }
 
 test "d3d11 pacer: backlog drains in one wait" {
     var p: Pacer = .{};
     for (0..4) |i| p.presented(i);
 
-    // The signals are all there: three polls take them without blocking and
-    // the last wait finds its signal at once.
-    var w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .signaled, .signaled } };
+    // The signals are all there: each wait finds its signal at once.
+    var w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .signaled } };
     try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
-    try testing.expectEqual(@as(usize, 4), w.calls);
-    try testing.expectEqual(@as(u32, 0), w.timeouts[0]);
-    try testing.expectEqual(@as(u32, 0), w.timeouts[1]);
-    try testing.expectEqual(@as(u32, 0), w.timeouts[2]);
-    try testing.expectEqual(@as(u32, 100), w.timeouts[3]);
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(usize, 3), w.calls);
 }
 
-test "d3d11 pacer: a backlog whose signals are not there yet still blocks once" {
+test "d3d11 pacer: a backlog whose signals are not there yet waits for each" {
     var p: Pacer = .{};
     for (0..3) |i| p.presented(i);
 
-    // The first poll finds nothing: the catch-up stops and the one blocking
-    // wait takes the signal that arrives; the rest stays owed.
-    var w: FakeWaiter = .{ .results = &.{ .timeout, .signaled } };
-    try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
+    // The first signal arrives, the second does not within the timeout: the
+    // frame is not let through behind more than the limit, the rest stays owed.
+    var w: FakeWaiter = .{ .results = &.{ .signaled, .timeout } };
+    try testing.expect(!p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
     try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
-    try testing.expectEqual(@as(u32, 0), w.timeouts[0]);
+    try testing.expectEqual(@as(u32, 100), w.timeouts[0]);
     try testing.expectEqual(@as(u32, 100), w.timeouts[1]);
 }
 
-test "d3d11 pacer: idle resync drops stale signals" {
+test "d3d11 pacer: steady presents keep at most two in flight and no surplus" {
+    var p: Pacer = .{};
+    var sem: SemModel = .{};
+    var t: u64 = 0;
+    // A chain that never goes idle: a frame every vblank, and some extra
+    // frames in the same refresh (a keypress repaint and an echo).
+    for (0..300) |i| {
+        t += ns_per_ms;
+        const frames: usize = if (i % 5 == 0) 3 else 1;
+        for (0..frames) |_| {
+            // A wait that times out is a frame waiting for its vblank.
+            while (!p.wait(t, 100, SemRef{ .s = &sem })) sem.vblank();
+            sem.present(&p, t);
+            try testing.expect(sem.in_flight <= Pacer.max_in_flight);
+            try testing.expect(p.pending.load(.monotonic) <= Pacer.max_in_flight);
+            // Every present is owed one-to-one: nothing is stray.
+            try testing.expectEqual(p.pending.load(.monotonic), sem.signals + sem.in_flight);
+        }
+        sem.vblank();
+        try testing.expect(!p.isIdle(t));
+    }
+}
+
+test "d3d11 pacer: idle resync drops stale signals and restores the two frame budget" {
     var p: Pacer = .{};
     p.presented(1_000);
 
@@ -905,16 +1001,45 @@ test "d3d11 pacer: idle resync drops stale signals" {
     try testing.expect(!p.isIdle(1_000 + Pacer.idle_ns));
     for (idle_w.timeouts[0..5]) |t| try testing.expectEqual(@as(u32, 0), t);
 
-    // The next frame's wait blocks for its own signal (the fake times out).
+    // The next two frames go through; the third blocks for its signal (the
+    // fake times out).
+    var none: FakeWaiter = .{ .results = &.{} };
+    try testing.expect(p.wait(2_000, 100, FakeRef{ .inner = &none }));
     p.presented(2_000);
+    try testing.expect(p.wait(2_000 + ns_per_ms, 100, FakeRef{ .inner = &none }));
+    p.presented(2_000 + ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), none.calls);
     var next: FakeWaiter = .{ .results = &.{.timeout} };
-    try testing.expect(!p.wait(2_000 + ns_per_ms, 100, FakeRef{ .inner = &next }));
+    try testing.expect(!p.wait(2_000 + 2 * ns_per_ms, 100, FakeRef{ .inner = &next }));
     try testing.expectEqual(@as(u32, 100), next.timeouts[0]);
-    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
 }
 
-test "d3d11 pacer: timeout keeps the present owed and is counted" {
+test "d3d11 pacer: idle and burst cycles never grow a surplus" {
     var p: Pacer = .{};
+    var sem: SemModel = .{};
+    var t: u64 = 0;
+    for (0..50) |_| {
+        // A burst: repaint, echo and a third frame.
+        for (0..3) |_| {
+            t += ns_per_ms;
+            while (!p.wait(t, 100, SemRef{ .s = &sem })) sem.vblank();
+            sem.present(&p, t);
+        }
+        // Idle: every frame retired, the signals are all there.
+        t += 100 * ns_per_ms;
+        while (sem.in_flight > 0) sem.vblank();
+        try testing.expect(p.isIdle(t));
+        const found = p.resync(SemRef{ .s = &sem });
+        try testing.expectEqual(@as(u32, 0), found.surplus());
+        try testing.expectEqual(@as(u32, 0), sem.signals);
+        try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    }
+}
+
+test "d3d11 pacer: timeout keeps the presents owed and is counted" {
+    var p: Pacer = .{};
+    p.presented(0);
     p.presented(0);
     var w: FakeWaiter = .{ .results = &.{ .timeout, .timeout, .signaled } };
 
@@ -923,13 +1048,14 @@ test "d3d11 pacer: timeout keeps the present owed and is counted" {
     try testing.expectEqual(@as(u32, 1), p.wait_timeouts.load(.monotonic));
     try testing.expect(!p.wait(2 * ns_per_ms, 0, FakeRef{ .inner = &w }));
     try testing.expectEqual(@as(u32, 1), p.wait_timeouts.load(.monotonic));
-    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), p.pending.load(.monotonic));
     try testing.expect(p.wait(3 * ns_per_ms, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
 }
 
 test "d3d11 frame slot: no wait after an idle interval" {
     var p: Pacer = .{};
+    p.presented(1_000);
     p.presented(1_000);
 
     // Just presented: the wait may block for its whole timeout.
@@ -945,11 +1071,12 @@ test "d3d11 frame slot: no wait after an idle interval" {
     try testing.expectEqual(@as(u32, 0), idle_w.timeouts[0]);
     try testing.expect(p.wait(later, 100, FakeRef{ .inner = &idle_w }));
     try testing.expectEqual(@as(u32, 0), idle_w.timeouts[1]);
-    try testing.expect(!p.isIdle(later));
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
 }
 
 test "d3d11 frame slot: a failing waitable gives up on pacing" {
     var p: Pacer = .{};
+    p.presented(0);
     p.presented(0);
     var w: FakeWaiter = .{ .results = &.{.failed} };
     try testing.expect(p.wait(0, 100, FakeRef{ .inner = &w }));
@@ -1004,13 +1131,14 @@ test "d3d11 frame slot: concurrent waits and presents keep pending in bounds" {
 test "d3d11 frame slot: a second wait after a consumed slot does not block" {
     var p: Pacer = .{};
     p.presented(0);
+    p.presented(0);
 
-    // The first wait takes the slot; the second finds nothing pending and
-    // never reaches the waitable.
+    // The first wait takes the slot; the second finds one frame in flight,
+    // which is allowed, and never reaches the waitable.
     var w: FakeWaiter = .{ .results = &.{.signaled} };
     try testing.expect(p.wait(ns_per_ms, 100, FakeRef{ .inner = &w }));
     try testing.expect(p.wait(2 * ns_per_ms, 100, FakeRef{ .inner = &w }));
-    try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), p.pending.load(.monotonic));
     try testing.expectEqual(@as(usize, 1), w.calls);
 }
 

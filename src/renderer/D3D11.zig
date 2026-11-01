@@ -704,7 +704,8 @@ pub fn drawDecor(self: *D3D11, target: *const Target) void {
     self.decor_pass.?.draw(target, word);
 }
 
-/// Blocks until the swap chain has a free frame slot. Nothing to wait for
+/// Blocks until the swap chain has a free frame slot (fewer than
+/// `Pacer.max_in_flight` frames in flight). Nothing to wait for
 /// until a swap chain exists and a frame was presented.
 ///
 /// Render thread, called by the renderer before it takes its draw mutex
@@ -740,21 +741,29 @@ pub fn waitFrameSlot(self: *D3D11) void {
     }
     if (sc.waitForSlot(0)) return;
 
-    const w = sc.beginUnlockedWait() orelse return;
-    const timed = latency.enabled() or self.pacing_log;
-    const start = if (timed) nowNs() else 0;
-    const result = unlocked: {
-        self.device.unlockContext();
-        defer self.device.lockContext();
-        break :unlocked w.wait(frame_slot_wait_ms);
-    };
-    if (self.swap_chain) |*current| current.finishUnlockedWait(w, result);
-    if (timed) {
-        const waited = nowNs() -| start;
-        // `waitFrameSlot` runs more than once per frame.
-        self.frame_slot_ns += waited;
-        self.frame_slot_timed_out = self.frame_slot_timed_out or result == .timeout;
-        latency.markSlotWait(waited);
+    // A backlog (sync draws on top of the frames in flight) takes more than
+    // one signal; the chain may be dropped while the lock is released.
+    var round: u32 = 0;
+    while (round < SwapChain.Pacer.max_in_flight) : (round += 1) {
+        const cur = if (self.swap_chain) |*c| c else return;
+        if (round > 0 and cur.waitForSlot(0)) return;
+        const w = cur.beginUnlockedWait() orelse return;
+        const timed = latency.enabled() or self.pacing_log;
+        const start = if (timed) nowNs() else 0;
+        const result = unlocked: {
+            self.device.unlockContext();
+            defer self.device.lockContext();
+            break :unlocked w.wait(frame_slot_wait_ms);
+        };
+        if (self.swap_chain) |*current| current.finishUnlockedWait(w, result);
+        if (timed) {
+            const waited = nowNs() -| start;
+            // `waitFrameSlot` runs more than once per frame.
+            self.frame_slot_ns += waited;
+            self.frame_slot_timed_out = self.frame_slot_timed_out or result == .timeout;
+            latency.markSlotWait(waited);
+        }
+        if (result != .signaled) return;
     }
 }
 
@@ -1047,9 +1056,9 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
     api.drawFrameEnd();
 
     const sc = &api.swap_chain.?;
-    // A hidden window may be reported occluded, which queues nothing.
+    // Model a full queue of frames either way.
     // Model a queued frame either way.
-    sc.pacer.pending.store(1, .monotonic);
+    sc.pacer.pending.store(SwapChain.Pacer.max_in_flight, .monotonic);
 
     // Draws that return before `beginFrame` (zero size, nothing changed)
     // only take and release the lock: they must not wait or touch the slot.
@@ -1059,7 +1068,7 @@ test "d3d11 pacing: no-op draws do not consume the latency slot" {
         api.drawFrameEnd();
     }
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 20);
-    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, SwapChain.Pacer.max_in_flight), sc.pacer.pending.load(.monotonic));
 
     // The render thread takes the slot before its next draw (waits at most
     // `frame_slot_wait_ms`) and leaves the lock free for it.
@@ -1085,12 +1094,12 @@ test "d3d11 pacing: sync draws never block on the slot" {
     const io = @import("../global.zig").io();
     const never = try neverSignaled(sc);
     defer restoreWaitable(sc, never);
-    sc.pacer.presented(nowNs());
+    for (0..SwapChain.Pacer.max_in_flight) |_| sc.pacer.presented(nowNs());
 
     const start = std.Io.Timestamp.now(io, .awake);
     api.pollFrameSlot();
     try std.testing.expect(start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < frame_slot_wait_ms);
-    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, SwapChain.Pacer.max_in_flight), sc.pacer.pending.load(.monotonic));
 }
 
 test "d3d11 frame slot: no lock is held during the wait" {
@@ -1110,7 +1119,7 @@ test "d3d11 frame slot: no lock is held during the wait" {
     };
     const never = try neverSignaled(sc);
     defer restoreWaitable(sc, never);
-    sc.pacer.presented(nowNs());
+    for (0..SwapChain.Pacer.max_in_flight) |_| sc.pacer.presented(nowNs());
 
     // The renderer calls `waitFrameSlot` before its draw mutex, so a sync
     // draw (here: the context lock it takes) gets through while the render
@@ -1134,7 +1143,7 @@ test "d3d11 frame slot: no lock is held during the wait" {
     thread.join();
     try std.testing.expect(drew_during_wait);
     // The wait timed out: the present is still pending.
-    try std.testing.expectEqual(@as(u32, 1), sc.pacer.pending.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, SwapChain.Pacer.max_in_flight), sc.pacer.pending.load(.monotonic));
 }
 
 /// Replaces the frame latency waitable of `sc` with an event that is never
@@ -1595,11 +1604,13 @@ test "d3d11 swapchain: waitable pacing in composition mode" {
     try std.testing.expect(sc.waitable != null);
     try std.testing.expect(!sc.waitArmed());
 
-    // As in hwnd mode: a present arms the wait, a wait consumes it.
+    // As in hwnd mode: presents arm the wait, a wait takes the signals of the
+    // frames beyond the in-flight limit.
+    try sc.present(true);
     try sc.present(true);
     try std.testing.expect(sc.waitArmed());
     try std.testing.expect(sc.waitForSlot(frame_slot_wait_ms));
-    try std.testing.expect(!sc.waitArmed());
+    try std.testing.expect(!sc.pacer.needsSlot());
 }
 
 test "d3d11 api: blending selects the target and texture formats" {
