@@ -74,9 +74,15 @@ pub fn reset_window_size(app: *App, target: apprt.Target, value: apprt.Action.Va
 }
 
 pub fn resize_window(app: *App, target: apprt.Target, value: apprt.Action.Value(.resize_window)) !bool {
-    const window = app.windowForTarget(target) orelse return false;
+    // Only a lone surface in a plain window: see `placement.resizeAllowed`.
+    const core = switch (target) {
+        .app => return false,
+        .surface => |s| s,
+    };
+    const surface = app.surfaceFor(core) orelse return false;
+    const window = surface.window;
     const size = placement.pointsToPixels(window, value.width, value.height);
-    return placement.resizeClient(window, size.w, size.h);
+    return placement.resizeSurface(window, surface, size.w, size.h);
 }
 
 pub fn prompt_title(app: *App, target: apprt.Target, value: apprt.Action.Value(.prompt_title)) !bool {

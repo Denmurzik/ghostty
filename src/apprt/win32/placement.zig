@@ -9,6 +9,7 @@ const apprt = @import("../../apprt.zig");
 const Window = @import("Window.zig");
 const frame = @import("frame.zig");
 const geom = @import("geom.zig");
+const Surface = @import("Surface.zig");
 
 const user32 = win32.user32;
 
@@ -152,6 +153,87 @@ pub fn resizeClient(window: *Window, width: u32, height: u32) bool {
     return setContentSize(window, target);
 }
 
+/// What decides whether a `resize_window` request (`CSI 8 t`) may move the
+/// window edges, like macOS (`TerminalController.resizeWindow`) and GTK
+/// (`Window.resizeSurface`).
+pub const ResizeContext = struct {
+    quick: bool,
+    tabs: usize,
+    leaves: usize,
+    inspector: bool,
+    maximized: bool,
+    fullscreen: bool,
+    minimized: bool,
+    /// Snapped / tiled by the shell (`IsWindowArranged`).
+    arranged: bool,
+};
+
+/// Only a lone surface in a single-tab, plain window may be resized by the
+/// program running in it.
+pub fn resizeAllowed(c: ResizeContext) bool {
+    if (c.quick or c.inspector) return false;
+    if (c.maximized or c.fullscreen or c.minimized or c.arranged) return false;
+    return c.tabs == 1 and c.leaves == 1;
+}
+
+/// The new window rectangle: the window size plus (requested - current)
+/// surface pixels per non-zero requested dimension, clamped to `work`, the
+/// top-left kept, then moved inside `work` if it sticks out.
+pub fn resizeByDelta(window: geom.Rect, surface: frame.Size, requested: frame.Size, work: geom.Rect) geom.Rect {
+    var w: i32 = window.w;
+    var h: i32 = window.h;
+    if (requested.w != 0) w = window.w + (requested.w - surface.w);
+    if (requested.h != 0) h = window.h + (requested.h - surface.h);
+    w = std.math.clamp(w, 1, @max(work.w, 1));
+    h = std.math.clamp(h, 1, @max(work.h, 1));
+    return .{
+        .x = std.math.clamp(window.x, work.x, @max(work.right() - w, work.x)),
+        .y = std.math.clamp(window.y, work.y, @max(work.bottom() - h, work.y)),
+        .w = w,
+        .h = h,
+    };
+}
+
+/// `resize_window` for the surface `s`: `width` x `height` physical pixels
+/// of that surface (0 keeps a dimension). False when the window is not a
+/// plain single-surface one.
+pub fn resizeSurface(window: *Window, s: *const Surface, width: u32, height: u32) bool {
+    const hwnd = window.hwnd;
+    const ctx: ResizeContext = .{
+        .quick = window.kind == .quick,
+        .tabs = window.tabs.items.len,
+        .leaves = if (s.tab.tree.isSplit()) 2 else 1,
+        .inspector = s.inspector != null,
+        .maximized = user32.IsZoomed(hwnd) != 0,
+        .fullscreen = window.placement.fullscreen,
+        .minimized = user32.IsIconic(hwnd) != 0,
+        .arranged = user32.IsWindowArranged(hwnd),
+    };
+    if (!resizeAllowed(ctx)) return false;
+
+    var wrc: win32.foundation.RECT = undefined;
+    if (user32.GetWindowRect(hwnd, &wrc) == 0) return false;
+    var crc: win32.foundation.RECT = undefined;
+    if (user32.GetClientRect(s.hwnd, &crc) == 0) return false;
+    const work = workRect(hwnd) orelse return false;
+
+    const rect = resizeByDelta(
+        geom.Rect.fromRECT(wrc),
+        .{ .w = crc.right - crc.left, .h = crc.bottom - crc.top },
+        .{ .w = Window.clampPixels(width), .h = Window.clampPixels(height) },
+        work,
+    );
+    return user32.SetWindowPos(
+        hwnd,
+        null,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        user32.SWP_NOZORDER | user32.SWP_NOACTIVATE,
+    ) != 0;
+}
+
 /// Config `maximize` and `fullscreen` take effect when the window is
 /// first shown.
 pub fn applyStartup(window: *Window) void {
@@ -213,6 +295,106 @@ fn monitorRect(hwnd: win32.foundation.HWND) ?geom.Rect {
     var info: user32.MONITORINFO = .{};
     if (user32.GetMonitorInfoW(monitor, &info) == 0) return null;
     return geom.Rect.fromRECT(info.rcMonitor);
+}
+
+fn workRect(hwnd: win32.foundation.HWND) ?geom.Rect {
+    const monitor = user32.MonitorFromWindow(hwnd, user32.MONITOR_DEFAULTTONEAREST) orelse return null;
+    var info: user32.MONITORINFO = .{};
+    if (user32.GetMonitorInfoW(monitor, &info) == 0) return null;
+    return geom.Rect.fromRECT(info.rcWork);
+}
+
+const plain: ResizeContext = .{
+    .quick = false,
+    .tabs = 1,
+    .leaves = 1,
+    .inspector = false,
+    .maximized = false,
+    .fullscreen = false,
+    .minimized = false,
+    .arranged = false,
+};
+
+test "win32 placement: CSI 8 t only for a lone surface in a plain window" {
+    try std.testing.expect(resizeAllowed(plain));
+    var c = plain;
+    c.quick = true;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.tabs = 2;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.tabs = 0;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.leaves = 2;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.inspector = true;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.maximized = true;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.fullscreen = true;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.minimized = true;
+    try std.testing.expect(!resizeAllowed(c));
+    c = plain;
+    c.arranged = true;
+    try std.testing.expect(!resizeAllowed(c));
+}
+
+test "win32 placement: CSI 8 t resizes by the surface delta" {
+    const work: geom.Rect = .{ .x = 0, .y = 0, .w = 1920, .h = 1040 };
+    const win: geom.Rect = .{ .x = 100, .y = 50, .w = 900, .h = 600 };
+    const surface: frame.Size = .{ .w = 870, .h = 520 };
+    // Window grows by the surface delta (the chrome stays the same).
+    try std.testing.expectEqual(
+        geom.Rect{ .x = 100, .y = 50, .w = 1030, .h = 580 },
+        resizeByDelta(win, surface, .{ .w = 1000, .h = 500 }, work),
+    );
+    // A zero dimension keeps the window's.
+    try std.testing.expectEqual(
+        geom.Rect{ .x = 100, .y = 50, .w = 900, .h = 580 },
+        resizeByDelta(win, surface, .{ .w = 0, .h = 500 }, work),
+    );
+    try std.testing.expectEqual(
+        geom.Rect{ .x = 100, .y = 50, .w = 1030, .h = 600 },
+        resizeByDelta(win, surface, .{ .w = 1000, .h = 0 }, work),
+    );
+    try std.testing.expectEqual(win, resizeByDelta(win, surface, .{ .w = 0, .h = 0 }, work));
+}
+
+test "win32 placement: CSI 8 t clamps to the work area and keeps the top-left" {
+    const work: geom.Rect = .{ .x = -1920, .y = 0, .w = 1920, .h = 1040 };
+    const win: geom.Rect = .{ .x = -1500, .y = 100, .w = 900, .h = 600 };
+    const surface: frame.Size = .{ .w = 870, .h = 520 };
+    // Too big: clamped to the work area, then moved inside.
+    try std.testing.expectEqual(
+        work,
+        resizeByDelta(win, surface, .{ .w = 5000, .h = 5000 }, work),
+    );
+    // Fits when it grows to the right: the top-left stays.
+    try std.testing.expectEqual(
+        geom.Rect{ .x = -1500, .y = 100, .w = 1200, .h = 600 },
+        resizeByDelta(win, surface, .{ .w = 1170, .h = 520 }, work),
+    );
+    // Sticks out at the right / bottom: moved back in, size kept.
+    try std.testing.expectEqual(
+        geom.Rect{ .x = -1600, .y = 100, .w = 1600, .h = 600 },
+        resizeByDelta(win, surface, .{ .w = 1570, .h = 520 }, work),
+    );
+    try std.testing.expectEqual(
+        geom.Rect{ .x = -1500, .y = 40, .w = 900, .h = 1000 },
+        resizeByDelta(win, surface, .{ .w = 870, .h = 920 }, work),
+    );
+    // Shrinks: the top-left stays.
+    try std.testing.expectEqual(
+        geom.Rect{ .x = -1500, .y = 100, .w = 500, .h = 300 },
+        resizeByDelta(win, surface, .{ .w = 470, .h = 220 }, work),
+    );
 }
 
 test "win32 placement: core points scale to physical pixels" {

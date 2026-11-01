@@ -1,6 +1,7 @@
 //! user32 bindings: windows, messages, input, keyboard layouts, clipboard
 //! and timers. Wide (W) variants only; every function is `callconv(.winapi)`
 //! and returns that can be NULL are declared as optionals.
+const std = @import("std");
 const foundation = @import("foundation.zig");
 const BOOL = foundation.BOOL;
 const HWND = foundation.HWND;
@@ -1011,3 +1012,26 @@ pub extern "user32" fn GetWindow(HWND, cmd: u32) callconv(.winapi) ?HWND;
 
 /// Sent by PrintWindow (and WM_PRINT) to draw the client area into a DC.
 pub const WM_PRINTCLIENT = 0x0318;
+
+/// `IsWindowArranged(hwnd)`: whether the window is snapped / tiled by the
+/// shell (Snap Assist). Only in user32 of Windows 11 and recent Windows 10,
+/// so it is resolved at run time; a missing entry point means "not arranged".
+pub fn IsWindowArranged(hwnd: HWND) bool {
+    const kernel32 = @import("kernel32.zig");
+    const Fn = *const fn (HWND) callconv(.winapi) BOOL;
+    const S = struct {
+        var proc: ?Fn = null;
+        var resolved = false;
+    };
+    if (!S.resolved) {
+        S.resolved = true;
+        const lib = std.unicode.utf8ToUtf16LeStringLiteral("user32.dll");
+        if (kernel32.LoadLibraryExW(lib, null, 0x00000800)) |module| {
+            if (kernel32.GetProcAddress(module, "IsWindowArranged")) |addr| {
+                S.proc = @ptrCast(@alignCast(addr));
+            }
+        }
+    }
+    const f = S.proc orelse return false;
+    return f(hwnd) != 0;
+}
