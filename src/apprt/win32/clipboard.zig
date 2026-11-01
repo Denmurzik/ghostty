@@ -323,7 +323,7 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
 
         .kitty_write => |kitty| {
             var flow: KittyFlow = .{ .surface = surface, .alloc = alloc, .p = p };
-            return runKitty(&flow, kitty.pw.len > 0);
+            return runKitty(&flow, .{}, kitty.pw.len > 0);
         },
 
         .kitty_read => |kitty| {
@@ -334,17 +334,16 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
                 surface.core_surface.denyClipboardRequest(p.req);
                 return true;
             };
-            if (entry.gathered) |g| {
-                var bytes: usize = 0;
-                for (g.contents) |c| bytes += c.data.len;
-                log.info("kitty read served {d} representations, {d} bytes in {d} ms", .{
-                    g.contents.len,
-                    bytes,
-                    started.durationTo(.now(global.io(), .awake)).toMilliseconds(),
-                });
-            }
+            const g = entry.gathered.?;
+            var bytes: usize = 0;
+            for (g.contents) |c| bytes += c.data.len;
+            log.info("kitty read gathered {d} representations, {d} bytes in {d} ms", .{
+                g.contents.len,
+                bytes,
+                started.durationTo(.now(global.io(), .awake)).toMilliseconds(),
+            });
             var flow: KittyFlow = .{ .surface = surface, .alloc = alloc, .p = entry };
-            const alive = runKitty(&flow, kitty.pw.len > 0);
+            const alive = runKitty(&flow, g, kitty.pw.len > 0);
             // Gone: `cancelAll` already freed what the entry owned.
             if (alive) entry.release(alloc);
             return alive;
@@ -603,36 +602,22 @@ fn runList(flow: anytype) void {
 const KittyFlow = struct {
     surface: *Surface,
     alloc: Allocator,
-    /// For a read, with `gathered` set.
+    /// For a read, with `gathered` set (the same data `runKitty` is given).
     p: Pending,
-
-    fn gatheredOf(self: *const KittyFlow) Gathered {
-        return self.p.gathered orelse .{};
-    }
 
     /// True when answering discloses nothing: a read that found no data (its
     /// listing is metadata, as for the `.` read that never prompts).
-    fn disclosesNothing(self: *const KittyFlow) bool {
-        return switch (self.p.req) {
-            .kitty_read => self.gatheredOf().contents.len == 0,
-            else => false,
-        };
+    fn disclosesNothing(self: *const KittyFlow, g: Gathered) bool {
+        return self.p.req == .kitty_read and g.contents.len == 0;
     }
 
-    fn complete(self: *KittyFlow, confirmed: bool, remember: bool) !void {
-        const g = self.gatheredOf();
-        try self.surface.core_surface.completeClipboardRequest(self.p.req, .{
-            .contents = g.contents,
-            .available = g.available,
-            .confirmed = confirmed,
-            .remember = remember,
-        });
+    fn complete(self: *KittyFlow, g: Gathered, confirmed: bool, remember: bool) !void {
+        try self.surface.core_surface.completeClipboardRequest(self.p.req, completeFor(g, confirmed, remember));
     }
 
     /// The prompt shows exactly what will be served: the gathered data of a
     /// read, the committed contents of a write.
-    fn confirm(self: *KittyFlow, can_remember: bool) Decision {
-        const g = self.gatheredOf();
+    fn confirm(self: *KittyFlow, g: Gathered, can_remember: bool) Decision {
         const kind: dialogs.ClipboardKind = if (self.p.req == .kitty_write) .write else .read;
         const parts = self.alloc.alloc(dialogs.ClipboardPart, partCount(self.p.req, g)) catch return .{ .answer = .no };
         defer self.alloc.free(parts);
@@ -644,6 +629,17 @@ const KittyFlow = struct {
         self.surface.core_surface.denyClipboardRequest(self.p.req);
     }
 };
+
+/// What core is given to answer with: the gathered data itself, never a copy
+/// or a second read. (A write carries its own contents in the request.)
+fn completeFor(g: Gathered, confirmed: bool, remember: bool) CoreSurface.CompleteClipboard {
+    return .{
+        .contents = g.contents,
+        .available = g.available,
+        .confirmed = confirmed,
+        .remember = remember,
+    };
+}
 
 /// How many representations the prompt of `req` lists.
 fn partCount(req: apprt.ClipboardRequest, g: Gathered) usize {
@@ -674,15 +670,17 @@ fn fillParts(req: apprt.ClipboardRequest, g: Gathered, parts: []dialogs.Clipboar
 /// consuming the request or `deny`: past core's permission check it
 /// consumes the request even when it then fails, so a failure there is only
 /// logged. `can_remember` is true for a request with a session password.
-/// False means the surface was destroyed behind the dialog.
-fn runKitty(flow: anytype, can_remember: bool) bool {
-    flow.complete(flow.disclosesNothing(), false) catch |err| switch (err) {
+/// False means the surface was destroyed behind the dialog. `g` is what a
+/// read gathered (empty for a write): the one value handed both to the
+/// prompt and to the answer.
+fn runKitty(flow: anytype, g: Gathered, can_remember: bool) bool {
+    flow.complete(g, flow.disclosesNothing(g), false) catch |err| switch (err) {
         error.UnauthorizedPaste => {
-            const decision = flow.confirm(can_remember);
+            const decision = flow.confirm(g, can_remember);
             switch (decision.answer) {
                 .gone => return false,
                 .no => flow.deny(),
-                .yes => flow.complete(true, decision.remember and can_remember) catch |e| switch (e) {
+                .yes => flow.complete(g, true, decision.remember and can_remember) catch |e| switch (e) {
                     // Cannot happen once confirmed; never leave it unanswered.
                     error.UnauthorizedPaste => flow.deny(),
                     else => log.warn("clipboard request failed err={}", .{e}),
@@ -1364,7 +1362,6 @@ const FakeKitty = struct {
     /// Whether the first unconfirmed completion asks for a prompt.
     ask: bool,
     answer: Decision = .{ .answer = .no },
-    gathered: Gathered = .{},
     /// A read that found nothing to disclose.
     empty: bool = false,
     fail_confirmed: bool = false,
@@ -1380,26 +1377,27 @@ const FakeKitty = struct {
     shown: []const terminal.clipboard.Content = &.{},
     served: []const terminal.clipboard.Content = &.{},
 
-    fn disclosesNothing(self: *const FakeKitty) bool {
+    fn disclosesNothing(self: *const FakeKitty, g: Gathered) bool {
+        _ = g;
         return self.empty;
     }
 
-    fn complete(self: *FakeKitty, confirmed: bool, remember: bool) error{ UnauthorizedPaste, OutOfMemory }!void {
+    fn complete(self: *FakeKitty, g: Gathered, confirmed: bool, remember: bool) error{ UnauthorizedPaste, OutOfMemory }!void {
         if (self.first_confirmed_arg == null) self.first_confirmed_arg = confirmed;
         if (self.ask and !confirmed) return error.UnauthorizedPaste;
         if (confirmed and self.fail_confirmed) return error.OutOfMemory;
         self.completions += 1;
         self.confirmed = confirmed;
         self.remember = remember;
-        self.served = self.gathered.contents;
+        self.served = completeFor(g, confirmed, remember).contents;
     }
 
-    fn confirm(self: *FakeKitty, can_remember: bool) Decision {
+    fn confirm(self: *FakeKitty, g: Gathered, can_remember: bool) Decision {
         self.asked += 1;
         self.asked_can_remember = can_remember;
         // Nothing may have been answered before the user did.
         std.debug.assert(self.completions == 0);
-        self.shown = self.gathered.contents;
+        self.shown = g.contents;
         return self.answer;
     }
 
@@ -1455,10 +1453,11 @@ test "win32 clipboard kitty: gather frees everything when memory runs out" {
 
 test "win32 clipboard kitty: read allowed by policy completes once" {
     const alloc = std.testing.allocator;
-    var fake: FakeKitty = .{ .ask = false, .gathered = try testGathered(alloc) };
-    defer fake.gathered.deinit(alloc);
+    var g = try testGathered(alloc);
+    defer g.deinit(alloc);
+    var fake: FakeKitty = .{ .ask = false };
 
-    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expect(runKitty(&fake, g, true));
     try std.testing.expectEqual(@as(usize, 0), fake.asked);
     try std.testing.expectEqual(@as(usize, 1), fake.completions);
     try std.testing.expectEqual(@as(usize, 0), fake.denied);
@@ -1472,22 +1471,21 @@ test "win32 clipboard kitty: read asks and serves what was shown" {
     kitty.mimes = &[_][:0]const u8{ "text/plain", "image/png" };
     kitty.list = false;
 
-    var fake: FakeKitty = .{
-        .ask = true,
-        .answer = .{ .answer = .yes, .remember = true },
-        .gathered = try gather(alloc, &kitty, FakeReader{ .reads = &reads }),
-    };
-    defer fake.gathered.deinit(alloc);
+    var g = try gather(alloc, &kitty, FakeReader{ .reads = &reads });
+    defer g.deinit(alloc);
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
     const reads_before = reads;
 
-    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expect(runKitty(&fake, g, true));
     try std.testing.expectEqual(@as(usize, 1), fake.asked);
     try std.testing.expect(fake.asked_can_remember);
     try std.testing.expectEqual(@as(usize, 1), fake.completions);
     try std.testing.expect(fake.confirmed);
     try std.testing.expect(fake.remember);
     try std.testing.expectEqual(@as(usize, 0), fake.denied);
-    // The same bytes in the prompt and in the answer, and no second read.
+    // `runKitty` handed the prompt and the answer the same data, and read
+    // nothing again.
+    try std.testing.expectEqual(g.contents.ptr, fake.shown.ptr);
     try std.testing.expectEqual(fake.shown.ptr, fake.served.ptr);
     try std.testing.expectEqualStrings("hello", fake.served[0].data);
     try std.testing.expectEqualStrings("PNGDATA", fake.served[1].data);
@@ -1495,7 +1493,7 @@ test "win32 clipboard kitty: read asks and serves what was shown" {
 
     // Without a password nothing is remembered, whatever the prompt said.
     var anon: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
-    try std.testing.expect(runKitty(&anon, false));
+    try std.testing.expect(runKitty(&anon, .{}, false));
     try std.testing.expect(!anon.asked_can_remember);
     try std.testing.expect(anon.confirmed);
     try std.testing.expect(!anon.remember);
@@ -1503,10 +1501,11 @@ test "win32 clipboard kitty: read asks and serves what was shown" {
 
 test "win32 clipboard kitty: denied read answers EPERM" {
     const alloc = std.testing.allocator;
-    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .no }, .gathered = try testGathered(alloc) };
-    defer fake.gathered.deinit(alloc);
+    var g = try testGathered(alloc);
+    defer g.deinit(alloc);
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .no } };
 
-    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expect(runKitty(&fake, g, true));
     try std.testing.expectEqual(@as(usize, 1), fake.asked);
     try std.testing.expectEqual(@as(usize, 1), fake.denied);
     try std.testing.expectEqual(@as(usize, 0), fake.completions);
@@ -1514,18 +1513,18 @@ test "win32 clipboard kitty: denied read answers EPERM" {
 
 test "win32 clipboard kitty: write asks and remembers only with a password" {
     var allowed: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
-    try std.testing.expect(runKitty(&allowed, true));
+    try std.testing.expect(runKitty(&allowed, .{}, true));
     try std.testing.expectEqual(@as(usize, 1), allowed.completions);
     try std.testing.expect(allowed.confirmed and allowed.remember);
     try std.testing.expect(allowed.asked_can_remember);
 
     var no_pw: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
-    try std.testing.expect(runKitty(&no_pw, false));
+    try std.testing.expect(runKitty(&no_pw, .{}, false));
     try std.testing.expect(no_pw.confirmed and !no_pw.remember);
     try std.testing.expect(!no_pw.asked_can_remember);
 
     var denied: FakeKitty = .{ .ask = true, .answer = .{ .answer = .no } };
-    try std.testing.expect(runKitty(&denied, true));
+    try std.testing.expect(runKitty(&denied, .{}, true));
     try std.testing.expectEqual(@as(usize, 1), denied.denied);
     try std.testing.expectEqual(@as(usize, 0), denied.completions);
 }
@@ -1547,9 +1546,36 @@ test "win32 clipboard kitty: the prompt lists the committed contents of a write"
     }
 }
 
+test "win32 clipboard kitty: the real prompt and the real answer use the gathered data" {
+    const alloc = std.testing.allocator;
+    var g = try testGathered(alloc);
+    defer g.deinit(alloc);
+
+    // What KittyFlow gives the dialog: the gathered bytes, not copies.
+    var kitty: apprt.ClipboardRequest.KittyRead = undefined;
+    const req: apprt.ClipboardRequest = .{ .kitty_read = &kitty };
+    try std.testing.expectEqual(@as(usize, 2), partCount(req, g));
+    var parts: [2]dialogs.ClipboardPart = undefined;
+    fillParts(req, g, &parts);
+    for (g.contents, parts) |c, part| {
+        try std.testing.expectEqualStrings(c.mime, part.mime);
+        try std.testing.expectEqual(c.data.ptr, part.data.ptr);
+    }
+
+    // What KittyFlow gives core: the same slices, with the answer's flags.
+    const first = completeFor(g, false, false);
+    const second = completeFor(g, true, true);
+    for ([_]CoreSurface.CompleteClipboard{ first, second }) |c| {
+        try std.testing.expectEqual(g.contents.ptr, c.contents.ptr);
+        try std.testing.expectEqual(g.available.ptr, c.available.ptr);
+    }
+    try std.testing.expect(!first.confirmed and !first.remember);
+    try std.testing.expect(second.confirmed and second.remember);
+}
+
 test "win32 clipboard kitty: a read with nothing to show does not prompt" {
     var fake: FakeKitty = .{ .ask = true, .empty = true };
-    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expect(runKitty(&fake, .{}, true));
     try std.testing.expectEqual(@as(?bool, true), fake.first_confirmed_arg);
     try std.testing.expectEqual(@as(usize, 0), fake.asked);
     try std.testing.expectEqual(@as(usize, 1), fake.completions);
@@ -1557,10 +1583,11 @@ test "win32 clipboard kitty: a read with nothing to show does not prompt" {
 
 test "win32 clipboard kitty: surface gone behind the prompt" {
     const alloc = std.testing.allocator;
-    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .gone }, .gathered = try testGathered(alloc) };
-    defer fake.gathered.deinit(alloc);
+    var g = try testGathered(alloc);
+    defer g.deinit(alloc);
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .gone } };
 
-    try std.testing.expect(!runKitty(&fake, true));
+    try std.testing.expect(!runKitty(&fake, g, true));
     // Nothing is answered or denied here: `cancelAll` did, once.
     try std.testing.expectEqual(@as(usize, 0), fake.completions);
     try std.testing.expectEqual(@as(usize, 0), fake.denied);
@@ -1568,7 +1595,7 @@ test "win32 clipboard kitty: surface gone behind the prompt" {
 
 test "win32 clipboard kitty: a failed completion is never denied after core consumed it" {
     var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes }, .fail_confirmed = true };
-    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expect(runKitty(&fake, .{}, true));
     try std.testing.expectEqual(@as(usize, 0), fake.denied);
     try std.testing.expectEqual(@as(usize, 0), fake.completions);
 }

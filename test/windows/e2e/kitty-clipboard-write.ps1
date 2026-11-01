@@ -37,7 +37,12 @@ Invoke-E2eScenario 'kitty-clipboard-write' {
             Start-E2eGhostty -ConfigText $cfg
         }
         function Finish-WriteCase($G, [string]$Name, [double]$TimeoutSec) {
-            if (-not (Wait-File (Join-Path $script:Sbx.Tmp "$Name.done") $TimeoutSec)) { throw "$Name`: the reader never finished" }
+            # Ghostty's write is this scenario's own doing: the restore mark
+            # follows it before any check, so a failing check still puts the
+            # owner's clipboard back.
+            try {
+                if (-not (Wait-File (Join-Path $script:Sbx.Tmp "$Name.done") $TimeoutSec)) { throw "$Name`: the reader never finished" }
+            } finally { Update-ClipboardMark }
         }
         function Stop-Case($G) {
             [void](Invoke-GhosttyAction -Class $G.Class -Action 'close_all_windows')

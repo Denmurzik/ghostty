@@ -12,7 +12,7 @@
 #   3. clipboard-read = deny: status=EPERM and no dialog.
 #   4. ask, a read of "." only: the listing, no dialog.
 #   5. allow, a 3840x2160 DIB read as image/png: the log line
-#      "kitty read served ... in N ms" and the time against the 300 ms budget
+#      "kitty read gathered ... in N ms" and the time against the 300 ms budget
 #      (ReleaseFast; reported only for a debug build).
 # The clipboard is saved and restored.
 . (Join-Path $PSScriptRoot '_common.ps1')
@@ -58,8 +58,8 @@ Invoke-E2eScenario 'kitty-clipboard-read' {
         $evd = Get-EvidenceDir; if (-not $evd) { $evd = $tmp }
         $shot = Join-Path $evd 'kitty-clipboard-read-dialog-shot.png'
         $red = Measure-ShotColor $dlg $shot @(255, 0, 0) 40
-        if ($red -lt 100) { throw "ask: the dialog shows $red red pixels (sampled), the 16x16 red picture is missing" }
-        Write-E2eInfo "ask: the dialog shows the red picture ($red sampled pixels)"
+        if ($red -lt 200) { throw "ask: the dialog shows $red red pixels, the 16x16 (256 pixel) red picture is missing" }
+        Write-E2eInfo "ask: the dialog shows the red picture ($red of 256 pixels)"
         Close-KittyDialog $dlg 'Allow'
         Wait-Reader 'r1' 40
         $reply = Read-KittyScreen $g
@@ -127,8 +127,8 @@ Invoke-E2eScenario 'kitty-clipboard-read' {
         $g = Start-ReadCase 'r5' 'allow' 'image/png' 'status=DONE\e\\' 60000 64
         Wait-Reader 'r5' 90
         $log = Get-Content -LiteralPath $g.Log -Raw -ErrorAction SilentlyContinue
-        $m = [regex]::Match([string]$log, 'kitty read served (\d+) representations, (\d+) bytes in (\d+) ms')
-        if (-not $m.Success) { throw "the log has no 'kitty read served' line ($($g.Log))" }
+        $m = [regex]::Match([string]$log, 'kitty read gathered (\d+) representations, (\d+) bytes in (\d+) ms')
+        if (-not $m.Success) { throw "the log has no 'kitty read gathered' line ($($g.Log))" }
         $ms = [int]$m.Groups[3].Value
         Write-E2eInfo "4K DIB served as PNG: $($m.Groups[2].Value) bytes in $ms ms (budget 300 ms on ReleaseFast)"
         if ($ms -gt 300) { Write-E2eInfo "NOTE $ms ms is over the 300 ms ReleaseFast budget (expected on a debug build)" }

