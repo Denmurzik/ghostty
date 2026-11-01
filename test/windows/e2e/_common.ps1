@@ -28,6 +28,7 @@ $script:WantLayout = $null
 
 Import-Module (Join-Path $script:WinDir 'lib\Harness.psm1') -Force
 Import-Module (Join-Path $script:WinDir 'lib\Clipboard.psm1') -Force
+Import-Module (Join-Path $script:WinDir 'lib\MouseInput.psm1') -Force
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -247,6 +248,9 @@ function Invoke-E2eScenario {
         Write-Output $line
         if ($line -like 'FAIL*') { Save-Log }
     } finally {
+        # A scenario that died between a press and its release must not leave
+        # a mouse button held on the owner's machine.
+        Reset-StuckMouseButtons
         Stop-OwnGhostty
         $parent = Split-Path -Parent $script:Sbx.Root
         Remove-E2eSandbox $script:Sbx

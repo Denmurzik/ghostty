@@ -66,6 +66,7 @@ if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdenti
 }
 
 Import-Module (Join-Path $PSScriptRoot 'lib\Harness.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\MouseInput.psm1') -Force
 
 # Discovery: the header sits in the leading comment block of each script.
 $all = @()
@@ -251,8 +252,10 @@ try {
                 $err = if (Test-Path $stderr) { (Get-Content -LiteralPath $stderr -Raw -Encoding UTF8) } else { '' }
                 $line = "FAIL ${name}: no result (exit code $($p.ExitCode)): $("$err".Trim() -replace '\s+', ' ')"
             }
-            # A killed scenario never ran its clipboard restore.
+            # A killed scenario never ran its clipboard restore, nor released
+            # a mouse button it held.
             Restore-ClipboardBackup
+            Reset-StuckMouseButtons
 
             $noFocus = $line -like 'SKIP*could not take the foreground*'
             $interfered = ($line -like 'FAIL*' -and $line -match $interference) -or $noFocus

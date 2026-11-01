@@ -118,10 +118,16 @@ Invoke-E2eScenario 'split-drag' {
         Send-MouseMove -Hwnd $hw -X $hp[0] -Y $hp[1]
         Start-Sleep -Milliseconds 250
         Send-MouseDown
-        Start-Sleep -Milliseconds 60
-        $sp = Convert-ClientToScreen $hw $hp[0] $hp[1]
-        Send-MouseMove -ScreenX ($sp.X + 14) -ScreenY ($sp.Y + 14) -Steps 4
-        Start-Sleep -Milliseconds 120
+        # Whatever throws after the press must not leave the button held.
+        try {
+            Start-Sleep -Milliseconds 60
+            $sp = Convert-ClientToScreen $hw $hp[0] $hp[1]
+            Send-MouseMove -ScreenX ($sp.X + 14) -ScreenY ($sp.Y + 14) -Steps 4
+            Start-Sleep -Milliseconds 120
+        } catch {
+            Send-MouseUp
+            throw
+        }
     }
     function Move-DragTo([IntPtr]$Hwnd, [int]$X, [int]$Y, [int]$Steps = 20) {
         $sp = Convert-ClientToScreen $Hwnd $X $Y

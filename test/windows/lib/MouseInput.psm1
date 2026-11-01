@@ -14,6 +14,7 @@ if (-not ('GhosttyE2e.Mouse' -as [type])) {
 [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
 [DllImport("user32.dll")] public static extern bool GetCursorPos(ref POINT p);
 [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
 "@
 }
 
@@ -163,4 +164,19 @@ function Send-MouseDrag {
     }
 }
 
-Export-ModuleMember -Function Convert-ClientToScreen, Send-MouseClick, Send-MouseMove, Send-MouseDown, Send-MouseUp, Send-MouseDrag
+# Safety net for a scenario that died with a button held: sends the up event of
+# every mouse button that GetAsyncKeyState reports as down. Never throws.
+function Reset-StuckMouseButtons {
+    $vk = @{ left = 0x01; right = 0x02; middle = 0x04 }
+    foreach ($b in 'left', 'right', 'middle') {
+        try {
+            if (([GhosttyE2e.Mouse]::GetAsyncKeyState($vk[$b]) -band 0x8000) -ne 0) {
+                Send-MouseUp -Button $b
+            }
+        } catch {
+            Write-Host "WARN could not release the $b mouse button: $($_.Exception.Message)"
+        }
+    }
+}
+
+Export-ModuleMember -Function Convert-ClientToScreen, Send-MouseClick, Send-MouseMove, Send-MouseDown, Send-MouseUp, Send-MouseDrag, Reset-StuckMouseButtons
