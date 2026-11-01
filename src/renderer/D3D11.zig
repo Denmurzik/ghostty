@@ -169,6 +169,7 @@ viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
 pacing_log: bool = false,
 frame_begin_ns: u64 = 0,
 frame_slot_ns: u64 = 0,
+frame_slot_timed_out: bool = false,
 
 /// The decor pass, created by the first frame whose decor word is non-zero.
 /// Only touched under the device context lock.
@@ -583,13 +584,29 @@ pub fn drawDecor(self: *D3D11, target: *const Target) void {
 /// on, without the lock, so one surface pacing itself does not hold up the
 /// others. A sync draw may drop the chain meanwhile (`dropSwapChain`), so
 /// the wait holds its own handle and is booked only on the same chain.
+///
+/// A chain that sat idle has all its frames retired: it is re-synced instead
+/// of polled (`Pacer.resync`), which wipes any signal no wait would take.
 pub fn waitFrameSlot(self: *D3D11) void {
     self.device.lockContext();
     defer self.device.unlockContext();
 
     const sc = if (self.swap_chain) |*sc| sc else return;
     if (!sc.waitArmed()) return;
-    if (sc.waitForSlot(0) or sc.idle()) return;
+    if (sc.idle()) {
+        const drained = sc.resyncIdle();
+        if (self.pacing_log) log.info(
+            "d3d11 pacer resync surface={d} drained={d} capped={d} timeouts={d}",
+            .{
+                sc.surface_id,
+                drained,
+                sc.pacer.capped_presents.load(.monotonic),
+                sc.pacer.wait_timeouts.load(.monotonic),
+            },
+        );
+        return;
+    }
+    if (sc.waitForSlot(0)) return;
 
     const w = sc.beginUnlockedWait() orelse return;
     const timed = latency.enabled() or self.pacing_log;
@@ -603,6 +620,7 @@ pub fn waitFrameSlot(self: *D3D11) void {
     if (timed) {
         const waited = nowNs() -| start;
         self.frame_slot_ns = waited;
+        self.frame_slot_timed_out = result == .timeout;
         latency.markSlotWait(waited);
     }
 }
@@ -623,12 +641,16 @@ fn nowNs() u64 {
 /// slot wait to the end of the present.
 pub fn logPacing(self: *D3D11) void {
     // The slot wait belongs to the frame that just ended; the next starts at 0.
-    defer self.frame_slot_ns = 0;
+    defer {
+        self.frame_slot_ns = 0;
+        self.frame_slot_timed_out = false;
+    }
     if (!self.pacing_log) return;
     const build = nowNs() -| self.frame_begin_ns;
-    log.info("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3}", .{
+    log.info("d3d11 pacing slot_wait_ms={d:.3} build_ms={d:.3} slot_timeout={d}", .{
         @as(f64, @floatFromInt(self.frame_slot_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(build)) / std.time.ns_per_ms,
+        @intFromBool(self.frame_slot_timed_out),
     });
 }
 
