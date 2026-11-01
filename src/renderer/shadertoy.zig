@@ -41,6 +41,35 @@ pub const Uniforms = extern struct {
     selection_background_color: [4]f32 align(16),
 };
 
+/// A surface shows `Uniforms.time` as an f32 of seconds since its first
+/// frame. The f32 step is 0.24 ms at one hour, 3.9 ms at 15 hours and 16 ms at
+/// three days, which makes a 200 ms cursor trail (`time - cursor_change_time`)
+/// visibly stepped on a long-lived surface. After this much elapsed time the
+/// time base moves (`rebaseTime`).
+pub const time_rebase_after_ns: i96 = 60 * std.time.ns_per_min;
+
+/// Moves the time base of a surface that has been alive for long: returns the
+/// whole seconds (in ns) the caller must add to its first frame time, or 0.
+/// `since_ns` is the time since that first frame. The stored change times
+/// are shifted by the same amount, so `time - cursor_change_time` and
+/// `time - time_focus` stay what they were; `time` itself falls back near 0
+/// (a one-off jump of up to the surface's age for a shader that reads `iTime`
+/// as a phase, at most once per `time_rebase_after_ns`).
+///
+/// Only done while no cursor or focus animation can be running (both changed
+/// more than a second ago), judged by the previous frame's `uniforms`.
+pub fn rebaseTime(uniforms: *Uniforms, since_ns: i96) i96 {
+    if (since_ns < time_rebase_after_ns) return 0;
+    if (uniforms.time - uniforms.cursor_change_time <= 1) return 0;
+    if (uniforms.time - uniforms.time_focus <= 1) return 0;
+
+    const shift_s = @divTrunc(since_ns, std.time.ns_per_s);
+    const shift: f32 = @floatFromInt(shift_s);
+    uniforms.cursor_change_time -= shift;
+    uniforms.time_focus -= shift;
+    return shift_s * std.time.ns_per_s;
+}
+
 /// The target to load shaders for.
 pub const Target = enum { glsl, msl, hlsl };
 
@@ -655,3 +684,76 @@ test "shadertoy hlsl: invalid shader fails cleanly" {
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");
 const test_invalid = @embedFile("shaders/test_shadertoy_invalid.glsl");
 const test_focus = @embedFile("shaders/test_shadertoy_focus.glsl");
+
+test "time rebase keeps millisecond resolution on a surface alive for days" {
+    const testing = std.testing;
+    const ns_per_s = std.time.ns_per_s;
+
+    var u: Uniforms = undefined;
+    u.cursor_change_time = 10;
+    u.time_focus = 5;
+
+    // Without a rebase an f32 of three days of seconds cannot tell 1 ms
+    // frames apart.
+    const age: i96 = 3 * 24 * 60 * 60 * ns_per_s + 123_456_789;
+    const raw: f32 = @floatFromInt(age);
+    const a = raw / ns_per_s;
+    const b = (raw + 1_000_000) / ns_per_s;
+    try testing.expect(b - a != 0.001);
+
+    // Take the previous frame as the last one before the rebase.
+    u.time = a;
+    const shift = rebaseTime(&u, age);
+    try testing.expect(shift > 0);
+    try testing.expectEqual(@as(i96, 0), @rem(shift, ns_per_s));
+
+    // The new time is below a second; 1 ms steps resolve to within 0.1 ms.
+    const t0: f32 = @floatFromInt(age - shift);
+    const t1: f32 = @floatFromInt(age - shift + 1_000_000);
+    const dt = (t1 - t0) / ns_per_s;
+    try testing.expect(t0 / ns_per_s < 1.0);
+    try testing.expectApproxEqAbs(@as(f32, 0.001), dt, 0.0001);
+
+    // A trail started right after the rebase has a precise progress.
+    u.cursor_change_time = t0 / ns_per_s;
+    const progress = t1 / ns_per_s - u.cursor_change_time;
+    try testing.expectApproxEqAbs(@as(f32, 0.001), progress, 0.0001);
+}
+
+test "time rebase waits for animations and keeps their progress" {
+    const testing = std.testing;
+    const hour: i96 = time_rebase_after_ns;
+
+    var u: Uniforms = undefined;
+
+    // Young surface: nothing moves.
+    u.time = 100;
+    u.cursor_change_time = 0;
+    u.time_focus = 0;
+    try testing.expectEqual(@as(i96, 0), rebaseTime(&u, 100 * std.time.ns_per_s));
+
+    // Old surface, but the cursor moved half a second ago: wait.
+    u.time = 4000;
+    u.cursor_change_time = 3999.5;
+    u.time_focus = 0;
+    try testing.expectEqual(@as(i96, 0), rebaseTime(&u, hour + 400 * std.time.ns_per_s));
+    try testing.expectEqual(@as(f32, 3999.5), u.cursor_change_time);
+
+    // Same for a fresh focus change.
+    u.cursor_change_time = 0;
+    u.time_focus = 3999.5;
+    try testing.expectEqual(@as(i96, 0), rebaseTime(&u, hour + 400 * std.time.ns_per_s));
+
+    // Both older than a second: rebase, and the ages stay the same.
+    u.time = 4000;
+    u.cursor_change_time = 3990;
+    u.time_focus = 3000;
+    const since: i96 = 4000 * std.time.ns_per_s + 250_000_000;
+    const shift = rebaseTime(&u, since);
+    try testing.expectEqual(@as(i96, 4000 * std.time.ns_per_s), shift);
+    const new_time: f32 = @floatFromInt(since - shift);
+    // The cursor change was 10 s before the previous frame: now 10.25 s.
+    try testing.expectApproxEqAbs(@as(f32, 10.25), new_time / std.time.ns_per_s - u.cursor_change_time, 0.001);
+    try testing.expectEqual(@as(f32, -10), u.cursor_change_time);
+    try testing.expectEqual(@as(f32, -1000), u.time_focus);
+}

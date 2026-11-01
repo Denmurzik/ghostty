@@ -2655,7 +2655,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
             const last_frame_time = self.last_frame_time orelse now;
 
-            const since_ns: f32 = @floatFromInt(first_frame_time.durationTo(now).nanoseconds);
+            // An f32 of seconds loses its millisecond steps on a surface
+            // that lives for days: move the time base now and then.
+            var since_raw = first_frame_time.durationTo(now).nanoseconds;
+            const rebase_ns = shadertoy.rebaseTime(uniforms, since_raw);
+            if (rebase_ns != 0) {
+                self.first_frame_time = first_frame_time.addDuration(.{ .nanoseconds = rebase_ns });
+                since_raw -= rebase_ns;
+            }
+            const since_ns: f32 = @floatFromInt(since_raw);
             uniforms.time = since_ns / std.time.ns_per_s;
 
             const delta_ns: f32 = @floatFromInt(last_frame_time.durationTo(now).nanoseconds);
