@@ -230,3 +230,76 @@ covers that. The host here sends no `CSI ? 9001 h` of its own, so the
 win32-input-mode cells only show how the console decodes character records.
 A missing Kitty image in Claude Code is therefore not explained by a reply lost
 in ConPTY input on the bundled console.
+
+## OSC 5522 through ConPTY (M8)
+
+Question: do `ESC [ ? 5522 h`, `ESC [ ? 5522 $ p`, OSC 5522 (write transaction and read
+request) leave the pseudo console, and does the program read the reply the terminal
+writes to the input? How slow and how big is a multi-MB reply?
+
+Method: `headless.ps1 -Kitty5522 -DllDir vendor/conpty/x64 -Flags 0,8 -Repeat 2` (no
+window; the script is the terminal). Windows 11 10.0.26300.9606; inbox = kernel32
+ConPTY (conhost.exe), bundled = `vendor/conpty/x64` OpenConsole.exe / conpty.dll
+1.25.2609.30003. Clients: Git Bash (`cases/headless-5522.sh`: `?5522h`, `?5522$p`,
+`type=write`, two `wdata` (text/plain, text/html), the empty `wdata`, `type=read;<b64
+"text/plain .">`, then `read -rs -t 3 -d '\'` per reply message, hexed) and a native VT
+reader (`New-FakeExe -Kind vtreader`, `FAKE_QUERY_FILE` with the same bytes,
+`FAKE_UNTIL` = the DONE message). The host answers DECRQM `?5522` with
+`ESC [ ? 5522 ; 1 $ y` and a read request with OK / listing / DATA (N base64 bytes in
+chunks of 4096) / DONE. All 8 runs per cell (2 repeats x flags 0 and 8) agree; the flag
+changes nothing here.
+
+| Cell (flags 0 and 8 alike) | inbox | bundled |
+|---|---|---|
+| `CSI ? 5522 h` arrives | yes | yes |
+| `CSI ? 5522 $ p` arrives | **no**: the console answers `ESC [ ? 5522 ; 0 $ y` itself ("unknown") and swallows it | yes |
+| OSC 5522 write / wdata x2 / commit arrive byte-identical (ST kept) | yes, 4 of 4 | yes, 4 of 4 |
+| OSC 5522 read request arrives byte-identical | yes | yes |
+| Reply read by Git Bash (4096 B reply) | **nothing**: 0 of 4272 bytes (only the console's own `;0$y`) | intact, 4272 of 4272 (OK, listing, DATA, DONE) |
+| Reply read by a native VT reader (4096 B reply) | **nothing**: 11 of 4276 bytes (only the console's own `ESC [ ? 5522 ; 0 $ y`) | intact, 4287 of 4287 (incl. the host's `;1$y`) |
+
+Inbox, reply direction: the OSC 5522 messages the terminal writes to the input never
+reach the program, in either client. With a 1 MiB or 8 MiB reply the native reader got
+4160 bytes (the console's DECRQM answer and one 4096-byte DATA message, unexplained),
+never the DONE message, and ran into the 60 s limit. The output direction is fine: a
+program can write 5522 through the inbox console unchanged.
+
+Timing and size of the input path (native reader stops at DONE; host write = the time
+WriteFile needed for the whole reply; "client" = time from the read request until the
+reader has every byte; private bytes of the console host sampled every 200 ms):
+
+| Reply | | inbox | bundled |
+|---|---|---|---|
+| 1 MiB (1 062 271 B on the wire) | client | not delivered (60 s limit) | 330 - 362 ms |
+| | host write | 12 - 19 ms | 83 - 88 ms |
+| | console host private | conhost 2 MB, no growth | OpenConsole 19 MB, no growth |
+| 8 MiB (8 497 279 B on the wire) | client | not delivered (60 s limit) | 1250 - 1271 ms |
+| | host write | 82 - 97 ms | 687 - 749 ms |
+| | console host private | conhost 2 MB, no growth | OpenConsole 79 - 84 MB before, 165 MB peak (+81 MB) |
+
+Verdicts (Task 9):
+- (a) **Inbox drops 5522 in the reply direction and answers DECRQM ?5522 itself (as unknown), so R-M8-16 applies**: Task 22 documents "5522 reads and the DECRQM probe need the bundled console (`windows-conpty = bundled` for Git Bash)"; the e2e scenarios use a native program (bundled under `auto`). 5522 writes (OSC output, `?5522h`) survive the inbox console.
+- (b) **Bundled: an 8 MiB reply takes 1.3 s and OpenConsole grows by 81 MB, far under the 5 s / 500 MB limits, so no R-M8-15 cap is needed for ConPTY reasons** (a cap may still be wanted for Ghostty's own memory).
+- (c) The console never answers a 5522 read or `?998n` itself; it only answers DECRQM on the inbox console (see the 2033 section for `?2033 $ p`).
+
+## Mode 2033 through ConPTY (M8)
+
+Method: `headless.ps1 -Visibility -DllDir vendor/conpty/x64 -Flags 0,8 -Repeat 2`, same
+machine and consoles as above. `cases/probe-2033.sh` (Git Bash) or the native reader
+emit `ESC [ ? 2033 h`, `ESC [ ? 998 n`, `ESC [ ? 2033 $ p`; the host answers the first
+two with `ESC [ ? 999 ; 1 n` and the DECRQM with `ESC [ ? 2033 ; 2 $ y`. All 8 runs per
+cell agree; flags 0 and 8 are identical.
+
+| Cell (flags 0 and 8 alike) | inbox | bundled |
+|---|---|---|
+| `CSI ? 2033 h` arrives | yes | yes |
+| `CSI ? 998 n` arrives (not answered by the console) | yes | yes |
+| `CSI ? 2033 $ p` arrives | **no**: the console answers `ESC [ ? 2033 ; 0 $ y` itself and swallows it | yes |
+| Both `ESC [ ? 999 ; 1 n` replies read by Git Bash | yes | yes |
+| Both `?999;1n` replies read by a native VT reader | yes | yes |
+| Host's DECRQM reply `ESC [ ? 2033 ; 2 $ y` read (Git Bash / native) | no: the program gets the console's `;0$y` instead, in both clients | yes / yes (intact) |
+
+Verdicts (Task 9):
+- (a) Inbox passes `?2033h`, `?998n` and the `?999;1n` replies in both directions, so mode 2033 reports work; **only DECRQM `?2033 $ p` is intercepted** (the program sees "mode 2033 not recognized"). R-M8-16 applies to the DECRQM check only: Task 22 documents it; a program that probes DECRQM before enabling 2033 sees it unsupported on the inbox console.
+- (b) n/a (no size question).
+- (c) The console does **not** answer `?998n` itself on either console; the host's reply is what the program reads.

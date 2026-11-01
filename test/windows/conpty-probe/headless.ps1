@@ -26,6 +26,20 @@ WriteFile to the echoed byte (conhost's cooked-mode echo), <Samples> samples.
 Rows go to <OutDir>\headless.csv; the raw output of every run to
 <OutDir>\<variant>-<run>.bin. Exit 1 when a run could not start.
 
+-Kitty5522 (M8): OSC 5522 (kitty clipboard) and DECSET/DECRQM ?5522 through the
+console. cases/headless-5522.sh (Git Bash) or the vtreader exe (native) emits
+them; the host records which of them arrive byte-identical, answers DECRQM ?5522
+with `ESC [ ? 5522 ; 1 $ y` and a read request with a fixed OK / listing / DATA /
+DONE reply of -ReplyBytes base64 bytes (default 4096), and compares what the
+client read. Native runs at each of -TimingBytes (default 1 MiB and 8 MiB) time
+the input path (up to -TimingLimitSec, default 60) and sample the private bytes of the
+console host processes.
+
+-Visibility (M8): `ESC [ ? 2033 h`, `ESC [ ? 998 n` and `ESC [ ? 2033 $ p` through
+the console; the host answers the first two with `ESC [ ? 999 ; 1 n` and the
+DECRQM with `ESC [ ? 2033 ; 2 $ y`, and records which requests arrived and what
+the client read.
+
 .PARAMETER DllDir
 Directory with conpty.dll and OpenConsole.exe of the target architecture.
 Without it only the inbox variants run.
@@ -41,6 +55,11 @@ param(
     [string]$Bash,
     [string]$OutDir,
     [switch]$KittyQ,
+    [switch]$Kitty5522,
+    [switch]$Visibility,
+    [ValidateRange(0, 16777216)][int]$ReplyBytes = 4096,
+    [int[]]$TimingBytes = @(1048576, 8388608),
+    [ValidateRange(5, 600)][int]$TimingLimitSec = 60,
     [string[]]$ReplyForm = @('plain', 'w32im')
 )
 
@@ -122,6 +141,13 @@ public class Session {
     // "" = do not answer Kitty a=q; "plain" = ESC _ G i=31;OK ESC \ ; "w32im" = the same
     // characters as win32-input-mode key-down records CSI 0;0;<unit>;1;0;1 _
     public string ReplyForm = "";
+    // "" ; "k5522" = answer DECRQM ?5522 and a 5522 read request ; "vis" = answer ?2033h, ?998n and DECRQM ?2033
+    public string Mode = "";
+    public int ReplyBytes = 4096;
+    public long ReplyT0 = -1, ReplyT1 = -1;
+    public string LastReply = "";
+    int rqScanned;
+    string bigReply;
     long lastTicks;
     Thread reader;
     public readonly Stopwatch Clock = Stopwatch.StartNew();
@@ -192,10 +218,24 @@ public class Session {
                 Answer("\x1b[0c", "\x1b[?62;22c", answers);
                 Answer("\x1b[6n", "\x1b[24;77R", answers);
                 AnswerKitty(answers);
+                if (Mode == "k5522") {
+                    // \x24 is the dollar sign: this source sits in a PowerShell expandable here-string
+                    Answer("\x1b[?5522\x24p", "\x1b[?5522;1\x24y", answers);
+                    Answer5522Read(answers);
+                } else if (Mode == "vis") {
+                    Answer("\x1b[?2033h", "\x1b[?999;1n", answers);
+                    Answer("\x1b[?998n", "\x1b[?999;1n", answers);
+                    Answer("\x1b[?2033\x24p", "\x1b[?2033;2\x24y", answers);
+                }
                 scanned = buf.Count;
                 Monitor.PulseAll(gate);
             }
             foreach (string a in answers) Write(a);
+            if (bigReply != null) {
+                string big = bigReply; bigReply = null;
+                Thread th = new Thread(delegate() { WriteChunks(big); });
+                th.IsBackground = true; th.Start();
+            }
         }
         lock (gate) { lastTicks = Clock.ElapsedTicks; Monitor.PulseAll(gate); }
     }
@@ -224,6 +264,70 @@ public class Session {
             answers.Add(reply);
             Replies.Add("kitty-a=q@" + s + "->" + ReplyForm);
         }
+    }
+
+    static string B64(string s) { return Convert.ToBase64String(Encoding.ASCII.GetBytes(s)); }
+    static string Osc5522(string meta, string payload) {
+        return "\x1b]5522;" + meta + (payload == null ? "" : ";" + payload) + "\x1b\\";
+    }
+
+    // The fixed reply to a read request: OK, the listing, DATA chunks of at most 4096
+    // base64 bytes (ReplyBytes in all), DONE.
+    string BuildReply() {
+        StringBuilder r = new StringBuilder();
+        r.Append(Osc5522("type=read:status=OK", null));
+        r.Append(Osc5522("type=read:status=DATA:mime=" + B64("."), B64("text/plain text/html")));
+        string alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        string meta = "type=read:status=DATA:mime=" + B64("text/plain");
+        int left = ReplyBytes - ReplyBytes % 4, pos = 0;
+        while (left > 0) {
+            int n = Math.Min(left, 4096);
+            StringBuilder c = new StringBuilder(n);
+            for (int i = 0; i < n; i++) c.Append(alpha[(pos + i) % 64]);
+            r.Append(Osc5522(meta, c.ToString()));
+            pos += n; left -= n;
+        }
+        r.Append(Osc5522("type=read:status=DONE", null));
+        return r.ToString();
+    }
+
+    // A complete `ESC ] 5522 ; type=read ; ... (ESC \ | BEL)` in the output gets the fixed reply.
+    void Answer5522Read(List<string> answers) {
+        byte[] pre = Encoding.ASCII.GetBytes("\x1b]5522;type=read;");
+        while (true) {
+            int s = -1;
+            for (int i = rqScanned; i + pre.Length <= buf.Count && s < 0; i++) {
+                bool hit = true;
+                for (int j = 0; j < pre.Length && hit; j++) hit = buf[i + j] == pre[j];
+                if (hit) s = i;
+            }
+            if (s < 0) return;
+            int e = -1;
+            for (int i = s + pre.Length; i < buf.Count && e < 0; i++) {
+                if (buf[i] == 7) e = i + 1;
+                else if (buf[i] == 0x1b && i + 1 < buf.Count && buf[i + 1] == (byte)'\\') e = i + 2;
+            }
+            if (e < 0) { rqScanned = s; return; }
+            rqScanned = e;
+            string reply = BuildReply();
+            LastReply = reply;
+            ReplyT0 = Clock.ElapsedMilliseconds; ReplyT1 = -1;
+            Replies.Add("5522-read@" + s + "->" + reply.Length + " bytes");
+            if (reply.Length > 200000) bigReply = reply; else answers.Add(reply);
+        }
+    }
+
+    void WriteChunks(string s) {
+        byte[] b = Encoding.ASCII.GetBytes(s);
+        for (int off = 0; off < b.Length; off += 32768) {
+            int n = Math.Min(32768, b.Length - off), w;
+            byte[] c = new byte[n];
+            Array.Copy(b, off, c, 0, n);
+            bool ok;
+            lock (writeGate) ok = K.WriteFile(inW, c, n, out w, IntPtr.Zero);
+            if (!ok) return;
+        }
+        ReplyT1 = Clock.ElapsedMilliseconds;
     }
 
     // A query that ends in the bytes read just now (not in bytes scanned before).
@@ -471,6 +575,220 @@ function Invoke-KittyQRun([string]$Dll, [uint32]$F, [string]$Form, [string]$Clie
     , $rows
 }
 
+# ---- M8: OSC 5522 and mode 2033 -------------------------------------------------
+
+$ESC = [string][char]27
+$ST = $ESC + '\'
+
+function ConvertTo-B64([string]$s) { [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($s)) }
+function ConvertTo-HexString([string]$s) { (($latin1.GetBytes($s) | ForEach-Object { $_.ToString('x2') }) -join '') }
+function ConvertFrom-HexString([string]$hex) {
+    $hex = $hex -replace '\s', ''
+    , [byte[]]@(for ($i = 0; $i + 1 -lt $hex.Length; $i += 2) { [Convert]::ToByte($hex.Substring($i, 2), 16) })
+}
+function Get-FreeMB { [int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024) }
+
+# Console host processes started by this probe (children of this PowerShell).
+function Get-HostPids {
+    @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$PID" |
+        Where-Object { $_.Name -in 'conhost.exe', 'OpenConsole.exe' } | ForEach-Object { [int]$_.ProcessId })
+}
+function Get-PrivateBytes([int[]]$ProcIds) {
+    $sum = 0L
+    foreach ($i in $ProcIds) {
+        try { $p = [Diagnostics.Process]::GetProcessById($i); $sum += $p.PrivateMemorySize64; $p.Dispose() } catch { }
+    }
+    $sum
+}
+
+# Start a headless client on the pseudo console. Native clients read their query from
+# $QueryFile and stop at $Until (C-escaped for the vtreader exe).
+function Start-Client($S, [uint32]$F, [string]$Client, [string]$Case, [string]$QueryFile, [string]$Until, [int]$WaitMs, [int]$GotMax) {
+    if ($Client -eq 'bash') {
+        $cmd = '"{0}" --noprofile --norc "{1}"' -f $Bash, ($Case -replace '\\', '/')
+    } else {
+        $env:FAKE_QUERY = ''
+        $env:FAKE_QUERY_FILE = $QueryFile
+        $env:FAKE_UNTIL = $Until
+        $env:FAKE_WAIT_MS = [string]$WaitMs
+        if ($GotMax -ge 0) { $env:FAKE_GOT_MAX = [string]$GotMax } else { Remove-Item Env:FAKE_GOT_MAX -ErrorAction SilentlyContinue }
+        $cmd = '"{0}"' -f $vtExe
+    }
+    $S.Start($F, $cmd, 80, 25)
+}
+
+function Clear-FakeEnv { foreach ($n in 'FAKE_QUERY', 'FAKE_QUERY_FILE', 'FAKE_UNTIL', 'FAKE_WAIT_MS', 'FAKE_GOT_MAX') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } }
+
+# Waits for the client's GOT: line while sampling the private bytes of the console hosts.
+function Wait-Got($S, [int]$LimitMs, [string]$Final = 'GOT:') {
+    Start-Sleep -Milliseconds 300
+    $hostPids = Get-HostPids
+    $names = @($hostPids | ForEach-Object { try { (Get-Process -Id $_ -ErrorAction Stop).ProcessName } catch { '?' } }) -join '+'
+    $base = Get-PrivateBytes $hostPids
+    $peak = $base
+    $deadline = $S.Clock.ElapsedMilliseconds + $LimitMs
+    $got = -1; $tGot = -1; $aborted = $false
+    while ($true) {
+        $got = $S.WaitFor($Final, 0, 200)
+        $m = Get-PrivateBytes $hostPids
+        if ($m -gt $peak) { $peak = $m }
+        if ($got -ge 0) { $tGot = $S.Clock.ElapsedMilliseconds; break }
+        if ($peak -gt 3GB) { $aborted = $true; break }
+        if ($S.Clock.ElapsedMilliseconds -gt $deadline) { break }
+    }
+    if ($got -ge 0) { $S.WaitFor("`n", $got, 8000) | Out-Null }
+    $S.WaitQuiet(300, 2000)
+    $m = Get-PrivateBytes $hostPids
+    if ($m -gt $peak) { $peak = $m }
+    @{ got = $got; tGot = $tGot; peak = $peak; base = $base; aborted = $aborted; hosts = $names }
+}
+
+function Get-Verdict([bool]$Arrived, [bool]$Partial) { if ($Arrived) { 'arrived' } elseif ($Partial) { 'partial' } else { 'dropped' } }
+
+# One run of the OSC 5522 case. $Client: bash | native. $Bytes: base64 bytes of the DATA reply.
+# $Timing: native client, only the length and the head of the reply are printed; time and memory are rows.
+function Invoke-K5522Run([string]$Dll, [uint32]$F, [string]$Client, [int]$Bytes, [bool]$Timing) {
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ($Timing -and (Get-FreeMB) -lt 4096) { $rows.Add(@('timing', 'skipped', ('free RAM {0} MB < 4096' -f (Get-FreeMB)))); return , $rows }
+    $s = New-Object CpProbe.Session -ArgumentList @(, $Dll)
+    $s.Mode = 'k5522'
+    $s.ReplyBytes = $Bytes
+    $limit = if ($Timing) { $TimingLimitSec * 1000 } else { 25000 }
+    $gotMax = if ($Timing) { 48 } else { -1 }
+    try {
+        if (-not (Start-Client $s $F $Client $k5522Case $k5522Query '\e]5522;type=read:status=DONE\e\\' $limit $gotMax)) {
+            $rows.Add(@('start', 'failed', ('CreatePseudoConsole hr=0x{0:x8}' -f $s.Hr)))
+            return , $rows
+        }
+        $w = Wait-Got $s $limit
+        $raw = $s.Bytes()
+        [IO.File]::WriteAllBytes((Join-Path $OutDir ('{0}-5522-{1}-{2}-{3}.bin' -f $script:Variant, $Client, $Bytes, $script:RunNo)), $raw)
+        $text = $latin1.GetString($raw)
+        $gotIdx = $text.IndexOf('GOT:')
+        if ($gotIdx -lt 0) {
+            $rows.Add(@('reply', 'failed', ('no GOT line{0}; output: {1}' -f $(if ($w.aborted) { ' (aborted, host memory over 3 GB)' } else { '' }), [CpProbe.Session]::Esc($raw, 0, 4096, 500))))
+            if ($Timing) {
+                $wr = if ($s.ReplyT1 -ge 0) { 'done in {0} ms' -f ($s.ReplyT1 - $s.ReplyT0) } else { 'not finished' }
+                $rows.Add(@('timing', 'info', ('peak host private {0:N0} MB, base {1:N0} MB, hosts {2}; reply write {3}' -f ($w.peak / 1MB), ($w.base / 1MB), $w.hosts, $wr)))
+            }
+            return , $rows
+        }
+        # What the console passed on: the case's slice (bash), or all output before the GOT line (native).
+        $scope = if ($Client -eq 'bash') { Get-Slice $text 'k5522' } else { $text.Substring(0, $gotIdx) }
+        if ($null -eq $scope) { $scope = '' }
+        $dbg = { param($pat) $m = [regex]::Matches($scope, $pat); (($m | ForEach-Object { Esc $_.Value 120 }) -join ' | ') }
+
+        $d1 = $scope.Contains($ESC + '[?5522h')
+        $rows.Add(@('decset', (Get-Verdict $d1 $false), ('ESC[?5522h in the output: {0}; ?-sequences seen: {1}' -f $d1, (& $dbg ($ESC + '\[\?[0-9;]*[hl]')))))
+        $d2 = $scope.Contains($ESC + '[?5522$p')
+        $rows.Add(@('decrqm', (Get-Verdict $d2 $false), ('ESC[?5522$p in the output: {0}; $p seen: {1}' -f $d2, (& $dbg ($ESC + '\[\?[0-9]*\$p')))))
+
+        $wr = @(
+            ($ESC + ']5522;type=write' + $ST),
+            ($ESC + ']5522;type=wdata:mime=' + $k.mt + ';' + $k.dt + $ST),
+            ($ESC + ']5522;type=wdata:mime=' + $k.mh + ';' + $k.dh + $ST),
+            ($ESC + ']5522;type=wdata' + $ST))
+        $nw = @($wr | Where-Object { $scope.Contains($_) }).Count
+        $oscPat = $ESC + '\]5522[^\x07' + $ESC + ']*(' + $ESC + '\\|\x07)?'
+        $rows.Add(@('osc-write', (Get-Verdict ($nw -eq 4) ($nw -gt 0)), ('{0} of 4 write/wdata OSCs byte-identical; OSC 5522 seen: {1}' -f $nw, (& $dbg $oscPat))))
+        $rq = $ESC + ']5522;type=read;' + $k.rq + $ST
+        $nr = $scope.Contains($rq)
+        $rows.Add(@('osc-read', (Get-Verdict $nr ($scope.Contains($ESC + ']5522;type=read'))), ('read request byte-identical: {0}; host replies: {1}' -f $nr, ($s.Replies -join ' '))))
+
+        # What the client read.
+        $dec = @($s.Replies | Where-Object { $_ -like '*5522$p@*' })
+        $decReply = if ($dec.Count) { $ESC + '[?5522;1$y' } else { '' }
+        if (-not $s.LastReply) {
+            $rows.Add(@('reply', 'nothing', 'the read request never reached the host, so no reply was written'))
+        } elseif ($Client -eq 'bash') {
+            $md = [regex]::Match($text, 'DECRQM:([0-9a-f]*)')
+            $mg = [regex]::Match($text, 'GOT:([0-9a-f]*)')
+            $expD = if ($dec.Count) { ConvertTo-HexString ($ESC + '[?5522;1$') } else { 'none' }
+            $expG = ConvertTo-HexString ($s.LastReply.Replace($ST, $ESC))
+            $gotG = $mg.Groups[1].Value
+            $v = if ($gotG -eq $expG) { 'intact' } elseif ($gotG.Length -eq 0) { 'nothing' } else { 'altered' }
+            $head = Esc ($latin1.GetString((ConvertFrom-HexString $gotG.Substring(0, [Math]::Min(120, $gotG.Length))))) 120
+            $rows.Add(@('reply', $v, ('Git Bash read; DECRQM reply {0} (expected {1}); {2} of {3} expected bytes; head {4}' -f $(if ($md.Success -and $md.Groups[1].Value) { $md.Groups[1].Value } else { 'none' }), $expD, ($gotG.Length / 2), ($expG.Length / 2), $head)))
+        } else {
+            $mg = [regex]::Match($text, 'GOT:([0-9a-f]*)')
+            $ml = [regex]::Match($text, 'LEN:(\d+)')
+            $expLen = $decReply.Length + $s.LastReply.Length
+            if ($Timing) {
+                $len = if ($ml.Success) { [int]$ml.Groups[1].Value } else { -1 }
+                $head = $latin1.GetString((ConvertFrom-HexString $mg.Groups[1].Value))
+                $expHead = ($decReply + $s.LastReply).Substring(0, [Math]::Min(48, $expLen))
+                $v = if ($len -eq $expLen -and $head -eq $expHead) { 'intact' } elseif ($len -le 0) { 'nothing' } else { 'altered' }
+                $rows.Add(@('reply', $v, ('native read; {0} of {1} expected bytes; head {2}' -f $len, $expLen, (Esc $head 100))))
+            } else {
+                $got = $latin1.GetString((ConvertFrom-HexString $mg.Groups[1].Value))
+                $v = if ($got -eq ($decReply + $s.LastReply)) { 'intact' } elseif ($got.Length -eq 0) { 'nothing' } else { 'altered' }
+                $rows.Add(@('reply', $v, ('native read; {0} of {1} expected bytes; head {2}' -f $got.Length, $expLen, (Esc $got 120))))
+            }
+        }
+        if ($Timing) {
+            $writeMs = if ($s.ReplyT1 -ge 0) { $s.ReplyT1 - $s.ReplyT0 } else { -1 }
+            $doneMs = if ($w.tGot -ge 0) { $w.tGot - $s.ReplyT0 } else { -1 }
+            $rows.Add(@('timing', 'info', ('{0} reply bytes ({1} on the wire); host write finished {2} ms, client had everything {3} ms after the read request; peak host private {4:N0} MB (before {5:N0} MB); hosts {6}' -f $Bytes, $s.LastReply.Length, $writeMs, $doneMs, ($w.peak / 1MB), ($w.base / 1MB), $w.hosts)))
+        }
+    } finally {
+        Clear-FakeEnv
+        $s.Stop()
+    }
+    , $rows
+}
+
+# One run of the mode 2033 case.
+function Invoke-VisRun([string]$Dll, [uint32]$F, [string]$Client) {
+    $rows = New-Object System.Collections.Generic.List[object]
+    $s = New-Object CpProbe.Session -ArgumentList @(, $Dll)
+    $s.Mode = 'vis'
+    try {
+        if (-not (Start-Client $s $F $Client $visCase $visQuery '\x24y' 6000 -1)) {
+            $rows.Add(@('start', 'failed', ('CreatePseudoConsole hr=0x{0:x8}' -f $s.Hr)))
+            return , $rows
+        }
+        $w = Wait-Got $s 20000 $(if ($Client -eq 'bash') { 'GOT3:' } else { 'GOT:' })
+        $raw = $s.Bytes()
+        [IO.File]::WriteAllBytes((Join-Path $OutDir ('{0}-vis-{1}-{2}.bin' -f $script:Variant, $Client, $script:RunNo)), $raw)
+        $text = $latin1.GetString($raw)
+        $gotIdx = $text.IndexOf('GOT:')
+        if ($gotIdx -lt 0) {
+            $rows.Add(@('reply', 'failed', ('no GOT line; output: ' + [CpProbe.Session]::Esc($raw, 0, 4096, 500))))
+            return , $rows
+        }
+        $scope = if ($Client -eq 'bash') { Get-Slice $text 'vis' } else { $text.Substring(0, $gotIdx) }
+        if ($null -eq $scope) { $scope = '' }
+        $a2033 = $scope.Contains($ESC + '[?2033h')
+        $a998 = $scope.Contains($ESC + '[?998n')
+        $aq = $scope.Contains($ESC + '[?2033$p')
+        $qs = ([regex]::Matches($scope, $ESC + '\[\?[0-9;]*[hln]|' + $ESC + '\[\?[0-9]*\$p') | ForEach-Object { Esc $_.Value 40 }) -join ' '
+        $rows.Add(@('decset-2033', (Get-Verdict $a2033 $false), ('ESC[?2033h in the output: {0}; ?-sequences seen: {1}' -f $a2033, $qs)))
+        $rows.Add(@('dsr-998', (Get-Verdict $a998 $false), ('ESC[?998n in the output: {0}; host replies: {1}' -f $a998, ($s.Replies -join ' '))))
+        $rows.Add(@('decrqm-2033', (Get-Verdict $aq $false), ('ESC[?2033$p in the output: {0}' -f $aq)))
+
+        $exp = ''
+        if ($a2033) { $exp += $ESC + '[?999;1n' }
+        if ($a998) { $exp += $ESC + '[?999;1n' }
+        if ($aq) { $exp += $ESC + '[?2033;2$y' }
+        if ($Client -eq 'bash') {
+            $parts = @(foreach ($n in 'GOT', 'GOT2', 'GOT3') { $m = [regex]::Match($text, "(?m)^${n}:([0-9a-f ]*)\r?$"); if ($m.Success) { $m.Groups[1].Value -replace '\s', '' } else { '' } })
+            $all = $latin1.GetString((ConvertFrom-HexString ($parts[0] + '6e' + $parts[1] + '6e' + $parts[2] + '79')))
+            $ev = 'Git Bash read; GOT {0} | GOT2 {1} | GOT3 {2}' -f (Esc ($latin1.GetString((ConvertFrom-HexString $parts[0]))) 60), (Esc ($latin1.GetString((ConvertFrom-HexString $parts[1]))) 60), (Esc ($latin1.GetString((ConvertFrom-HexString $parts[2]))) 60)
+            $v = if ($exp -and $all -eq $exp) { 'intact' } elseif (-not ($parts -join '')) { 'nothing' } else { 'altered' }
+            $rows.Add(@('reply', $v, ($ev + '; expected ' + (Esc $exp 80))))
+        } else {
+            $mg = [regex]::Match($text, 'GOT:([0-9a-f]*)')
+            $got = $latin1.GetString((ConvertFrom-HexString $mg.Groups[1].Value))
+            $v = if ($exp -and $got -eq $exp) { 'intact' } elseif ($got.Length -eq 0) { 'nothing' } else { 'altered' }
+            $rows.Add(@('reply', $v, ('native read: {0}; expected {1}' -f (Esc $got 120), (Esc $exp 80))))
+        }
+    } finally {
+        Clear-FakeEnv
+        $s.Stop()
+    }
+    , $rows
+}
+
 $variants = @()
 foreach ($f in $Flags) { $variants += , @("inbox-f$f", $null, $f) }
 if ($dll) { foreach ($f in $Flags) { $variants += , @("bundled-f$f", $dll, $f) } }
@@ -503,6 +821,61 @@ if ($KittyQ) {
     exit $(if ($failed) { 1 } else { 0 })
 }
 
+
+if ($Kitty5522 -or $Visibility) {
+    Import-Module (Join-Path $PSScriptRoot '..\lib\FakeExe.psm1') -Force
+    # always rebuilt: the vtreader needs FAKE_QUERY_FILE, FAKE_UNTIL and FAKE_GOT_MAX
+    $vtExe = Join-Path $OutDir 'vtreader-m8.exe'
+    Remove-Item -LiteralPath $vtExe -Force -ErrorAction SilentlyContinue
+    $vtExe = New-FakeExe -Path $vtExe -Kind vtreader
+    $k = @{
+        mt = ConvertTo-B64 'text/plain'; mh = ConvertTo-B64 'text/html'
+        dt = ConvertTo-B64 'probe-text'; dh = ConvertTo-B64 '<b>probe-html</b>'; rq = ConvertTo-B64 'text/plain .'
+    }
+    $k5522Case = Join-Path $PSScriptRoot 'cases\headless-5522.sh'
+    $visCase = Join-Path $PSScriptRoot 'cases\probe-2033.sh'
+    $k5522Query = Join-Path $OutDir 'query-5522.bin'
+    [IO.File]::WriteAllBytes($k5522Query, $latin1.GetBytes(
+            ($ESC + '[?5522h' + $ESC + '[?5522$p' +
+                $ESC + ']5522;type=write' + $ST +
+                $ESC + ']5522;type=wdata:mime=' + $k.mt + ';' + $k.dt + $ST +
+                $ESC + ']5522;type=wdata:mime=' + $k.mh + ';' + $k.dh + $ST +
+                $ESC + ']5522;type=wdata' + $ST +
+                $ESC + ']5522;type=read;' + $k.rq + $ST)))
+    $visQuery = Join-Path $OutDir 'query-2033.bin'
+    [IO.File]::WriteAllBytes($visQuery, $latin1.GetBytes($ESC + '[?2033h' + $ESC + '[?998n' + $ESC + '[?2033$p'))
+    $csv = Join-Path $OutDir 'headless-m8.csv'
+    Set-Content -LiteralPath $csv -Value 'mode,variant,run,client,bytes,sequence,verdict,evidence' -Encoding UTF8
+    $failed = 0
+    function Write-ProbeRows($Mode, $V, $Run, $Client, $Bytes, $Rows) {
+        foreach ($r in $Rows) {
+            if ($r[1] -eq 'failed') { $script:failed++ }
+            Add-Content -LiteralPath $csv -Value ('{0},{1},{2},{3},{4},{5},{6},"{7}"' -f $Mode, $V, $Run, $Client, $Bytes, $r[0], $r[1], ($r[2] -replace '"', "'")) -Encoding UTF8
+            Write-Output ('ROW {0} {1} run={2} client={3} bytes={4} {5} -> {6} | {7}' -f $Mode, $V, $Run, $Client, $Bytes, $r[0], $r[1], $r[2])
+        }
+    }
+    Write-Output ('INFO build {0}; free RAM {1} MB; bundled {2}' -f [Environment]::OSVersion.Version, (Get-FreeMB), $(if ($dll) { $dll } else { 'none' }))
+    foreach ($v in $variants) {
+        $script:Variant = $v[0]
+        for ($run = 1; $run -le $Repeat; $run++) {
+            $script:RunNo = $run
+            if ($Kitty5522) {
+                foreach ($client in 'bash', 'native') {
+                    Write-ProbeRows '5522' $v[0] $run $client $ReplyBytes (Invoke-K5522Run $v[1] $v[2] $client $ReplyBytes $false)
+                }
+                foreach ($n in $TimingBytes) {
+                    Write-ProbeRows '5522' $v[0] $run 'native' $n (Invoke-K5522Run $v[1] $v[2] 'native' $n $true)
+                }
+            }
+            if ($Visibility) {
+                foreach ($client in 'bash', 'native') {
+                    Write-ProbeRows 'vis' $v[0] $run $client 0 (Invoke-VisRun $v[1] $v[2] $client)
+                }
+            }
+        }
+    }
+    exit $(if ($failed) { 1 } else { 0 })
+}
 $csv = Join-Path $OutDir 'headless.csv'
 Set-Content -LiteralPath $csv -Value 'variant,run,sequence,verdict,evidence' -Encoding UTF8
 $failed = 0

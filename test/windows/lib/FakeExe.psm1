@@ -13,6 +13,11 @@
 #       sets ENABLE_VIRTUAL_TERMINAL_INPUT on raw input, writes FAKE_QUERY
 #       (C-escaped: \e \a \r \n \t \\ \xNN) to stdout, reads stdin for
 #       FAKE_WAIT_MS (default 2000), prints "GOT:" + the hex of what arrived.
+#       Optional: FAKE_QUERY_FILE = path, the raw bytes of that file are the
+#       query instead of FAKE_QUERY; FAKE_UNTIL = C-escaped byte string, reading
+#       stops once it has arrived (it is part of GOT; FAKE_WAIT_MS stays the
+#       upper bound); FAKE_GOT_MAX = N, GOT holds the hex of the first N bytes
+#       only and a line "LEN:<total bytes>" follows.
 #   New-FakeExe -SelfTest
 #       compiles the three kinds into %TEMP% and runs argv once; no window.
 Set-StrictMode -Version Latest
@@ -78,9 +83,13 @@ public static class FakeExeProgram {
             SetConsoleMode(hin, mode);
         }
 
+        // FAKE_QUERY_FILE: the query is the raw bytes of this file (no unescaping).
+        string qf = Environment.GetEnvironmentVariable("FAKE_QUERY_FILE");
         string q = Environment.GetEnvironmentVariable("FAKE_QUERY") ?? "";
         Stream o = Console.OpenStandardOutput();
-        byte[] qb = Encoding.UTF8.GetBytes(Unescape(q));
+        byte[] qb = (!string.IsNullOrEmpty(qf) && File.Exists(qf))
+            ? File.ReadAllBytes(qf)
+            : Encoding.UTF8.GetBytes(Unescape(q));
         o.Write(qb, 0, qb.Length);
         o.Flush();
 
@@ -88,23 +97,44 @@ public static class FakeExeProgram {
         int.TryParse(Environment.GetEnvironmentVariable("FAKE_WAIT_MS"), out wait);
         if (wait <= 0) wait = 2000;
 
+        // FAKE_UNTIL (C-escaped): stop reading once this byte string has arrived
+        // (it is part of GOT); FAKE_WAIT_MS stays the upper bound.
+        string us = Environment.GetEnvironmentVariable("FAKE_UNTIL");
+        byte[] until = string.IsNullOrEmpty(us) ? null : Encoding.UTF8.GetBytes(Unescape(us));
+        ManualResetEvent matched = new ManualResetEvent(false);
+
         Thread t = new Thread(delegate() {
-            byte[] buf = new byte[256];
+            byte[] buf = new byte[4096];
             while (true) {
                 uint n;
                 if (!ReadFile(hin, buf, (uint)buf.Length, out n, IntPtr.Zero) || n == 0) return;
-                lock (Lock) { Got.Write(buf, 0, (int)n); }
+                lock (Lock) {
+                    Got.Write(buf, 0, (int)n);
+                    if (until != null && !matched.WaitOne(0)) {
+                        byte[] g = Got.GetBuffer();
+                        int len = (int)Got.Length;
+                        for (int i = Math.Max(0, len - (int)n - until.Length + 1); i + until.Length <= len; i++) {
+                            int j = 0;
+                            while (j < until.Length && g[i + j] == until[j]) j++;
+                            if (j == until.Length) { matched.Set(); break; }
+                        }
+                    }
+                }
             }
         });
         t.IsBackground = true;
         t.Start();
-        Thread.Sleep(wait);
+        if (until != null) matched.WaitOne(wait); else Thread.Sleep(wait);
 
         byte[] all;
         lock (Lock) { all = Got.ToArray(); }
+        // FAKE_GOT_MAX: print the hex of the first N bytes only, then LEN:<total>.
+        int max = -1;
+        bool capped = int.TryParse(Environment.GetEnvironmentVariable("FAKE_GOT_MAX"), out max) && max >= 0;
         StringBuilder sb = new StringBuilder("GOT:");
-        foreach (byte b in all) sb.Append(b.ToString("x2"));
+        for (int i = 0; i < all.Length && (!capped || i < max); i++) sb.Append(all[i].ToString("x2"));
         sb.Append("\n");
+        if (capped) sb.Append("LEN:" + all.Length + "\n");
         byte[] ob = Encoding.UTF8.GetBytes(sb.ToString());
         o.Write(ob, 0, ob.Length);
         o.Flush();
