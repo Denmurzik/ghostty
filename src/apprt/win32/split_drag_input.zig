@@ -94,9 +94,50 @@ fn windowOfRoot(app: *App, root: win32.foundation.HWND) ?*Window {
 
 /// Whether a window takes a split dropped on it.
 fn accepts(w: *const Window) bool {
-    if (w.tearing_down or w.parked) return false;
-    if (user32.IsIconic(w.hwnd) != 0) return false;
-    return QuickTerminal.acceptsTabDrop(w.kind);
+    return acceptsState(.{
+        .tearing_down = w.tearing_down,
+        .parked = w.parked,
+        .iconic = user32.IsIconic(w.hwnd) != 0,
+        // A modal prompt (close confirm, clipboard prompt) disables its owner:
+        // its code waits in a nested loop and must not see the tabs change.
+        .enabled = user32.IsWindowEnabled(w.hwnd) != 0,
+        .tab_drop = QuickTerminal.acceptsTabDrop(w.kind),
+    });
+}
+
+/// Pure part of `accepts`.
+const AcceptsIn = struct {
+    tearing_down: bool,
+    parked: bool,
+    iconic: bool,
+    enabled: bool,
+    tab_drop: bool,
+};
+
+fn acceptsState(s: AcceptsIn) bool {
+    if (s.tearing_down or s.parked or s.iconic) return false;
+    return s.enabled and s.tab_drop;
+}
+
+test "win32 split drag input: a disabled window takes no drop" {
+    const t = std.testing;
+    const ok: AcceptsIn = .{ .tearing_down = false, .parked = false, .iconic = false, .enabled = true, .tab_drop = true };
+    try t.expect(acceptsState(ok));
+    var s = ok;
+    s.enabled = false;
+    try t.expect(!acceptsState(s));
+    s = ok;
+    s.tab_drop = false;
+    try t.expect(!acceptsState(s));
+    s = ok;
+    s.parked = true;
+    try t.expect(!acceptsState(s));
+    s = ok;
+    s.iconic = true;
+    try t.expect(!acceptsState(s));
+    s = ok;
+    s.tearing_down = true;
+    try t.expect(!acceptsState(s));
 }
 
 /// What lies under the screen point `pt`. Our own layered popups (ghost,
