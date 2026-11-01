@@ -348,7 +348,7 @@ $script:BaseConfig = @"
 background = #102030
 foreground = #e0e0e0
 confirm-close-surface = false
-"@
+"@ + "`n"
 
 <#
 .SYNOPSIS
