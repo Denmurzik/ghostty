@@ -38,8 +38,27 @@ pub const WM_GHOSTTY_CLIPBOARD_READ = messages.WM_GHOSTTY_CLIPBOARD_READ;
 const open_retries = 5;
 const open_retry_ms = 10;
 
-/// How much of the text a confirmation prompt shows.
-const preview_chars = 512;
+/// What a Kitty clipboard read gathered from the clipboard: the data of the
+/// requested representations and the listing, read once before any prompt.
+/// The prompt shows these bytes and an allowed read serves these same
+/// bytes; the clipboard is never read again.
+const Gathered = struct {
+    /// Data owned by `alloc`; each `mime` is borrowed (the canonical text
+    /// name, or the request's own spelling) and only valid while the request
+    /// is alive.
+    contents: []terminal.clipboard.Content = &.{},
+
+    /// The listing, the slice and every name owned by `alloc`.
+    available: []const []const u8 = &.{},
+
+    fn deinit(self: *Gathered, alloc: Allocator) void {
+        for (self.contents) |c| alloc.free(c.data);
+        alloc.free(self.contents);
+        for (self.available) |a| alloc.free(a);
+        alloc.free(self.available);
+        self.* = .{};
+    }
+};
 
 /// One queued piece of clipboard work.
 const Pending = struct {
@@ -47,6 +66,18 @@ const Pending = struct {
 
     /// The text of an `osc_52_write`, owned by the queue.
     text: ?[:0]u8 = null,
+
+    /// What a `kitty_read` gathered, owned by the entry from the moment it
+    /// is shown to the user until the request is answered.
+    gathered: ?Gathered = null,
+
+    /// Free what the entry owns. Not the request: core consumes or denies it.
+    fn release(self: *Pending, alloc: Allocator) void {
+        if (self.text) |t| alloc.free(t);
+        self.text = null;
+        if (self.gathered) |*g| g.deinit(alloc);
+        self.gathered = null;
+    }
 };
 
 /// Per-surface clipboard state: the FIFO of work waiting for the message
@@ -80,15 +111,15 @@ pub const State = struct {
         if (self.abandoned) |flag| flag.* = true;
         self.abandoned = null;
 
-        if (self.active) |p| {
+        if (self.active) |*p| {
             deny(ctx, p.req);
-            if (p.text) |t| alloc.free(t);
+            p.release(alloc);
             self.active = null;
         }
 
-        for (self.queue.items) |p| {
+        for (self.queue.items) |*p| {
             deny(ctx, p.req);
-            if (p.text) |t| alloc.free(t);
+            p.release(alloc);
         }
         self.queue.deinit(alloc);
         self.queue = .empty;
@@ -126,12 +157,7 @@ pub fn request(
     t: apprt.Clipboard,
     req: apprt.ClipboardRequest,
 ) !apprt.ClipboardReadResult {
-    if (!supports(t)) return .unsupported;
-    switch (req) {
-        .paste, .osc_52_read => {},
-        // Not supported by this apprt; core answers the program.
-        .osc_52_write, .kitty_read, .kitty_write, .list => return .unsupported,
-    }
+    if (admission(t, req)) |answer| return answer;
 
     // Lets performable paste bindings fall through when there is nothing
     // to paste (an image, say). An OSC 52 read of such a clipboard is
@@ -146,6 +172,20 @@ pub fn request(
 
     try enqueue(surface, .{ .req = req });
     return .started;
+}
+
+/// The answer to a request that is turned away before anything is queued
+/// or asked: a clipboard Windows does not have, and the one request type
+/// that is never started here. Null means the request is queued. A Kitty
+/// read or write to a location this apprt cannot serve is `.unsupported`
+/// (core answers the program ENOSYS) before any prompt.
+fn admission(t: apprt.Clipboard, req: apprt.ClipboardRequest) ?apprt.ClipboardReadResult {
+    if (!supports(t)) return .unsupported;
+    return switch (req) {
+        // An OSC 52 write comes through `setClipboard`.
+        .osc_52_write => .unsupported,
+        .paste, .osc_52_read, .kitty_read, .kitty_write, .list => null,
+    };
 }
 
 const cf_hdrop = win32.ole32.CF_HDROP;
@@ -248,20 +288,20 @@ fn drain(surface: *Surface) void {
 
 const Answer = enum { yes, no, gone };
 
+/// The user's decision on a prompt. `remember` is only ever true with `.yes`.
+const Decision = struct {
+    answer: Answer,
+    remember: bool = false,
+};
+
 /// Handle one entry. False means the surface was destroyed behind a
 /// dialog and must not be touched.
 fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
     switch (p.req) {
         .osc_52_write => {
             const text = p.text orelse return true;
-            const answer = confirmWith(
-                surface,
-                alloc,
-                p,
-                "Clipboard Write",
-                "An application in this terminal wants to write to your clipboard. Allow it?",
-                text,
-            );
+            const parts = [_]dialogs.ClipboardPart{.{ .mime = "text/plain", .data = text }};
+            const answer = confirmParts(surface, p, .write, &parts, false).answer;
             switch (answer) {
                 .gone => return false,
                 .yes => surface.core_surface.completeClipboardRequest(p.req, .{
@@ -272,6 +312,42 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
             }
             alloc.free(text);
             return true;
+        },
+
+        // Never prompts: a listing discloses no data.
+        .list => {
+            var flow: ListFlow = .{ .surface = surface, .p = p };
+            runList(&flow);
+            return true;
+        },
+
+        .kitty_write => |kitty| {
+            var flow: KittyFlow = .{ .surface = surface, .alloc = alloc, .p = p };
+            return runKitty(&flow, kitty.pw.len > 0);
+        },
+
+        .kitty_read => |kitty| {
+            var entry = p;
+            const started: std.Io.Timestamp = .now(global.io(), .awake);
+            entry.gathered = gather(alloc, kitty, ClipboardReader{ .hwnd = surface.hwnd }) catch |err| {
+                log.warn("clipboard read failed err={}", .{err});
+                surface.core_surface.denyClipboardRequest(p.req);
+                return true;
+            };
+            if (entry.gathered) |g| {
+                var bytes: usize = 0;
+                for (g.contents) |c| bytes += c.data.len;
+                log.info("kitty read served {d} representations, {d} bytes in {d} ms", .{
+                    g.contents.len,
+                    bytes,
+                    started.durationTo(.now(global.io(), .awake)).toMilliseconds(),
+                });
+            }
+            var flow: KittyFlow = .{ .surface = surface, .alloc = alloc, .p = entry };
+            const alive = runKitty(&flow, kitty.pw.len > 0);
+            // Gone: `cancelAll` already freed what the entry owned.
+            if (alive) entry.release(alloc);
+            return alive;
         },
 
         .paste, .osc_52_read => {
@@ -295,9 +371,6 @@ fn process(surface: *Surface, alloc: Allocator, p: Pending) bool {
             if (alive or given == null) alloc.free(text);
             return alive;
         },
-
-        // `request` never queues these.
-        .kitty_read, .kitty_write, .list => unreachable,
     }
 }
 
@@ -316,18 +389,9 @@ const RequestFlow = struct {
     }
 
     fn confirm(self: *RequestFlow, text: []const u8) Answer {
-        const unsafe = self.p.req == .paste;
-        return confirmWith(
-            self.surface,
-            self.alloc,
-            self.p,
-            if (unsafe) "Confirm Paste" else "Clipboard Read",
-            if (unsafe)
-                "This text may be unsafe to paste: it contains line breaks or control characters. Paste it anyway?"
-            else
-                "An application in this terminal wants to read your clipboard. Allow it?",
-            text,
-        );
+        const parts = [_]dialogs.ClipboardPart{.{ .mime = "text/plain", .data = text }};
+        const kind: dialogs.ClipboardKind = if (self.p.req == .paste) .paste else .read;
+        return confirmParts(self.surface, self.p, kind, &parts, false).answer;
     }
 
     fn deny(self: *RequestFlow) void {
@@ -376,39 +440,258 @@ pub fn pasteText(surface: *Surface, text: [:0]const u8) void {
     };
 }
 
-/// Ask the user about `p`, showing `text` in the prompt. While the dialog
-/// is up `p` is registered in the state so that destroying the surface
-/// denies it, and the answer is `.gone` if that happened.
-fn confirmWith(
+/// Ask the user about `p`, showing `parts` in the prompt (the dialog copies
+/// what it shows before it appears). While the dialog is up `p` is
+/// registered in the state so that destroying the surface denies it, and
+/// the answer is `.gone` if that happened.
+fn confirmParts(
     surface: *Surface,
-    alloc: Allocator,
     p: Pending,
-    title: []const u8,
-    question: []const u8,
-    text: []const u8,
-) Answer {
+    kind: dialogs.ClipboardKind,
+    parts: []const dialogs.ClipboardPart,
+    can_remember: bool,
+) Decision {
     // Everything the dialog needs is copied out first: the surface may not
     // be there when it returns.
     const owner = surface.window.hwnd;
     const state = &surface.clipboard_state;
 
-    const shown = previewOf(alloc, text, preview_chars) catch return .no;
-    defer alloc.free(shown);
-    const body = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ question, shown }) catch return .no;
-    defer alloc.free(body);
-
     var abandoned = false;
     state.abandoned = &abandoned;
     state.active = p;
 
-    const yes = dialogs.confirm(owner, title, body);
+    const got = dialogs.confirmClipboard(owner, kind, parts, can_remember);
 
     // Past this point only the local flag may be looked at before it is
     // known whether the surface survived.
-    if (abandoned) return .gone;
+    if (abandoned) return .{ .answer = .gone };
     state.abandoned = null;
     state.active = null;
-    return if (yes) .yes else .no;
+    return .{
+        .answer = if (got.allow) .yes else .no,
+        .remember = got.allow and can_remember and got.remember,
+    };
+}
+
+/// Where a Kitty read finds the clipboard, so `gather` can be driven by a
+/// fake in tests.
+const ClipboardReader = struct {
+    hwnd: win32.foundation.HWND,
+
+    fn read(self: ClipboardReader, alloc: Allocator, mime: []const u8) !?[]u8 {
+        return readMime(alloc, self.hwnd, mime);
+    }
+
+    fn list(
+        self: ClipboardReader,
+        buf: *[clipboard_formats.max_listing][]const u8,
+        names: *clipboard_formats.NameBuf,
+    ) ![]const []const u8 {
+        return listMimes(self.hwnd, buf, names);
+    }
+};
+
+/// The name a representation is served under: every text alias is
+/// `text/plain` (core matches the aliases itself), anything else keeps the
+/// request's spelling.
+fn servedName(mime: []const u8) []const u8 {
+    return if (terminal.clipboard.isTextMime(mime)) "text/plain" else mime;
+}
+
+/// Read what a Kitty read asked for, once: each requested representation
+/// (read under its served name once, however often or under which alias it
+/// was asked for) and, when requested, the listing. A representation that
+/// cannot be read is simply absent, which is how the protocol says "not
+/// available"; so is a failed listing. Only an allocation failure is an
+/// error.
+fn gather(
+    alloc: Allocator,
+    kitty: *const apprt.ClipboardRequest.KittyRead,
+    reader: anytype,
+) Allocator.Error!Gathered {
+    var out: std.ArrayList(terminal.clipboard.Content) = .empty;
+    errdefer {
+        for (out.items) |c| alloc.free(c.data);
+        out.deinit(alloc);
+    }
+
+    for (kitty.mimes, 0..) |mime, i| {
+        const name = servedName(mime);
+        const again = for (kitty.mimes[0..i]) |earlier| {
+            if (std.mem.eql(u8, servedName(earlier), name)) break true;
+        } else false;
+        if (again) continue;
+
+        const got = reader.read(alloc, name) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                log.warn("clipboard representation not read err={}", .{err});
+                continue;
+            },
+        };
+        const data = got orelse continue;
+        errdefer alloc.free(data);
+        try out.append(alloc, .{ .mime = name, .data = data });
+    }
+
+    var available: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (available.items) |a| alloc.free(a);
+        available.deinit(alloc);
+    }
+    if (kitty.list) {
+        var buf: [clipboard_formats.max_listing][]const u8 = undefined;
+        var names: clipboard_formats.NameBuf = .{};
+        if (reader.list(&buf, &names)) |found| {
+            for (found) |m| {
+                const copy = try alloc.dupe(u8, m);
+                errdefer alloc.free(copy);
+                try available.append(alloc, copy);
+            }
+        } else |err| log.warn("clipboard listing not read err={}", .{err});
+    }
+
+    const contents = try out.toOwnedSlice(alloc);
+    errdefer {
+        for (contents) |c| alloc.free(c.data);
+        alloc.free(contents);
+    }
+    return .{ .contents = contents, .available = try available.toOwnedSlice(alloc) };
+}
+
+/// The core side of a paste event listing, so that `runList` can be driven
+/// by a fake in tests.
+const ListFlow = struct {
+    surface: *Surface,
+    p: Pending,
+
+    fn listing(
+        self: *ListFlow,
+        buf: *[clipboard_formats.max_listing][]const u8,
+        names: *clipboard_formats.NameBuf,
+    ) ![]const []const u8 {
+        return listMimes(self.surface.hwnd, buf, names);
+    }
+
+    fn complete(self: *ListFlow, available: []const []const u8) !void {
+        try self.surface.core_surface.completeClipboardRequest(self.p.req, .{ .available = available });
+    }
+
+    fn deny(self: *ListFlow) void {
+        self.surface.core_surface.denyClipboardRequest(self.p.req);
+    }
+};
+
+/// Answer a listing request with the MIME types on the clipboard. Never
+/// asks: the listing is metadata only. A failure still ends the request.
+fn runList(flow: anytype) void {
+    var buf: [clipboard_formats.max_listing][]const u8 = undefined;
+    var names: clipboard_formats.NameBuf = .{};
+    const found = flow.listing(&buf, &names) catch |err| {
+        log.warn("clipboard listing failed err={}", .{err});
+        flow.deny();
+        return;
+    };
+    flow.complete(found) catch |err| {
+        log.warn("clipboard listing not delivered err={}", .{err});
+        flow.deny();
+    };
+}
+
+/// The core and dialog side of a Kitty read or write, so that `runKitty` can
+/// be driven by a fake in tests.
+const KittyFlow = struct {
+    surface: *Surface,
+    alloc: Allocator,
+    /// For a read, with `gathered` set.
+    p: Pending,
+
+    fn gatheredOf(self: *const KittyFlow) Gathered {
+        return self.p.gathered orelse .{};
+    }
+
+    /// True when answering discloses nothing: a read that found no data (its
+    /// listing is metadata, as for the `.` read that never prompts).
+    fn disclosesNothing(self: *const KittyFlow) bool {
+        return switch (self.p.req) {
+            .kitty_read => self.gatheredOf().contents.len == 0,
+            else => false,
+        };
+    }
+
+    fn complete(self: *KittyFlow, confirmed: bool, remember: bool) !void {
+        const g = self.gatheredOf();
+        try self.surface.core_surface.completeClipboardRequest(self.p.req, .{
+            .contents = g.contents,
+            .available = g.available,
+            .confirmed = confirmed,
+            .remember = remember,
+        });
+    }
+
+    /// The prompt shows exactly what will be served: the gathered data of a
+    /// read, the committed contents of a write.
+    fn confirm(self: *KittyFlow, can_remember: bool) Decision {
+        const g = self.gatheredOf();
+        const kind: dialogs.ClipboardKind = if (self.p.req == .kitty_write) .write else .read;
+        const parts = self.alloc.alloc(dialogs.ClipboardPart, partCount(self.p.req, g)) catch return .{ .answer = .no };
+        defer self.alloc.free(parts);
+        fillParts(self.p.req, g, parts);
+        return confirmParts(self.surface, self.p, kind, parts, can_remember);
+    }
+
+    fn deny(self: *KittyFlow) void {
+        self.surface.core_surface.denyClipboardRequest(self.p.req);
+    }
+};
+
+/// How many representations the prompt of `req` lists.
+fn partCount(req: apprt.ClipboardRequest, g: Gathered) usize {
+    return switch (req) {
+        .kitty_read => g.contents.len,
+        .kitty_write => |w| w.contents.len,
+        else => 0,
+    };
+}
+
+/// The representations the prompt of `req` lists: the gathered data of a
+/// read, the committed contents of a write. `parts.len == partCount(..)`.
+fn fillParts(req: apprt.ClipboardRequest, g: Gathered, parts: []dialogs.ClipboardPart) void {
+    switch (req) {
+        .kitty_read => for (g.contents, parts) |c, *part| {
+            part.* = .{ .mime = c.mime, .data = c.data };
+        },
+        .kitty_write => |w| for (w.contents, parts) |c, *part| {
+            part.* = .{ .mime = c.mime, .data = c.data };
+        },
+        else => {},
+    }
+}
+
+/// Answer a Kitty read or write: straight away when core accepts it,
+/// behind a confirmation when it is unauthorized, with the same data in
+/// the prompt and in the answer. Every path ends in exactly one of core
+/// consuming the request or `deny`: past core's permission check it
+/// consumes the request even when it then fails, so a failure there is only
+/// logged. `can_remember` is true for a request with a session password.
+/// False means the surface was destroyed behind the dialog.
+fn runKitty(flow: anytype, can_remember: bool) bool {
+    flow.complete(flow.disclosesNothing(), false) catch |err| switch (err) {
+        error.UnauthorizedPaste => {
+            const decision = flow.confirm(can_remember);
+            switch (decision.answer) {
+                .gone => return false,
+                .no => flow.deny(),
+                .yes => flow.complete(true, decision.remember and can_remember) catch |e| switch (e) {
+                    // Cannot happen once confirmed; never leave it unanswered.
+                    error.UnauthorizedPaste => flow.deny(),
+                    else => log.warn("clipboard request failed err={}", .{e}),
+                },
+            }
+        },
+        else => log.warn("clipboard request failed err={}", .{err}),
+    };
+    return true;
 }
 
 /// Put `text_utf8` on the system clipboard as CF_UNICODETEXT, with lone
@@ -494,65 +777,6 @@ pub fn sanitize(alloc: Allocator, text: []const u8) ![]u8 {
         }
     }
     return out.toOwnedSlice(alloc);
-}
-
-/// The text of a confirmation prompt's preview: `dialogs.previewText`
-/// plus an escape for what it leaves alone and that can mislead a reader,
-/// C1 controls and bidi overrides/isolates/marks, shown as `<U+XXXX>`. Text
-/// of more than `max_chars` codepoints keeps its head (three quarters) and
-/// its tail, with the number of codepoints left out between them.
-fn previewOf(alloc: Allocator, text: []const u8, max_chars: usize) ![]u8 {
-    var total: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) : (total += 1) i += seqLen(text[i..]);
-    if (total <= max_chars) return previewPart(alloc, text);
-
-    const head = max_chars - max_chars / 4;
-    const tail = max_chars - head;
-    var head_end: usize = 0;
-    for (0..head) |_| head_end += seqLen(text[head_end..]);
-    var tail_start: usize = head_end;
-    for (0..total - head - tail) |_| tail_start += seqLen(text[tail_start..]);
-
-    const first = try previewPart(alloc, text[0..head_end]);
-    defer alloc.free(first);
-    const last = try previewPart(alloc, text[tail_start..]);
-    defer alloc.free(last);
-    return std.fmt.allocPrint(alloc, "{s}\u{2026} [{d} more characters] \u{2026}{s}", .{ first, total - head - tail, last });
-}
-
-/// Bytes of the codepoint at the start of `s`; 1 for invalid UTF-8.
-fn seqLen(s: []const u8) usize {
-    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return 1;
-    if (len > s.len) return 1;
-    _ = std.unicode.utf8Decode(s[0..len]) catch return 1;
-    return len;
-}
-
-fn previewPart(alloc: Allocator, text: []const u8) ![]u8 {
-    var escaped: std.ArrayList(u8) = .empty;
-    defer escaped.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < text.len) {
-        const len = seqLen(text[i..]);
-        const cp: ?u21 = if (len > 1 or text[i] < 0x80) std.unicode.utf8Decode(text[i..][0..len]) catch null else null;
-        if (cp) |c| {
-            if (isDeceptive(c)) {
-                var tmp: [12]u8 = undefined;
-                try escaped.appendSlice(alloc, std.fmt.bufPrint(&tmp, "<U+{X:0>4}>", .{c}) catch unreachable);
-            } else try escaped.appendSlice(alloc, text[i..][0..len]);
-        } else try escaped.append(alloc, text[i]);
-        i += len;
-    }
-
-    return dialogs.previewText(alloc, escaped.items, std.math.maxInt(usize));
-}
-fn isDeceptive(c: u21) bool {
-    return (c >= 0x80 and c <= 0x9F) or
-        c == 0x061C or c == 0x200E or c == 0x200F or
-        (c >= 0x202A and c <= 0x202E) or
-        (c >= 0x2066 and c <= 0x2069);
 }
 
 /// The clipboard's text as UTF-8 with CRLF turned into LF, or null when
@@ -803,8 +1027,29 @@ const Recorder = struct {
     }
 };
 
+/// A gathered read as `gather` makes it, for the tests.
+fn testGathered(alloc: Allocator) !Gathered {
+    const contents = try alloc.alloc(terminal.clipboard.Content, 2);
+    errdefer alloc.free(contents);
+    contents[0] = .{ .mime = "text/plain", .data = try alloc.dupe(u8, "hello") };
+    errdefer alloc.free(contents[0].data);
+    contents[1] = .{ .mime = "image/png", .data = try alloc.dupe(u8, "PNGDATA") };
+    errdefer alloc.free(contents[1].data);
+    const available = try alloc.alloc([]const u8, 2);
+    errdefer alloc.free(available);
+    available[0] = try alloc.dupe(u8, "text/plain");
+    errdefer alloc.free(available[0]);
+    available[1] = try alloc.dupe(u8, "image/png");
+    return .{ .contents = contents, .available = available };
+}
+
 test "win32 clipboard: pending request is denied when the surface closes" {
     const alloc = std.testing.allocator;
+
+    // The requests are only recorded (the recorder does not destroy them),
+    // so stand-ins are enough.
+    var kitty_read: apprt.ClipboardRequest.KittyRead = undefined;
+    var kitty_write: apprt.ClipboardRequest.KittyWrite = undefined;
 
     var state: State = .{};
     try state.queue.append(alloc, .{ .req = .{ .paste = .standard } });
@@ -818,6 +1063,12 @@ test "win32 clipboard: pending request is denied when the surface closes" {
         .req = .{ .osc_52_write = .standard },
         .text = try alloc.dupeSentinel(u8, "queued", 0),
     });
+    // Kitty entries: a read with data gathered, a listing.
+    try state.queue.append(alloc, .{
+        .req = .{ .kitty_read = &kitty_read },
+        .gathered = try testGathered(alloc),
+    });
+    try state.queue.append(alloc, .{ .req = .{ .list = .standard } });
     var abandoned = false;
     state.abandoned = &abandoned;
 
@@ -831,13 +1082,26 @@ test "win32 clipboard: pending request is denied when the surface closes" {
     try std.testing.expectEqual(@as(usize, 0), state.queue.items.len);
     try std.testing.expectEqualSlices(
         apprt.ClipboardRequestType,
-        &.{ .osc_52_write, .paste, .osc_52_read, .osc_52_write },
+        &.{ .osc_52_write, .paste, .osc_52_read, .osc_52_write, .kitty_read, .list },
         rec.denied.items,
     );
 
     // A second cancel (nothing left) is a no-op.
     state.cancelAll(alloc, &rec, Recorder.deny);
-    try std.testing.expectEqual(@as(usize, 4), rec.denied.items.len);
+    try std.testing.expectEqual(@as(usize, 6), rec.denied.items.len);
+
+    // A kitty write behind its dialog, and a read whose data was shown.
+    state.active = .{ .req = .{ .kitty_write = &kitty_write } };
+    try state.queue.append(alloc, .{
+        .req = .{ .kitty_read = &kitty_read },
+        .gathered = try testGathered(alloc),
+    });
+    state.cancelAll(alloc, &rec, Recorder.deny);
+    try std.testing.expectEqualSlices(
+        apprt.ClipboardRequestType,
+        &.{ .kitty_write, .kitty_read },
+        rec.denied.items[6..],
+    );
 }
 
 test "win32 clipboard: osc52 invalid utf8 replaced" {
@@ -851,19 +1115,6 @@ test "win32 clipboard: osc52 invalid utf8 replaced" {
     const b = try sanitize(alloc, "Ж😀\x00tail");
     defer alloc.free(b);
     try std.testing.expectEqualStrings("Ж😀", b);
-}
-
-test "win32 clipboard: preview escapes bidi overrides" {
-    const alloc = std.testing.allocator;
-
-    const a = try previewOf(alloc, "rm\u{202E}fdp\u{85}\u{2066}x\n", 512);
-    defer alloc.free(a);
-    try std.testing.expectEqualStrings("rm<U+202E>fdp<U+0085><U+2066>x\u{240A}", a);
-
-    // Over the limit: the head and the tail stay, the middle is counted.
-    const b = try previewOf(alloc, "abcdefghijklmnopqrstuvwx", 8);
-    defer alloc.free(b);
-    try std.testing.expectEqualStrings("abcdef\u{2026} [16 more characters] \u{2026}wx", b);
 }
 
 const FakeFlow = struct {
@@ -1082,6 +1333,313 @@ test "win32 clipboard: png served from a dib" {
     try std.testing.expectEqual(@as(u32, 2), got.width);
     // Top-left pixel is the red one.
     try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, got.pixels[0..4]);
+}
+
+const FakeReader = struct {
+    reads: *usize,
+
+    fn read(self: FakeReader, alloc: Allocator, mime: []const u8) !?[]u8 {
+        self.reads.* += 1;
+        if (std.mem.eql(u8, mime, "text/plain")) return try alloc.dupe(u8, "hello");
+        if (std.mem.eql(u8, mime, "image/png")) return try alloc.dupe(u8, "PNGDATA");
+        if (std.mem.eql(u8, mime, "text/rtf")) return error.ClipboardBusy;
+        return null;
+    }
+
+    fn list(
+        self: FakeReader,
+        buf: *[clipboard_formats.max_listing][]const u8,
+        names: *clipboard_formats.NameBuf,
+    ) ![]const []const u8 {
+        _ = self;
+        _ = names;
+        buf[0] = "text/plain";
+        buf[1] = "image/png";
+        return buf[0..2];
+    }
+};
+
+/// What the fake core says to a Kitty read or write.
+const FakeKitty = struct {
+    /// Whether the first unconfirmed completion asks for a prompt.
+    ask: bool,
+    answer: Decision = .{ .answer = .no },
+    gathered: Gathered = .{},
+    /// A read that found nothing to disclose.
+    empty: bool = false,
+    fail_confirmed: bool = false,
+
+    /// Core consumed the request with a success.
+    completions: usize = 0,
+    confirmed: bool = false,
+    remember: bool = false,
+    asked: usize = 0,
+    asked_can_remember: bool = false,
+    denied: usize = 0,
+    first_confirmed_arg: ?bool = null,
+    shown: []const terminal.clipboard.Content = &.{},
+    served: []const terminal.clipboard.Content = &.{},
+
+    fn disclosesNothing(self: *const FakeKitty) bool {
+        return self.empty;
+    }
+
+    fn complete(self: *FakeKitty, confirmed: bool, remember: bool) error{ UnauthorizedPaste, OutOfMemory }!void {
+        if (self.first_confirmed_arg == null) self.first_confirmed_arg = confirmed;
+        if (self.ask and !confirmed) return error.UnauthorizedPaste;
+        if (confirmed and self.fail_confirmed) return error.OutOfMemory;
+        self.completions += 1;
+        self.confirmed = confirmed;
+        self.remember = remember;
+        self.served = self.gathered.contents;
+    }
+
+    fn confirm(self: *FakeKitty, can_remember: bool) Decision {
+        self.asked += 1;
+        self.asked_can_remember = can_remember;
+        // Nothing may have been answered before the user did.
+        std.debug.assert(self.completions == 0);
+        self.shown = self.gathered.contents;
+        return self.answer;
+    }
+
+    fn deny(self: *FakeKitty) void {
+        self.denied += 1;
+    }
+};
+
+test "win32 clipboard kitty: gather reads each representation once" {
+    const alloc = std.testing.allocator;
+    var reads: usize = 0;
+
+    var kitty: apprt.ClipboardRequest.KittyRead = undefined;
+    kitty.mimes = &[_][:0]const u8{ "UTF8_STRING", "image/png", "text/plain", "image/gif", "text/rtf" };
+    kitty.list = true;
+
+    var g = try gather(alloc, &kitty, FakeReader{ .reads = &reads });
+    defer g.deinit(alloc);
+
+    // The text alias and `text/plain` are one read; gif is absent, rtf
+    // failed: both are simply not served.
+    try std.testing.expectEqual(@as(usize, 4), reads);
+    try std.testing.expectEqual(@as(usize, 2), g.contents.len);
+    try std.testing.expectEqualStrings("text/plain", g.contents[0].mime);
+    try std.testing.expectEqualStrings("hello", g.contents[0].data);
+    try std.testing.expectEqualStrings("image/png", g.contents[1].mime);
+    try std.testing.expectEqual(@as(usize, 2), g.available.len);
+    try std.testing.expectEqualStrings("image/png", g.available[1]);
+
+    // Without a listing request there is no listing.
+    kitty.list = false;
+    var plain = try gather(alloc, &kitty, FakeReader{ .reads = &reads });
+    defer plain.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), plain.available.len);
+}
+
+test "win32 clipboard kitty: gather frees everything when memory runs out" {
+    var kitty: apprt.ClipboardRequest.KittyRead = undefined;
+    kitty.mimes = &[_][:0]const u8{ "text/plain", "image/png" };
+    kitty.list = true;
+
+    var fail_index: usize = 0;
+    while (fail_index < 16) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var reads: usize = 0;
+        if (gather(a, &kitty, FakeReader{ .reads = &reads })) |got| {
+            var g = got;
+            g.deinit(a);
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+}
+
+test "win32 clipboard kitty: read allowed by policy completes once" {
+    const alloc = std.testing.allocator;
+    var fake: FakeKitty = .{ .ask = false, .gathered = try testGathered(alloc) };
+    defer fake.gathered.deinit(alloc);
+
+    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expectEqual(@as(usize, 0), fake.asked);
+    try std.testing.expectEqual(@as(usize, 1), fake.completions);
+    try std.testing.expectEqual(@as(usize, 0), fake.denied);
+    try std.testing.expect(!fake.confirmed);
+}
+
+test "win32 clipboard kitty: read asks and serves what was shown" {
+    const alloc = std.testing.allocator;
+    var reads: usize = 0;
+    var kitty: apprt.ClipboardRequest.KittyRead = undefined;
+    kitty.mimes = &[_][:0]const u8{ "text/plain", "image/png" };
+    kitty.list = false;
+
+    var fake: FakeKitty = .{
+        .ask = true,
+        .answer = .{ .answer = .yes, .remember = true },
+        .gathered = try gather(alloc, &kitty, FakeReader{ .reads = &reads }),
+    };
+    defer fake.gathered.deinit(alloc);
+    const reads_before = reads;
+
+    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expectEqual(@as(usize, 1), fake.asked);
+    try std.testing.expect(fake.asked_can_remember);
+    try std.testing.expectEqual(@as(usize, 1), fake.completions);
+    try std.testing.expect(fake.confirmed);
+    try std.testing.expect(fake.remember);
+    try std.testing.expectEqual(@as(usize, 0), fake.denied);
+    // The same bytes in the prompt and in the answer, and no second read.
+    try std.testing.expectEqual(fake.shown.ptr, fake.served.ptr);
+    try std.testing.expectEqualStrings("hello", fake.served[0].data);
+    try std.testing.expectEqualStrings("PNGDATA", fake.served[1].data);
+    try std.testing.expectEqual(reads_before, reads);
+
+    // Without a password nothing is remembered, whatever the prompt said.
+    var anon: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
+    try std.testing.expect(runKitty(&anon, false));
+    try std.testing.expect(!anon.asked_can_remember);
+    try std.testing.expect(anon.confirmed);
+    try std.testing.expect(!anon.remember);
+}
+
+test "win32 clipboard kitty: denied read answers EPERM" {
+    const alloc = std.testing.allocator;
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .no }, .gathered = try testGathered(alloc) };
+    defer fake.gathered.deinit(alloc);
+
+    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expectEqual(@as(usize, 1), fake.asked);
+    try std.testing.expectEqual(@as(usize, 1), fake.denied);
+    try std.testing.expectEqual(@as(usize, 0), fake.completions);
+}
+
+test "win32 clipboard kitty: write asks and remembers only with a password" {
+    var allowed: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
+    try std.testing.expect(runKitty(&allowed, true));
+    try std.testing.expectEqual(@as(usize, 1), allowed.completions);
+    try std.testing.expect(allowed.confirmed and allowed.remember);
+    try std.testing.expect(allowed.asked_can_remember);
+
+    var no_pw: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes, .remember = true } };
+    try std.testing.expect(runKitty(&no_pw, false));
+    try std.testing.expect(no_pw.confirmed and !no_pw.remember);
+    try std.testing.expect(!no_pw.asked_can_remember);
+
+    var denied: FakeKitty = .{ .ask = true, .answer = .{ .answer = .no } };
+    try std.testing.expect(runKitty(&denied, true));
+    try std.testing.expectEqual(@as(usize, 1), denied.denied);
+    try std.testing.expectEqual(@as(usize, 0), denied.completions);
+}
+
+test "win32 clipboard kitty: the prompt lists the committed contents of a write" {
+    var kitty: apprt.ClipboardRequest.KittyWrite = undefined;
+    kitty.contents = &.{
+        .{ .mime = "text/plain", .data = "gh-5522" },
+        .{ .mime = "image/png", .data = "PNG" },
+    };
+    const req: apprt.ClipboardRequest = .{ .kitty_write = &kitty };
+
+    try std.testing.expectEqual(@as(usize, 2), partCount(req, .{}));
+    var parts: [2]dialogs.ClipboardPart = undefined;
+    fillParts(req, .{}, &parts);
+    for (kitty.contents, parts) |c, part| {
+        try std.testing.expectEqualStrings(c.mime, part.mime);
+        try std.testing.expectEqualStrings(c.data, part.data);
+    }
+}
+
+test "win32 clipboard kitty: a read with nothing to show does not prompt" {
+    var fake: FakeKitty = .{ .ask = true, .empty = true };
+    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expectEqual(@as(?bool, true), fake.first_confirmed_arg);
+    try std.testing.expectEqual(@as(usize, 0), fake.asked);
+    try std.testing.expectEqual(@as(usize, 1), fake.completions);
+}
+
+test "win32 clipboard kitty: surface gone behind the prompt" {
+    const alloc = std.testing.allocator;
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .gone }, .gathered = try testGathered(alloc) };
+    defer fake.gathered.deinit(alloc);
+
+    try std.testing.expect(!runKitty(&fake, true));
+    // Nothing is answered or denied here: `cancelAll` did, once.
+    try std.testing.expectEqual(@as(usize, 0), fake.completions);
+    try std.testing.expectEqual(@as(usize, 0), fake.denied);
+}
+
+test "win32 clipboard kitty: a failed completion is never denied after core consumed it" {
+    var fake: FakeKitty = .{ .ask = true, .answer = .{ .answer = .yes }, .fail_confirmed = true };
+    try std.testing.expect(runKitty(&fake, true));
+    try std.testing.expectEqual(@as(usize, 0), fake.denied);
+    try std.testing.expectEqual(@as(usize, 0), fake.completions);
+}
+
+test "win32 clipboard kitty: unsupported location before any prompt" {
+    var kw: apprt.ClipboardRequest.KittyWrite = undefined;
+    var kr: apprt.ClipboardRequest.KittyRead = undefined;
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unsupported),
+        admission(.primary, .{ .kitty_write = &kw }),
+    );
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unsupported),
+        admission(.primary, .{ .kitty_read = &kr }),
+    );
+    try std.testing.expectEqual(
+        @as(?apprt.ClipboardReadResult, .unsupported),
+        admission(.primary, .{ .list = .primary }),
+    );
+    // The standard clipboard is queued.
+    try std.testing.expect(admission(.standard, .{ .kitty_write = &kw }) == null);
+    try std.testing.expect(admission(.standard, .{ .kitty_read = &kr }) == null);
+    try std.testing.expect(admission(.standard, .{ .list = .standard }) == null);
+}
+
+const FakeList = struct {
+    fail_listing: bool = false,
+    fail_complete: bool = false,
+    completed: usize = 0,
+    denied: usize = 0,
+    seen: usize = 0,
+
+    fn listing(
+        self: *FakeList,
+        buf: *[clipboard_formats.max_listing][]const u8,
+        names: *clipboard_formats.NameBuf,
+    ) ![]const []const u8 {
+        _ = names;
+        if (self.fail_listing) return error.ClipboardBusy;
+        buf[0] = "text/plain";
+        buf[1] = "image/png";
+        return buf[0..2];
+    }
+
+    fn complete(self: *FakeList, available: []const []const u8) !void {
+        if (self.fail_complete) return error.OutOfMemory;
+        self.completed += 1;
+        self.seen = available.len;
+    }
+
+    fn deny(self: *FakeList) void {
+        self.denied += 1;
+    }
+};
+
+test "win32 clipboard kitty: list never prompts" {
+    var ok: FakeList = .{};
+    runList(&ok);
+    try std.testing.expectEqual(@as(usize, 1), ok.completed);
+    try std.testing.expectEqual(@as(usize, 2), ok.seen);
+    try std.testing.expectEqual(@as(usize, 0), ok.denied);
+
+    // A failure still ends the request, once.
+    var busy: FakeList = .{ .fail_listing = true };
+    runList(&busy);
+    try std.testing.expectEqual(@as(usize, 0), busy.completed);
+    try std.testing.expectEqual(@as(usize, 1), busy.denied);
+
+    var lost: FakeList = .{ .fail_complete = true };
+    runList(&lost);
+    try std.testing.expectEqual(@as(usize, 1), lost.denied);
 }
 
 test {
