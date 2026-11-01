@@ -9,6 +9,8 @@ const terminal = @import("../../terminal/main.zig");
 const Surface = @import("Surface.zig");
 const scrollbar = @import("scrollbar.zig");
 const context_menu = @import("context_menu.zig");
+const grab_overlay = @import("grab_overlay.zig");
+const split_drag_input = @import("split_drag_input.zig");
 const latency = @import("../../os/main.zig").windows_latency;
 
 const log = std.log.scoped(.win32_mouse);
@@ -103,6 +105,7 @@ pub fn handle(
         user32.WM_MOUSEMOVE => {
             trackLeave(surface);
             const pos = [2]i32{ user32.getXLparam(lparam), user32.getYLparam(lparam) };
+            grab_overlay.pointerMoved(surface, pos[0], pos[1]);
             scrollbar.pointerMoved(surface, pos[0], surface.mouse_state.captured_buttons != 0);
             const moved = if (surface.mouse_state.last_pos) |p| !std.mem.eql(i32, &p, &pos) else true;
             surface.mouse_state.last_pos = pos;
@@ -114,6 +117,7 @@ pub fn handle(
         user32.WM_MOUSELEAVE => {
             surface.mouse_state.tracking_leave = false;
             surface.mouse_state.last_pos = null;
+            grab_overlay.pointerLeft(surface);
             // While a button is held the capture keeps the position
             // flowing; clearing it would break a drag selection.
             if (surface.mouse_state.captured_buttons == 0) {
@@ -126,6 +130,11 @@ pub fn handle(
         // starts a divider drag instead.
         user32.WM_LBUTTONDOWN => {
             if (surface.tab.beginDragFrom(surface.hwnd, user32.getXLparam(lparam), user32.getYLparam(lparam))) return 0;
+            // The grab handle takes the left press; the terminal never sees it.
+            if (grab_overlay.hitHandle(surface, user32.getXLparam(lparam), user32.getYLparam(lparam))) {
+                split_drag_input.press(surface, user32.getXLparam(lparam), user32.getYLparam(lparam));
+                return 0;
+            }
             const ev = buttonEvent(msg, wparam) orelse return null;
             handleButton(surface, ev.button, ev.state, lparam);
             return 0;
@@ -175,6 +184,10 @@ pub fn handle(
                 _ = user32.SetCursor(user32.LoadCursorW(null, cursor));
                 return 1;
             }
+            if (!surface.mouse_state.hidden and overHandle(surface)) {
+                _ = user32.SetCursor(user32.LoadCursorW(null, user32.IDC_SIZEALL));
+                return 1;
+            }
             applyCursor(surface.mouse_state);
             return 1;
         },
@@ -183,15 +196,31 @@ pub fn handle(
     }
 }
 
+/// Whether the pointer is on the pane's grab handle right now.
+fn overHandle(surface: *Surface) bool {
+    // A button held elsewhere (a selection drag) keeps its own cursor.
+    if (surface.mouse_state.captured_buttons != 0) return false;
+    var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
+    if (win32.user32.GetCursorPos(&pt) == 0) return false;
+    if (win32.user32.ScreenToClient(surface.hwnd, &pt) == 0) return false;
+    return grab_overlay.hitHandle(surface, pt.x, pt.y);
+}
+
 /// Re-apply the cursor now. Window messages only update the cursor when
 /// the mouse moves, so a shape or visibility action calls this to take
 /// effect immediately while the pointer is over the surface.
 pub fn refreshCursor(surface: *Surface) void {
     var pt: win32.foundation.POINT = .{ .x = 0, .y = 0 };
     if (win32.user32.GetCursorPos(&pt) == 0) return;
+    // A hidden pointer hides the ellipsis too.
+    grab_overlay.refresh(surface);
     // A captured surface owns the cursor wherever the pointer is.
     if (surface.mouse_state.captured_buttons == 0 and
         win32.user32.WindowFromPoint(pt) != surface.hwnd) return;
+    if (!surface.mouse_state.hidden and overHandle(surface)) {
+        _ = win32.user32.SetCursor(win32.user32.LoadCursorW(null, win32.user32.IDC_SIZEALL));
+        return;
+    }
     applyCursor(surface.mouse_state);
 }
 

@@ -42,6 +42,7 @@ const messages = @import("messages.zig");
 const mouse = @import("mouse.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const scrollbar_mod = @import("scrollbar.zig");
+const grab_overlay = @import("grab_overlay.zig");
 const taskbar = @import("taskbar.zig");
 const title_rules = @import("title_rules.zig");
 const theme = @import("theme.zig");
@@ -168,6 +169,7 @@ decor_word: std.atomic.Value(u64) = .init(0),
 search: SearchBar.State = .{},
 link: link_mod.State = .{},
 badges: badges_mod.State = .{},
+grab: grab_overlay.State = .{},
 key_state: key_state_mod.State = .{},
 decor: decor_mod.State = .{},
 composition: composition_mod.SurfaceState = .{},
@@ -820,6 +822,9 @@ fn wndProc(
             return 0;
         } else if (wparam == messages.timers.surface.title_grace) {
             self.titleGraceOver();
+            return 0;
+        } else if (wparam == messages.timers.surface.grab_fade) {
+            grab_overlay.onTimer(self);
             return 0;
         },
 

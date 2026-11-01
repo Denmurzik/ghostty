@@ -24,6 +24,7 @@ const composition = @import("composition.zig");
 const config_errors = @import("config_errors.zig");
 const decor = @import("decor.zig");
 const export_io = @import("export_io.zig");
+const grab_overlay = @import("grab_overlay.zig");
 const hotkeys = @import("hotkeys.zig");
 const jumplist = @import("jumplist.zig");
 const key_state = @import("key_state.zig");
@@ -103,6 +104,7 @@ pub fn configChanged(app: *App, config: *const Config, reloaded: bool) void {
     tmux_labels.configChanged(app);
     decor.configChanged(app, config);
     overlay.configChanged(app, config);
+    grab_overlay.configChanged(app, config);
     hotkeys.configChanged(app, config);
     QuickTerminal.configChanged(app, config);
     composition.configChanged(app, config);
@@ -229,10 +231,16 @@ pub fn windowMessage(window: *Window, msg: u32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
+/// The grab handles of every pane of the window (a new scale moves them; layout changes arrive through `tabLayoutChanged`).
+fn refreshWindowHandles(window: *Window) void {
+    for (window.tabs.items) |tab| grab_overlay.refreshTab(tab);
+}
+
 pub const WindowChange = enum { moved, sized, dpi, minimized, restored, activated, deactivated, destroying };
 
 pub fn windowChanged(window: *Window, change: WindowChange) void {
     overlay.windowChanged(window, change);
+    if (change == .dpi) refreshWindowHandles(window);
     // The editor sits at a pixel rect of the old scale.
     if (change == .dpi) title_edit.cancel(window);
     if (change == .destroying) link.windowDestroying(window);
@@ -244,6 +252,7 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
 /// The tab became the window's visible one (or stopped being it).
 pub fn tabShown(tab: *Tab, shown: bool) void {
     overlay.tabShown(tab, shown);
+    grab_overlay.refreshTab(tab);
     if (!shown) title_edit.cancelForTab(tab.window, tab);
     scrollbar.tabShown(tab, shown);
     tmux_labels.tabShown(tab, shown);
@@ -287,6 +296,7 @@ pub fn surfaceCreated(surface: *Surface) void {
 /// Before core tears the surface down.
 pub fn surfaceDestroying(surface: *Surface) void {
     overlay.surfaceDestroying(surface);
+    grab_overlay.surfaceDestroying(surface);
     SearchBar.surfaceDestroying(surface);
     CommandPalette.surfaceDestroying(surface);
     link.surfaceDestroying(surface);
@@ -303,12 +313,14 @@ pub fn surfaceDestroying(surface: *Surface) void {
 pub fn surfaceFocus(surface: *Surface, focused: bool) void {
     decor.surfaceFocus(surface, focused);
     overlay.surfaceFocus(surface, focused);
+    grab_overlay.refresh(surface);
 }
 
 /// After every relayout of the tab's split tree and every change of its
 /// active surface.
 pub fn tabLayoutChanged(tab: *Tab) void {
     decor.tabLayoutChanged(tab);
+    grab_overlay.refreshTab(tab);
     secure_input.tabLayoutChanged(tab);
     tmux_pane_io.layoutChanged(tab);
     tmux_labels.tabLayoutChanged(tab);

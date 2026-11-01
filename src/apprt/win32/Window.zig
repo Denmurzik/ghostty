@@ -30,6 +30,7 @@ const proxy_icon = @import("proxy_icon.zig");
 const resize_overlay = @import("resize_overlay.zig");
 const secure_input = @import("secure_input.zig");
 const strip_input_mod = @import("strip_input.zig");
+const split_drag_input = @import("split_drag_input.zig");
 const tab_anim_mod = @import("tab_anim.zig");
 const taskbar_mod = @import("taskbar.zig");
 const theme = @import("theme.zig");
@@ -63,6 +64,7 @@ pub const Hook = *const fn (
 const hooks = [_]Hook{
     hooks_mod.windowMessage,
     frame_mod.handle,
+    split_drag_input.handle,
     strip_input_mod.handle,
     theme.handle,
     taskbar_mod.handle,
