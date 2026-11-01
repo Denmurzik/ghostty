@@ -189,12 +189,14 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   every cached back-buffer reference. Generic still draws
   on every wakeup (no display link); the waitable wait caps it at the display rate.
 - Fallback switch (only if measured lock contention > 2 ms/frame with ≥ 8 surfaces): `Options.per_surface_device = true`
-- M8 pacer (R-M8-7, `fd6ae7340`): the pacer counts **every** present (not only those followed by a wait), drains a backlog of waitable signals, consumes the
-  initial signal and resyncs when the surface has been idle (`d3d11 pacer resync …`, counters `pending/drained/surplus/capped/timeouts`;
-  `GHOSTTY_D3D11_PACING_LOG=1`). `waitFrameSlot` returns whether it timed out (`slot_timeout=` per frame). Custom-shader time is f64 nanoseconds with a rebase
+- M8 pacer (R-M8-7, R-M8-41, `fd6ae7340`, final design Task 1.1): the pacer counts **every** present (not only those followed by a wait), resyncs when the
+  surface has been idle (`d3d11 pacer resync …`, counters `pending/drained/surplus/capped/timeouts`; `GHOSTTY_D3D11_PACING_LOG=1`) and keeps up to **two frames in
+  flight**, as before Task 1 (R-M8-41). `waitFrameSlot` returns whether it timed out (`slot_timeout=` per frame). The latency tracer books the frame-slot wait between
+  parse and render start as `slot_wait`. Custom-shader time is f64 nanoseconds with a rebase
   on long-lived surfaces (`shadertoy.rebaseTime`); a shader that uses `iTime` as a phase may jump once an hour (not during cursor or focus animation).
-  The fix is "likely" until the `long-tab-lag` proof (Task 24 B4). A hidden tab's swap chain shrinks to 1 x 1 (`SwapChain.shrink`, switch
-  `shrink_hidden_chains` in `D3D11.zig`, R-M8-21) and the reshow is flash-free: the tab is raised only after the first present of the grown chain
+  Verdict of the `long-tab-lag` batch run (Task 24 B4): **fixed**, long-tab A minus C = -0.57 ms, at most 2 signals drained, surplus 0; key echo is back at the win.2
+  level (fresh tab owned p50 about 0.85 ms). A hidden tab's swap chain shrinks to 1 x 1 (`SwapChain.shrink`, switch
+  `shrink_hidden_chains` in `D3D11.zig`, R-M8-21, R-M8-42) and the reshow is flash-free: the tab is raised only after the first present of the grown chain
   (`WM_GHOSTTY_PRESENTED`, `RaiseGate`).
   gives each `D3D11` instance its own device+context and no global lock. Not built in M1.
 - Device loss (`error.DeviceLost` from Present/Map/Create*): M1 = mark `renderer_health = .unhealthy` via
@@ -400,11 +402,12 @@ that window cannot be built. Owned by the top-level window; modal. The link and 
   after a 250 ms debounce (a quick desktop switch does not flicker the report), an uncloak is immediate. Windows fully covered by other windows are **not** tracked
   (no occlusion test, R-M8-22); zoomed-out split panes stay "not visible" as on GTK (R-M8-23); no EcoQoS / process power throttling (R-M8-24).
 - **Hidden tabs (R-M8-21).** A hidden tab's container is hidden and its surfaces are not visible; its DXGI swap chain shrinks to 1 x 1 (§6.3) and is restored
-  before the tab is raised, so no stale frame shows. Whether the shrink stays is a gate measured in Task 24 B2 (hidden tab at least 8 MB at the default size
-  or 30 MB maximised at 1080p before the shrink); otherwise one `const` in `D3D11.zig` turns it off.
+  before the tab is raised, so no stale frame shows. Gate measured in Task 24 B2: a hidden tab held 11.4 MB at 1600 x 900 (15.5 MB maximised) before the shrink, 0 after, so the shrink is kept
+  (R-M8-21). It applies only to inactive tabs of a window that is shown; the quick terminal, `toggle_visibility` and a restore never shrink (R-M8-42).
 - **`CSI 8 ; rows ; cols t` (R-M8-25).** Allowed only with `vt-window-resize-allowed = true` (default `false`) and only for a lone surface of a single-tab,
   non-quick, non-maximised, non-fullscreen, non-snapped window with the inspector closed; the window changes by the surface delta, clamped to the work area,
-  top-left kept.
+  top-left kept. Both Windows consoles (inbox and bundled OpenConsole) resize their own buffer on `CSI 8 t`; when Ghostty does not honour the request it re-sends
+  its grid size to the pty (R-M8-43); expectations of ConPTY resize echoes expire after 1000 ms (R-M8-44).
 - **Split drag (R-M8-5, R-M8-10, R-M8-27…35).** `split_drag_input.zig` (state machine, pure geometry `split_drag.zig`), `grab_overlay.zig` (handle, 80 x 12 DIP,
   top centre of every pane including a lone one; `drag-handle = auto|always|never`, macOS `auto`), `drag_ghost.zig`. Drop targets: another pane of the same tab
   (zones left, right, top, bottom; "split the target, then remove the source", ratio 0.5), the tab strip (a new tab at the insertion marker; a chip hovered
@@ -952,12 +955,11 @@ Kitty in pwsh/cmd (render and `a=q` reply measured), symbols/emoji from Segoe UI
 `CF_HDROP` paste, system double-click time, pwsh/cmd `cursor`/`ssh-env`/`ssh-terminfo`, WSL start directory, Windows 11 top-level "Open Ghostty here" (not shipped, see 13.1),
 installer task `explorermenu`. MSYS stays on the inbox console (limit, `docs/windows/m7/msys-key-loss.md`).
 
-**M8 — `1.4.1-dev-win.3` (plan `docs/windows/plans/M8-win14.md`, rulings R-M8-1…40 in §18; tag `win-1.4.1-dev-3`).** Upstream 1.4 merged; D3D11 pacer fix for the
-long-tab input lag (likely fix until the Task 24 B4 proof), `TERMINUS_SUBLIME` for Claude Code symbols, Kitty clipboard protocol OSC 5522 with the prompt
+**M8 — `1.4.1-dev-win.3` (plan `docs/windows/plans/M8-win14.md`, rulings R-M8-1…44 in §18; tag `win-1.4.1-dev-3`).** Upstream 1.4 merged; D3D11 pacer fix for the
+long-tab input lag (fixed, proven in the Task 24 B4 batch run), `TERMINUS_SUBLIME` for Claude Code symbols, Kitty clipboard protocol OSC 5522 with the prompt
 (§7.4), rich (HTML) copy, in-process selection clipboard and middle click, split drag with the handle (§7.7), window-level visibility (hidden, lock,
 display off, other virtual desktop), hidden tabs shrink their swap chain with a flash-free reshow, `CSI 8 t` guards, security fixes (Git prompt `$PWD`,
-invisible characters in links, C1 in dropped paths). The GUI e2e of the M8 scenarios runs in one batch (Task 24) after the code is in; the docs say "likely"
-where a measurement is still pending.
+invisible characters in links, C1 in dropped paths). The GUI e2e of the M8 scenarios ran in one batch (Task 24) after the code was in; results are in the sections above and in `CHANGELOG.md`.
 
 ## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
 1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
@@ -1422,3 +1424,7 @@ Rulings for M8 (plan-m8, 2026-11-01; owner answers where given, else the design'
 - R-M8-38, the invisible set is macOS `isUnsafeCharacter` (C0, C1, U+061C, U+200B-U+200F, U+202A-U+202E, U+2066-U+2069, U+2028/2029, U+2060, U+FEFF); `.paste` excludes U+200D; dropped paths also refuse C1.
 - R-M8-39, the scrollback default of 50 MB (upstream) is kept on Windows; SPEC says `scrollback-limit-bytes`; the RAM row is re-measured in Task 24.
 - R-M8-40, Kitty animation on D3D11 was never verified: if Task 24 shows frames do not advance while visible, that is a separate n.1 renderer task.
+- R-M8-41, the Task 1.1 pacer keeps up to two frames in flight (as before Task 1), counts every present and resyncs when idle. Batch verdict of `long-tab-lag`: fixed (A minus C = -0.57 ms, drained at most 2, surplus 0).
+- R-M8-42, the swap-chain shrink applies only to inactive tabs of a shown window; quick terminal, `toggle_visibility` and restore never shrink. Measured: 11.4 MB per hidden tab at 1600 x 900 (15.5 MB maximised) before, 0 after, so the shrink stays (R-M8-21 gate met).
+- R-M8-43, `CSI 8 t`: both Windows consoles resize their own buffer; when Ghostty does not honour the request it re-sends its grid size to the pty (a pre-existing bug, fixed). Termio Windows touch points: `stream_handler.zig`, `message.zig`, `Thread.zig`, `resize_echoes.zig`.
+- R-M8-44, ConPTY resize echo expectations expire after 1000 ms (a compromise: a real application request after a maximize is honoured once the expectation has expired). Better fix in `next-version.md` (item 35).

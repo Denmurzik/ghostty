@@ -158,9 +158,9 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | Window-level visibility: hidden window, hidden quick terminal, minimised report not visible | M8 | unit: win32 window (not-on-screen test); e2e/visibility-hidden | done (GUI proof pending) |
 | Lock screen, display off, remote disconnect, other virtual desktop report not visible | M8 | unit: win32 screen; Win+L and virtual desktops are the owner's manual check in the M8 batch | manual |
 | Windows covered by other windows | M8 | R-M8-22 | gap (not tracked) |
-| Hidden tabs shrink their swap chain to 1 x 1; flash-free reshow | M8 | unit: d3d11 swapchain; e2e/hidden-render (GPU counters, `measure-ram.ps1 -Gpu`) | done (gate measured in the M8 batch) |
-| D3D11 pacer fix for the long-tab input lag, `iTime` rebase | M8 | unit: d3d11 pacer, d3d11 shader time; e2e/long-tab-lag | likely fix (proof in the M8 batch) |
-| `CSI 8 ; rows ; cols t` guards (`vt-window-resize-allowed`) | M8 | unit: win32 placement (CSI 8 t); e2e/csi8-resize | done (GUI proof pending) |
+| Hidden tabs shrink their swap chain to 1 x 1; flash-free reshow | M8 | unit: d3d11 swapchain; e2e/hidden-render (GPU counters, `measure-ram.ps1 -Gpu`) | done (gate met: 11.4 MB per hidden tab at 1600 x 900, 15.5 MB maximised, before; 0 after; only inactive tabs of a shown window shrink, R-M8-42) |
+| D3D11 pacer fix for the long-tab input lag, `iTime` rebase | M8 | unit: d3d11 pacer, d3d11 shader time; e2e/long-tab-lag | done (fixed: long-tab-lag A minus C -0.57 ms, drained at most 2, surplus 0; two frames in flight, R-M8-41) |
+| `CSI 8 ; rows ; cols t` guards (`vt-window-resize-allowed`) | M8 | unit: win32 placement (CSI 8 t); e2e/csi8-resize | done (pty re-sync on a refused request, R-M8-43; echo expectations expire after 1 s, R-M8-44) |
 | Split grab handle (every pane, hover reveal, `drag-handle`) | M8 | unit: win32 grab handle, win32 grab overlay; e2e/split-drag | done (GUI proof pending) |
 | Split drag onto panes, the tab strip, another window, out to a new window; tmux-shim panes move | M8 | unit: win32 split drag, win32 split drag input; e2e/split-drag | done (GUI proof pending) |
 | Undo of a split move | M8 | R-M8-30 | gap (next version) |

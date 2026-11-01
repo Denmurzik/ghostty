@@ -528,14 +528,15 @@ they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, 
 `N` only and the release script refuses an `N` that is not above the highest existing tag (`win-1.3.2-dev-2`), so installed
 `win.2` builds see this release as an update. (Owner ruling R-M8-2; had it been `win.1`, win.1 and win.2 installs would get no update toast.)
 
-- **Input lag in a long-lived tab: likely fix, proof pending.** The D3D11 frame pacer did not count every present and kept a
+- **Input lag in a long-lived tab: fixed.** The D3D11 frame pacer did not count every present and kept a
   backlog, so after a long session in one tab frames could wait for a slot (typed text and selection both late). The pacer now counts
-  every present, drains the backlog, consumes the initial signal and resyncs when idle. Custom-shader time is kept in 64-bit
+  every present, resyncs when idle and keeps up to two frames in flight (as before the fix; key echo is back at the win.2 level,
+  a fresh tab owned p50 about 0.85 ms). Measured in the M8 batch (`long-tab-lag`): A minus C is -0.57 ms, at most 2 signals drained, surplus 0. The latency tracer now books the wait for a frame slot between parse and render
+  start as `slot_wait`. Custom-shader time is kept in 64-bit
   nanoseconds and rebased on long-lived surfaces; a shader that uses `iTime` as a phase may jump once an hour on a very long-lived
   surface (not during cursor or focus animations). Diagnostic: `GHOSTTY_D3D11_PACING_LOG=1` writes
   `d3d11 pacer resync surface=.. pending=.. drained=.. surplus=.. capped=.. timeouts=..` and a per-frame `slot_timeout=` to the log.
-  It is called a *likely fix* because the proof run (`long-tab-lag`, M8 batch) comes after this commit; if the lag is still there,
-  send the log with the pacing variable on.
+  If the lag ever comes back, send the log with the pacing variable on.
 - **Claude Code symbols.** Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is
   not set (inherited or by `env`). Claude Code's `is-unicode-supported` check then draws `◯ ✔ ❯` instead of ASCII stand-ins such as
   `( )`. A value you set is never overridden and there is no config key. The package tests only whether the variable is non-empty,
@@ -575,11 +576,16 @@ they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, 
   drawing. Cloaking (virtual desktop) counts after 250 ms, uncloaking at once. Minimised windows keep their swap chain (Alt+Tab
   previews) but are reported not visible.
 - **Hidden tabs free their GPU memory.** The swap chain of a hidden tab shrinks to 1 x 1 pixel and grows back when the tab is shown,
-  with the new frame ready before the tab is raised (no flash of the old picture). The saving is measured in the M8 batch; the shrink
-  is a single switch (`shrink_hidden_chains` in `src/renderer/D3D11.zig`) if the measurement says it is not worth it.
+  with the new frame ready before the tab is raised (no flash of the old picture). Measured in the M8 batch: a hidden tab held
+  11.4 MB at 1600 x 900 (15.5 MB maximised) before, 0 after, so the shrink stays (switch `shrink_hidden_chains` in
+  `src/renderer/D3D11.zig`). It applies only to inactive tabs of a window that is shown; the quick terminal, `toggle_visibility`
+  and a restored window never shrink.
 - **`CSI 8 ; rows ; cols t`.** With `vt-window-resize-allowed = true` (default `false`, as upstream) a program may resize the
   window only when it holds one tab with one pane, is not the quick terminal, is not maximised, full screen or snapped and the
-  inspector is closed; the window changes by the surface delta, clamped to the work area, top-left kept.
+  inspector is closed; the window changes by the surface delta, clamped to the work area, top-left kept. Both Windows consoles
+  (inbox and bundled OpenConsole) resize their own buffer on `CSI 8 t`; when Ghostty does not honour the request it now sends its
+  own grid size back to the console (an older bug: the console buffer stayed at the requested size). The echo of a ConPTY resize
+  that Ghostty expects is forgotten after 1 s, so a later real application request is honoured.
 
 ### Security
 
@@ -615,5 +621,6 @@ they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, 
 - **No undo for a move of a split.** A move also drops the undo entries of the tabs involved.
 - Lock screen, display off and virtual-desktop detection are checked by hand (Win+L, a second virtual desktop) in the M8 batch;
   a message-only window fallback follows if Win+L is not delivered.
+- A late ConPTY resize echo (more than 1 s, under heavy load) can snap a window back once when `vt-window-resize-allowed = true`.
 - Kitty graphics animation on D3D11 is not verified. The D3D11 debug layer is not captured in the e2e logs.
 - Everything in the earlier "Known limitations" lists that is not named here is unchanged.

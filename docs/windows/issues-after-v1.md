@@ -756,5 +756,5 @@ Merged from the audit report below (§ 6a).
 | 3.2 drag of a split | done | Tasks 2, 5, 8, 11, 14: handle on every pane, drop on panes, the tab strip, other windows, out to a new window. Undo of a move: open (next version) |
 | 9.3 `drag-handle` | done | Task 8 (R-M8-10); `Config.zig` says "On Windows, the same as macOS". `font-thicken`: done in win.2; `macos-auto-secure-input`: unchanged |
 | next-version 25 Claude Code symbols | done | Task 18: `TERMINUS_SUBLIME=1` (opt-out: `unset TERMINUS_SUBLIME` in the shell rc or a `TERM` off the package list) |
-| next-version 28 long-tab input lag | likely fixed | Tasks 1, 21: pacer and `iTime` fix; proof (`long-tab-lag`) in the M8 batch |
+| next-version 28 long-tab input lag | fixed | Tasks 1, 1.1, 21: pacer (two frames in flight) and `iTime` fix; batch proof `long-tab-lag`: A minus C -0.57 ms, drained at most 2, surplus 0 |
 | Git Bash title injection (SEC-1), invisible characters in links, C1 in dropped paths | done | Task 6 |
