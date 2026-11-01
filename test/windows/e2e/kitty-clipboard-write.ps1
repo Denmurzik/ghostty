@@ -1,4 +1,4 @@
-# e2e: milestone=M8 timeout=420 order=1250
+# e2e: milestone=M8 timeout=520 order=1250
 # kitty-clipboard-write: a program writes the clipboard with the Kitty
 # clipboard protocol (OSC 5522) and the system clipboard holds every
 # representation. A native vtreader (bundled console under `auto`) sends the
@@ -10,6 +10,7 @@
 #   2. clipboard-write = ask: a GhosttyDialog appears; Enter (the default,
 #      Deny) answers status=EPERM and the clipboard sequence number does not
 #      change.
+#   3a. limit 1 MiB, a 2 MiB write: status=EFBIG (the limit reaches the handler).
 #   3. a 70 MiB write: status=EFBIG (core's limit) and no dialog.
 # The clipboard is saved and restored.
 . (Join-Path $PSScriptRoot '_common.ps1')
@@ -107,6 +108,22 @@ Invoke-E2eScenario 'kitty-clipboard-write' {
         $st = Get-KittyStatuses (Read-KittyReply $reply.Raw)
         if ($st -notcontains 'EPERM') { throw "ask: Deny did not answer EPERM: $($reply.Raw)" }
         Write-E2eInfo 'ask: Deny answered EPERM and left the clipboard alone'
+        Stop-Case $g
+
+        # --- 3a. the limit wiring, fast: limit 1 MiB, a 2 MiB write --------------
+        # The same EFBIG path as case 3 without a 90 s flood: if this passes and
+        # case 3 fails, the config reaches the handler and the loss is in the
+        # volume (the console or the read loop), not in the limit.
+        $mid = [GhosttyKitty.Tool]::Fill(2 * 1024 * 1024, 65)
+        [GhosttyKitty.Tool]::WriteQuery((Join-Path $tmp 'w3a.bin'), [string[]]@('text/plain'), [byte[][]]@($mid), 3072)
+        $mid = $null
+        $g = Start-WriteCase 'w3a' ("allow`nclipboard-write-limit-bytes = 1048576") (Join-Path $tmp 'w3a.bin') 'status=EFBIG\e\\' 60000
+        Finish-WriteCase $g 'w3a' 90
+        if (Test-KittyDialogOpen $g) { throw 'EFBIG (1 MiB limit): a dialog appeared' }
+        $reply = Read-KittyScreen $g
+        $st = Get-KittyStatuses (Read-KittyReply $reply.Raw)
+        if ($st -notcontains 'EFBIG') { throw "EFBIG (1 MiB limit): the 2 MiB write was not refused with EFBIG: $($reply.Raw)" }
+        Write-E2eInfo 'EFBIG: a 2 MiB write over a 1 MiB limit was refused'
         Stop-Case $g
 
         # --- 3. 70 MiB: over core's limit ---------------------------------------
