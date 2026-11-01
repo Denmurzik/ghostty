@@ -1071,6 +1071,7 @@ test "d3d11 frame: surfaceHidden then draw regrows the chain" {
 
     var packed_size: std.atomic.Value(u64) = .init(D3D11.packSize(16, 8));
     fx.api.present_target = .{ .hwnd = window.hwnd, .size = &packed_size };
+    fx.api.test_top_visible = true;
     defer fx.api.threadExit();
 
     // No chain yet: nothing to shrink.
@@ -1149,6 +1150,7 @@ test "d3d11 frame: presented notify fires once after a shrink and after the chai
         .size = &packed_size,
         .presented = .{ .ctx = &counter, .func = PresentedCounter.func },
     };
+    fx.api.test_top_visible = true;
     defer fx.api.threadExit();
 
     // A surface that never drew counts as needing its first present.

@@ -161,6 +161,12 @@ device: *Device,
 /// `threadEnter`.
 present_target: ?PresentTarget = null,
 
+/// Tests: stands in for `IsWindowVisible` of the surface's top-level window
+/// (a test window is a hidden top-level one, and a test must not show a real
+/// window on the desktop). Null: ask the system.
+test_top_visible: if (@import("builtin").is_test) ?bool else void =
+    if (@import("builtin").is_test) null else {},
+
 /// The swap chain of `present_target`. Created by `threadEnter` or, if the
 /// window had no size yet, by the first frame; released by `threadExit`.
 /// Only touched under the device context lock.
@@ -433,7 +439,12 @@ pub fn surfaceHidden(self: *D3D11) void {
     // parked) is not an inactive tab, and only a tab switch is covered by the
     // RaiseGate when the surface comes back.
     const root = win32.user32.GetAncestor(hwnd, win32.user32.GA_ROOT);
-    const top_visible = if (root) |r| win32.user32.IsWindowVisible(r) != 0 else false;
+    const top_visible = if (@import("builtin").is_test and self.test_top_visible != null)
+        self.test_top_visible.?
+    else if (root) |r|
+        win32.user32.IsWindowVisible(r) != 0
+    else
+        false;
     const mode = if (self.swap_chain) |*sc| sc.mode else .hwnd;
     if (!shrinkOnHide(self.swap_chain != null, surface_visible, top_visible, mode)) return;
 
