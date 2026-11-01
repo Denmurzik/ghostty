@@ -322,8 +322,8 @@ Invoke-E2eScenario 'long-tab-lag' {
         # Keys at the prompt of tab A, then in a fresh tab C.
         $a = Measure-KeyPhase $g 'A (long)' $aId $Animation $RefreshHz
         Invoke-Act $g 'new_tab'
-        $w = Wait-Win $g 'tab C' { param($w) @($w.tabs).Count -eq 3 -and $w.active_tab -eq 2 }
-        $cId = [int]@(@($w.tabs)[2].surfaces)[0].id
+        $w = Wait-Win $g 'tab C' { param($w) @($w.tabs).Count -eq 3 -and $w.active_tab -ne 0 }
+        $cId = [int]@(@($w.tabs)[[int]$w.active_tab].surfaces)[0].id
         if (-not (Set-ForegroundSafe -Hwnd $g.Hwnd)) { throw 'E2E-SKIP: could not take the foreground' }
         [void](Enter-Zsh $g "gt-lag-zsh-$Tag-c.txt")
         $c = Measure-KeyPhase $g 'C (fresh)' $cId $Animation $RefreshHz

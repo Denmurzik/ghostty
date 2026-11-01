@@ -38,7 +38,7 @@ Invoke-E2eScenario 'split-drag' {
     $cfg = (Get-Content -LiteralPath (Get-ConfigPath 'cmd') -Raw -Encoding UTF8) +
         "`nconfirm-close-surface = false`nwindow-decoration = client`nwindow-show-tab-bar = always`n" +
         "quick-terminal-position = bottom`nquick-terminal-size = 150px`nquick-terminal-autohide = false`n" +
-        "quick-terminal-animation-duration = 0.1`n"
+        "quick-terminal-animation-duration = 0.1`nshell-integration = none`n"
     $g = Start-E2eGhostty -ConfigText $cfg
     $global:E2eLast = $g
     [void](Wait-ChildNamed $g @('cmd.exe') 15)

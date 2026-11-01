@@ -104,7 +104,7 @@ Invoke-E2eScenario 'visibility-hidden' {
     # 1. Start: visible.
     Start-Reader $hwnd 'main'
     Wait-CoreVisible $g 0 $true 'at start'
-    if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { (Read-VisLog 'main').Count -gt 0 })) {
+    if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { @(Read-VisLog 'main').Count -gt 0 })) {
         $script:LogsOk = $false
         Write-E2eInfo 'SKIP: vis.log checks (the console dropped mode 2033; use windows-conpty = bundled)'
     } else {

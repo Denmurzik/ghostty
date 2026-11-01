@@ -28,6 +28,7 @@ function Get-Win($G) {
 function Get-SttySize($G, [IntPtr]$Hwnd, [string]$Name) {
     $f = Join-Path $G.Sandbox.Tmp "$Name.txt"
     if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+    Invoke-SendInput -Hwnd $Hwnd -Keys 'enter'; Start-Sleep -Milliseconds 400
     Send-Line $Hwnd ('stty size > "$TEMP/' + $Name + '.txt"')
     if (-not (Wait-File $f 8)) { throw "stty size did not run ($Name)" }
     Start-Sleep -Milliseconds 200
@@ -79,7 +80,7 @@ Invoke-E2eScenario 'csi8-resize' {
     Send-Line $g.Hwnd ($script:Esc8)
     Start-Sleep -Milliseconds 1200
     if (-not [GhosttyE2e.Csi8]::IsZoomed($g.Hwnd)) { throw 'the window left the maximized state' }
-    if ((Get-SttySize $g $g.Hwnd 'max1') -ne $max) { throw 'maximized: the grid changed' }
+    $max1 = Get-SttySize $g $g.Hwnd 'max1'; if ($max1 -ne $max) { throw "maximized: the grid changed: '$max' -> '$max1'" }
     [void](Invoke-GhosttyAction -Class $g.Class -Action 'toggle_maximize')
     if (-not (Wait-Until -TimeoutSec 5 -PollMs 100 -Condition { -not [GhosttyE2e.Csi8]::IsZoomed($g.Hwnd) })) { throw 'toggle_maximize did not restore' }
     Start-Sleep -Milliseconds 600

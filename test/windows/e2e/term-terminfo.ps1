@@ -74,7 +74,7 @@ Invoke-E2eScenario 'term-terminfo' {
         Start-Sleep -Seconds 2
         $pout = Join-Path $script:Sbx.Tmp 'pwsh-term.txt'
         Remove-Item -LiteralPath $pout -ErrorAction SilentlyContinue
-        Send-Line $g.Hwnd ("& '$gitBin\vim.exe' -u NONE -c q 2>`$null | Out-Null; `$e = `$LASTEXITCODE; `$o = @(`$env:TERM, (& '$gitBin\tput.exe' colors 2>&1), `$e); " +
+        Send-Line $g.Hwnd ("& '$gitBin\vim.exe' -u NONE -c q 2>`$null | Out-Null; `$e = `$LASTEXITCODE; `$o = @(`$env:TERM, (& '$gitBin\tput.exe' colors 2>&1), `$e, `$env:TERMINUS_SUBLIME); " +
             "Set-Content -LiteralPath '$pout' -Value `$o -Encoding ascii")
         if (-not (Wait-File $pout 20)) { throw 'pwsh never wrote its probe' }
         $p = @((Read-ShellFile $pout).Utf8 -split "`r?`n" | Where-Object { $_ })
