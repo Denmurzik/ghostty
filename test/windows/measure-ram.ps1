@@ -691,9 +691,13 @@ try {
     } elseif (-not $samplePoints.Count) {
         Start-Sleep -Seconds $IdleSeconds
         $singleRow = Get-RamSample $rowName $true
-        if ($showMs.Count) {
-            $singleRow.ShowP50 = [math]::Round((Get-Percentile -Values $showMs -P 50), 1)
-            $singleRow.ShowP95 = [math]::Round((Get-Percentile -Values $showMs -P 95), 1)
+    }
+    # The show times belong to the row that closes the run: the single row, or with an explicit -Sample the last sample row.
+    if ($showMs.Count) {
+        $target = if ($singleRow) { $singleRow } elseif ($pointRows.Count) { $pointRows[$pointRows.Count - 1] } else { $null }
+        if ($target) {
+            $target.ShowP50 = [math]::Round((Get-Percentile -Values $showMs -P 50), 1)
+            $target.ShowP95 = [math]::Round((Get-Percentile -Values $showMs -P 95), 1)
         }
     }
 
