@@ -2,7 +2,9 @@
 # term-terminfo: TERM defaults to xterm-ghostty on Windows and the compiled
 # terminfo under share/terminfo is found by Git's MSYS tools through TERMINFO
 # (the /c/... form: ncurses splits C:/ at the colon). Checked from Git Bash,
-# pwsh and cmd: tput colors, tput Smulx, tput cup, infocmp and vim.
+# pwsh and cmd: tput colors, tput Smulx, tput cup, infocmp and vim. Also
+# TERMINUS_SUBLIME=1 (Node CLIs such as Claude Code draw Unicode symbols), absent
+# with another TERM, and a user value kept.
 . (Join-Path $PSScriptRoot '_common.ps1')
 
 Invoke-E2eScenario 'term-terminfo' {
@@ -43,7 +45,7 @@ Invoke-E2eScenario 'term-terminfo' {
         'echo "CUP=$(tput cup 1 1 2>&1 | od -An -c | head -c 40)"; ' +
         'echo "INFOCMP=$(infocmp xterm-ghostty 2>&1 | head -n 1)"; ' +
         'vim -u NONE -c q >/dev/null 2>"$TEMP/vimerr.txt"; echo "VIM=$?"; ' +
-        'echo "VIMERR=$(grep -c E558 "$TEMP/vimerr.txt")"; echo END; } > "$TEMP/term.txt" 2>&1'
+        'echo "VIMERR=$(grep -c E558 "$TEMP/vimerr.txt")"; echo "SUBLIME=$TERMINUS_SUBLIME"; echo END; } > "$TEMP/term.txt" 2>&1'
     Send-Line $g.Hwnd $cmd
     $ok = Wait-Until -TimeoutSec 30 -PollMs 200 -Condition {
         (Test-Path -LiteralPath $out) -and ((Get-Content -LiteralPath $out -Raw) -match 'END')
@@ -60,6 +62,7 @@ Invoke-E2eScenario 'term-terminfo' {
     if ($v.SMULX -notmatch '4\s+:\s+%') { throw "tput Smulx gave '$($v.SMULX)'" }
     if ($v.CUP -notmatch '2\s+;\s+2\s+H') { throw "tput cup 1 1 gave '$($v.CUP)'" }
     if ($v.VIM -ne '0' -or $v.VIMERR -ne '0') { throw "vim exit=$($v.VIM) E558 count=$($v.VIMERR)" }
+    if ($v.SUBLIME -ne '1') { throw "TERMINUS_SUBLIME is '$($v.SUBLIME)' in Git Bash, expected 1" }
     Save-Evidence -Tag 'term-terminfo-bash' -G $g -Window
     Stop-OwnGhostty
 
@@ -79,6 +82,7 @@ Invoke-E2eScenario 'term-terminfo' {
         if ($p[0] -ne 'xterm-ghostty') { throw "TERM is '$($p[0])' in pwsh" }
         if ($p[1] -ne '256') { throw "Git tput colors from pwsh gave '$($p[1])'" }
         if ($p[2] -ne '0') { throw "Git vim from pwsh exited $($p[2])" }
+        if ($p[3] -ne '1') { throw "TERMINUS_SUBLIME is '$($p[3])' in pwsh, expected 1" }
         Stop-OwnGhostty
     } else {
         Write-E2eInfo 'pwsh not found; pwsh case skipped'
@@ -99,11 +103,12 @@ Invoke-E2eScenario 'term-terminfo' {
         "echo %TERM%> `"$cout`"",
         "`"$gitBin\tput.exe`" colors >> `"$cout`" 2>&1",
         "`"$gitBin\vim.exe`" -u NONE -c q >nul 2>&1",
-        "echo VIM=%ERRORLEVEL% >> `"$cout`""
+        "echo VIM=%ERRORLEVEL% >> `"$cout`"",
+        "echo SUB=%TERMINUS_SUBLIME% >> `"$cout`""
     ) -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
     Send-Line $g.Hwnd "call `"$bat`""
     $okc = Wait-Until -TimeoutSec 20 -PollMs 200 -Condition {
-        try { (Get-Content -LiteralPath $cout -Raw -ErrorAction Stop) -match 'VIM=' } catch { $false }
+        try { (Get-Content -LiteralPath $cout -Raw -ErrorAction Stop) -match 'SUB=' } catch { $false }
     }
     if (-not $okc) { Save-Evidence -Tag 'term-terminfo-cmd' -G $g -Window; throw "cmd never finished its probe: [$(if (Test-Path -LiteralPath $cout) { Get-Content -LiteralPath $cout -Raw })]" }
     $c = @((Read-ShellFile $cout).Utf8 -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -111,4 +116,28 @@ Invoke-E2eScenario 'term-terminfo' {
     if ($c[0] -ne 'xterm-ghostty') { throw "TERM is '$($c[0])' in cmd" }
     if ($c[1] -ne '256') { throw "Git tput colors from cmd gave '$($c[1])'" }
     if ($c[2] -ne 'VIM=0') { throw "Git vim from cmd: '$($c[2])'" }
+    if ($c[3] -ne 'SUB=1') { throw "TERMINUS_SUBLIME in cmd: '$($c[3])', expected SUB=1" }
+    Stop-OwnGhostty
+
+    # --- TERMINUS_SUBLIME: absent with another TERM, a user value is kept ---
+    # A batch file prints it (an unset variable expands to nothing).
+    $subBat = Join-Path $script:Sbx.Tmp 'sub.cmd'
+    foreach ($case in @(
+            @{ Tag = 'xterm-256color'; Env = "env = TERM=xterm-256color`n"; Want = 'SUB=' },
+            @{ Tag = 'user-value'; Env = "env = TERMINUS_SUBLIME=yes`n"; Want = 'SUB=yes' })) {
+        $sout = Join-Path $script:Sbx.Tmp "sub-$($case.Tag).txt"
+        Remove-Item -LiteralPath $sout -ErrorAction SilentlyContinue
+        [IO.File]::WriteAllText($subBat, (@('@echo off', "echo SUB=%TERMINUS_SUBLIME%> `"$sout`"") -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
+        $cfg = (Get-Content -LiteralPath (Get-ConfigPath 'cmd') -Raw -Encoding UTF8).TrimEnd() + "`n" + $case.Env
+        $g = Start-E2eGhostty -ConfigText $cfg -Env @{ TERMINUS_SUBLIME = $null }
+        [void](Set-ForegroundSafe -Hwnd $g.Hwnd)
+        if (-not (Wait-ChildNamed $g @('cmd.exe') 20)) { throw "cmd did not start ($($case.Tag))" }
+        Start-Sleep -Seconds 1
+        Send-Line $g.Hwnd "call `"$subBat`""
+        if (-not (Wait-File $sout 20)) { throw "cmd never wrote its probe ($($case.Tag))" }
+        $got = ((Read-ShellFile $sout).Utf8 -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)
+        Write-E2eInfo "TERMINUS_SUBLIME $($case.Tag): '$got'"
+        if ($got -ne $case.Want) { throw "TERMINUS_SUBLIME with $($case.Tag): '$got', expected '$($case.Want)'" }
+        Stop-OwnGhostty
+    }
 }

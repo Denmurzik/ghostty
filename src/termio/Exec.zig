@@ -970,6 +970,8 @@ const Subprocess = struct {
                     try env.put("TERMINFO", msysTerminfo(&pbuf, dir));
                 }
             }
+            // Also for a TERM from `env`: the hint follows the final TERM.
+            try windowsUnicodeHint(&env);
         }
 
         // We have to copy the cwd because there is no guarantee that
@@ -3055,6 +3057,60 @@ test "windows tokenize: execCommand splits a quoted shell value" {
 }
 
 const xterm_ghostty = "xterm-ghostty";
+
+/// `TERMINUS_SUBLIME=1` for a Windows child whose final TERM is
+/// `xterm-ghostty`, unless the user already set it (a value from `env` or the
+/// parent environment is never overridden).
+///
+/// The Node `is-unicode-supported` check treats a Windows terminal as ASCII-only
+/// unless `WT_SESSION`, `TERM_PROGRAM=vscode`, `TERMINUS_SUBLIME`, `ConEmuTask`
+/// or a few others are present, or TERM is `xterm-256color` / `alacritty` /
+/// `rxvt-unicode*`. The consumers are Claude Code, `figures`, `log-symbols`,
+/// `ora`, `listr2`, `@inquirer/figures` and `@clack/prompts`, which then draw
+/// `( )` instead of the Unicode symbols. `TERMINUS_SUBLIME` is the one flag that
+/// changes nothing else: unlike `WT_SESSION` or `TERM_PROGRAM` it does not change
+/// how programs detect the terminal (still Ghostty through TERM and
+/// XTVERSION). Opt out with `env = TERMINUS_SUBLIME=` (an empty value is a
+/// user value and is kept) or set another TERM.
+fn windowsUnicodeHint(env: *EnvMap) !void {
+    const term = env.get("TERM") orelse return;
+    if (!std.mem.eql(u8, term, xterm_ghostty)) return;
+    if (env.get("TERMINUS_SUBLIME") != null) return;
+    try env.put("TERMINUS_SUBLIME", "1");
+}
+
+test "windows unicode hint: set for xterm-ghostty" {
+    const alloc = std.testing.allocator;
+    var env: EnvMap = .init(alloc);
+    defer env.deinit();
+    try env.put("TERM", "xterm-ghostty");
+    try windowsUnicodeHint(&env);
+    try std.testing.expectEqualStrings("1", env.get("TERMINUS_SUBLIME").?);
+}
+
+test "windows unicode hint: user value wins" {
+    const alloc = std.testing.allocator;
+    var env: EnvMap = .init(alloc);
+    defer env.deinit();
+    try env.put("TERM", "xterm-ghostty");
+    try env.put("TERMINUS_SUBLIME", "yes");
+    try windowsUnicodeHint(&env);
+    try std.testing.expectEqualStrings("yes", env.get("TERMINUS_SUBLIME").?);
+    try env.put("TERMINUS_SUBLIME", "");
+    try windowsUnicodeHint(&env);
+    try std.testing.expectEqualStrings("", env.get("TERMINUS_SUBLIME").?);
+}
+
+test "windows unicode hint: not for xterm-256color or a user TERM" {
+    const alloc = std.testing.allocator;
+    for ([_]?[]const u8{ "xterm-256color", "foo", null }) |term| {
+        var env: EnvMap = .init(alloc);
+        defer env.deinit();
+        if (term) |t| try env.put("TERM", t);
+        try windowsUnicodeHint(&env);
+        try std.testing.expect(env.get("TERMINUS_SUBLIME") == null);
+    }
+}
 
 /// What TERM and TERMINFO a Windows child gets. `xterm-ghostty` needs the
 /// compiled entry shipped next to the resources and a program that can read
