@@ -579,6 +579,42 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     }
 }
 
+/// A pane moved to a tab of `to` (`Surface.reparent` already rewired `s`):
+/// its popups change owner when the window changed and hide with the tab.
+pub fn surfaceReparented(s: *Surface, from: *Window, to: *Window) void {
+    const hidden = if (to.activeTab()) |t| t != s.tab else false;
+    reownSurface(s, from, to, hidden);
+}
+
+/// The pure part: popups of `from` anchored to `s` go to `to` (a no-op for
+/// the owner when it is the same window), hidden with a hidden tab.
+fn reownSurface(s: *Surface, from: *Window, to: *Window, tab_hidden: bool) void {
+    var i: usize = 0;
+    while (i < from.overlays.popups.items.len) {
+        const p = from.overlays.popups.items[i];
+        if (p.surface != s) {
+            i += 1;
+            continue;
+        }
+        p.tab_hidden = tab_hidden;
+        if (from == to) {
+            apply(p);
+            i += 1;
+            continue;
+        }
+        const len = from.overlays.popups.items.len;
+        // `reown` takes it out of this list.
+        reown(p, to) catch |err| {
+            log.warn("unable to move an overlay to its new window err={}", .{err});
+            p.destroy();
+            // The popup is reusable: it must not keep pointing at `from`.
+            p.window = to;
+            // A popup without a window was not unlinked by `destroy`.
+            if (from.overlays.popups.items.len == len) i += 1;
+        };
+    }
+}
+
 /// Moves the popup to `to`: new owner, new list, new place.
 fn reown(p: *Popup, to: *Window) !void {
     if (p.window == to) return;
@@ -815,6 +851,42 @@ test "win32 overlay: re-owning on tab re-parent" {
     const client = clientScreen(b.hwnd);
     try std.testing.expect(r.x >= client.x and r.right() <= client.right());
     try std.testing.expectEqual(client.y + 8, r.y);
+}
+
+test "win32 overlay: popups of a moved pane follow it to its new window" {
+    const a = try TestOwner.create(100, 100);
+    defer a.destroy();
+    const b = try TestOwner.create(500, 300);
+    defer b.destroy();
+    // Only the window handle of a surface is read (the popup's anchor).
+    const moved = try std.testing.allocator.create(Surface);
+    defer std.testing.allocator.destroy(moved);
+    moved.hwnd = a.hwnd;
+    const other = try std.testing.allocator.create(Surface);
+    defer std.testing.allocator.destroy(other);
+    other.hwnd = a.hwnd;
+    var mine = a.popup(.label);
+    mine.surface = moved;
+    var theirs = a.popup(.label);
+    theirs.surface = other;
+    try mine.show();
+    defer mine.destroy();
+    try theirs.show();
+    defer theirs.destroy();
+
+    reownSurface(moved, &a.window, &b.window, true);
+    try std.testing.expectEqual(@as(?HWND, b.hwnd), user32.GetWindow(mine.hwnd.?, user32.GW_OWNER));
+    try std.testing.expectEqual(@as(?HWND, a.hwnd), user32.GetWindow(theirs.hwnd.?, user32.GW_OWNER));
+    try std.testing.expect(mine.tab_hidden);
+    try std.testing.expect(!theirs.tab_hidden);
+    try std.testing.expectEqual(@as(usize, 1), a.window.overlays.popups.items.len);
+    try std.testing.expectEqual(@as(usize, 1), b.window.overlays.popups.items.len);
+    try std.testing.expect(mine.window == &b.window);
+
+    // Same window (another tab): the owner stays, only the tab flag follows.
+    reownSurface(moved, &b.window, &b.window, false);
+    try std.testing.expect(!mine.tab_hidden);
+    try std.testing.expectEqual(@as(usize, 1), b.window.overlays.popups.items.len);
 }
 
 test "win32 overlay: panel activation keeps the owner active" {

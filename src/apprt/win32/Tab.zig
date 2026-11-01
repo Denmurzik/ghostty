@@ -12,6 +12,8 @@ const CoreSurface = @import("../../Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Overrides = @import("Overrides.zig");
 const SplitLayout = @import("SplitLayout.zig");
+const Chrome = @import("Chrome.zig");
+const split_drag = @import("split_drag.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const hooks_mod = @import("hooks.zig");
@@ -110,6 +112,46 @@ const drag_interval_ms = 16;
 /// Create the container and its first surface. The tab is not part of the
 /// window's tab list yet; `Window.addTab` appends it.
 pub fn create(window: *Window, opts: CreateOptions) !*Tab {
+    const self = try createContainer(window);
+    errdefer self.discardContainer();
+
+    // Core's start-up actions (initial size, title, ...) reach the window
+    // through the surface's `tab`, which `Surface.create` sets before init.
+    const surface = try Surface.create(self, .{
+        .parent = opts.parent,
+        .overrides = opts.overrides,
+        .context = opts.context,
+        .tmux = opts.tmux,
+    });
+    errdefer surface.destroy();
+
+    self.tree = try Surface.Tree.init(window.app.core_app.alloc, surface);
+    self.focused = surface;
+
+    // Core's start-up actions (`initial_size`) resize the window while the
+    // surface is still initializing, and the resulting child WM_SIZE never
+    // reaches core: bring core up to date now.
+    self.layout();
+    surface.applySize(surface.size.load(.acquire));
+
+    return self;
+}
+
+/// A new tab in `window` holding only `s`, a surface of another tab: no new
+/// surface, no new process. The tab is not part of the window's tab list yet
+/// (like `create`), and `s` is still a child of its old container: the caller
+/// inserts the tab and then calls `adopt` to complete the move. Nothing is
+/// laid out here.
+pub fn createAdopting(window: *Window, s: *Surface) !*Tab {
+    const self = try createContainer(window);
+    errdefer self.discardContainer();
+    self.tree = try Surface.Tree.init(window.app.core_app.alloc, s);
+    self.focused = s;
+    return self;
+}
+
+/// The container window and the empty tab around it.
+fn createContainer(window: *Window) !*Tab {
     const app = window.app;
     const alloc = app.core_app.alloc;
 
@@ -153,28 +195,15 @@ pub fn create(window: *Window, opts: CreateOptions) !*Tab {
         return error.CreateWindowFailed;
     };
     self.hwnd = hwnd;
-    errdefer _ = win32.user32.DestroyWindow(hwnd);
-
-    // Core's start-up actions (initial size, title, ...) reach the window
-    // through the surface's `tab`, which `Surface.create` sets before init.
-    const surface = try Surface.create(self, .{
-        .parent = opts.parent,
-        .overrides = opts.overrides,
-        .context = opts.context,
-        .tmux = opts.tmux,
-    });
-    errdefer surface.destroy();
-
-    self.tree = try Surface.Tree.init(alloc, surface);
-    self.focused = surface;
-
-    // Core's start-up actions (`initial_size`) resize the window while the
-    // surface is still initializing, and the resulting child WM_SIZE never
-    // reaches core: bring core up to date now.
-    self.layout();
-    surface.applySize(surface.size.load(.acquire));
-
     return self;
+}
+
+/// Undo `createContainer` after a failure: the tree holds no surface.
+fn discardContainer(self: *Tab) void {
+    const alloc = self.window.app.core_app.alloc;
+    self.tree.deinit();
+    _ = win32.user32.DestroyWindow(self.hwnd);
+    alloc.destroy(self);
 }
 
 /// Ask the renderer thread of every surface to quit without waiting.
@@ -798,6 +827,268 @@ pub fn setWindow(self: *Tab, window: *Window) void {
     hooks_mod.tabReparented(self, from, window);
 }
 
+// -- Moving one pane ------------------------------------------------------------
+//
+// A pane moves between tabs and windows without restarting its process: the
+// surface (HWND, renderer, pty, threads) stays, only its parent window, the
+// two trees and the pointers change. Everything that can fail (memory) is done
+// first, so a failure changes nothing; then the steps of `moveOrder` run.
+
+pub const MoveError = Allocator.Error || error{ SurfaceNotInTab, SameSurface, TargetGone };
+
+/// What a move does to the source side.
+pub const MoveKind = enum {
+    /// Inside one tab: the tree is rebuilt, nothing is reparented.
+    same_tab,
+    /// To another tab; the source keeps other panes.
+    other_tab,
+    /// To another tab; the source tab held only this pane and goes.
+    emptied_tab,
+    /// Like `emptied_tab`, and the source window had no other tab.
+    emptied_window,
+};
+
+/// The steps of a move after the trees were prepared, in the order they run.
+pub const Step = enum {
+    /// Undo entries that name the pane or the tabs, a title editor on it.
+    forget_undo,
+    /// `Surface.reparent`: the HWND and the pointers.
+    reparent,
+    /// The source tab gets the tree without the pane.
+    release_source,
+    /// The source tab's tree becomes empty (before its removal: `Tab.destroy`
+    /// must find no surface to stop, the pane lives on in the target).
+    empty_source_tree,
+    /// `Window.removeTab` of the emptied source tab.
+    remove_source_tab,
+    /// The target tab gets the tree with the pane, laid out.
+    replace_target_tree,
+    /// Focus, window title and tab strip, activation.
+    focus_target,
+    /// The source window has no tab left: it closes.
+    close_source_window,
+};
+
+/// The order of a move; the code runs exactly this list, the test pins it.
+/// The pane is reparented before it leaves the old tree and an emptied tree
+/// is empty before its tab is removed, so neither the removal nor the old
+/// container's destruction can touch the pane.
+fn moveOrder(kind: MoveKind) []const Step {
+    return switch (kind) {
+        .same_tab => &.{ .forget_undo, .replace_target_tree, .focus_target },
+        .other_tab => &.{ .forget_undo, .reparent, .release_source, .replace_target_tree, .focus_target },
+        .emptied_tab => &.{ .forget_undo, .reparent, .empty_source_tree, .remove_source_tab, .replace_target_tree, .focus_target },
+        .emptied_window => &.{ .forget_undo, .reparent, .empty_source_tree, .remove_source_tab, .replace_target_tree, .focus_target, .close_source_window },
+    };
+}
+
+/// One prepared move.
+const Move = struct {
+    s: *Surface,
+    source: *Tab,
+    target: *Tab,
+    source_window: *Window,
+    kind: MoveKind,
+    /// The target's tree with the pane. Null: the target's tree already
+    /// holds it (a tab made by `createAdopting`), only a layout is needed.
+    new_target: ?Surface.Tree,
+    /// The source's tree without the pane (empty when it was the only one).
+    new_source: Surface.Tree = .empty,
+    /// The pane of the source that takes its focus.
+    next_focus: ?*Surface = null,
+
+    /// Everything that can fail, for a move of `s` out of its tab into
+    /// `target`.
+    fn prepare(s: *Surface, target: *Tab, new_target: ?Surface.Tree) MoveError!Move {
+        const source = s.tab;
+        const alloc = source.window.app.core_app.alloc;
+        const at = source.tree.locate(s) orelse return error.SurfaceNotInTab;
+
+        // The new focus is picked in the old tree but only taken at the release.
+        var next_focus: ?*Surface = null;
+        if (source.focused == s) {
+            if (focusAfterRemove(Surface.Tree, &source.tree, at, alloc) catch null) |h| {
+                switch (source.tree.nodes[h.idx()]) {
+                    .leaf => |v| next_focus = v,
+                    .split => {},
+                }
+            }
+        }
+        const new_source = try source.tree.remove(alloc, at);
+        const kind: MoveKind = if (!new_source.isEmpty())
+            .other_tab
+        else if (source.window.tabs.items.len == 1)
+            .emptied_window
+        else
+            .emptied_tab;
+        return .{
+            .s = s,
+            .source = source,
+            .target = target,
+            .source_window = source.window,
+            .kind = kind,
+            .new_target = new_target,
+            .new_source = new_source,
+            .next_focus = next_focus,
+        };
+    }
+
+    fn run(m: *Move) void {
+        for (moveOrder(m.kind)) |step| switch (step) {
+            .forget_undo => m.forgetUndo(),
+            .reparent => m.s.reparent(m.target),
+            .release_source, .empty_source_tree => {
+                _ = m.source.releaseMoved(m.s, m.new_source, m.next_focus);
+            },
+            .remove_source_tab => m.source_window.removeTab(m.source),
+            .replace_target_tree => m.replaceTarget(),
+            .focus_target => m.focusTarget(),
+            .close_source_window => {
+                if (m.source_window.tabs.items.len == 0) m.source_window.requestClose(true);
+            },
+        };
+    }
+
+    fn forgetUndo(m: *Move) void {
+        const app = m.target.window.app;
+        if (m.kind != .same_tab) {
+            // Their snapshots no longer match the trees.
+            undo_actions.forgetSurface(app, m.s);
+            _ = undo_actions.forgetTab(app, m.source);
+            title_edit.cancelForSurface(m.source_window, m.s);
+        }
+        _ = undo_actions.forgetTab(app, m.target);
+    }
+
+    fn replaceTarget(m: *Move) void {
+        const target = m.target;
+        if (m.new_target) |t| {
+            // (Laying out the new tree sizes the pane to its new place:
+            // WM_SIZE, core resize, ResizePseudoConsole.)
+            target.replaceTree(t);
+            m.new_target = null;
+        } else {
+            target.layout();
+        }
+        target.focused = m.s;
+        target.applyOcclusion(target.window.activeTab() == target);
+        hooks_mod.tabLayoutChanged(target);
+    }
+
+    fn focusTarget(m: *Move) void {
+        const tw = m.target.window;
+        tw.refreshTitle();
+        Chrome.invalidate(tw);
+        // A closing source window is hidden and about to go.
+        if (m.kind != .same_tab and m.kind != .emptied_window and m.source_window != tw) {
+            m.source_window.refreshTitle();
+            Chrome.invalidate(m.source_window);
+        }
+        tw.activate();
+        m.target.focus();
+    }
+};
+
+/// Same tab: move `s` next to `dst` on the `dir` side. Focus goes to `s`.
+/// Nothing changed on error.
+pub fn moveWithin(
+    self: *Tab,
+    s: *Surface,
+    dst: *Surface,
+    dir: Surface.Tree.Split.Direction,
+) MoveError!void {
+    if (s == dst) return error.SameSurface;
+    if (self.tree.locate(s) == null) return error.SurfaceNotInTab;
+    if (self.tree.locate(dst) == null) return error.TargetGone;
+    const alloc = self.window.app.core_app.alloc;
+    const new_tree = split_drag.moveWithin(Surface.Tree, alloc, &self.tree, s, dst, dir) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.SameView => error.SameSurface,
+        error.ViewNotFound => error.SurfaceNotInTab,
+    };
+    var m: Move = .{
+        .s = s,
+        .source = self,
+        .target = self,
+        .source_window = self.window,
+        .kind = .same_tab,
+        .new_target = new_tree,
+    };
+    m.run();
+}
+
+/// Other tab (of this or another window): put `s` next to `dst` of this tab
+/// on the `dir` side, then take it out of its old tab. An emptied old tab is
+/// removed, and an emptied old window closes, after `s` is safely reparented.
+/// The process of `s` keeps running. Nothing changed on error.
+pub fn adoptNextTo(
+    self: *Tab,
+    s: *Surface,
+    dst: *Surface,
+    dir: Surface.Tree.Split.Direction,
+) MoveError!void {
+    if (s == dst) return error.SameSurface;
+    if (s.tab == self) return self.moveWithin(s, dst, dir);
+    if (s.tab.tree.locate(s) == null) return error.SurfaceNotInTab;
+    if (self.tree.locate(dst) == null or self.window.tabIndex(self) == null) return error.TargetGone;
+
+    const alloc = self.window.app.core_app.alloc;
+    var new_target = split_drag.insertInto(Surface.Tree, alloc, &self.tree, s, dst, dir) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.SameView => error.SameSurface,
+        error.ViewNotFound => error.TargetGone,
+    };
+    errdefer new_target.deinit();
+    var m = try Move.prepare(s, self, new_target);
+    m.run();
+}
+
+/// Completes the move into a tab made by `createAdopting(window, s)` that is
+/// in its window's tab list: `s` leaves its old tab and becomes this tab's
+/// pane. On error nothing changed and the caller drops the tab with
+/// `dropAdopting` and `Window.removeTab`.
+pub fn adopt(self: *Tab, s: *Surface) MoveError!void {
+    if (s.tab == self) return error.SameSurface;
+    if (self.tree.locate(s) == null) return error.TargetGone;
+    if (self.window.tabIndex(self) == null) return error.TargetGone;
+    var m = try Move.prepare(s, self, null);
+    m.run();
+}
+
+/// A tab made by `createAdopting` whose `adopt` failed: lets go of the pane
+/// without stopping it, so that `Window.removeTab` can take the tab down.
+pub fn dropAdopting(self: *Tab) void {
+    var old = self.tree;
+    self.tree = .empty;
+    self.focused = null;
+    old.deinit();
+}
+
+/// The source side of a move, after the pane was reparented: the tab gets
+/// `new_tree` (the old tree without `s`); returns whether the tab is now
+/// empty. When it is, its tree is empty on return, so the following
+/// `Window.removeTab` neither stops the threads of `s` nor destroys its HWND
+/// (it is no longer a child of this container). The old tree's reference to
+/// `s` is dropped here; the target tree holds the other one.
+fn releaseMoved(self: *Tab, s: *Surface, new_tree: Surface.Tree, next_focus: ?*Surface) bool {
+    const alloc = self.window.app.core_app.alloc;
+    self.cancelDrag();
+    if (self.focused == s) self.focused = next_focus;
+    if (new_tree.isEmpty()) {
+        var old = self.tree;
+        self.tree = .empty;
+        self.focused = null;
+        if (self.split_layout) |*l| l.deinit(alloc);
+        self.split_layout = null;
+        old.deinit();
+        return true;
+    }
+    self.replaceTree(new_tree);
+    self.applyOcclusion(self.window.activeTab() == self);
+    hooks_mod.tabLayoutChanged(self);
+    return false;
+}
+
 /// The surface to focus once `at` is removed: the previous leaf, else the
 /// next one wrapped around; never `at` itself. Null if `at` is the only leaf.
 pub fn focusAfterRemove(
@@ -1210,4 +1501,44 @@ test "win32 tab: a parked window or tab renders nothing" {
     try std.testing.expect(!onScreen(true, true, false, true)); // minimized
     try std.testing.expect(!onScreen(false, false, false, true));
     try std.testing.expect(!onScreen(true, false, false, false));
+}
+
+test "win32 tab: move order reparents before remove and empties before removeTab" {
+    const indexOf = struct {
+        fn f(steps: []const Step, step: Step) ?usize {
+            for (steps, 0..) |x, i| if (x == step) return i;
+            return null;
+        }
+    }.f;
+
+    // Inside a tab nothing is reparented or released.
+    const same = moveOrder(.same_tab);
+    try std.testing.expect(indexOf(same, .reparent) == null);
+    try std.testing.expect(indexOf(same, .release_source) == null);
+    try std.testing.expect(indexOf(same, .remove_source_tab) == null);
+    try std.testing.expect(indexOf(same, .replace_target_tree).? < indexOf(same, .focus_target).?);
+
+    // To a tab that keeps other panes: reparent, then leave the old tree.
+    const other = moveOrder(.other_tab);
+    try std.testing.expect(indexOf(other, .reparent).? < indexOf(other, .release_source).?);
+    try std.testing.expect(indexOf(other, .remove_source_tab) == null);
+    try std.testing.expect(indexOf(other, .close_source_window) == null);
+    try std.testing.expectEqual(Step.forget_undo, other[0]);
+
+    // An emptied tab: reparent, empty the tree, only then remove the tab.
+    inline for (.{ MoveKind.emptied_tab, MoveKind.emptied_window }) |kind| {
+        const steps = moveOrder(kind);
+        const reparent = indexOf(steps, .reparent).?;
+        const empty = indexOf(steps, .empty_source_tree).?;
+        const remove = indexOf(steps, .remove_source_tab).?;
+        try std.testing.expect(reparent < empty);
+        try std.testing.expect(empty < remove);
+        try std.testing.expect(remove < indexOf(steps, .replace_target_tree).?);
+        try std.testing.expect(indexOf(steps, .release_source) == null);
+    }
+
+    // The window closes last, and only when it lost its last tab.
+    try std.testing.expect(indexOf(moveOrder(.emptied_tab), .close_source_window) == null);
+    const window = moveOrder(.emptied_window);
+    try std.testing.expectEqual(Step.close_source_window, window[window.len - 1]);
 }

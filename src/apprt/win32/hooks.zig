@@ -256,6 +256,24 @@ pub fn tabReparented(tab: *Tab, from: *Window, to: *Window) void {
     tmux_labels.tabReparented(tab, from, to);
 }
 
+/// Called by `Surface.reparent` once the pane's HWND, `tab` and `window` are
+/// the new ones. The trees are not updated yet: the move's own relayouts
+/// (`tabLayoutChanged` of both tabs) follow and settle what is read from them.
+pub fn surfaceMoved(s: *Surface, from: *Tab, to: *Tab) void {
+    // A palette targets one window: it does not follow its target.
+    if (from.window != to.window) CommandPalette.surfaceDestroying(s);
+    // Popups of the surface change owner (and the tab they hide with).
+    overlay.surfaceReparented(s, from.window, to.window);
+    composition.surfaceMoved(s, from.window, to.window);
+    // The tmux labels read their tab's window id and pane index.
+    tmux_labels.optionsChanged(s.app, from.id);
+    tmux_labels.optionsChanged(s.app, to.id);
+    decor.tabLayoutChanged(from);
+    decor.tabLayoutChanged(to);
+    secure_input.tabLayoutChanged(from);
+    secure_input.tabLayoutChanged(to);
+}
+
 /// The title of the surface changed (the program's or the user's).
 pub fn surfaceTitleChanged(surface: *Surface) void {
     tmux_labels.refreshPane(surface);
@@ -374,6 +392,27 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try osk.testState(app, jw);
     try jw.endObject();
     try tmux_Server.testState(app, jw);
+}
+
+test "win32 hooks: surfaceMoved reaches every per-surface subsystem" {
+    // The first occurrence of the signature is the function itself.
+    const source = @embedFile("hooks.zig");
+    const start = std.mem.indexOf(u8, source, "pub fn surfaceMoved(s: *Surface") orelse return error.TestUnexpectedResult;
+    const end = std.mem.indexOfPos(u8, source, start, "\n}") orelse return error.TestUnexpectedResult;
+    const body = source[start..end];
+    inline for (.{
+        "CommandPalette.surfaceDestroying(s)",
+        "overlay.surfaceReparented(s,",
+        "composition.surfaceMoved(s,",
+        "tmux_labels.optionsChanged(s.app, from.id)",
+        "tmux_labels.optionsChanged(s.app, to.id)",
+        "decor.tabLayoutChanged(from)",
+        "decor.tabLayoutChanged(to)",
+        "secure_input.tabLayoutChanged(from)",
+        "secure_input.tabLayoutChanged(to)",
+    }) |call| {
+        try std.testing.expect(std.mem.indexOf(u8, body, call) != null);
+    }
 }
 
 test "win32 hooks: testState writes an m3 object" {

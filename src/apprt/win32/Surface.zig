@@ -84,8 +84,8 @@ const resize_interval_ms: u32 = 16;
 var next_id: std.atomic.Value(u32) = .init(1);
 
 hwnd: win32.foundation.HWND,
-/// The window of `tab`, kept in step by `Tab.setWindow`. UI thread only:
-/// `Tab.setWindow` rewrites it while the renderer and IO threads run, so
+/// The window of `tab`, kept in step by `Tab.setWindow` and `reparent`. UI
+/// thread only: those rewrite it while the renderer and IO threads run, so
 /// those go through `app`.
 window: *Window,
 /// The app, which outlives every window and never changes. The only
@@ -593,6 +593,31 @@ pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
         .mode = &self.composition.mode,
         .hand_off = composition_mod.handOffFor(self),
     };
+}
+
+/// Put the pane under the container of `to` (another tab, maybe of another
+/// window) and rewire the window and tab pointers. The surface, its HWND,
+/// renderer, pty and threads all stay. UI thread. Touches no tree: the
+/// caller (`Tab`'s move) puts the surface into the tree of `to` and takes it
+/// out of the old one. Order: the progress leaves the old taskbar button,
+/// `SetParent`, then the pointers, then everything that follows the window
+/// (DPI, swap chain, taskbar, the per-surface features through the hooks).
+pub fn reparent(self: *Surface, to: *Tab) void {
+    const from_tab = self.tab;
+    const from_window = self.window;
+    const to_window = to.window;
+    // The progress bar of the moved surface stays on the old button otherwise.
+    taskbar.surfaceClosed(from_window, self.id);
+    if (win32.user32.SetParent(self.hwnd, to.hwnd) == null) {
+        log.warn("SetParent failed err={}", .{win32.kernel32.GetLastError()});
+    }
+    self.tab = to;
+    self.window = to_window;
+    if (from_window.dpi != to_window.dpi) self.applyDpi();
+    // The swap chain was made for the old parent chain.
+    self.bumpPresentTarget();
+    taskbar.surfaceRestored(to_window, self.id);
+    hooks_mod.surfaceMoved(self, from_tab, to);
 }
 
 /// Tell the render thread that the window changed parents. UI thread, after
