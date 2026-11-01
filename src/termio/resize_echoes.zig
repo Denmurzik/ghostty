@@ -39,6 +39,20 @@ pub const ResizeEchoes = struct {
         return true;
     }
 
+    /// Forget which grid was sent last, so the next `record` of the same grid
+    /// is recorded: a re-sync resize sends the grid the pty already had on
+    /// record, and the console still echoes it.
+    pub fn rearm(self: *ResizeEchoes) void {
+        self.last = null;
+    }
+
+    /// Whether an application's own `CSI 8 t` (not an echo) left the pseudo
+    /// console on a grid other than ours: the console resizes its buffer on
+    /// that request by itself, whatever the terminal does with it.
+    pub fn needsResync(grid_columns: u16, grid_rows: u16, req_columns: u16, req_rows: u16) bool {
+        return grid_columns != req_columns or grid_rows != req_rows;
+    }
+
     /// Whether a `CSI 8 t` for this size is the echo of a recorded one;
     /// that entry and the older ones are used up.
     pub fn consume(self: *ResizeEchoes, columns: u16, rows: u16) bool {
@@ -103,4 +117,23 @@ test "ResizeEchoes: the oldest size is forgotten past capacity" {
     try std.testing.expect(!e.consume(10, 24));
     try std.testing.expect(e.consume(10 + ResizeEchoes.capacity, 24));
     try std.testing.expectEqual(@as(usize, 0), e.len);
+}
+
+test "windows resize echoes: a re-sync of the grid last sent is recorded again" {
+    var e: ResizeEchoes = .{};
+    try std.testing.expect(e.record(80, 25));
+    // The same grid again records nothing, so its echo would pass as a request.
+    try std.testing.expect(!e.record(80, 25));
+    e.rearm();
+    try std.testing.expect(e.record(80, 25));
+    try std.testing.expectEqual(@as(usize, 2), e.len);
+    // Both echoes are used up by the first one.
+    try std.testing.expect(e.consume(80, 25));
+    try std.testing.expectEqual(@as(usize, 1), e.len);
+}
+
+test "windows resize echoes: only a request for another grid needs a re-sync" {
+    try std.testing.expect(ResizeEchoes.needsResync(80, 25, 120, 35));
+    try std.testing.expect(ResizeEchoes.needsResync(80, 25, 80, 35));
+    try std.testing.expect(!ResizeEchoes.needsResync(80, 25, 80, 25));
 }

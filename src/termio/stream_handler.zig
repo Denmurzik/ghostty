@@ -332,6 +332,20 @@ pub const StreamHandler = struct {
                     }
                 }
                 log.debug("CSI 8 t resize request cols={} rows={}", .{ value.columns, value.rows });
+                if (comptime builtin.os.tag == .windows) {
+                    // The pseudo console resized its own buffer to the
+                    // request before it passed it on. Whether the window
+                    // follows is the apprt's call (config, guards); when it
+                    // does not, the console must go back to our grid. The
+                    // re-sync is queued first: a window resize that follows
+                    // posts its own size later, and resizes coalesce to the
+                    // last one.
+                    const grid = self.size.grid();
+                    if (ResizeEchoes.needsResync(grid.columns, grid.rows, value.columns, value.rows)) {
+                        self.resize_echoes.rearm();
+                        self.messageWriter(.{ .resize = self.size.* });
+                    }
+                }
                 self.surfaceMessageWriter(.{ .resize_window = value });
             },
             .xtversion => try self.reportXtversion(),
@@ -1583,16 +1597,17 @@ pub const StreamHandler = struct {
         const is_windows = comptime builtin.target.os.tag == .windows;
         const host = if (is_windows and (uri.host == null or uri.host.?.isEmpty()))
             std.Io.net.HostName{ .bytes = "localhost" }
-        else std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
-            error.UriMissingHost => {
-                log.warn("OSC 7 uri must contain a hostname: {}", .{err});
-                return;
-            },
-            error.NameTooLong, error.InvalidHostName => {
-                log.warn("OSC 7 uri contains an invalid hostname: {}", .{err});
-                return;
-            },
-        };
+        else
+            std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
+                error.UriMissingHost => {
+                    log.warn("OSC 7 uri must contain a hostname: {}", .{err});
+                    return;
+                },
+                error.NameTooLong, error.InvalidHostName => {
+                    log.warn("OSC 7 uri contains an invalid hostname: {}", .{err});
+                    return;
+                },
+            };
 
         // OSC 7 is a little sketchy because anyone can send any value from
         // any host (such an SSH session). The best practice terminals follow
