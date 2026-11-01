@@ -56,6 +56,7 @@ aprilnea
 aredmondd
 arneshbanerjee
 arvin7liu
+aryanhamedani
 athaapa
 atomk
 aurelleb
@@ -80,6 +81,7 @@ brentschroeter
 brianc442
 by-nelson
 c0x0o
+cammeresi
 carldaws
 carlvillads
 cespare
@@ -87,6 +89,7 @@ charliie-dev
 chernetskyi
 chronologos
 clemg
+clinta
 cmwetherell
 complexsplit
 crayxt
@@ -127,6 +130,7 @@ douglas-macgregor
 drepper
 dungdm93
 dzhlobo
+edsarmiento
 ekaterinepapava
 ekusiadadus
 elias8
@@ -165,6 +169,7 @@ h3nock
 hackattack
 hakonhagland
 halosatrio
+hamidp
 heaths
 heddxh heddxh
 heitoraugustoln
@@ -190,6 +195,7 @@ jamylak
 jarred-sumner
 jcollie
 jesusvazquez
+jglanz
 jguthmiller
 jmcgover
 jmr
@@ -339,8 +345,10 @@ rmengelbrecht
 rmunn
 robmorgan
 rockorager
+romen
 ronijacobson
 rpfaeffle
+rtgibbons
 ruoyouz
 ruseel
 sahilkmishra
@@ -376,6 +384,7 @@ thomasfedb
 thoutbeckers
 ticclick
 tnagatomi
+tonypapousek
 toppk
 tothedarktowercame
 trag1c
@@ -403,6 +412,7 @@ yabbal
 yak3d
 yamshta
 ydah
+yeager
 -zaviro
 zenangst
 zenyr

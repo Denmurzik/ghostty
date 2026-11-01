@@ -3552,6 +3552,98 @@ pub fn deleteChars(self: *Terminal, count_req: usize) void {
     self.screens.active.cursorMarkDirty();
 }
 
+/// DECIC - Insert Column. Inserts count blank columns at the cursor
+/// column in every row of the scrolling region, moving existing cell
+/// contents to the right. The contents of the count right-most columns
+/// in the scroll region are lost. The cursor position is not changed.
+///
+/// This does nothing if the cursor is outside the scrolling region.
+pub fn insertColumns(self: *Terminal, count: usize) void {
+    if (!self.cursorInScrollingRegion()) return;
+
+    const old_x = self.screens.active.cursor.x;
+    const old_y = self.screens.active.cursor.y;
+    defer self.screens.active.cursorAbsolute(old_x, old_y);
+
+    var y = self.scrolling_region.top;
+    while (y <= self.scrolling_region.bottom) : (y += 1) {
+        self.screens.active.cursorAbsolute(old_x, y);
+        self.insertBlanks(count);
+    }
+}
+
+/// DECDC - Delete Column. Deletes count columns starting at the cursor
+/// column in every row of the scrolling region, moving the remaining
+/// cell contents to the left and filling from the right margin with
+/// blanks. The cursor position is not changed.
+///
+/// This does nothing if the cursor is outside the scrolling region.
+pub fn deleteColumns(self: *Terminal, count: usize) void {
+    if (!self.cursorInScrollingRegion()) return;
+
+    const old_x = self.screens.active.cursor.x;
+    const old_y = self.screens.active.cursor.y;
+    defer self.screens.active.cursorAbsolute(old_x, old_y);
+
+    var y = self.scrolling_region.top;
+    while (y <= self.scrolling_region.bottom) : (y += 1) {
+        self.screens.active.cursorAbsolute(old_x, y);
+        self.deleteChars(count);
+    }
+}
+
+/// DECBI - Back Index. If the cursor is on the left margin, the contents
+/// of the scrolling region are shifted one column right and a blank
+/// column is inserted at the left margin. Otherwise the cursor moves one
+/// column left, unless it is already at the left edge of the screen.
+///
+/// This unsets the pending wrap state without wrapping.
+pub fn backIndex(self: *Terminal) void {
+    self.screens.active.cursor.pending_wrap = false;
+
+    if (self.screens.active.cursor.x == self.scrolling_region.left) {
+        self.insertColumns(1);
+        return;
+    }
+
+    if (self.screens.active.cursor.x > 0) self.screens.active.cursorLeft(1);
+}
+
+/// DECFI - Forward Index. If the cursor is on the right margin, the
+/// contents of the scrolling region are shifted one column left, losing
+/// the column at the left margin, and a blank column is inserted at the
+/// right margin. Otherwise the cursor
+/// moves one column right, unless it is already at the right edge of
+/// the screen.
+///
+/// This unsets the pending wrap state without wrapping.
+pub fn forwardIndex(self: *Terminal) void {
+    self.screens.active.cursor.pending_wrap = false;
+
+    if (self.screens.active.cursor.x == self.scrolling_region.right) {
+        // Scrolling the region left means deleting its left-most column,
+        // not the one under the cursor.
+        const old_x = self.screens.active.cursor.x;
+        const old_y = self.screens.active.cursor.y;
+        defer self.screens.active.cursorAbsolute(old_x, old_y);
+        self.screens.active.cursorAbsolute(self.scrolling_region.left, old_y);
+        self.deleteColumns(1);
+        return;
+    }
+
+    if (self.screens.active.cursor.x < self.cols - 1) self.screens.active.cursorRight(1);
+}
+
+/// Returns true if the cursor is inside the scrolling region, including
+/// the left and right margins.
+fn cursorInScrollingRegion(self: *const Terminal) bool {
+    const cursor = &self.screens.active.cursor;
+    return cursor.x >= self.scrolling_region.left and
+        cursor.x <= self.scrolling_region.right and
+        cursor.y >= self.scrolling_region.top and
+        cursor.y <= self.scrolling_region.bottom;
+}
+
 pub fn eraseChars(self: *Terminal, count_req: usize) void {
     const count = end: {
         const remaining = self.cols - self.screens.active.cursor.x;
@@ -3688,7 +3780,36 @@ pub fn eraseLine(
     );
 }
 
-/// Erase the display.
+/// Erase the display (ED, `CSI Ps J`). The mode picks what is erased:
+///
+///   - `below`: from the cursor to the end of the screen.
+///   - `above`: from the start of the screen to the cursor.
+///   - `complete`: the whole screen. See "Clearing at a prompt" below.
+///   - `scrollback`: the scrollback history. The screen is left as is.
+///   - `scroll_complete`: moves the screen contents into scrollback,
+///     then clears the screen. This is a Kitty extension (`CSI 22 J`).
+///
+/// Protected cells are kept if `protected_req` is true, or if the most
+/// recent protection mode was ISO (set by SPA, `ESC V`).
+///
+/// Clearing at a prompt: on the primary screen, a `complete` erase acts
+/// like `scroll_complete` when the last non-blank row is a shell prompt.
+/// This keeps the previous command output in scrollback when the user
+/// presses Ctrl+L at a prompt. Shells usually send `CSI H CSI 2 J`, so
+/// the cursor is already at the top and its position can't be used to
+/// tell whether a prompt is showing. Instead, prompt rows are found
+/// using semantic prompt marks (OSC 133). A screen that has never
+/// received OSC 133 prompt or input marks has no prompt rows, so the
+/// erase is a plain clear. See #905.
+///
+/// For example, with a shell that marks its prompts:
+///
+/// ```
+/// ESC ] 133 ; A ESC \ $ ESC ] 133 ; B ESC \   (prompt, then input starts)
+/// ESC [ H ESC [ 2 J                           (Ctrl+L: scrolls, then clears)
+/// ```
+///
+/// Without the OSC 133 sequences, the same `CSI H CSI 2 J` just clears.
 pub fn eraseDisplay(
     self: *Terminal,
     mode: csi.EraseDisplay,
@@ -3722,13 +3843,17 @@ pub fn eraseDisplay(
         },
 
         .complete => {
-            // If we're on the primary screen and our last non-empty row is
-            // a prompt, then we do a scroll_complete instead. This is a
-            // heuristic to get the generally desirable behavior that ^L
-            // at a prompt scrolls the screen contents prior to clearing.
-            // Most shells send `ESC [ H ESC [ 2 J` so we can't just check
-            // our current cursor position. See #905
-            if (self.screens.active_key == .primary) at_prompt: {
+            // Scroll first if the last non-blank row is a prompt. See
+            // "Clearing at a prompt" in the doc comment.
+            //
+            // The `seen` check matters for speed. Without it, every erase
+            // walks up from the bottom row and reads each cell of each
+            // blank row looking for text. Programs that redraw by clearing
+            // the screen often would pay that cost on every frame, even
+            // though no row can be a prompt.
+            if (self.screens.active_key == .primary and
+                self.screens.active.semantic_prompt.seen)
+            at_prompt: {
                 // Go from the bottom of the active up and see if we're
                 // at a prompt.
                 const active_br = self.screens.active.pages.getBottomRight(
@@ -14054,6 +14179,211 @@ test "Terminal: deleteChars wide char across right margin" {
     }
 }
 
+test "Terminal: insertColumns" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut");
+    t.setCursorPos(2, 2);
+    t.insertColumns(2);
+
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("a  bcdef\nA  BCDEF\nz  yxwvu", str);
+    }
+}
+
+test "Terminal: insertColumns with margins" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut\nZYXWVUT");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setTopAndBottomMargin(2, 3);
+    t.setCursorPos(2, 3);
+    t.insertColumns(1);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nAB CDFG\nzy xwut\nZYXWVUT", str);
+    }
+}
+
+test "Terminal: insertColumns outside scrolling region" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setCursorPos(1, 1);
+    t.insertColumns(10);
+    t.setTopAndBottomMargin(3, 4);
+    t.setCursorPos(1, 3);
+    t.insertColumns(10);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nABCDEFG", str);
+    }
+}
+
+test "Terminal: deleteColumns" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut");
+    t.setCursorPos(2, 2);
+    t.deleteColumns(2);
+
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("adefg\nADEFG\nzwvut", str);
+    }
+}
+
+test "Terminal: deleteColumns with margins" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut\nZYXWVUT");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setTopAndBottomMargin(2, 3);
+    t.setCursorPos(2, 3);
+    t.deleteColumns(99);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nAB   FG\nzy   ut\nZYXWVUT", str);
+    }
+}
+
+test "Terminal: backIndex moves cursor left" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(2, 5);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+
+    // Left of the left margin it still moves, but stops at the screen edge.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setCursorPos(1, 2);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
+}
+
+test "Terminal: backIndex scrolls at left margin" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 5, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString(" abcde\n fghij\n klmno\n pqrst\n uvwxy");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(3, 3);
+    t.backIndex();
+
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings(" abcde\n f ghj\n k lmo\n p qrt\n uvwxy", str);
+    }
+}
+
+test "Terminal: forwardIndex moves cursor right" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(2, 5);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 5), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+
+    // Right of the right margin it still moves, but stops at the screen edge.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setCursorPos(1, 7);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 7), t.screens.active.cursor.x);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 7), t.screens.active.cursor.x);
+}
+
+test "Terminal: forwardIndex scrolls at right margin" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 5, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString(" abcde\n fghij\n klmno\n pqrst\n uvwxy");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(3, 5);
+    t.forwardIndex();
+
+    try testing.expectEqual(@as(usize, 4), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings(" abcde\n fhi j\n kmn o\n prs t\n uvwxy", str);
+    }
+}
+
+test "Terminal: forwardIndex scrolls whole screen at right edge" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 2, .cols = 4 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcd");
+    try testing.expect(t.screens.active.cursor.pending_wrap);
+    t.forwardIndex();
+
+    try testing.expect(!t.screens.active.cursor.pending_wrap);
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("bcd", str);
+    }
+}
+
 test "Terminal: saveCursor" {
     const alloc = testing.allocator;
     const io_impl = testing.io;
@@ -17607,10 +17937,13 @@ test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
     try t.printString("hello");
 
     // Mark row 1 as a prompt row and then discard it with a region
-    // scroll, recycling its storage as the blank bottom row.
+    // scroll, recycling its storage as the blank bottom row. Set `seen`
+    // as OSC 133 would, or eraseDisplay skips the prompt check entirely
+    // and this test passes without testing anything.
     t.screens.active.pages.getCell(
         .{ .active = .{ .y = 1 } },
     ).?.row.semantic_prompt = .prompt;
+    t.screens.active.semantic_prompt.seen = true;
     t.setTopAndBottomMargin(2, 3);
     t.setCursorPos(3, 1);
     try t.linefeed();
@@ -17642,6 +17975,63 @@ test "Terminal: eraseDisplay complete at prompt not on last row scrolls" {
     try t.semanticPrompt(.init(.end_prompt_start_input));
 
     // What bash/zsh send for clear-screen
+    t.setCursorPos(1, 1);
+    t.eraseDisplay(.complete, false);
+
+    try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+test "Terminal: eraseDisplay complete at input-only prompt scrolls" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 15 });
+    defer t.deinit(alloc);
+
+    // Command output, then a shell that only emits OSC 133;B (input
+    // start) and never 133;A. Rows typed after the input mark are
+    // marked as prompt continuations on linefeed, so a full erase must
+    // still scroll before clearing.
+    for (0..10) |_| {
+        try t.printString("x");
+        t.carriageReturn();
+        try t.linefeed();
+    }
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("echo hi");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.printString("more");
+
+    t.setCursorPos(1, 1);
+    t.eraseDisplay(.complete, false);
+
+    try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+test "Terminal: eraseDisplay complete at input prompt copied from alt screen scrolls" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 15 });
+    defer t.deinit(alloc);
+
+    for (0..10) |_| {
+        try t.printString("x");
+        t.carriageReturn();
+        try t.linefeed();
+    }
+
+    // The only OSC 133 is seen on the alternate screen. Leaving it with
+    // mode 1047 copies the cursor, including its input content, back to
+    // the primary screen, so rows typed there are prompt continuations.
+    try t.switchScreenMode(.@"1047", true);
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.switchScreenMode(.@"1047", false);
+    try testing.expectEqual(.primary, t.screens.active_key);
+    try t.printString("echo hi");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.printString("more");
+
     t.setCursorPos(1, 1);
     t.eraseDisplay(.complete, false);
 
