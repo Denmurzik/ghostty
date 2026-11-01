@@ -1,0 +1,4 @@
+# The cursor-trail shader of the long-tab lag repro (e2e long-tab-lag), defaults
+# otherwise. The path is relative to this file; the scenario puts the absolute
+# path of cursor-trail.glsl in its place.
+custom-shader = cursor-trail.glsl
