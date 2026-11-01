@@ -661,7 +661,19 @@ fn finishGate(self: *Window) void {
     _ = win32.user32.RedrawWindow(new.hwnd, null, null, win32.user32.RDW_INVALIDATE |
         win32.user32.RDW_ERASE | win32.user32.RDW_ALLCHILDREN |
         win32.user32.RDW_UPDATENOW | win32.user32.RDW_ERASENOW);
+    // A click during the wait took the focus into the old tab: it goes to
+    // the new one, or the next keys would reach a shell nobody can see.
+    const f = win32.user32.GetFocus();
+    const in_old = if (f) |h| h == o.hwnd or win32.user32.IsChild(o.hwnd, h) != 0 else false;
     o.setVisible(false);
+    if (focusAfterGate(in_old, self.tearing_down)) new.focus();
+}
+
+/// Whether finishing a gated switch moves the keyboard focus to the new tab:
+/// when it sits inside the tab that is about to be hidden, and the window is
+/// not going down.
+fn focusAfterGate(focus_in_old: bool, tearing_down: bool) bool {
+    return focus_in_old and !tearing_down;
 }
 
 /// `WM_GHOSTTY_PRESENTED`: a surface presented a frame.
@@ -2133,6 +2145,14 @@ test "win32 window: raise gate opens at the cap" {
     try std.testing.expectEqual(@as(u64, 100), raise_cap_ms);
     // Still waiting for a leaf: only the cap opens it.
     try std.testing.expect(!gate.presented(1));
+}
+
+test "win32 window: focus left in the old tab moves to the new one when the gate ends" {
+    try std.testing.expect(focusAfterGate(true, false));
+    // Focus elsewhere (the new tab, the tab strip) stays where it is.
+    try std.testing.expect(!focusAfterGate(false, false));
+    // A window going down takes no focus.
+    try std.testing.expect(!focusAfterGate(true, true));
 }
 
 test "win32 window: a second switch flushes the first" {

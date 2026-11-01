@@ -285,6 +285,8 @@ pub extern "user32" fn GetAncestor(HWND, flags: u32) callconv(.winapi) ?HWND;
 pub extern "user32" fn IsZoomed(HWND) callconv(.winapi) BOOL;
 pub extern "user32" fn IsIconic(HWND) callconv(.winapi) BOOL;
 pub extern "user32" fn IsWindowVisible(HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn IsWindowEnabled(HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn IsChild(parent: HWND, child: HWND) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowPlacement(HWND, *WINDOWPLACEMENT) callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowPlacement(HWND, *const WINDOWPLACEMENT) callconv(.winapi) BOOL;
 pub extern "user32" fn MonitorFromWindow(HWND, flags: u32) callconv(.winapi) ?HMONITOR;
