@@ -22,6 +22,9 @@ pub const DWMWA_CAPTION_COLOR = 35;
 pub const DWMWA_TEXT_COLOR = 36;
 pub const DWMWA_SYSTEMBACKDROP_TYPE = 38;
 pub const DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+/// Non-zero when the shell hides the window (another virtual desktop, a UWP
+/// app suspended, ...): `IsWindowVisible` still says true.
+pub const DWMWA_CLOAKED: u32 = 14;
 
 pub const MARGINS = extern struct {
     cxLeftWidth: i32,

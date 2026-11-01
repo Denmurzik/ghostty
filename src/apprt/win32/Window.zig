@@ -107,6 +107,11 @@ parked_tabs: std.ArrayList(*Tab) = .empty,
 /// The whole window is parked: hidden, kept in `App.parked_windows`.
 parked: bool = false,
 
+/// The session is locked, the display is off or the console is disconnected:
+/// nothing of the window can be seen (set by the App for every window, which
+/// then calls `syncOcclusion`).
+screen_off: bool = false,
+
 /// The window's DPI, the single source of it: read once at creation, then
 /// only by WM_DPICHANGED.
 dpi: u32 = dpi_mod.default_dpi,
@@ -1243,24 +1248,94 @@ fn handleSize(self: *Window, wparam: win32.foundation.WPARAM) void {
     // The children never see the parent's minimize (they keep their size),
     // so occlusion is forwarded from here.
     if (wparam == win32.user32.SIZE_MINIMIZED) {
-        self.setMinimized(true);
+        self.syncOcclusion();
         hooks_mod.windowChanged(self, .minimized);
         return;
     }
     if (wparam != win32.user32.SIZE_RESTORED and wparam != win32.user32.SIZE_MAXIMIZED) return;
 
-    self.setMinimized(false);
+    self.syncOcclusion();
     self.layout();
     // SIZE_RESTORED also ends a maximize: features treat `.restored` as idempotent.
     if (wparam == win32.user32.SIZE_RESTORED) hooks_mod.windowChanged(self, .restored);
     hooks_mod.windowChanged(self, .sized);
 }
 
-/// Tell the active tab whether the window is minimized (its surfaces are
-/// occluded then).
-fn setMinimized(self: *Window, minimized: bool) void {
-    const tab = self.activeTab() orelse return;
-    tab.applyOcclusion(!minimized);
+/// What decides whether anything of a window can be seen.
+pub const ScreenState = struct {
+    /// `IsWindowVisible`
+    visible: bool,
+    /// `IsIconic`
+    iconic: bool,
+    /// `Window.parked`
+    parked: bool,
+    /// The shell hides the window (another virtual desktop).
+    cloaked: bool = false,
+    /// `Window.screen_off`
+    screen_off: bool = false,
+};
+
+/// The window's state now. `cloaked` is read live (a failed call is "not
+/// cloaked"): the cloak events of the shell are only a trigger.
+pub fn screenState(self: *const Window) ScreenState {
+    var cloaked: u32 = 0;
+    const hr = win32.dwmapi.DwmGetWindowAttribute(
+        self.hwnd,
+        win32.dwmapi.DWMWA_CLOAKED,
+        &cloaked,
+        @sizeOf(u32),
+    );
+    return .{
+        .visible = win32.user32.IsWindowVisible(self.hwnd) != 0,
+        .iconic = win32.user32.IsIconic(self.hwnd) != 0,
+        .parked = self.parked,
+        .cloaked = hr >= 0 and cloaked != 0,
+        .screen_off = self.screen_off,
+    };
+}
+
+/// Whether anything in the window can be seen.
+pub fn windowOnScreen(s: ScreenState) bool {
+    return s.visible and !s.iconic and !s.parked and !s.cloaked and !s.screen_off;
+}
+
+/// Whether `tab`'s surfaces render: it is the active tab of a window that is
+/// on screen.
+pub fn tabOnScreen(self: *const Window, tab: *const Tab) bool {
+    return self.activeTab() == tab and windowOnScreen(self.screenState());
+}
+
+/// Whether a window message is followed by `syncOcclusion`. `WM_SHOWWINDOW`
+/// arrives before `IsWindowVisible` changes, so the sync is posted and runs
+/// once the show has settled.
+fn showWindowNeedsSync(msg: u32, wparam: win32.foundation.WPARAM, lparam: win32.foundation.LPARAM) bool {
+    _ = wparam;
+    _ = lparam;
+    return msg == win32.user32.WM_SHOWWINDOW;
+}
+
+/// Tell core the occlusion of every surface of every tab: the active tab
+/// gets `windowOnScreen`, the others false. Idempotent (core dedups). When a
+/// surface turned hidden, the freed GPU memory is returned to the driver.
+pub fn syncOcclusion(self: *Window) void {
+    const state = self.screenState();
+    const before = self.visibleSurfaces();
+    for (self.tabs.items, 0..) |tab, i| {
+        tab.applyOcclusion(i == self.active_tab and windowOnScreen(state));
+    }
+    if (self.visibleSurfaces() < before) self.app.scheduleMemoryRelease();
+}
+
+/// How many surfaces of the window core currently considers visible.
+fn visibleSurfaces(self: *const Window) usize {
+    var n: usize = 0;
+    for (self.tabs.items) |tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| {
+            if (entry.view.initialized and entry.view.core_surface.visible) n += 1;
+        }
+    }
+    return n;
 }
 
 /// Follow a new DPI. Every surface of every tab gets the new content scale
@@ -1550,6 +1625,18 @@ fn wndProc(
             return 0;
         },
 
+        messages.WM_GHOSTTY_SYNC_OCCLUSION => {
+            self.syncOcclusion();
+            return 0;
+        },
+
+        // (toggle_visibility and the quick terminal show and hide through
+        // here.) The message comes before the visible bit changes: the sync
+        // is posted.
+        win32.user32.WM_SHOWWINDOW => if (showWindowNeedsSync(msg, wparam, lparam)) {
+            _ = win32.user32.PostMessageW(hwnd, messages.WM_GHOSTTY_SYNC_OCCLUSION, 0, 0);
+        },
+
         messages.WM_GHOSTTY_CLOSE_TAB => {
             const mode = std.enums.fromInt(CloseTabMode, wparam) orelse return 0;
             self.handleCloseTab(mode, @truncate(@as(usize, @bitCast(lparam))));
@@ -1665,6 +1752,35 @@ test "win32 window: a tab waits under the old one only on its first show over gl
     s = on;
     s.composing = false;
     try std.testing.expect(!waitUnderOld(s));
+}
+
+test "win32 window: hidden, minimized, parked, cloaked or screen-off windows show nothing" {
+    const on: ScreenState = .{ .visible = true, .iconic = false, .parked = false };
+    try std.testing.expect(windowOnScreen(on));
+
+    var s = on;
+    s.visible = false;
+    try std.testing.expect(!windowOnScreen(s));
+    s = on;
+    s.iconic = true;
+    try std.testing.expect(!windowOnScreen(s));
+    s = on;
+    s.parked = true;
+    try std.testing.expect(!windowOnScreen(s));
+    s = on;
+    s.cloaked = true;
+    try std.testing.expect(!windowOnScreen(s));
+    s = on;
+    s.screen_off = true;
+    try std.testing.expect(!windowOnScreen(s));
+}
+
+test "win32 window: occlusion is synced after WM_SHOWWINDOW settles" {
+    try std.testing.expect(showWindowNeedsSync(win32.user32.WM_SHOWWINDOW, 0, 0));
+    try std.testing.expect(showWindowNeedsSync(win32.user32.WM_SHOWWINDOW, 1, 0));
+    try std.testing.expect(showWindowNeedsSync(win32.user32.WM_SHOWWINDOW, 0, 3));
+    try std.testing.expect(!showWindowNeedsSync(win32.user32.WM_SIZE, 0, 0));
+    try std.testing.expect(!showWindowNeedsSync(win32.user32.WM_ACTIVATE, 1, 0));
 }
 
 test "win32 window: an insert keeps active_tab on the tab on screen" {

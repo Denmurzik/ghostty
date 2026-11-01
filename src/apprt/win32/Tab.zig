@@ -402,7 +402,7 @@ pub fn swapTree(self: *Tab, tree: Surface.Tree, s: *Surface, show_s: bool) void 
         if (self.focused == s) self.focused = next_focus;
     }
     const active = self.window.activeTab() == self;
-    self.applyOcclusion(active);
+    self.applyOcclusion(self.window.tabOnScreen(self));
     hooks_mod.tabLayoutChanged(self);
     if (active) self.focus();
 }
@@ -414,16 +414,16 @@ pub fn setVisible(self: *Tab, visible: bool) void {
     );
     if (visible) self.layout();
 
-    self.applyOcclusion(visible);
+    self.applyOcclusion(visible and Window.windowOnScreen(self.window.screenState()));
     hooks_mod.tabShown(self, visible);
 }
 
 /// Tell core which surfaces are on screen. Only the leaves the layout shows
-/// are un-occluded, and only while `shown` (the tab is the active one);
-/// zoomed-out and empty-rect leaves stay occluded. A minimized window keeps
-/// every surface occluded.
+/// are un-occluded, and only while `shown` (the tab is the active one of a
+/// window that is on screen: `Window.tabOnScreen`); zoomed-out and
+/// empty-rect leaves stay occluded.
 pub fn applyOcclusion(self: *Tab, shown: bool) void {
-    // (A parked window or tab renders nothing, whatever selects a tab in it.)
+    // (A parked tab renders nothing, whatever selects it.)
     const minimized = win32.user32.IsIconic(self.window.hwnd) != 0;
     var it = self.tree.iterator();
     while (it.next()) |entry| {
@@ -434,7 +434,7 @@ pub fn applyOcclusion(self: *Tab, shown: bool) void {
             (if (l.leafFor(s)) |leaf| leaf.visible else true)
         else
             true;
-        const on_screen = onScreen(shown, minimized, self.window.parked or self.parked, leaf_visible);
+        const on_screen = onScreen(shown, leaf_visible, self.parked);
         s.core_surface.occlusionCallback(on_screen) catch |err|
             log.warn("occlusion callback failed err={}", .{err});
     }
@@ -507,8 +507,7 @@ pub fn layout(self: *Tab) void {
     self.split_layout = new;
 
     // Hidden panes are occluded; shown ones only when the tab itself is.
-    const shown = self.window.activeTab() == self and
-        win32.user32.IsIconic(self.window.hwnd) == 0;
+    const shown = self.window.tabOnScreen(self);
     for (changes orelse &.{}) |c| {
         if (c.visible and !shown) continue;
         if (!c.view.initialized) continue;
@@ -971,7 +970,7 @@ const Move = struct {
             target.layout();
         }
         target.focused = m.s;
-        target.applyOcclusion(target.window.activeTab() == target);
+        target.applyOcclusion(target.window.tabOnScreen(target));
         hooks_mod.tabLayoutChanged(target);
     }
 
@@ -1084,7 +1083,7 @@ fn releaseMoved(self: *Tab, s: *Surface, new_tree: Surface.Tree, next_focus: ?*S
         return true;
     }
     self.replaceTree(new_tree);
-    self.applyOcclusion(self.window.activeTab() == self);
+    self.applyOcclusion(self.window.tabOnScreen(self));
     hooks_mod.tabLayoutChanged(self);
     return false;
 }
@@ -1489,18 +1488,18 @@ test "win32 tab: leaf rects while minimized" {
     try std.testing.expect(copy.leaves.ptr != applied.leaves.ptr);
 }
 
-/// Whether a leaf renders: its tab is shown, the window is not minimized and
-/// neither window nor tab is parked (a hidden item presents no frames).
-fn onScreen(shown: bool, minimized: bool, parked: bool, leaf_visible: bool) bool {
-    return shown and !minimized and !parked and leaf_visible;
+/// Whether a leaf renders: its tab is the active one of a window that is on
+/// screen (`shown`), the layout shows the leaf and the tab is not parked (a
+/// hidden item presents no frames).
+fn onScreen(shown: bool, leaf_visible: bool, parked: bool) bool {
+    return shown and leaf_visible and !parked;
 }
 
-test "win32 tab: a parked window or tab renders nothing" {
-    try std.testing.expect(onScreen(true, false, false, true));
-    try std.testing.expect(!onScreen(true, false, true, true)); // parked
-    try std.testing.expect(!onScreen(true, true, false, true)); // minimized
-    try std.testing.expect(!onScreen(false, false, false, true));
-    try std.testing.expect(!onScreen(true, false, false, false));
+test "win32 tab: only the active tab of an on-screen window renders" {
+    try std.testing.expect(onScreen(true, true, false));
+    try std.testing.expect(!onScreen(true, true, true)); // parked tab
+    try std.testing.expect(!onScreen(false, true, false)); // inactive tab, or the window shows nothing
+    try std.testing.expect(!onScreen(true, false, false)); // zoomed-out or empty-rect pane
 }
 
 test "win32 tab: move order reparents before remove and empties before removeTab" {

@@ -574,6 +574,9 @@ fn writeSurface(jw: *std.json.Stringify, window: *Window, s: *Surface, focused: 
 
     try jw.objectField("visible");
     try jw.write(user32.IsWindowVisible(s.hwnd) != 0);
+    // What core believes (the occlusion callback), as opposed to `visible`.
+    try jw.objectField("core_visible");
+    try jw.write(s.core_surface.visible);
     try jw.objectField("focused");
     try jw.write(focused);
     try jw.objectField("title");
