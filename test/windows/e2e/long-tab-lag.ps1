@@ -135,10 +135,18 @@ Invoke-E2eScenario 'long-tab-lag' {
         'bash'
     }
 
+    # A shader that failed to load leaves no continuous frames (animationWake is off): the run would prove nothing. FAIL, not SKIP.
+    function Assert-ShaderLoaded($G, [string]$When) {
+        $text = Read-LogRange $G.Log 0 ([int64]::MaxValue)
+        $m = [regex]::Match($text, '[^\r\n]*error loading custom shaders[^\r\n]*')
+        if ($m.Success) { throw ('the custom shader did not load ({0}): {1}' -f $When, $m.Value.Trim()) }
+    }
+
     # ---- one measured key phase -------------------------------------------------
-    function Measure-KeyPhase($G, [string]$Label, [int]$SurfaceId) {
+    function Measure-KeyPhase($G, [string]$Label, [int]$SurfaceId, [bool]$Animation, [double]$RefreshHz) {
         $cursor = Enter-LatencyInput $G
         try {
+            $phaseSw = [Diagnostics.Stopwatch]::StartNew()
             $logFrom = Get-LogPos $G.Log
             $since = Get-NowNs
             $keys = @(for ($i = 0; $i -lt 100; $i++) { [string][char](97 + ($i % 26)) })
@@ -146,6 +154,7 @@ Invoke-E2eScenario 'long-tab-lag' {
             $after = Get-AfterStamps
             Start-Sleep -Milliseconds 800
             $logTo = Get-LogPos $G.Log
+            $phaseSecs = $phaseSw.Elapsed.TotalSeconds
             $rows = @(Get-LatencyRows)
         } finally {
             Exit-LatencyInput $cursor
@@ -159,6 +168,9 @@ Invoke-E2eScenario 'long-tab-lag' {
         }
         $samples = @(Get-Samples $mine 'key' $since $stamps $after)
         $pacing = Get-PacingStats (Read-LogRange $G.Log $logFrom $logTo)
+        # With the animation on a frame is drawn on every vblank: far fewer frames in the phase means the shader did not animate (or the log has no pacing lines).
+        $needed = 0.5 * $RefreshHz * $phaseSecs
+        $inconclusive = $Animation -and ($pacing.Frames -lt $needed)
         function P50([string]$Prop) { Get-Percentile @($samples | ForEach-Object { [double]$_.$Prop } | Sort-Object) 50 }
         $totals = @($samples | ForEach-Object { [double]$_.Total } | Sort-Object)
         [pscustomobject]@{
@@ -167,6 +179,7 @@ Invoke-E2eScenario 'long-tab-lag' {
             InputToWrite = P50 'InputToWrite'; WriteToOutput = P50 'WriteToOutput'; OutputToParsed = P50 'OutputToParsed'
             ParsedToRender = P50 'ParsedToRender'; SlotWait = P50 'SlotWait'; RenderToPresent = P50 'RenderToPresent'
             Presents = P50 'PresentsBetween'
+            PhaseSecs = $phaseSecs; Needed = $needed; Inconclusive = $inconclusive
             Frames = $pacing.Frames; ZeroFrac = $pacing.ZeroFrac; TimeoutFrac = $pacing.TimeoutFrac
             LogSlot50 = $pacing.Slot50; LogSlot95 = $pacing.Slot95
             Samples = $samples
@@ -174,14 +187,17 @@ Invoke-E2eScenario 'long-tab-lag' {
     }
 
     function Format-Phase($P) {
-        '{0,-9} surface {1} n={2,3} total p50 {3,7:F2} p95 {4,7:F2} | input_to_write {5:F2} write_to_output {6:F2} output_to_parsed {7:F2} parsed_to_render {8:F2} slot_wait {9:F2} render_to_present {10:F2} presents_between {11:F1} | log: {12} frames, slot wait ~0 on {13:P0}, p50 {14:F2} p95 {15:F2} ms, timeouts {16:P1}' -f
+        '{0,-9} surface {1} n={2,3} total p50 {3,7:F2} p95 {4,7:F2} | input_to_write {5:F2} write_to_output {6:F2} output_to_parsed {7:F2} parsed_to_render {8:F2} slot_wait {9:F2} render_to_present {10:F2} presents_between {11:F1} | log: {12} frames{17}, slot wait ~0 on {13:P0}, p50 {14:F2} p95 {15:F2} ms, timeouts {16:P1}' -f
             $P.Label, $P.Surface, $P.N, $P.Total50, $P.Total95, $P.InputToWrite, $P.WriteToOutput, $P.OutputToParsed,
-            $P.ParsedToRender, $P.SlotWait, $P.RenderToPresent, $P.Presents, $P.Frames, $P.ZeroFrac, $P.LogSlot50, $P.LogSlot95, $P.TimeoutFrac
+            $P.ParsedToRender, $P.SlotWait, $P.RenderToPresent, $P.Presents, $P.Frames, $P.ZeroFrac, $P.LogSlot50, $P.LogSlot95, $P.TimeoutFrac, $(if ($P.Inconclusive) { ' (INCONCLUSIVE: need >= {0:F0})' -f $P.Needed } else { '' })
     }
 
     # H1 confirmed / H1 killed / fixed (diag-lag section 5).
     function Get-LagVerdict($A, $C, $Resync, [double]$PeriodMs) {
         $diff = $A.Total50 - $C.Total50
+        if ($A.Inconclusive -or $C.Inconclusive) {
+            return [pscustomobject]@{ Name = 'INCONCLUSIVE'; Diff = $diff; Detail = ('frames drawn during the key phases: A {0} (need >= {1:F0}), C {2} (need >= {3:F0}); the shader did not animate or the log has no pacing lines, so no verdict' -f $A.Frames, $A.Needed, $C.Frames, $C.Needed) }
+        }
         $stages = [ordered]@{
             input_to_write   = $A.InputToWrite - $C.InputToWrite
             write_to_output  = $A.WriteToOutput - $C.WriteToOutput
@@ -198,9 +214,12 @@ Invoke-E2eScenario 'long-tab-lag' {
         if ($diff -le 2.0) {
             if ($Resync.Count -gt 0) {
                 $note = if ($Resync.MaxDrained -le 2) { 'drained small' } else { 'a backlog of ' + $Resync.MaxDrained + ' signals was found and drained' }
-                return [pscustomobject]@{ Name = 'fixed'; Diff = $diff; Detail = ('A ~ C (difference {0:F2} ms), {1}; {2}' -f $diff, $note, $resyncText) }
+                return [pscustomobject]@{ Name = 'fixed'; Diff = $diff; Detail = ('A ~ C (difference {0:F2} ms) with the animation proven ({1} and {2} frames in the key phases) and a resync line seen; {3}; {4}' -f $diff, $A.Frames, $C.Frames, $note, $resyncText) }
             }
             return [pscustomobject]@{ Name = 'H1 killed'; Diff = $diff; Detail = ('same distributions (difference {0:F2} ms), no pacer resync line in the log (a build without Task 1, or no info log); {1}' -f $diff, $resyncText) }
+        }
+        if ($zeroA -and -not $zeroC) {
+            return [pscustomobject]@{ Name = 'H1 signature present, below one refresh (not confirmed)'; Diff = $diff; Detail = ('A is {0:F2} ms slower (< 1 refresh = {1:F2} ms), A slot wait ~0 on {2:P0} of frames, C on {3:P0}; {4}' -f $diff, $PeriodMs, $A.ZeroFrac, $C.ZeroFrac, $resyncText) }
         }
         [pscustomobject]@{ Name = 'H1 killed'; Diff = $diff; Detail = ('A is {0:F2} ms slower than C but the slot wait does not explain it (A ~0 on {1:P0}, C on {2:P0}); the stage that differs most: {3} ({4:F2} ms); {5}' -f $diff, $A.ZeroFrac, $C.ZeroFrac, $worst, $stages[$worst], $resyncText) }
     }
@@ -242,7 +261,7 @@ Invoke-E2eScenario 'long-tab-lag' {
     }
 
     # ---- one run ------------------------------------------------------------------
-    function Invoke-LagRun([string]$Tag, [bool]$Animation, [int]$GenSecs) {
+    function Invoke-LagRun([string]$Tag, [bool]$Animation, [int]$GenSecs, [double]$RefreshHz) {
         $extra = $trailCfg.TrimEnd() + "`ncustom-shader-animation = " + $Animation.ToString().ToLowerInvariant() + "`n"
         $env:GHOSTTY_D3D11_PACING_LOG = '1'
         try {
@@ -254,6 +273,7 @@ Invoke-E2eScenario 'long-tab-lag' {
         $w = Get-Win $g
         $aId = [int]@(@($w.tabs)[0].surfaces)[0].id
         $shell = Enter-Zsh $g "gt-lag-zsh-$Tag-a.txt"
+        Assert-ShaderLoaded $g 'after start'
         Write-E2eInfo "$Tag run: animation=$Animation, shell=$shell, generator $GenSecs s, surface A = $aId"
 
         # Tab B (idle, hidden behind A), then A again with the focus.
@@ -300,14 +320,15 @@ Invoke-E2eScenario 'long-tab-lag' {
         Save-Evidence "$Tag-after-gen" $g -Window
 
         # Keys at the prompt of tab A, then in a fresh tab C.
-        $a = Measure-KeyPhase $g 'A (long)' $aId
+        $a = Measure-KeyPhase $g 'A (long)' $aId $Animation $RefreshHz
         Invoke-Act $g 'new_tab'
         $w = Wait-Win $g 'tab C' { param($w) @($w.tabs).Count -eq 3 -and $w.active_tab -eq 2 }
         $cId = [int]@(@($w.tabs)[2].surfaces)[0].id
         if (-not (Set-ForegroundSafe -Hwnd $g.Hwnd)) { throw 'E2E-SKIP: could not take the foreground' }
         [void](Enter-Zsh $g "gt-lag-zsh-$Tag-c.txt")
-        $c = Measure-KeyPhase $g 'C (fresh)' $cId
+        $c = Measure-KeyPhase $g 'C (fresh)' $cId $Animation $RefreshHz
 
+        Assert-ShaderLoaded $g 'end of run'
         $resync = Get-ResyncStats (Read-LogRange $g.Log 0 ([int64]::MaxValue)) $aId
         Save-Evidence "$Tag-end" $g -Window
         Stop-OwnGhostty
@@ -322,34 +343,44 @@ Invoke-E2eScenario 'long-tab-lag' {
         [pscustomobject]@{ Tag = $Tag; A = $a; C = $c; Resync = $resync }
     }
 
-    function Publish-Run($R, [double]$PeriodMs) {
+    function Publish-Run($R, [double]$PeriodMs, [switch]$Control) {
         foreach ($p in $R.A, $R.C) { Write-E2eInfo ('{0}: {1}' -f $R.Tag, (Format-Phase $p)) }
         foreach ($p in $R.A, $R.C) { [void](Publish-Latency ("long-tab-lag-{0}-{1}" -f $R.Tag, ($p.Label -replace '[^A-Za-z]', '')) $p.Samples) }
         $v = Get-LagVerdict $R.A $R.C $R.Resync $PeriodMs
+        if ($Control) {
+            # No continuous frames in the control: both slot waits may be ~0 whatever the cause, so it is never given a verdict name.
+            Write-E2eInfo ('{0}: control, numbers only (not a verdict): A - C p50 = {1:F2} ms; slot wait ~0 on A {2:P0}, C {3:P0}; frames A {4}, C {5}' -f $R.Tag, $v.Diff, $R.A.ZeroFrac, $R.C.ZeroFrac, $R.A.Frames, $R.C.Frames)
+            return [pscustomobject]@{ Name = 'control'; Diff = ($R.A.Total50 - $R.C.Total50); Detail = '' }
+        }
         Write-E2eInfo ('{0}: VERDICT {1} - {2}' -f $R.Tag, $v.Name, $v.Detail)
         $v
     }
 
     # ---- scenario ---------------------------------------------------------------
     $hz = (Get-GpuInfo).Hz
-    $period = if ($hz -gt 1) { 1000.0 / $hz } else { 1000.0 / 60 }
+    $hzEff = if ($hz -gt 1) { [double]$hz } else { 60.0 }
+    $period = 1000.0 / $hzEff
     Write-E2eInfo ('display {0} Hz, one refresh {1:F2} ms' -f $hz, $period)
 
-    $main = Invoke-LagRun 'anim' $true $secs
+    $main = Invoke-LagRun 'anim' $true $secs $hzEff
     foreach ($p in $main.A, $main.C) {
         if ($p.N -lt 20) { throw "$($p.Label): only $($p.N) complete key samples of 100, the comparison is not meaningful" }
     }
     $vMain = Publish-Run $main $period
 
-    $control = Invoke-LagRun 'control' $false ([Math]::Max(120, [int]($secs / 2)))
+    $control = Invoke-LagRun 'control' $false ([Math]::Max(120, [int]($secs / 2))) $hzEff
     foreach ($p in $control.A, $control.C) {
         if ($p.N -lt 20) { Write-E2eInfo "WARN control $($p.Label): only $($p.N) complete key samples" }
     }
     if ($control.A.N -ge 20 -and $control.C.N -ge 20) {
-        $vCtl = Publish-Run $control $period
+        $vCtl = Publish-Run $control $period -Control
         $diffCtl = $control.A.Total50 - $control.C.Total50
+        if ($vMain.Name -eq 'INCONCLUSIVE') {
+            Write-E2eInfo 'main run INCONCLUSIVE: no comparison with the control'
+        } else {
         Write-E2eInfo ('control (animation=false): A - C = {0:F2} ms; main (animation=true): A - C = {1:F2} ms. H1 predicts the lag is gone in the control: {2}' -f
             $diffCtl, $vMain.Diff, $(if ($diffCtl -le 2.0 -and $vMain.Diff -gt 2.0) { 'yes, consistent with H1' } elseif ($diffCtl -gt 2.0) { 'no, the lag stays without animation' } else { 'no lag in either run' }))
+        }
     }
 
     $keep = Get-EvidenceDir
@@ -358,6 +389,7 @@ Invoke-E2eScenario 'long-tab-lag' {
         Set-Content -LiteralPath (Join-Path $keep 'long-tab-lag-summary.txt') -Value $lines -Encoding ASCII
     }
 
+    if ($vMain.Name -eq 'INCONCLUSIVE') { throw "long tab lag: INCONCLUSIVE - $($vMain.Detail)" }
     if ($env:GHOSTTY_LAG_NOGATE -ne '1') {
         if ($vMain.Name -eq 'H1 confirmed') { throw "long tab lag: H1 confirmed - $($vMain.Detail)" }
         if ($vMain.Diff -gt 2.0) { throw ('long tab lag: key echo of the long tab is {0:F2} ms slower at p50 than a fresh tab (budget 2 ms): {1}' -f $vMain.Diff, $vMain.Detail) }
