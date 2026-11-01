@@ -1284,6 +1284,7 @@ pub const StreamHandler = struct {
             return;
         }
 
+        log.info("kitty clipboard write begins, limit={d} bytes", .{self.clipboard_write_limit});
         const state = try self.alloc.create(terminal.kitty.clipboard.WriteState);
         errdefer self.alloc.destroy(state);
         state.* = try .init(self.alloc, meta, .{
@@ -1327,11 +1328,14 @@ pub const StreamHandler = struct {
 
             // Data over the write limit aborts the transaction and is
             // reported to the client.
-            error.TooLarge => try self.kittyClipboardWriteFinish(
-                state,
-                .EFBIG,
-                terminator,
-            ),
+            error.TooLarge => {
+                log.info("kitty clipboard write refused: over the limit of {d} bytes", .{state.max_size});
+                try self.kittyClipboardWriteFinish(
+                    state,
+                    .EFBIG,
+                    terminator,
+                );
+            },
 
             // An invalid base64 payload stream aborts the transaction.
             error.Invalid => try self.kittyClipboardWriteFinish(
@@ -1423,6 +1427,11 @@ pub const StreamHandler = struct {
     ) error{ OutOfMemory, Invalid }!void {
         const committed = try state.commit(self.alloc);
         defer committed.deinit(self.alloc);
+        {
+            var bytes: usize = 0;
+            for (committed.contents) |c| bytes += c.data.len;
+            log.info("kitty clipboard write committed, {d} types, {d} bytes, limit={d}", .{ committed.contents.len, bytes, state.max_size });
+        }
 
         // Per the spec a password without a name is no password. A
         // stored session grant for it lets the surface skip its

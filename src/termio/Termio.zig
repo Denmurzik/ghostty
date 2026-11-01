@@ -963,3 +963,143 @@ test "windows termio config: clipboard-write-limit-bytes reaches the termio conf
     try testing.expectEqual(@as(usize, 1048576), derived.clipboard_write_limit);
     try testing.expectEqual(configpkg.ClipboardAccess.allow, derived.clipboard_write);
 }
+/// A Termio built the way `Surface.init` builds it (config loaded from the
+/// lines of a config file and finalized, derived termio config, exec backend,
+/// `Termio.init`), whose child is never started. Output is fed with
+/// `io.processOutput` and what the terminal answers is read back from the
+/// termio mailbox. Test only; it must stay where `init` put it.
+pub const TestRig = struct {
+    alloc: Allocator,
+    cfg: configpkg.Config,
+    mutex: std.Io.Mutex = .init,
+    renderer_state: renderer.State,
+    wakeup: xev.Async,
+    render_mailbox: *renderer.Thread.Mailbox,
+    io: Termio,
+
+    pub fn init(self: *TestRig, alloc: Allocator, config_lines: []const []const u8) !void {
+        const Iter = struct {
+            data: []const []const u8,
+            i: usize = 0,
+            pub fn next(it: *@This()) ?[]const u8 {
+                if (it.i >= it.data.len) return null;
+                defer it.i += 1;
+                return it.data[it.i];
+            }
+        };
+        self.alloc = alloc;
+        self.cfg = try configpkg.Config.default(alloc);
+        errdefer self.cfg.deinit();
+        var it: Iter = .{ .data = config_lines };
+        try self.cfg.loadIter(alloc, &it);
+        try self.cfg.finalize();
+
+        var env: EnvMap = .init(alloc);
+        try env.put("HOME", "/home/ghostty");
+        try env.put("SHELL", "/bin/sh");
+        const exec = try termio.Exec.init(alloc, .{
+            .env = env,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&self.cfg),
+            .rt_post_fork_info = .init(&self.cfg),
+        });
+
+        var io_config = try DerivedConfig.init(alloc, &self.cfg);
+        errdefer io_config.deinit();
+        var io_mailbox = try termio.Mailbox.initSPSC(alloc);
+        errdefer io_mailbox.deinit(alloc);
+
+        self.mutex = .init;
+        self.renderer_state = .{ .mutex = &self.mutex, .terminal = undefined };
+        self.wakeup = try xev.Async.init();
+        errdefer self.wakeup.deinit();
+        self.render_mailbox = try renderer.Thread.Mailbox.create(alloc);
+        errdefer self.render_mailbox.destroy(alloc);
+
+        try Termio.init(&self.io, alloc, .{
+            .size = .{
+                .screen = .{ .width = 800, .height = 400 },
+                .cell = .{ .width = 10, .height = 20 },
+                .padding = .{},
+            },
+            .full_config = &self.cfg,
+            .config = io_config,
+            .backend = .{ .exec = exec },
+            .mailbox = io_mailbox,
+            .renderer_state = &self.renderer_state,
+            .renderer_wakeup = &self.wakeup,
+            .renderer_mailbox = self.render_mailbox,
+            .surface_mailbox = .{ .surface = undefined, .app = undefined },
+        });
+        self.renderer_state.terminal = &self.io.terminal;
+    }
+
+    pub fn deinit(self: *TestRig) void {
+        self.io.deinit();
+        self.render_mailbox.destroy(self.alloc);
+        self.wakeup.deinit();
+        self.cfg.deinit();
+    }
+
+    /// Everything the terminal wrote to the child so far.
+    pub fn replies(self: *TestRig) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.alloc);
+        while (self.io.mailbox.spsc.queue.pop(global.io())) |msg| {
+            defer msg.deinit();
+            switch (msg) {
+                .write_alloc => |v| try out.appendSlice(self.alloc, v.data),
+                else => {},
+            }
+        }
+        return out.toOwnedSlice(self.alloc);
+    }
+};
+
+/// The bytes of an OSC 5522 write of `total` raw bytes in packets of `chunk`
+/// raw bytes, the commit included (what the e2e scenario's reader sends).
+pub fn testKittyWriteQuery(alloc: Allocator, total: usize, chunk: usize) ![]u8 {
+    const b64 = std.base64.standard.Encoder;
+    const raw = try alloc.alloc(u8, chunk);
+    defer alloc.free(raw);
+    @memset(raw, 'A');
+    const enc = try alloc.alloc(u8, b64.calcSize(chunk));
+    defer alloc.free(enc);
+    _ = b64.encode(enc, raw);
+
+    var feed: std.Io.Writer.Allocating = .init(alloc);
+    errdefer feed.deinit();
+    try feed.writer.writeAll("\x1b]5522;type=write\x1b\\");
+    var sent: usize = 0;
+    while (sent < total) : (sent += chunk) {
+        try feed.writer.writeAll("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;");
+        try feed.writer.writeAll(enc);
+        try feed.writer.writeAll("\x1b\\");
+    }
+    try feed.writer.writeAll("\x1b]5522;type=wdata\x1b\\");
+    return feed.toOwnedSlice();
+}
+
+test "windows kitty clipboard write: the limit of the loaded config reaches the Termio the surface builds" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // 1 KiB limit as the e2e config sets it; a 2000 byte single packet and a
+    // 4096 byte write in two packets.
+    for ([_][2]usize{ .{ 2000, 2000 }, .{ 4096, 3072 } }) |q| {
+        var rig: TestRig = undefined;
+        try rig.init(alloc, &.{ "--clipboard-write=allow", "--clipboard-write-limit-bytes=1024" });
+        defer rig.deinit();
+        try testing.expectEqual(@as(usize, 1024), rig.io.terminal_stream.handler.clipboard_write_limit);
+
+        const query = try testKittyWriteQuery(alloc, q[0], q[1]);
+        defer alloc.free(query);
+        rig.io.processOutput(query);
+
+        const out = try rig.replies();
+        defer alloc.free(out);
+        try testing.expect(std.mem.indexOf(u8, out, "status=EFBIG") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "status=DONE") == null);
+    }
+}

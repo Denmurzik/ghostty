@@ -349,8 +349,12 @@ pub fn args() std.process.Args {
 /// (saves allocation of the temporary directory where you can get at global
 /// state).
 ///
-/// Asserts that the global state is initialized.
+/// Asserts that the global state is initialized when not running as a test
+/// (a test that builds a Termio has no global state; "." is the current
+/// directory there).
 pub fn tmpDirPath() []const u8 {
+    if (builtin.is_test and state == null) return ".";
+
     return state.?.tmp_dir_path.?;
 }
 

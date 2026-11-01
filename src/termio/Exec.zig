@@ -3700,6 +3700,86 @@ test "windows exec: the bundled console runs a child, drains its output and ends
     );
 }
 
+test "windows exec: an OSC 5522 write over the limit through the bundled console is answered EFBIG" {
+    if (comptime !is_windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const k32 = windows.exp.kernel32;
+
+    const arch = switch (builtin.cpu.arch) {
+        .x86_64 => "x64",
+        .aarch64 => "arm64",
+        else => return error.SkipZigTest,
+    };
+    const dll = std.Io.Dir.cwd().realPathFileAlloc(global.io(), "vendor/conpty/" ++ arch ++ "/conpty.dll", alloc) catch
+        return error.SkipZigTest;
+    defer alloc.free(dll);
+    const T = struct {
+        var api: windows.ConPty = undefined;
+    };
+    T.api = .{ .create = undefined, .resize = undefined, .close = undefined, .flags = 0 };
+    try windows.loadDll(dll, &T.api);
+
+    // The bytes a program sends, in a file the child prints with `type`.
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    const query = try termio.Termio.testKittyWriteQuery(alloc, 2000, 2000);
+    defer alloc.free(query);
+    {
+        var file = try td.dir.createFile(testing.io, "q.bin", .{});
+        defer file.close(testing.io);
+        var wbuf: [4096]u8 = undefined;
+        var w = file.writer(testing.io, &wbuf);
+        try w.interface.writeAll(query);
+        try w.end();
+    }
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "q.bin", &path_buf)];
+    const plain = if (std.mem.startsWith(u8, path, "\\\\?\\")) path[4..] else path;
+    const cmdline = try std.fmt.allocPrintSentinel(alloc, "type {s}", .{plain}, 0);
+    defer alloc.free(cmdline);
+
+    var pty = try Pty.openWith(.{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 }, &T.api);
+    defer pty.deinit();
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/c", cmdline },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .pseudo_console = pty.pseudo_console,
+    };
+    try cmd.start(alloc);
+    defer _ = k32.CloseHandle(cmd.pid.?);
+    pty.closeChildSide();
+
+    var loop = try TestReadLoop.init(pty.out_pipe);
+    defer loop.deinit();
+    try loop.start();
+    try testing.expectEqual(
+        @as(windows.DWORD, windows.WAIT_OBJECT_0),
+        k32.WaitForSingleObject(cmd.pid.?, 10_000),
+    );
+    pty.closeConsoleAsync();
+    try testing.expect(loop.waitDone(2000));
+
+    // What the console delivered, through the real Termio of the surface.
+    const got = loop.collected.items;
+    const wdata = std.mem.count(u8, got, "type=wdata");
+    try testing.expectEqual(@as(usize, 2), wdata);
+
+    var rig: termio.Termio.TestRig = undefined;
+    try rig.init(alloc, &.{ "--clipboard-write=allow", "--clipboard-write-limit-bytes=1024" });
+    defer rig.deinit();
+    rig.io.processOutput(got);
+    const out = try rig.replies();
+    defer alloc.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "status=EFBIG") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "status=DONE") == null);
+}
+
 /// A handle (terminate, synchronize) to a child process of `parent` whose
 /// image is named `name`, found with a Toolhelp snapshot; null if none yet.
 fn openChildNamed(parent: windows.HANDLE, name: []const u8) ?windows.HANDLE {
