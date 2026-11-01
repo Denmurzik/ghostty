@@ -18,6 +18,8 @@ const Allocator = std.mem.Allocator;
 const win32 = @import("win32");
 const Dialog = @import("dialog/Dialog.zig");
 const dtext = @import("dialog/text.zig");
+const dlayout = @import("dialog/layout.zig");
+const clipboard_image = @import("clipboard_image.zig");
 
 const IDYES = 6;
 const MB_DEFBUTTON2 = 0x00000100;
@@ -172,6 +174,21 @@ fn show(
     buttons: []const ListButton,
     default_id: i32,
 ) ?i32 {
+    return showWith(owner, window_title, title, body, list, buttons, default_id, null, null);
+}
+
+/// `show` with a preview image and a switch (see `Dialog.Spec`).
+fn showWith(
+    owner: ?win32.foundation.HWND,
+    window_title: []const u8,
+    title: []const u8,
+    body: []const u8,
+    list: []const u8,
+    buttons: []const ListButton,
+    default_id: i32,
+    image: ?Dialog.Image,
+    check: ?Dialog.Check,
+) ?i32 {
     var window_buf: [128]u16 = undefined;
     var title_buf: [256]u16 = undefined;
     var body_buf: [8192]u16 = undefined;
@@ -195,6 +212,8 @@ fn show(
         .buttons = wide_buttons[0..count],
         .default_index = default_index,
         .icon = take_icon,
+        .image = image,
+        .check = check,
     });
 }
 
@@ -221,7 +240,7 @@ pub fn inform(
 }
 
 /// The M1 message box, for when the dialog cannot be built.
-fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8) bool {
+fn fallbackBox(owner: ?win32.foundation.HWND, title: []const u8, body: []const u8) bool {
     log.warn("the dialog could not be built, using a message box", .{});
     var title_buf: [128]u16 = undefined;
     var body_buf: [2048]u16 = undefined;
@@ -232,6 +251,228 @@ fn fallbackBox(owner: win32.foundation.HWND, title: []const u8, body: []const u8
         win32.user32.MB_YESNO | win32.user32.MB_ICONQUESTION | MB_DEFBUTTON2,
     );
     return result == IDYES;
+}
+
+/// Which clipboard prompt this is. Decides the title, the sentence and the
+/// button labels.
+pub const ClipboardKind = enum { paste, read, write };
+
+/// One representation of the clipboard that the prompt is about.
+pub const ClipboardPart = struct {
+    mime: []const u8,
+    data: []const u8,
+};
+
+pub const ClipboardAnswer = struct {
+    allow: bool,
+    /// The "remember" switch was on when the dialog closed; always false
+    /// when the prompt had no switch.
+    remember: bool,
+};
+
+const remember_label = w16("Remember this choice for the session");
+
+/// Characters of a MIME type, and of the text, the clipboard prompt shows.
+const clipboard_mime_chars = 64;
+const clipboard_text_chars = 512;
+
+/// Everything a clipboard prompt shows, as UTF-8 (the dialog widens it).
+const ClipboardPrompt = struct {
+    title: []const u8,
+    /// The macOS sentence (`ClipboardRequest.text()`).
+    body: []const u8,
+    /// One line per part, a blank line, the first text.
+    list: []const u8,
+    allow: []const u8,
+    deny: []const u8,
+    /// The first image that decodes, scaled down to fit.
+    image: ?clipboard_image.Bgra,
+
+    fn deinit(self: *ClipboardPrompt, alloc: Allocator) void {
+        alloc.free(self.list);
+        if (self.image) |*i| i.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+fn clipboardTitle(kind: ClipboardKind) []const u8 {
+    return switch (kind) {
+        .read => "Clipboard Read",
+        .write => "Clipboard Write",
+        .paste => "Confirm Paste",
+    };
+}
+
+/// `ClipboardRequest.text()` of macOS. The program's own name for the
+/// request (the kitty protocol has one) is not shown: it is controlled by the
+/// program and would let it put its own words in this prompt.
+fn clipboardBody(kind: ClipboardKind) []const u8 {
+    return switch (kind) {
+        .paste => "Pasting this text to the terminal may be dangerous as it looks like some commands may be executed.",
+        .read => "An application is attempting to read from the clipboard.\nThe current clipboard contents are shown below.",
+        .write => "An application is attempting to write to the clipboard.\nThe content to write is shown below.",
+    };
+}
+
+fn mimeIs(mime: []const u8, prefix: []const u8) bool {
+    const semi = std.mem.indexOfScalar(u8, mime, ';') orelse mime.len;
+    const base = std.mem.trim(u8, mime[0..semi], " \t");
+    return base.len >= prefix.len and std.ascii.eqlIgnoreCase(base[0..prefix.len], prefix);
+}
+
+/// "7 bytes", "1.2 KB", "3.4 MB": binary units, one decimal.
+fn sizeText(buf: []u8, n: usize) []const u8 {
+    if (n == 1) return "1 byte";
+    if (n < 1024) return std.fmt.bufPrint(buf, "{d} bytes", .{n}) catch "?";
+    const units = [_][]const u8{ "KB", "MB", "GB" };
+    var unit: usize = 1024;
+    for (units, 0..) |name, i| {
+        // Tenths of the unit, rounded; 1024.0 KB is 1.0 MB.
+        const tenths = (@as(u128, n) * 10 + unit / 2) / unit;
+        if (tenths < 10240 or i == units.len - 1) {
+            return std.fmt.bufPrint(buf, "{d}.{d} {s}", .{ tenths / 10, tenths % 10, name }) catch "?";
+        }
+        unit *= 1024;
+    }
+    unreachable;
+}
+
+/// Builds what `confirmClipboard` shows. `max_w` and `max_h` (px) bound the
+/// picture.
+fn buildClipboardPrompt(
+    alloc: Allocator,
+    kind: ClipboardKind,
+    parts: []const ClipboardPart,
+    max_w: u32,
+    max_h: u32,
+) Allocator.Error!ClipboardPrompt {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(alloc);
+
+    // The first image that decodes is previewed; no other part is.
+    var image: ?clipboard_image.Bgra = null;
+    errdefer if (image) |*i| i.deinit(alloc);
+    var image_part: ?usize = null;
+    for (parts, 0..) |part, i| {
+        if (!mimeIs(part.mime, "image/")) continue;
+        var rgba = clipboard_image.decode(alloc, part.mime, part.data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        defer rgba.deinit(alloc);
+        image = clipboard_image.preview(alloc, rgba, max_w, max_h) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        image_part = i;
+        break;
+    }
+
+    for (parts, 0..) |part, i| {
+        if (i > 0) try list.append(alloc, '\n');
+        const mime = try escapeDeceptive(alloc, part.mime, .link, clipboard_mime_chars);
+        defer alloc.free(mime);
+        var size_buf: [32]u8 = undefined;
+        try list.appendSlice(alloc, mime);
+        try list.appendSlice(alloc, " \u{2014} ");
+        try list.appendSlice(alloc, sizeText(&size_buf, part.data.len));
+        if (mimeIs(part.mime, "image/") and image_part != i) try list.appendSlice(alloc, " (no preview)");
+    }
+
+    // The first text: text/plain, else any part that is valid UTF-8.
+    var text: ?[]const u8 = null;
+    for (parts) |part| {
+        if (mimeIs(part.mime, "text/plain")) {
+            text = part.data;
+            break;
+        }
+    }
+    if (text == null) for (parts) |part| {
+        if (mimeIs(part.mime, "image/")) continue;
+        if (std.unicode.utf8ValidateSlice(part.data)) {
+            text = part.data;
+            break;
+        }
+    };
+    if (text) |t| if (t.len > 0) {
+        // Enough bytes for the characters shown, however they are escaped.
+        const shown = try escapeDeceptive(alloc, t[0..@min(t.len, 4096)], .paste, clipboard_text_chars);
+        defer alloc.free(shown);
+        try list.appendSlice(alloc, if (list.items.len > 0) "\n\n" else "");
+        try list.appendSlice(alloc, shown);
+    };
+
+    return .{
+        .title = clipboardTitle(kind),
+        .body = clipboardBody(kind),
+        .list = try list.toOwnedSlice(alloc),
+        .allow = if (kind == .paste) "Paste" else "Allow",
+        .deny = if (kind == .paste) "Cancel" else "Deny",
+        .image = image,
+    };
+}
+
+/// Ask whether the program may use the clipboard (`read`, `write`) or paste
+/// `parts`. The prompt lists every part with its size, previews the first
+/// image that decodes and the first text (hidden characters written out), and
+/// can offer to remember the answer for the session. Deny (Cancel) is the
+/// default button. Like every dialog here it runs a message loop: only from
+/// posted-message handlers.
+pub fn confirmClipboard(
+    owner: ?win32.foundation.HWND,
+    kind: ClipboardKind,
+    parts: []const ClipboardPart,
+    can_remember: bool,
+) ClipboardAnswer {
+    const deny: ClipboardAnswer = .{ .allow = false, .remember = false };
+    const alloc = std.heap.page_allocator;
+
+    // The picture is scaled for the owner's DPI to the room it gets.
+    const dpi: u32 = if (owner) |o| ownerDpi(o) else 96;
+    const content_dip = dlayout.max_w - 2 * dlayout.pad;
+    var prompt = buildClipboardPrompt(
+        alloc,
+        kind,
+        parts,
+        @intCast(@divFloor(content_dip * @as(i32, @intCast(dpi)), 96)),
+        @intCast(@divFloor(dlayout.image_max_h * @as(i32, @intCast(dpi)), 96)),
+    ) catch return deny;
+    defer prompt.deinit(alloc);
+
+    const buttons = [_]ListButton{
+        .{ .id = button_accept, .text = prompt.allow },
+        .{ .id = button_cancel, .text = prompt.deny },
+    };
+
+    var remember = false;
+    const image: ?Dialog.Image = if (prompt.image) |img|
+        .{ .width = img.width, .height = img.height, .bgra = img.pixels }
+    else
+        null;
+    const check: ?Dialog.Check = if (can_remember) .{ .label = remember_label, .state = &remember } else null;
+
+    const answer = showWith(
+        owner,
+        prompt.title,
+        prompt.title,
+        prompt.body,
+        prompt.list,
+        &buttons,
+        button_cancel,
+        image,
+        check,
+    ) orelse {
+        // No dialog: the message box shows the same words; it has no switch.
+        const text = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ prompt.body, prompt.list }) catch return deny;
+        defer alloc.free(text);
+        return .{ .allow = fallbackBox(owner, prompt.title, text), .remember = false };
+    };
+    return .{ .allow = answer == button_accept, .remember = can_remember and remember };
+}
+
+fn ownerDpi(owner: win32.foundation.HWND) u32 {
+    const dpi = win32.user32.GetDpiForWindow(owner);
+    return if (dpi != 0) dpi else 96;
 }
 
 /// A single-line, display-safe rendition of `text` for confirmation
@@ -407,6 +648,149 @@ test "win32 dialogs: escapeDeceptive shows hidden characters" {
     try std.testing.expectEqualStrings("<U+202E><U…", cut);
 }
 
+fn testPng(alloc: Allocator) ![]u8 {
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = @truncate(i *% 37);
+    const img: clipboard_image.Rgba = .{ .width = 8, .height = 8, .pixels = &pixels };
+    return clipboard_image.encodePng(alloc, img);
+}
+
+test "win32 dialogs: size text" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0 bytes", sizeText(&buf, 0));
+    try std.testing.expectEqualStrings("1 byte", sizeText(&buf, 1));
+    try std.testing.expectEqualStrings("7 bytes", sizeText(&buf, 7));
+    try std.testing.expectEqualStrings("1023 bytes", sizeText(&buf, 1023));
+    try std.testing.expectEqualStrings("1.0 KB", sizeText(&buf, 1024));
+    try std.testing.expectEqualStrings("1.2 KB", sizeText(&buf, 1229));
+    try std.testing.expectEqualStrings("1.0 MB", sizeText(&buf, 1024 * 1024 - 1));
+    try std.testing.expectEqualStrings("2.5 MB", sizeText(&buf, 5 * 512 * 1024));
+    try std.testing.expectEqualStrings("3.0 GB", sizeText(&buf, 3 * 1024 * 1024 * 1024));
+}
+
+test "win32 dialogs: clipboard prompt text" {
+    const alloc = std.testing.allocator;
+    const png = try testPng(alloc);
+    defer alloc.free(png);
+
+    const parts = [_]ClipboardPart{
+        .{ .mime = "text/plain", .data = "rm -rf\n" },
+        .{ .mime = "image/png", .data = png },
+    };
+    var size_buf: [32]u8 = undefined;
+    const png_line = try std.fmt.allocPrint(alloc, "image/png \u{2014} {s}", .{sizeText(&size_buf, png.len)});
+    defer alloc.free(png_line);
+    const expect_list = try std.fmt.allocPrint(alloc, "text/plain \u{2014} 7 bytes\n{s}\n\nrm -rf\u{240A}", .{png_line});
+    defer alloc.free(expect_list);
+
+    var read = try buildClipboardPrompt(alloc, .read, &parts, 500, 200);
+    defer read.deinit(alloc);
+    try std.testing.expectEqualStrings(expect_list, read.list);
+    try std.testing.expectEqualStrings("Clipboard Read", read.title);
+    try std.testing.expectEqualStrings("Allow", read.allow);
+    try std.testing.expectEqualStrings("Deny", read.deny);
+    try std.testing.expect(std.mem.startsWith(u8, read.body, "An application is attempting to read from the clipboard."));
+    // The png decoded, and 8 x 8 stays 8 x 8.
+    try std.testing.expect(read.image != null);
+    try std.testing.expectEqual(@as(u32, 8), read.image.?.width);
+
+    var write = try buildClipboardPrompt(alloc, .write, &parts, 500, 200);
+    defer write.deinit(alloc);
+    try std.testing.expectEqualStrings("Clipboard Write", write.title);
+    try std.testing.expectEqualStrings("Allow", write.allow);
+    try std.testing.expectEqualStrings("Deny", write.deny);
+    try std.testing.expect(std.mem.startsWith(u8, write.body, "An application is attempting to write to the clipboard."));
+
+    var paste = try buildClipboardPrompt(alloc, .paste, parts[0..1], 500, 200);
+    defer paste.deinit(alloc);
+    try std.testing.expectEqualStrings("Confirm Paste", paste.title);
+    try std.testing.expectEqualStrings("Paste", paste.allow);
+    try std.testing.expectEqualStrings("Cancel", paste.deny);
+    try std.testing.expect(std.mem.startsWith(u8, paste.body, "Pasting this text to the terminal may be dangerous"));
+    try std.testing.expect(paste.image == null);
+    try std.testing.expectEqualStrings("text/plain \u{2014} 7 bytes\n\nrm -rf\u{240A}", paste.list);
+
+    // A 300 byte MIME type from the program is cut at 64 characters.
+    const long_mime: [300]u8 = @splat('a');
+    const a64: [64]u8 = @splat('a');
+    const long = [_]ClipboardPart{.{ .mime = &long_mime, .data = "x" }};
+    var cut = try buildClipboardPrompt(alloc, .read, &long, 500, 200);
+    defer cut.deinit(alloc);
+    const dash = std.mem.indexOf(u8, cut.list, " \u{2014} ").?;
+    try std.testing.expectEqualStrings(a64 ++ "\u{2026}", cut.list[0..dash]);
+
+    // The program's name for the request has no way in: the API has no
+    // parameter for it, and nothing but the macOS sentences is fixed text.
+    for ([_]ClipboardKind{ .paste, .read, .write }) |k| {
+        try std.testing.expect(std.mem.indexOf(u8, clipboardBody(k), "name") == null);
+        try std.testing.expect(std.mem.indexOf(u8, clipboardTitle(k), "name") == null);
+    }
+}
+
+test "win32 dialogs: unpreviewable image" {
+    const alloc = std.testing.allocator;
+    const parts = [_]ClipboardPart{.{ .mime = "image/png", .data = "bad" }};
+    var prompt = try buildClipboardPrompt(alloc, .read, &parts, 500, 200);
+    defer prompt.deinit(alloc);
+    try std.testing.expect(prompt.image == null);
+    try std.testing.expectEqualStrings("image/png \u{2014} 3 bytes (no preview)", prompt.list);
+
+    // A second image is listed but not previewed.
+    const png = try testPng(alloc);
+    defer alloc.free(png);
+    const two = [_]ClipboardPart{
+        .{ .mime = "image/png", .data = "bad" },
+        .{ .mime = "image/png", .data = png },
+        .{ .mime = "image/jpeg", .data = png },
+    };
+    var second = try buildClipboardPrompt(alloc, .read, &two, 500, 200);
+    defer second.deinit(alloc);
+    try std.testing.expect(second.image != null);
+    var lines = std.mem.splitScalar(u8, second.list, '\n');
+    try std.testing.expect(std.mem.endsWith(u8, lines.next().?, "(no preview)"));
+    try std.testing.expect(!std.mem.endsWith(u8, lines.next().?, "(no preview)"));
+    try std.testing.expect(std.mem.endsWith(u8, lines.next().?, "(no preview)"));
+}
+
+test "win32 dialogs: hidden characters in the preview" {
+    const alloc = std.testing.allocator;
+    const parts = [_]ClipboardPart{.{ .mime = "text/plain", .data = "a\u{202E}b" }};
+    var prompt = try buildClipboardPrompt(alloc, .paste, &parts, 500, 200);
+    defer prompt.deinit(alloc);
+    try std.testing.expectEqualStrings("text/plain \u{2014} 5 bytes\n\na<U+202E>b", prompt.list);
+
+    // A MIME type with a bidi override cannot reorder its line either.
+    const evil = [_]ClipboardPart{.{ .mime = "text/\u{202E}plain", .data = "x" }};
+    var named = try buildClipboardPrompt(alloc, .read, &evil, 500, 200);
+    defer named.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, named.list, "\u{202E}") == null);
+    try std.testing.expect(std.mem.indexOf(u8, named.list, "<U+202E>") != null);
+}
+
+test "win32 dialogs: the text of a part that is not text/plain" {
+    const alloc = std.testing.allocator;
+    // Valid UTF-8 in another type is the text; bytes that are not are not.
+    const html = [_]ClipboardPart{
+        .{ .mime = "application/octet-stream", .data = "\xff\xfe" },
+        .{ .mime = "text/html", .data = "<b>hi</b>" },
+    };
+    var prompt = try buildClipboardPrompt(alloc, .read, &html, 500, 200);
+    defer prompt.deinit(alloc);
+    try std.testing.expect(std.mem.endsWith(u8, prompt.list, "\n\n<b>hi</b>"));
+    // No parts: an empty list.
+    var none = try buildClipboardPrompt(alloc, .read, &.{}, 500, 200);
+    defer none.deinit(alloc);
+    try std.testing.expectEqualStrings("", none.list);
+    // The text shown is cut at 512 characters.
+    const big: [5000]u8 = @splat('y');
+    const y512: [512]u8 = @splat('y');
+    const parts = [_]ClipboardPart{.{ .mime = "text/plain", .data = &big }};
+    var cut = try buildClipboardPrompt(alloc, .paste, &parts, 500, 200);
+    defer cut.deinit(alloc);
+    const at = std.mem.indexOf(u8, cut.list, "\n\n").? + 2;
+    try std.testing.expectEqualStrings(y512 ++ "\u{2026}", cut.list[at..]);
+}
+
 test "win32 dialogs: every close kind has its own sentence" {
     const kinds = std.enums.values(CloseKind);
     for (kinds, 0..) |a, i| {
@@ -432,6 +816,7 @@ test "win32 dialogs: every close kind asks its own question" {
 
 test {
     _ = @import("dialog/colors.zig");
+    _ = @import("dialog/extras.zig");
     _ = @import("dialog/keys.zig");
     _ = @import("dialog/layout.zig");
     _ = @import("dialog/text.zig");

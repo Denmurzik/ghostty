@@ -30,6 +30,14 @@ pub const list_inset = 6;
 pub const list_min_lines = 3;
 pub const max_buttons = 4;
 
+/// The tallest preview image (GTK clamps its preview to 200 px as well).
+pub const image_max_h = 200;
+/// The switch: box and gap to the label (DIP), and the row's height.
+pub const check_box = 20;
+pub const check_gap = 8;
+pub const check_row_h = 32;
+pub const check_radius = 4;
+
 /// Title and body sizes (px at 96 DPI).
 pub const title_px = 20;
 pub const body_px = 14;
@@ -126,6 +134,11 @@ pub const Input = struct {
     list_h: i32 = 0,
     /// Height of an app icon above the text; 0 for none.
     icon_h: i32 = 0,
+    /// Natural height (px) of the preview image between body and list; 0 for
+    /// none. Like a list, an image makes the dialog as wide as it gets.
+    image_h: i32 = 0,
+    /// Height of the switch row above the button bar; 0 for none.
+    check_h: i32 = 0,
 };
 
 pub const Plan = struct {
@@ -134,7 +147,11 @@ pub const Plan = struct {
     icon: Rect = .{},
     title: Rect,
     body: Rect,
+    /// The box the preview image is fitted into (see `fitImage`).
+    image: Rect = .{},
     list: Rect,
+    /// The row of the switch.
+    check: Rect = .{},
     footer: Rect,
     buttons: [max_buttons]Rect,
     count: usize,
@@ -146,7 +163,8 @@ pub fn plan(in: Input) Plan {
     const dpi = in.dpi;
     const p = px(pad, dpi);
     const g = px(gap, dpi);
-    const width = if (in.list_h > 0) px(max_w, dpi) else dialogWidth(in.text_w, in.buttons_w, dpi);
+    const wide = in.list_h > 0 or in.image_h > 0;
+    const width = if (wide) px(max_w, dpi) else dialogWidth(in.text_w, in.buttons_w, dpi);
     const content_w = width - 2 * p;
 
     var out: Plan = .{
@@ -176,10 +194,21 @@ pub fn plan(in: Input) Plan {
         y += in.body_h;
     }
     out.drag_h = y;
+    if (in.image_h > 0) {
+        if (y > p) y += g;
+        const h = @min(px(image_max_h, dpi), in.image_h);
+        out.image = .{ .x = p, .y = y, .w = content_w, .h = h };
+        y += h;
+    }
     if (in.list_h > 0) {
         if (y > p) y += g;
         out.list = .{ .x = p, .y = y, .w = content_w, .h = in.list_h };
         y += in.list_h;
+    }
+    if (in.check_h > 0) {
+        if (y > p) y += g;
+        out.check = .{ .x = p, .y = y, .w = content_w, .h = in.check_h };
+        y += in.check_h;
     }
     y += p;
 
@@ -318,6 +347,105 @@ test "win32 dialog layout: a list makes the dialog wide and sits under the body"
     try std.testing.expectEqual(p.list.bottom() + 24, p.footer.y);
     // Three buttons fill the content width.
     try std.testing.expectEqual(@as(i32, 548 - 24), p.buttons[2].right());
+}
+
+/// Where an `iw` x `ih` px image is drawn inside `box`: as large as fits
+/// with its aspect ratio kept, never larger than itself, centred.
+pub fn fitImage(box: Rect, iw: u32, ih: u32) Rect {
+    if (iw == 0 or ih == 0 or box.w <= 0 or box.h <= 0) return .{ .x = box.x, .y = box.y };
+    const w: i64 = iw;
+    const h: i64 = ih;
+    var ow = w;
+    var oh = h;
+    if (w > box.w or h > box.h) {
+        if (w * box.h >= h * box.w) {
+            ow = box.w;
+            oh = @max(1, @divFloor(h * box.w, w));
+        } else {
+            oh = box.h;
+            ow = @max(1, @divFloor(w * box.h, h));
+        }
+    }
+    const out_w: i32 = @intCast(ow);
+    const out_h: i32 = @intCast(oh);
+    return .{
+        .x = box.x + @divFloor(box.w - out_w, 2),
+        .y = box.y + @divFloor(box.h - out_h, 2),
+        .w = out_w,
+        .h = out_h,
+    };
+}
+
+test "win32 dialog layout: image is clamped and fitted" {
+    for ([_]u32{ 96, 144 }) |dpi| {
+        const p = plan(.{
+            .dpi = dpi,
+            .text_w = 100,
+            .buttons_w = 100,
+            .button_count = 2,
+            .title_h = 28,
+            .body_h = 40,
+            .image_h = 6000,
+            .list_h = 100,
+        });
+        try std.testing.expectEqual(px(200, dpi), p.image.h);
+        try std.testing.expectEqual(p.width - 2 * px(pad, dpi), p.image.w);
+        // Between the body and the list, one gap each side.
+        try std.testing.expectEqual(p.body.bottom() + px(gap, dpi), p.image.y);
+        try std.testing.expectEqual(p.image.bottom() + px(gap, dpi), p.list.y);
+        // 800 x 6000: the height is the tight side, the aspect is kept.
+        const fit = fitImage(p.image, 800, 6000);
+        try std.testing.expectEqual(px(200, dpi), fit.h);
+        try std.testing.expect(fit.w <= p.image.w and fit.w > 0);
+        try std.testing.expect(@abs(@as(i64, fit.w) * 6000 - @as(i64, fit.h) * 800) <= 6000);
+        // Centred in the box.
+        try std.testing.expectEqual(p.image.x + @divFloor(p.image.w - fit.w, 2), fit.x);
+    }
+
+    // 10 x 10 keeps its size and sits in the middle.
+    const small = plan(.{ .dpi = 96, .text_w = 100, .buttons_w = 100, .button_count = 1, .body_h = 20, .image_h = 10, .list_h = 60 });
+    try std.testing.expectEqual(@as(i32, 10), small.image.h);
+    const fit = fitImage(small.image, 10, 10);
+    try std.testing.expectEqual(@as(i32, 10), fit.w);
+    try std.testing.expectEqual(@as(i32, 10), fit.h);
+    try std.testing.expectEqual(small.image.x + @divFloor(small.image.w - 10, 2), fit.x);
+    try std.testing.expectEqual(small.image.y, fit.y);
+
+    // A wide image is limited by the width.
+    const wide = fitImage(.{ .x = 0, .y = 0, .w = 500, .h = 200 }, 2000, 400);
+    try std.testing.expectEqual(@as(i32, 500), wide.w);
+    try std.testing.expectEqual(@as(i32, 100), wide.h);
+    try std.testing.expectEqual(@as(i32, 50), wide.y);
+}
+
+test "win32 dialog layout: check row sits above the footer" {
+    const base: Input = .{
+        .dpi = 96,
+        .text_w = 100,
+        .buttons_w = 100,
+        .button_count = 2,
+        .title_h = 28,
+        .body_h = 40,
+        .image_h = 80,
+        .list_h = 120,
+    };
+    var with = base;
+    with.check_h = px(check_row_h, 96);
+    const a = plan(base);
+    const b = plan(with);
+
+    try std.testing.expectEqual(Rect{}, a.check);
+    // Below the list, above the bar, no overlap.
+    try std.testing.expectEqual(b.list.bottom() + px(gap, 96), b.check.y);
+    try std.testing.expectEqual(b.check.bottom() + px(pad, 96), b.footer.y);
+    try std.testing.expect(b.check.y >= b.list.bottom());
+    try std.testing.expectEqual(b.list.w, b.check.w);
+    // The dialog grows by the row and the gap above it.
+    try std.testing.expectEqual(a.height + b.check.h + px(gap, 96), b.height);
+    // Without an image or a list the row follows the body.
+    const only = plan(.{ .dpi = 96, .text_w = 100, .buttons_w = 100, .button_count = 1, .body_h = 40, .check_h = 32 });
+    try std.testing.expectEqual(only.body.bottom() + px(gap, 96), only.check.y);
+    try std.testing.expectEqual(Rect{}, only.image);
 }
 
 test "win32 dialog layout: body only, no title" {

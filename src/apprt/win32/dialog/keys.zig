@@ -1,16 +1,18 @@
 //! Keyboard state machine of the dialog: where the focus is, and what a key
 //! does there. Pure; the window feeds it keys and acts on the answer.
 //!
-//! The focus ring is the list (when the dialog has one) followed by the
-//! buttons. Enter presses the focused button (the default one when the
-//! list has the focus), Esc and Alt+F4 cancel, Tab and Shift+Tab walk the
-//! ring and wrap, the arrow keys walk the buttons.
+//! The focus ring is the list (when the dialog has one), the switch (when it
+//! has one) and then the buttons. Enter presses the focused button (the
+//! default one when the list or the switch has the focus), Esc and Alt+F4
+//! cancel, Tab and Shift+Tab walk the ring and wrap, the arrow keys walk the
+//! buttons. Space on the switch is the control's own.
 const std = @import("std");
 
 pub const Key = enum { tab, shift_tab, left, right, up, down, home, end, enter, escape, alt_f4 };
 
 pub const Focus = union(enum) {
     list,
+    check,
     button: usize,
 
     pub fn eql(a: Focus, b: Focus) bool {
@@ -36,34 +38,46 @@ pub const State = struct {
     count: usize,
     default: usize,
     has_list: bool,
+    has_check: bool = false,
     focus: Focus,
 
     /// The focus starts on the default button.
     pub fn init(count: usize, default: usize, has_list: bool) State {
-        std.debug.assert(count >= 1);
-        const d = if (default < count) default else 0;
-        return .{ .count = count, .default = d, .has_list = has_list, .focus = .{ .button = d } };
+        return initWith(count, default, has_list, false);
     }
 
-    /// Where Tab goes from here: ring position 0 is the list if there is
-    /// one, then the buttons.
+    pub fn initWith(count: usize, default: usize, has_list: bool, has_check: bool) State {
+        std.debug.assert(count >= 1);
+        const d = if (default < count) default else 0;
+        return .{ .count = count, .default = d, .has_list = has_list, .has_check = has_check, .focus = .{ .button = d } };
+    }
+
+    /// Where Tab goes from here: the ring is the list if there is one, the
+    /// switch if there is one, then the buttons.
     fn ringIndex(self: *const State, f: Focus) usize {
+        const before: usize = @as(usize, @intFromBool(self.has_list)) + @intFromBool(self.has_check);
         return switch (f) {
             .list => 0,
-            .button => |i| i + @intFromBool(self.has_list),
+            .check => @intFromBool(self.has_list),
+            .button => |i| i + before,
         };
     }
 
     fn ringFocus(self: *const State, idx: usize) Focus {
+        var at = idx;
         if (self.has_list) {
-            if (idx == 0) return .list;
-            return .{ .button = idx - 1 };
+            if (at == 0) return .list;
+            at -= 1;
         }
-        return .{ .button = idx };
+        if (self.has_check) {
+            if (at == 0) return .check;
+            at -= 1;
+        }
+        return .{ .button = at };
     }
 
     fn ringLen(self: *const State) usize {
-        return self.count + @intFromBool(self.has_list);
+        return self.count + @as(usize, @intFromBool(self.has_list)) + @intFromBool(self.has_check);
     }
 
     /// Feed one key. The state follows a returned `.focus`.
@@ -72,7 +86,7 @@ pub const State = struct {
             .escape, .alt_f4 => return .cancel,
             .enter => return .{ .activate = switch (self.focus) {
                 .button => |i| i,
-                .list => self.default,
+                .list, .check => self.default,
             } },
             .tab, .shift_tab => {
                 const len = self.ringLen();
@@ -82,7 +96,7 @@ pub const State = struct {
             },
             .left, .right, .up, .down, .home, .end => {
                 const i = switch (self.focus) {
-                    .list => return .pass,
+                    .list, .check => return .pass,
                     .button => |i| i,
                 };
                 const to: usize = switch (key) {
@@ -105,6 +119,9 @@ pub const State = struct {
     pub fn set(self: *State, f: Focus) void {
         switch (f) {
             .list => if (self.has_list) {
+                self.focus = f;
+            },
+            .check => if (self.has_check) {
                 self.focus = f;
             },
             .button => |i| if (i < self.count) {
@@ -169,4 +186,31 @@ test "win32 dialog keys: default out of range falls back to the first button" {
     try std.testing.expect(s.focus.eql(.{ .button = 0 }));
     s.set(.{ .button = 1 });
     try std.testing.expect(s.focus.eql(.{ .button = 1 }));
+}
+
+test "win32 dialog keys: the switch sits between the list and the buttons" {
+    var s = State.initWith(2, 0, true, true);
+    // Buttons first, then the list, then the switch, then back to the buttons.
+    try std.testing.expectEqual(Action{ .focus = .{ .button = 1 } }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .list }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .check }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .{ .button = 0 } }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .check }, s.press(.shift_tab));
+    try std.testing.expectEqual(Action{ .focus = .list }, s.press(.shift_tab));
+    // Enter on the switch presses the default button, arrows are the control's.
+    s.set(.check);
+    try std.testing.expectEqual(Action.pass, s.press(.left));
+    try std.testing.expectEqual(Action{ .activate = 0 }, s.press(.enter));
+    try std.testing.expectEqual(Action.cancel, s.press(.escape));
+}
+
+test "win32 dialog keys: a switch without a list" {
+    var s = State.initWith(2, 1, false, true);
+    try std.testing.expectEqual(Action{ .focus = .check }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .{ .button = 0 } }, s.press(.tab));
+    try std.testing.expectEqual(Action{ .focus = .{ .button = 1 } }, s.press(.tab));
+    // No switch: `.check` is not accepted.
+    var plain = State.init(2, 0, true);
+    plain.set(.check);
+    try std.testing.expect(plain.focus.eql(.{ .button = 0 }));
 }

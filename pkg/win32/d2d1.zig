@@ -128,6 +128,19 @@ pub const D2D1_RENDER_TARGET_PROPERTIES = extern struct {
     minLevel: u32 = FEATURE_LEVEL_DEFAULT,
 };
 
+/// D2D1_BITMAP_PROPERTIES
+pub const D2D1_BITMAP_PROPERTIES = extern struct {
+    pixelFormat: D2D1_PIXEL_FORMAT,
+    dpiX: f32 = 96,
+    dpiY: f32 = 96,
+};
+
+/// D2D1_BITMAP_INTERPOLATION_MODE
+pub const BitmapInterpolationMode = enum(u32) {
+    NEAREST_NEIGHBOR = 0,
+    LINEAR = 1,
+};
+
 pub const D2D1_HWND_RENDER_TARGET_PROPERTIES = extern struct {
     hwnd: HWND,
     pixelSize: D2D1_SIZE_U,
@@ -201,6 +214,24 @@ pub const ID2D1SolidColorBrush = extern struct {
     }
 };
 
+/// A bitmap owned by one render target. Only `Release` is used.
+pub const ID2D1Bitmap = extern struct {
+    vtable: *const VTable,
+
+    pub const iid = GUID.parse("a2296057-ea42-4099-983b-539fb6505426");
+
+    pub const VTable = extern struct {
+        base: ID2D1Resource.VTable,
+        GetSize: *const anyopaque,
+        GetPixelSize: *const anyopaque,
+        GetPixelFormat: *const anyopaque,
+        GetDpi: *const anyopaque,
+        CopyFromBitmap: *const anyopaque,
+        CopyFromRenderTarget: *const anyopaque,
+        CopyFromMemory: *const anyopaque,
+    };
+};
+
 pub const ID2D1RenderTarget = extern struct {
     vtable: *const VTable,
 
@@ -208,7 +239,7 @@ pub const ID2D1RenderTarget = extern struct {
 
     pub const VTable = extern struct {
         base: ID2D1Resource.VTable,
-        CreateBitmap: *const anyopaque,
+        CreateBitmap: *const fn (*ID2D1RenderTarget, D2D1_SIZE_U, ?*const anyopaque, u32, *const D2D1_BITMAP_PROPERTIES, *?*ID2D1Bitmap) callconv(.winapi) HRESULT,
         CreateBitmapFromWicBitmap: *const anyopaque,
         CreateSharedBitmap: *const anyopaque,
         CreateBitmapBrush: *const anyopaque,
@@ -230,7 +261,7 @@ pub const ID2D1RenderTarget = extern struct {
         FillGeometry: *const anyopaque,
         FillMesh: *const anyopaque,
         FillOpacityMask: *const anyopaque,
-        DrawBitmap: *const anyopaque,
+        DrawBitmap: *const fn (*ID2D1RenderTarget, *ID2D1Bitmap, ?*const D2D1_RECT_F, f32, BitmapInterpolationMode, ?*const D2D1_RECT_F) callconv(.winapi) void,
         DrawText: *const anyopaque,
         DrawTextLayout: *const fn (*ID2D1RenderTarget, D2D1_POINT_2F, *dwrite.IDWriteTextLayout, *ID2D1Brush, u32) callconv(.winapi) void,
         DrawGlyphRun: *const anyopaque,
@@ -262,6 +293,32 @@ pub const ID2D1RenderTarget = extern struct {
         GetMaximumBitmapSize: *const anyopaque,
         IsSupported: *const anyopaque,
     };
+
+    /// A bitmap of `width` x `height` pixels copied from `pixels`
+    /// (`pitch` bytes per row) in `props.pixelFormat`.
+    pub inline fn createBitmap(
+        self: *ID2D1RenderTarget,
+        width: u32,
+        height: u32,
+        pixels: []const u8,
+        pitch: u32,
+        props: D2D1_BITMAP_PROPERTIES,
+    ) Error!*ID2D1Bitmap {
+        var out: ?*ID2D1Bitmap = null;
+        try check(self.vtable.CreateBitmap(self, .{ .width = width, .height = height }, pixels.ptr, pitch, &props, &out));
+        return out orelse error.ComFailure;
+    }
+
+    /// Draws the whole bitmap into `dest`, scaled.
+    pub inline fn drawBitmap(
+        self: *ID2D1RenderTarget,
+        bitmap: *ID2D1Bitmap,
+        dest: D2D1_RECT_F,
+        opacity: f32,
+        mode: BitmapInterpolationMode,
+    ) void {
+        self.vtable.DrawBitmap(self, bitmap, &dest, opacity, mode, null);
+    }
 
     pub inline fn createSolidColorBrush(self: *ID2D1RenderTarget, color: D2D1_COLOR_F) Error!*ID2D1SolidColorBrush {
         var out: ?*ID2D1SolidColorBrush = null;

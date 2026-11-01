@@ -25,6 +25,7 @@ const colors = @import("colors.zig");
 const keys = @import("keys.zig");
 const layout = @import("layout.zig");
 const text = @import("text.zig");
+const extras = @import("extras.zig");
 
 const com = win32.com;
 const d2d1 = win32.d2d1;
@@ -56,6 +57,11 @@ pub const msg_click_button = user32.WM_USER + 102;
 
 pub const max_buttons = layout.max_buttons;
 
+/// A preview image between the body and the list (see `extras.Image`).
+pub const Image = extras.Image;
+/// The "remember" switch above the buttons (see `extras.Check`).
+pub const Check = extras.Check;
+
 pub const Button = struct {
     id: i32,
     /// With an optional `&` accelerator.
@@ -80,6 +86,12 @@ pub const Spec = struct {
     cancel_id: i32 = cancel_id,
     /// Show the app icon (resource 1) above the text.
     icon: bool = false,
+    /// A picture of the clipboard (premultiplied BGRA, already scaled down),
+    /// drawn between the body and the list, centred and fitted.
+    image: ?Image = null,
+    /// A switch above the buttons; its state is written back when the
+    /// dialog closes, however it closes.
+    check: ?Check = null,
 };
 
 // -- Win32 odds and ends the bindings do not have ----------------------------------
@@ -161,6 +173,7 @@ const COLOR_HIGHLIGHTTEXT = 14;
 const id_button = 1000;
 const id_body = 900;
 const id_list = 901;
+const id_check = 950;
 
 const hover_none = std.math.maxInt(usize);
 
@@ -170,8 +183,14 @@ const Formats = struct {
     body: *dwrite.IDWriteTextFormat,
     button: *dwrite.IDWriteTextFormat,
     list: *dwrite.IDWriteTextFormat,
+    /// The label of the switch (one line, vertically centred) and its
+    /// check mark (an icon font).
+    check_label: *dwrite.IDWriteTextFormat,
+    check_glyph: *dwrite.IDWriteTextFormat,
 
     fn release(self: Formats) void {
+        com.release(self.check_glyph);
+        com.release(self.check_label);
         com.release(self.list);
         com.release(self.button);
         com.release(self.body);
@@ -195,6 +214,7 @@ fonts: Formats,
 title_family: [*:0]const u16,
 body_family: [*:0]const u16,
 list_family: [*:0]const u16,
+glyph_family: [*:0]const u16,
 plan: layout.Plan,
 plan_input: layout.Input = undefined,
 /// Line pitch of the list font as GDI sets it, and the tallest the list may be.
@@ -210,6 +230,9 @@ body_static: ?HWND = null,
 edit: ?HWND = null,
 edit_font: ?gdi32.HFONT = null,
 edit_brush: ?user32.HBRUSH = null,
+/// The switch (`Spec.check`) and the preview bitmap (made on the render target).
+check_hwnd: ?HWND = null,
+bitmap: ?*d2d1.ID2D1Bitmap = null,
 state: keys.State,
 hover: usize = hover_none,
 /// The app icon of `Spec.icon`, loaded by `drawIcon`.
@@ -258,8 +281,14 @@ fn init(self: *Dialog, spec: Spec, sh: *Chrome.Shared) !void {
     const accent = colors.accentFor(dark, systemAccent());
     const pal = if (hc) colors.forHighContrast(systemColors()) else colors.forTheme(dark, accent);
 
+    var checked_spec = spec;
+    // A picture that does not match its size is not drawn.
+    if (checked_spec.image) |img| {
+        if (!extras.imageValid(img)) checked_spec.image = null;
+    }
+
     self.* = .{
-        .spec = spec,
+        .spec = checked_spec,
         .body = spec.body,
         .list = spec.list,
         .dpi = dpi,
@@ -269,9 +298,11 @@ fn init(self: *Dialog, spec: Spec, sh: *Chrome.Shared) !void {
         .title_family = pickFamily(sh.dwrite, L("Segoe UI Variable Display"), L("Segoe UI")),
         .body_family = sh.title_family,
         .list_family = pickFamily(sh.dwrite, L("Cascadia Mono"), L("Consolas")),
+        .glyph_family = pickFamily(sh.dwrite, L("Segoe Fluent Icons"), L("Segoe MDL2 Assets")),
         .plan = undefined,
-        .state = keys.State.init(@min(spec.buttons.len, max_buttons), spec.default_index, spec.list.len > 0),
+        .state = undefined,
     };
+    self.state = self.newState(@min(spec.buttons.len, max_buttons), spec.list.len > 0);
 
     const count = @min(spec.buttons.len, max_buttons);
     for (spec.buttons[0..count], 0..) |b, i| {
@@ -285,7 +316,12 @@ fn init(self: *Dialog, spec: Spec, sh: *Chrome.Shared) !void {
     self.plan = try self.buildPlan();
 }
 
+fn newState(self: *const Dialog, count: usize, has_list: bool) keys.State {
+    return keys.State.initWith(count, self.spec.default_index, has_list, self.spec.check != null);
+}
+
 fn deinit(self: *Dialog) void {
+    extras.release(&self.bitmap);
     if (self.edit_font) |f| _ = gdi32.DeleteObject(@ptrCast(f));
     if (self.edit_brush) |b| _ = gdi32.DeleteObject(@ptrCast(b));
     if (self.icon_handle) |i| _ = user32.DestroyIcon(@ptrCast(i));
@@ -397,7 +433,26 @@ fn makeFormats(self: *Dialog, dpi: u32) !Formats {
     try button.setTrimming(.{ .granularity = .CHARACTER }, sign);
     const list = try self.makeFormat(self.list_family, .NORMAL, layout.list_px, dpi);
     errdefer com.release(list);
-    return .{ .title = title, .body = body, .button = button, .list = list };
+    const check_label = try self.makeFormat(self.body_family, .NORMAL, layout.body_px, dpi);
+    errdefer com.release(check_label);
+    try check_label.setParagraphAlignment(.CENTER);
+    try check_label.setWordWrapping(.NO_WRAP);
+    const check_sign = try self.sh.dwrite.createEllipsisTrimmingSign(check_label);
+    defer com.release(check_sign);
+    try check_label.setTrimming(.{ .granularity = .CHARACTER }, check_sign);
+    const check_glyph = try self.makeFormat(self.glyph_family, .NORMAL, 12, dpi);
+    errdefer com.release(check_glyph);
+    try check_glyph.setTextAlignment(.CENTER);
+    try check_glyph.setParagraphAlignment(.CENTER);
+    try check_glyph.setWordWrapping(.NO_WRAP);
+    return .{
+        .title = title,
+        .body = body,
+        .button = button,
+        .list = list,
+        .check_label = check_label,
+        .check_glyph = check_glyph,
+    };
 }
 
 const Size = struct { w: i32, h: i32 };
@@ -446,7 +501,9 @@ fn buildPlan(self: *Dialog) !layout.Plan {
     const text_w = @max(title_wide.w, body_wide.w);
 
     var has_list = self.list.len > 0;
-    var width = if (has_list) layout.px(layout.max_w, dpi) else layout.dialogWidth(text_w, buttons_w, dpi);
+    const image_h: i32 = if (self.spec.image) |img| @intCast(img.height) else 0;
+    const check_h: i32 = if (self.spec.check != null) layout.px(layout.check_row_h, dpi) else 0;
+    var width = if (has_list or image_h > 0) layout.px(layout.max_w, dpi) else layout.dialogWidth(text_w, buttons_w, dpi);
     var content_w = width - 2 * layout.px(layout.pad, dpi);
 
     var title = try self.measure(self.spec.title, f.title, content_w);
@@ -459,7 +516,7 @@ fn buildPlan(self: *Dialog) !layout.Plan {
         self.list = self.body;
         self.body = &.{};
         has_list = true;
-        self.state = keys.State.init(count, self.spec.default_index, true);
+        self.state = self.newState(count, true);
         width = layout.px(layout.max_w, dpi);
         content_w = width - 2 * layout.px(layout.pad, dpi);
         title = try self.measure(self.spec.title, f.title, content_w);
@@ -471,6 +528,9 @@ fn buildPlan(self: *Dialog) !layout.Plan {
     var list_h: i32 = 0;
     if (has_list) {
         cap -= body.h;
+        // The picture and the switch share the room, each with its gap.
+        if (image_h > 0) cap -= @min(layout.px(layout.image_max_h, dpi), image_h) + layout.px(layout.gap, dpi);
+        if (check_h > 0) cap -= check_h + layout.px(layout.gap, dpi);
         const cell = self.listMetrics();
         const scroll = user32.GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
         const cols: usize = @intCast(@max(1, @divFloor(
@@ -492,6 +552,8 @@ fn buildPlan(self: *Dialog) !layout.Plan {
         .body_h = body.h,
         .list_h = list_h,
         .icon_h = if (self.spec.icon) layout.px(48, dpi) else 0,
+        .image_h = image_h,
+        .check_h = check_h,
     };
     return layout.plan(self.plan_input);
 }
@@ -563,7 +625,7 @@ fn applyBackdrop(self: *Dialog) void {
     // with alpha 0 on glass, so their text would show the backdrop instead
     // of its colour. Everything else is Direct2D.
     self.mica = false;
-    if (!theme.highContrast() and self.list.len == 0) {
+    if (!theme.highContrast() and self.list.len == 0 and self.spec.image == null and self.spec.check == null) {
         const kind: i32 = dwmapi.DWMSBT_MAINWINDOW;
         const hr = dwmapi.DwmSetWindowAttribute(hwnd, dwmapi.DWMWA_SYSTEMBACKDROP_TYPE, &kind, @sizeOf(i32));
         if (hr >= 0) {
@@ -644,6 +706,63 @@ fn createChildren(self: *Dialog) !void {
     }
 
     if (self.list.len > 0) try self.createList(hwnd, hinstance);
+    if (self.spec.check) |c| try self.createCheck(hwnd, hinstance, c);
+}
+
+/// A real auto check box: it keeps the role and the state for screen
+/// readers and toggles on Space; `WM_NOTIFY` has us paint it.
+fn createCheck(self: *Dialog, hwnd: HWND, hinstance: ?win32.foundation.HINSTANCE, c: Check) !void {
+    var wide: [129]u16 = undefined;
+    const n = @min(c.label.len, wide.len - 1);
+    @memcpy(wide[0..n], c.label[0..n]);
+    wide[n] = 0;
+    const r = self.plan.check;
+    const child = user32.CreateWindowExW(
+        0,
+        L("BUTTON"),
+        @ptrCast(&wide),
+        user32.WS_CHILD | user32.WS_VISIBLE | WS_TABSTOP | extras.BS_AUTOCHECKBOX,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        hwnd,
+        @ptrFromInt(id_check),
+        hinstance,
+        null,
+    ) orelse return error.CreateCheckFailed;
+    self.check_hwnd = child;
+    _ = user32.SendMessageW(child, extras.BM_SETCHECK, @intFromBool(c.state.*), 0);
+}
+
+/// The switch asks to be painted: the whole control is ours.
+fn customDrawCheck(self: *Dialog, nm: *const extras.NMCUSTOMDRAW) LRESULT {
+    if (nm.dwDrawStage != extras.CDDS_PREPAINT) return extras.CDRF_DODEFAULT;
+    const hdc = nm.hdc orelse return extras.CDRF_DODEFAULT;
+    const check_hwnd = self.check_hwnd orelse return extras.CDRF_DODEFAULT;
+    const w = nm.rc.right - nm.rc.left;
+    const h = nm.rc.bottom - nm.rc.top;
+    const checked = user32.SendMessageW(check_hwnd, extras.BM_GETCHECK, 0, 0) == extras.BST_CHECKED;
+    const label_text: []const u16 = if (self.spec.check) |c| c.label else &.{};
+    const cp: extras.CheckPaint = .{
+        .state = nm.uItemState,
+        .checked = checked,
+        .show_focus = self.kb_focus,
+        .dpi = self.dpi,
+        .label = label_text,
+        .label_format = self.fonts.check_label,
+        .glyph_format = self.fonts.check_glyph,
+    };
+    self.draw(hdc, w, h, self.pal.body_solid, cp, drawCheckBody) catch |err| {
+        if (!self.paint_logged) log.warn("unable to paint the dialog switch err={}", .{err});
+        self.paint_logged = true;
+        return extras.CDRF_DODEFAULT;
+    };
+    return extras.CDRF_SKIPDEFAULT;
+}
+
+fn drawCheckBody(self: *Dialog, pen: Pen, cp: extras.CheckPaint) void {
+    extras.drawCheck(pen, &self.pal, self.plan.check.w, self.plan.check.h, cp);
 }
 
 fn listRect(self: *const Dialog) layout.Rect {
@@ -733,12 +852,19 @@ fn fitList(self: *Dialog) void {
         const r = self.plan.buttons[i];
         _ = user32.MoveWindow(h, r.x, r.y, r.w, r.h, 1);
     };
+    self.moveCheck();
     const r = self.listRect();
     _ = user32.MoveWindow(edit, r.x, r.y, r.w, r.h, 1);
     const size: geom.Size = .{ .w = self.plan.width, .h = self.plan.height };
     const at = self.position(size);
     _ = user32.SetWindowPos(hwnd, null, at.x, at.y, size.w, size.h, user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
     _ = user32.InvalidateRect(hwnd, null, 0);
+}
+
+fn moveCheck(self: *Dialog) void {
+    const c = self.check_hwnd orelse return;
+    const r = self.plan.check;
+    _ = user32.MoveWindow(c, r.x, r.y, r.w, r.h, 1);
 }
 
 /// The scrollbar shows only when the lines do not all fit.
@@ -807,6 +933,10 @@ fn knownId(self: *const Dialog, wparam: WPARAM) ?i32 {
 
 fn finish(self: *Dialog, id: i32) void {
     if (self.done) return;
+    // However the dialog closes, the answer of the switch is kept.
+    if (self.spec.check) |c| if (self.check_hwnd) |h| {
+        if (user32.IsWindow(h) != 0) c.state.* = user32.SendMessageW(h, extras.BM_GETCHECK, 0, 0) == extras.BST_CHECKED;
+    };
     self.result = id;
     self.done = true;
 }
@@ -840,6 +970,7 @@ fn preTranslate(self: *Dialog, msg: *const user32.MSG) bool {
         user32.WM_LBUTTONDOWN => {
             self.kb_focus = false;
             if (self.buttonIndex(h)) |i| self.state.set(.{ .button = i });
+            if (self.check_hwnd == h) self.state.set(.check);
         },
         else => {},
     }
@@ -862,6 +993,8 @@ fn syncFocus(self: *Dialog) void {
     const focus = user32.GetFocus() orelse return;
     if (self.edit != null and focus == self.edit.?) {
         self.state.set(.list);
+    } else if (self.check_hwnd != null and focus == self.check_hwnd.?) {
+        self.state.set(.check);
     } else if (self.buttonIndex(focus)) |i| {
         self.state.set(.{ .button = i });
     }
@@ -917,9 +1050,11 @@ fn moveFocus(self: *Dialog, f: keys.Focus) void {
     self.kb_focus = true;
     const target = switch (f) {
         .list => self.edit,
+        .check => self.check_hwnd,
         .button => |i| self.buttons[i],
     };
     if (target) |t| _ = user32.SetFocus(t);
+    if (self.check_hwnd) |c| _ = user32.InvalidateRect(c, null, 0);
     for (self.buttons[0..self.state.count]) |b| if (b) |h| {
         _ = user32.InvalidateRect(h, null, 0);
     };
@@ -940,6 +1075,8 @@ fn renderTarget(self: *Dialog) !*d2d1.ID2D1DCRenderTarget {
 }
 
 fn dropTarget(self: *Dialog) void {
+    // A bitmap belongs to its render target.
+    extras.release(&self.bitmap);
     com.release(self.rt);
     self.rt = null;
 }
@@ -958,18 +1095,18 @@ const Pen = struct {
         };
     }
 
-    fn fill(self: Pen, r: layout.Rect, c: colors.Rgba) void {
+    pub fn fill(self: Pen, r: layout.Rect, c: colors.Rgba) void {
         self.brush.setColor(colorF(c));
         self.rt.fillRectangle(rectF(r), self.brush.asBrush());
     }
 
-    fn fillRound(self: Pen, r: layout.Rect, radius: f32, c: colors.Rgba) void {
+    pub fn fillRound(self: Pen, r: layout.Rect, radius: f32, c: colors.Rgba) void {
         self.brush.setColor(colorF(c));
         self.rt.fillRoundedRectangle(.{ .rect = rectF(r), .radiusX = radius, .radiusY = radius }, self.brush.asBrush());
     }
 
     /// An outline of `width` px lying inside `r`.
-    fn strokeRound(self: Pen, r: layout.Rect, radius: f32, width: f32, inset: f32, c: colors.Rgba) void {
+    pub fn strokeRound(self: Pen, r: layout.Rect, radius: f32, width: f32, inset: f32, c: colors.Rgba) void {
         self.brush.setColor(colorF(c));
         const half = width / 2 + inset;
         const rect: d2d1.D2D1_RECT_F = .{
@@ -982,7 +1119,7 @@ const Pen = struct {
         self.rt.drawRoundedRectangle(.{ .rect = rect, .radiusX = rad, .radiusY = rad }, self.brush.asBrush(), width);
     }
 
-    fn drawText(self: Pen, r: layout.Rect, str: []const u16, format: *dwrite.IDWriteTextFormat, c: colors.Rgba) void {
+    pub fn drawText(self: Pen, r: layout.Rect, str: []const u16, format: *dwrite.IDWriteTextFormat, c: colors.Rgba) void {
         if (r.w <= 0 or r.h <= 0 or str.len == 0) return;
         const tl = self.dw.createTextLayout(str, format, @floatFromInt(r.w), @floatFromInt(r.h)) catch return;
         defer com.release(tl);
@@ -1035,8 +1172,12 @@ fn drawParent(self: *Dialog, pen: Pen, _: void) void {
     pen.drawText(p.title, self.spec.title, self.fonts.title, pal.text);
     pen.drawText(p.body, self.body, self.fonts.body, pal.text);
 
+    const radius: f32 = @floatFromInt(layout.px(layout.card_radius, self.dpi));
+    if (self.spec.image) |img| {
+        if (p.image.h > 0) extras.drawImage(pen, &self.bitmap, img, p.image, pal, radius);
+    }
+
     if (p.list.h > 0) {
-        const radius: f32 = @floatFromInt(layout.px(layout.card_radius, self.dpi));
         pen.fillRound(p.list, radius, pal.card);
         pen.strokeRound(p.list, radius, 1, 0, pal.card_border);
     }
@@ -1142,6 +1283,8 @@ fn dpiChanged(self: *Dialog, new_dpi: u32, suggested: ?*const RECT) void {
     };
     old.release();
     self.plan = plan;
+    // The picture is drawn from the same pixels at the new size.
+    extras.release(&self.bitmap);
 
     var x: i32 = 0;
     var y: i32 = 0;
@@ -1158,6 +1301,7 @@ fn dpiChanged(self: *Dialog, new_dpi: u32, suggested: ?*const RECT) void {
         const r = plan.buttons[i];
         _ = user32.MoveWindow(h, r.x, r.y, r.w, r.h, 1);
     };
+    self.moveCheck();
     if (self.edit) |e| {
         const r = self.listRect();
         _ = user32.MoveWindow(e, r.x, r.y, r.w, r.h, 1);
@@ -1207,6 +1351,13 @@ fn wndProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winap
             const dis: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             self.drawItem(dis);
             return 1;
+        },
+        extras.WM_NOTIFY => {
+            const nm: *const extras.NMCUSTOMDRAW = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (nm.hdr.code == extras.NM_CUSTOMDRAW and self.check_hwnd != null and nm.hdr.hwndFrom == self.check_hwnd) {
+                return self.customDrawCheck(nm);
+            }
+            return 0;
         },
         user32.WM_COMMAND => {
             const id = lo(wparam);
