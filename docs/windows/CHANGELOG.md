@@ -623,4 +623,8 @@ they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, 
   a message-only window fallback follows if Win+L is not delivered.
 - A late ConPTY resize echo (more than 1 s, under heavy load) can snap a window back once when `vt-window-resize-allowed = true`.
 - Kitty graphics animation on D3D11 is not verified. The D3D11 debug layer is not captured in the e2e logs.
+- **`clipboard-write-limit-bytes` is not enforced for OSC 5522 writes in the running app.** A write over the limit is accepted
+  (`DONE`) instead of refused (`EFBIG`), although the unit tests through the real parser, termio and ConPTY answer `EFBIG`.
+  Writes still follow `clipboard-write`; only the size cap is missing. Each write now logs its limit (`log.info`) for the fix
+  in the next version.
 - Everything in the earlier "Known limitations" lists that is not named here is unchanged.
