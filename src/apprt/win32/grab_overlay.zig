@@ -401,3 +401,28 @@ test "win32 grab overlay: an eaten press eats its release, a double click is a p
     try testing.expectEqual(LeftRoute.terminal, leftRoute(false, true, false));
     try testing.expectEqual(LeftRoute.terminal, leftRoute(false, false, false));
 }
+
+/// The `m8.grab` array of the IPC `state` op: a row per pane whose handle is
+/// shown (dim or bright, even while it still fades in). Only called with
+/// `GHOSTTY_WIN32_TEST_IPC=1`.
+pub fn testState(app: *App, jw: *std.json.Stringify) !void {
+    try jw.beginArray();
+    for (app.windows.items) |window| {
+        for (window.tabs.items) |tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |e| {
+                const s = e.view;
+                if (s.grab.shown == .hidden) continue;
+                try jw.beginObject();
+                try jw.objectField("surface");
+                try jw.write(s.id);
+                try jw.objectField("shown");
+                try jw.write(@tagName(s.grab.shown));
+                try jw.objectField("opacity");
+                try jw.write(s.grab.opacity);
+                try jw.endObject();
+            }
+        }
+    }
+    try jw.endArray();
+}

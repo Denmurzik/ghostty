@@ -821,13 +821,15 @@ fn activeAfterInsert(active: usize, at: usize, len: usize) usize {
     return if (at <= active) active + 1 else active;
 }
 
-/// A hidden window for a torn-off tab, `size` (outer, pixels at
-/// `source_dpi`) scaled to the DPI of the monitor `origin` is on. Call
-/// `showPlain` once the tab is in.
+/// A hidden window for a torn-off tab or pane. Its content area is `content`
+/// (pixels at the DPI of `source`; null: the content area of `source`),
+/// scaled to the DPI of the monitor `origin` is on. Call `showPlain` once
+/// the tab is in.
 pub fn createForTearOff(
     app: *App,
     origin: struct { x: i32, y: i32 },
     source: *const Window,
+    content: ?geom.Size,
 ) !*Window {
     const alloc = app.core_app.alloc;
     const new = try create(app, .{ .first_tab = false });
@@ -845,9 +847,12 @@ pub fn createForTearOff(
         0,
         win32.user32.SWP_NOSIZE | win32.user32.SWP_NOZORDER | win32.user32.SWP_NOACTIVATE,
     );
-    const content = source.contentRect();
-    const scaled_w: i32 = @intCast(@divTrunc(@as(i64, content.w) * new.dpi, source.dpi));
-    const scaled_h: i32 = @intCast(@divTrunc(@as(i64, content.h) * new.dpi, source.dpi));
+    const want: geom.Size = content orelse blk: {
+        const r = source.contentRect();
+        break :blk .{ .w = r.w, .h = r.h };
+    };
+    const scaled_w: i32 = @intCast(@divTrunc(@as(i64, want.w) * new.dpi, source.dpi));
+    const scaled_h: i32 = @intCast(@divTrunc(@as(i64, want.h) * new.dpi, source.dpi));
     const size = windowSizeFor(.{ .w = scaled_w, .h = scaled_h }, frame_mod.nonClientSize(new));
     _ = win32.user32.SetWindowPos(
         new.hwnd,

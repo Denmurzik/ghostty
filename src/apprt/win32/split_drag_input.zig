@@ -56,8 +56,9 @@ pub const Session = struct {
     /// Neither ghost could be made; do not try again on every move.
     ghost_failed: bool = false,
     zone_popup: ?*overlay.Popup = null,
-    /// The window whose strip shows the insertion marker.
+    /// The window whose strip shows the insertion marker, and the slot.
     marker_window: ?u32 = null,
+    marker_index: usize = 0,
     /// The chip the spring timer runs for.
     spring: ?struct { window: u32, index: usize } = null,
 };
@@ -499,6 +500,7 @@ fn setMarker(app: *App, sess: *Session, target: ?MarkerTarget) void {
     const t = target orelse return;
     strip_input.showDropMarker(app, t.window, t.index);
     sess.marker_window = t.window;
+    sess.marker_index = t.index;
 }
 
 // -- End ---------------------------------------------------------------------------
@@ -552,9 +554,66 @@ fn finish(app: *App, outcome: split_drag.Outcome, refocus: bool) void {
         .cancelled => if (refocus) focusSource(src),
         .to_pane => |t| toPane(app, src, t),
         .new_tab => |t| newTab(app, src, t.window, t.index),
-        // A pane dragged out into a window of its own is a later step.
-        .new_window => focusSource(src),
+        // (The outcome's own point is pointer - grab, the content's corner;
+        // the window origin is worked out from the pointer.)
+        .new_window => newWindow(app, src, sess.machine.last_pt, sess.machine.src.grab),
     }
+}
+
+/// Whether a pane may leave for a window of its own: the window takes drops
+/// (not the quick terminal, not parked, not closing) and the pane is not the
+/// only thing there is to move (the same rule as `outsideOutcome`, looked at
+/// again when the drag ends, since the tabs may have changed meanwhile).
+pub fn newWindowAllowed(in: struct { tab_split: bool, window_tabs: usize, accepts: bool }) bool {
+    if (!in.accepts) return false;
+    return in.tab_split or in.window_tabs > 1;
+}
+
+/// Drop outside every window: the pane gets a window of its own, as large as
+/// the pane was, with the grabbed point under the pointer.
+fn newWindow(app: *App, src: *Surface, pointer: split_drag.Point, grab: split_drag.Point) void {
+    const window = src.window;
+    if (!newWindowAllowed(.{
+        .tab_split = tabSplit(src.tab),
+        .window_tabs = window.tabs.items.len,
+        .accepts = accepts(window) and !src.tab.parked,
+    })) return focusSource(src);
+
+    // Everything is measured before anything moves.
+    const pane = paneSize(src);
+    const at = paneScreenRect(src);
+    var wr: win32.foundation.RECT = undefined;
+    if (user32.GetWindowRect(window.hwnd, &wr) == 0) return focusSource(src);
+    const offset: split_drag.Point = .{ .x = at.x - wr.left, .y = at.y - wr.top };
+    const origin = split_drag.newWindowOrigin(pointer, grab, offset, window.dpi, window.dpi);
+
+    const new = Window.createForTearOff(app, .{ .x = origin.x, .y = origin.y }, window, .{ .w = pane.w, .h = pane.h }) catch |err| {
+        log.warn("unable to make a window for the split err={}", .{err});
+        return focusSource(src);
+    };
+    if (new.dpi != window.dpi) {
+        // The grab and the offset were measured in source pixels.
+        const o = split_drag.newWindowOrigin(pointer, grab, offset, window.dpi, new.dpi);
+        _ = user32.SetWindowPos(new.hwnd, null, o.x, o.y, 0, 0, user32.SWP_NOSIZE | user32.SWP_NOZORDER | user32.SWP_NOACTIVATE);
+    }
+
+    // (`createForTearOff` reserved the room for the tab.) The window has no
+    // tab to lose: when anything fails it is simply destroyed again.
+    const tab = Tab.createAdopting(new, src) catch |err| {
+        log.warn("unable to make a tab for the split err={}", .{err});
+        new.destroy();
+        return focusSource(src);
+    };
+    new.tabs.appendAssumeCapacity(tab);
+    tab.adopt(src) catch |err| {
+        log.warn("unable to move the split to a new window err={}", .{err});
+        tab.dropAdopting();
+        new.removeTab(tab);
+        return focusSource(src);
+    };
+    new.selectTabFocus(0, false);
+    new.showPlain();
+    new.activate();
 }
 
 fn findTab(window: *const Window, id: u32) ?*Tab {
@@ -632,6 +691,61 @@ pub fn windowDestroying(window: *Window) void {
     const sess = window.app.split_drag orelse return;
     if (sess.capture_id != window.id) return;
     finish(window.app, .cancelled, false);
+}
+
+/// The `m8.split_drag` object of the IPC `state` op. Only called with
+/// `GHOSTTY_WIN32_TEST_IPC=1`.
+pub fn testState(app: *App, jw: *std.json.Stringify) !void {
+    try jw.beginObject();
+    const sess = app.split_drag;
+    try jw.objectField("active");
+    try jw.write(sess != null);
+
+    try jw.objectField("ghost");
+    if (drag_ghost.currentMode()) |mode| try jw.write(@tagName(mode)) else try jw.write(null);
+
+    try jw.objectField("zone");
+    zone: {
+        const s = sess orelse break :zone try jw.write(null);
+        const p = s.zone_popup orelse break :zone try jw.write(null);
+        if (!p.visible) break :zone try jw.write(null);
+        const r = zoneOf(p).rect;
+        try jw.write([4]i32{ r.x, r.y, r.w, r.h });
+    }
+
+    try jw.objectField("marker");
+    marker: {
+        const s = sess orelse break :marker try jw.write(null);
+        const w = s.marker_window orelse break :marker try jw.write(null);
+        try jw.beginObject();
+        try jw.objectField("window");
+        try jw.write(w);
+        try jw.objectField("index");
+        try jw.write(s.marker_index);
+        try jw.endObject();
+    }
+    try jw.endObject();
+}
+
+test "win32 split drag input: new window only when allowed" {
+    const t = std.testing;
+    // A split tab, or a window with other tabs, may give a pane away.
+    try t.expect(newWindowAllowed(.{ .tab_split = true, .window_tabs = 1, .accepts = true }));
+    try t.expect(newWindowAllowed(.{ .tab_split = false, .window_tabs = 2, .accepts = true }));
+    // A lone pane of a lone tab stays (macOS).
+    try t.expect(!newWindowAllowed(.{ .tab_split = false, .window_tabs = 1, .accepts = true }));
+    // A window that takes no drop (quick terminal, parked, closing) gives nothing.
+    try t.expect(!newWindowAllowed(.{ .tab_split = true, .window_tabs = 3, .accepts = false }));
+    // The same rule as the machine's: the two agree on every source.
+    const grab: split_drag.Point = .{ .x = 1, .y = 1 };
+    for ([_]bool{ false, true }) |split| {
+        for ([_]usize{ 1, 2, 5 }) |tabs| {
+            const src: split_drag.Source = .{ .window = 1, .tab = 1, .surface = 1, .tab_split = split, .window_tabs = tabs, .grab = grab };
+            const out = split_drag.outsideOutcome(src, .{ .x = 10, .y = 10 }, grab);
+            const machine_says = out == .new_window;
+            try t.expectEqual(machine_says, newWindowAllowed(.{ .tab_split = split, .window_tabs = tabs, .accepts = true }));
+        }
+    }
 }
 
 test "win32 split drag input: refocus follows the tab on screen" {

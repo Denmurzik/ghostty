@@ -405,6 +405,13 @@ pub fn testState(app: *App, jw: *std.json.Stringify) !void {
     try jw.objectField("osk");
     try osk.testState(app, jw);
     try jw.endObject();
+    try jw.objectField("m8");
+    try jw.beginObject();
+    try jw.objectField("split_drag");
+    try split_drag_input.testState(app, jw);
+    try jw.objectField("grab");
+    try grab_overlay.testState(app, jw);
+    try jw.endObject();
     try tmux_Server.testState(app, jw);
 }
 
@@ -446,6 +453,7 @@ test "win32 hooks: testState writes an m3 object" {
     app.undo = .{};
     app.update = .{};
     app.secure = .{};
+    app.split_drag = null;
     try testState(&app, &jw);
     try jw.endObject();
 
@@ -459,6 +467,13 @@ test "win32 hooks: testState writes an m3 object" {
     inline for (.{ "profiles", "jumplist", "update", "secure_input", "undo", "osk" }) |key| {
         try std.testing.expect(m5.object.get(key) != null);
     }
+    const m8 = parsed.value.object.get("m8") orelse return error.TestUnexpectedResult;
+    const drag = m8.object.get("split_drag") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!drag.object.get("active").?.bool);
+    try std.testing.expect(drag.object.get("ghost").? == .null);
+    try std.testing.expect(drag.object.get("zone").? == .null);
+    try std.testing.expect(drag.object.get("marker").? == .null);
+    try std.testing.expectEqual(@as(usize, 0), (m8.object.get("grab") orelse return error.TestUnexpectedResult).array.items.len);
     inline for (.{ "overlay", "decor", "notify", "quick", "search", "palette", "composition", "hotkeys", "health", "opened", "inspector", "export_io", "config_errors" }) |key| {
         try std.testing.expect(m3.object.get(key) != null);
     }

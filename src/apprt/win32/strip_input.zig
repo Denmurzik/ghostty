@@ -565,7 +565,7 @@ fn finish(window: *Window, ev: tab_drag.Event, refocus: bool) void {
             transfer(window, target.?, tab, m.index);
         },
         .tear_off => |o| {
-            const new = Window.createForTearOff(window.app, .{ .x = o.x, .y = o.y }, window) catch |err| {
+            const new = Window.createForTearOff(window.app, .{ .x = o.x, .y = o.y }, window, null) catch |err| {
                 log.warn("unable to create a window for the tab err={}", .{err});
                 return restore(window, &s);
             };
