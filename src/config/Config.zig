@@ -2384,6 +2384,8 @@ keybind: Keybinds = .{},
 ///    On macOS, the handle is only hidden when there's one split
 ///    in **fullscreen** mode, otherwise it's shown when hovered.
 ///
+///    On Windows, the same as macOS.
+///
 ///  - `never`
 ///
 ///    Never show the drag handle. Splits then cannot be rearranged with
@@ -2552,8 +2554,13 @@ keybind: Keybinds = .{},
 ///   on macOS. (Available since: 1.4.0)
 ///
 /// For backward compatibility and convenience, a value of `true` is the same as
-/// `primary` on Linux and `clipboard` on macOS, and `false` is an alias for
-/// `none`.
+/// `primary` on Linux and `clipboard` on macOS and Windows, and `false` is an
+/// alias for `none`.
+///
+/// On Windows, `primary` is a Ghostty-only selection buffer that middle click
+/// pastes (see `middle-click-action`); it is kept inside the Ghostty process
+/// and never reaches the system clipboard. `both` also writes the system
+/// clipboard.
 ///
 /// The default value is `primary` on Linux and `none` otherwise.
 @"copy-on-select": CopyOnSelect = switch (builtin.target.os.tag) {
@@ -2583,6 +2590,9 @@ keybind: Keybinds = .{},
 /// Valid values:
 ///   * `primary-paste` - Paste from the selection clipboard on Linux.
 ///      Does nothing on macOS.
+///      On Windows, `primary-paste` pastes the Ghostty-only selection buffer,
+///      which is empty unless `copy-on-select` is `primary` or `both` (or a
+///      program filled it with OSC 52 for the selection).
 ///   * `clipboard-paste` - Paste from the system clipboard.
 ///   * `ignore` - Do nothing, ignore the middle click.
 ///
@@ -3930,6 +3940,14 @@ else
 ///     outside `System32`, or a path under `usr\bin` or a Cygwin folder):
 ///     a wrapper such as `cmd /c start-bash.cmd` keeps the bundled console
 ///     for whatever it starts, and a bare `bash` counts as MSYS2.
+///
+///     The inbox console also does not reliably deliver the replies of the
+///     Kitty clipboard protocol (OSC 5522 reads) to the program, and it
+///     answers the mode query `CSI ? 5522 $ p` and `CSI ? 2033 $ p` itself
+///     as "not recognised". 5522 writes and the visibility reports of
+///     mode 2033 itself still work, but a program that reads the clipboard
+///     with OSC 5522 in Git Bash needs `windows-conpty = bundled` (with the
+///     input loss above).
 ///
 ///   * `bundled` - the `conpty.dll` and `OpenConsole.exe`
 ///     shipped next to `ghostty.exe`, the newer console from Microsoft that

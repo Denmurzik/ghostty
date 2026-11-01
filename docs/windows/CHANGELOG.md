@@ -520,3 +520,98 @@ unless the environment already has it. `tmux.exe` stays in the zip and the insta
   (`0x80073D2B`, "an unsigned package cannot include Executable activations"); shipping it needs a real code-signing
   certificate. The classic verb in "Show more options" (Shift+F10) is the only Explorer entry.
 - Everything in the v1.0 "Gaps" list that is not named above is unchanged (unsigned builds, per-user install, winget).
+
+## M8 — `1.4.1-dev-win.3` (tag `win-1.4.1-dev-3`)
+
+Based on **upstream Ghostty 1.4**: the `windows` branch merges `upstream/main` after `v1.4.0` (summary of the upstream notes and what
+they mean for the port: `docs/windows/next-version.md`). The number is `win.3`, not `win.1`: the update check compares releases by
+`N` only and the release script refuses an `N` that is not above the highest existing tag (`win-1.3.2-dev-2`), so installed
+`win.2` builds see this release as an update. (Owner ruling R-M8-2; had it been `win.1`, win.1 and win.2 installs would get no update toast.)
+
+- **Input lag in a long-lived tab: likely fix, proof pending.** The D3D11 frame pacer did not count every present and kept a
+  backlog, so after a long session in one tab frames could wait for a slot (typed text and selection both late). The pacer now counts
+  every present, drains the backlog, consumes the initial signal and resyncs when idle. Custom-shader time is kept in 64-bit
+  nanoseconds and rebased on long-lived surfaces; a shader that uses `iTime` as a phase may jump once an hour on a very long-lived
+  surface (not during cursor or focus animations). Diagnostic: `GHOSTTY_D3D11_PACING_LOG=1` writes
+  `d3d11 pacer resync surface=.. pending=.. drained=.. surplus=.. capped=.. timeouts=..` and a per-frame `slot_timeout=` to the log.
+  It is called a *likely fix* because the proof run (`long-tab-lag`, M8 batch) comes after this commit; if the lag is still there,
+  send the log with the pacing variable on.
+- **Claude Code symbols.** Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is
+  not set (inherited or by `env`). Claude Code's `is-unicode-supported` check then draws `◯ ✔ ❯` instead of ASCII stand-ins such as
+  `( )`. A value you set is never overridden and there is no config key. Opt out with another `TERM` (`env = TERM=xterm-256color`),
+  with a **non-empty** value (`env = TERMINUS_SUBLIME=0`; an empty `env = TERMINUS_SUBLIME=` deletes the key and does **not** opt
+  out), or `unset TERMINUS_SUBLIME` in the shell rc.
+
+### What is new
+
+- **Kitty clipboard protocol (OSC 5522).** Programs can read, write and receive paste events for several representations at once:
+  `text/plain`, `text/html`, `text/uri-list`, images and other MIME types. Images go to the clipboard as `PNG` (or `JFIF`) and
+  `CF_DIBV5`; a clipboard that holds only files (`CF_HDROP`) is served as `text/uri-list`; a program's own `text/uri-list` write is
+  stored as a plain registered format, never turned into `CF_HDROP`. Access follows `clipboard-read` and `clipboard-write`. The
+  confirmation dialog defaults to Deny (Enter denies), never shows the program's name, shows the head and tail of a long text
+  (256 + … + 256 characters, invisible characters escaped) and offers "Remember this choice for the session" only for requests
+  with a password, only on Allow. MIME names must look like a MIME type and at most 128 distinct names per process are accepted.
+  There is no read size cap (an 8 MiB reply took 1.25 s). `loc=primary` and OSC 52 `p` answer "not supported" (as on macOS);
+  `selection` works.
+- **Rich copy.** Every copy now also puts `HTML Format` on the clipboard (`copy_to_clipboard = mixed`, the upstream default), so
+  colours and fonts reach Word, Outlook and Slack. For plain text only, bind the action with a parameter:
+  `keybind = ctrl+shift+c=copy_to_clipboard:plain`.
+- **Selection clipboard.** `copy-on-select = primary` fills a Ghostty-only buffer shared by all windows of the process (the macOS
+  model): nothing leaves the process, no toast, no clipboard-history entry. `both` also writes the system clipboard; `true` is
+  `clipboard`. The default `middle-click-action = primary-paste` (unchanged) pastes that buffer. With the Windows default
+  `copy-on-select = none` the buffer is empty and a middle click does nothing, as before. A program can fill the buffer too, with
+  OSC 52 `s` when `clipboard-write` allows it; a middle click then pastes it (paste protection still applies).
+- **Split drag.** Every pane, also a lone one, has a drag handle at its top centre (80 x 12 DIP, shown on hover like macOS;
+  `drag-handle = auto|always|never`, `auto` hides it only for a single pane in fullscreen). Drag it onto another pane (drop on the
+  left, right, top or bottom), onto the tab strip (the pane becomes a new tab at the marker; hovering a tab for 500 ms switches to
+  it), onto another Ghostty window, or outside every window (a new window). The shell and its process move with the pane,
+  tmux-shim panes included. The pointer is a four-way arrow; the ghost is a 20 % snapshot of the pane (a title chip under secure
+  input or when the snapshot fails). A click in the handle never reaches the program. The quick terminal has no handle and is not a
+  drop target; a lone pane of a lone tab dropped outside stays.
+- **Hidden means not visible.** A minimised or hidden window, the hidden quick terminal, the lock screen, display off, a
+  disconnected remote session and another virtual desktop count as "not visible": mode 2033 reports `;2n` and the renderer stops
+  drawing. Cloaking (virtual desktop) counts after 250 ms, uncloaking at once. Minimised windows keep their swap chain (Alt+Tab
+  previews) but are reported not visible.
+- **Hidden tabs free their GPU memory.** The swap chain of a hidden tab shrinks to 1 x 1 pixel and grows back when the tab is shown,
+  with the new frame ready before the tab is raised (no flash of the old picture). The saving is measured in the M8 batch; the shrink
+  is a single switch (`shrink_hidden_chains` in `src/renderer/D3D11.zig`) if the measurement says it is not worth it.
+- **`CSI 8 ; rows ; cols t`.** With `vt-window-resize-allowed = true` (default `false`, as upstream) a program may resize the
+  window only when it holds one tab with one pane, is not the quick terminal, is not maximised, full screen or snapped and the
+  inspector is closed; the window changes by the surface delta, clamped to the work area, top-left kept.
+
+### Security
+
+- **Git for Windows prompt.** The default Git Bash prompt put the raw `$PWD` into the window title, so a directory named with ESC and
+  BEL could send OSC 52 and overwrite the clipboard. `ghostty.bash` now strips control characters from that path (MSYS only).
+- **Invisible characters in links.** A link (OSC 8 or detected) with C0, C1, bidi, zero-width or other invisible characters is
+  refused, or shown escaped (`<U+202E>`) in the confirmation, never opened silently. The paste confirmation escapes them too
+  (U+200D, used in emoji, is excluded there).
+- **C1 controls in dropped paths.** A dropped file whose name holds a C1 control character is refused.
+- The upstream 1.4 security fixes (paste protection with CR, Kitty graphics limits, tmux control mode, scrollback clear, zsh
+  integration) are in the base.
+
+### Changes you may notice
+
+- **Scrollback default is 50 MB** (upstream 1.4; before 10 MB). The key is `scrollback-limit-bytes`; the old name `scrollback-limit`
+  is still accepted. Idle scrollback is compressed by the core.
+- **A drag handle appears at the top of every pane** while the pointer is over it (`drag-handle = never` removes it).
+- **Middle click is unchanged by default** (`primary-paste` of an empty buffer).
+- Every copy also carries `HTML Format` (see above).
+- Upstream 1.4 in the core: much faster ASCII parsing and large-scrollback resize, more VT modes, Kitty graphics animation and
+  relative placements, `copy-on-select = none|primary|clipboard|both`, `clipboard-write-limit-bytes`, `link-osc8`,
+  `window-padding-balance = equal`.
+- Keybindings: the GTK 1.4 defaults (`ctrl+shift+page_up/down` = `move_tab`, `ctrl+shift+arrow_up/down` = `jump_to_prompt`) were
+  already in the tree since win.1; nothing changes.
+
+### Known limits
+
+- **Git Bash and OSC 5522 reads.** `windows-conpty = auto` keeps Git Bash on the inbox console. It does not reliably deliver the
+  replies of OSC 5522 reads to the program (writes work) and answers the queries `CSI ? 5522 $ p` and `CSI ? 2033 $ p` itself as
+  "not recognised". Mode 2033 reports do work on both consoles. For 5522 reads in Git Bash set `windows-conpty = bundled` (with the
+  input loss of win.2's limitations). pwsh, cmd and WSL use the bundled console and work.
+- **Windows covered by other windows are not tracked** as hidden; minimised, cloaked, locked and display-off are.
+- **No undo for a move of a split.** A move also drops the undo entries of the tabs involved.
+- Lock screen, display off and virtual-desktop detection are checked by hand (Win+L, a second virtual desktop) in the M8 batch;
+  a message-only window fallback follows if Win+L is not delivered.
+- Kitty graphics animation on D3D11 is not verified. The D3D11 debug layer is not captured in the e2e logs.
+- Everything in the earlier "Known limitations" lists that is not named here is unchanged.

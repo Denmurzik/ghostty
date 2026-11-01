@@ -149,6 +149,25 @@ criterion is that every row is `done` with evidence (a test, a scenario or a ref
 | WSL tabs and splits start in the shell's reported directory (`--cd`) | M7 | e2e/wsl-cwd | done (custom hostname: limit) |
 | Windows 11 top-level "Open Ghostty here" (`ghostty-explorer.dll`, sparse package) | M7 | owner check (G4) | gap: not shipped, Windows refuses an unsigned sparse package (`0x80073D2B`); needs a code-signing certificate. Classic verb in "Show more options" remains |
 | Installer task `explorermenu` ticked by default; unticking on upgrade removes the package; locked DLL renamed aside | M7 | installer-test | done |
+| Kitty clipboard protocol OSC 5522: read, write (text, HTML, images, URI list, program MIME types), paste events, listing, `?5522` | M8 | unit: win32 clipboard, clipboard_formats, clipboard_html, clipboard_image, clipboard_mime; e2e/kitty-clipboard-write, e2e/kitty-clipboard-read, e2e/kitty-paste-event (written, run in the M8 batch); conpty-probe | done (GUI proof pending); gap: reads from Git Bash under `windows-conpty = auto` (inbox console) |
+| Clipboard prompt for OSC 52 / OSC 5522: Deny default, parts summary, image preview, head and tail of long text, remember only with a password | M8 | unit: win32 dialogs; e2e/kitty-clipboard-read (dialog phase), e2e/paste-confirm | done (GUI proof pending) |
+| Rich copy: every copy also carries `HTML Format` (`copy_to_clipboard = mixed`); `copy_to_clipboard:plain` for plain only | M8 | unit: clipboard_html, win32 clipboard; e2e/copy-html | done (GUI proof pending) |
+| Selection clipboard: `copy-on-select = primary` or `both`, middle click (`middle-click-action = primary-paste`), `paste_from_selection` | M8 | unit: win32 selection store, win32 clipboard; e2e/selection-paste, e2e/middle-click | done (GUI proof pending) |
+| `loc=primary` (OSC 5522) and OSC 52 `p` | M8 | R-M8-11 | gap (by design, as macOS) |
+| Mode 2033 (visibility report) | M8 | conpty-probe (both consoles pass the reports; inbox answers the DECRQM itself); e2e/visibility-hidden | done (inbox DECRQM: limit) |
+| Window-level visibility: hidden window, hidden quick terminal, minimised report not visible | M8 | unit: win32 window (not-on-screen test); e2e/visibility-hidden | done (GUI proof pending) |
+| Lock screen, display off, remote disconnect, other virtual desktop report not visible | M8 | unit: win32 screen; Win+L and virtual desktops are the owner's manual check in the M8 batch | manual |
+| Windows covered by other windows | M8 | R-M8-22 | gap (not tracked) |
+| Hidden tabs shrink their swap chain to 1 x 1; flash-free reshow | M8 | unit: d3d11 swapchain; e2e/hidden-render (GPU counters, `measure-ram.ps1 -Gpu`) | done (gate measured in the M8 batch) |
+| D3D11 pacer fix for the long-tab input lag, `iTime` rebase | M8 | unit: d3d11 pacer, d3d11 shader time; e2e/long-tab-lag | likely fix (proof in the M8 batch) |
+| `CSI 8 ; rows ; cols t` guards (`vt-window-resize-allowed`) | M8 | unit: win32 placement (CSI 8 t); e2e/csi8-resize | done (GUI proof pending) |
+| Split grab handle (every pane, hover reveal, `drag-handle`) | M8 | unit: win32 grab handle, win32 grab overlay; e2e/split-drag | done (GUI proof pending) |
+| Split drag onto panes, the tab strip, another window, out to a new window; tmux-shim panes move | M8 | unit: win32 split drag, win32 split drag input; e2e/split-drag | done (GUI proof pending) |
+| Undo of a split move | M8 | R-M8-30 | gap (next version) |
+| `TERMINUS_SUBLIME=1` for Windows children on `TERM=xterm-ghostty` (Claude Code symbols); opt-out by another `TERM` or a non-empty value | M8 | unit: windows unicode hint | done (owner check of Claude Code pending) |
+| Git for Windows prompt `$PWD` cannot inject escapes into the window title | M8 | shell-marks `bash-git-title-inject`; e2e/title-inject | done |
+| Invisible characters in links refused or shown escaped; C1 in dropped paths refused | M8 | unit: win32 link policy, shell_open, dialogs, drop; e2e/link-hover-open, e2e/drop-files | done |
+| Scrollback default 50 MB (`scrollback-limit-bytes`) | M8 | upstream default (R-M8-39); RAM row `scrollback` re-measured in the M8 batch | done |
 
 ## Notes
 

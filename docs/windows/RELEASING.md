@@ -21,6 +21,7 @@ git fetch --tags origin
 Then:
 
 - pick the next `N`: one above the highest `win-*-<N>` tag (`git tag -l "win-*"`); `N` starts at 1 and is never reused;
+- the version is `build.zig.zon` `.version` plus `-win.<N>`: with the zon at `1.4.1-dev` (upstream 1.4 base) and the highest tag `win-1.3.2-dev-2`, the next release is `N = 3`, version `1.4.1-dev-win.3`, tag `win-1.4.1-dev-3` (R-M8-2: `N` must stay above the old tags, because the update check compares by `N` only);
 - add the CHANGELOG entry (`docs/windows/CHANGELOG.md`) and commit and push it too. The tree must be clean and HEAD must be on `origin/windows`, or the script refuses.
 
 ## 3. Build
@@ -28,6 +29,7 @@ Then:
 ```
 PS> dist/windows/release.ps1 -N <N> -ConptyPackage <path to .nupkg> [-V1] [-Arm64TestExe]
 # for example win.2:  dist/windows/release.ps1 -N 2 -ConptyPackage <path to .nupkg>
+# for example 1.4.1-dev-win.3 (tag win-1.4.1-dev-3):  dist/windows/release.ps1 -N 3 -ConptyPackage <path to .nupkg>
 ```
 
 - It takes about 1 to 2 hours. Run no other builds meanwhile: the script waits when free memory is below its gate (`-MinFreeGB`, default 7: the G1 build peak of 4.9 GB plus 2 GB) and stops after 15 minutes.

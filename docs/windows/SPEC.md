@@ -189,6 +189,13 @@ Mapping per [renderer §4, §7.2]. Fixed choices:
   every cached back-buffer reference. Generic still draws
   on every wakeup (no display link); the waitable wait caps it at the display rate.
 - Fallback switch (only if measured lock contention > 2 ms/frame with ≥ 8 surfaces): `Options.per_surface_device = true`
+- M8 pacer (R-M8-7, `fd6ae7340`): the pacer counts **every** present (not only those followed by a wait), drains a backlog of waitable signals, consumes the
+  initial signal and resyncs when the surface has been idle (`d3d11 pacer resync …`, counters `pending/drained/surplus/capped/timeouts`;
+  `GHOSTTY_D3D11_PACING_LOG=1`). `waitFrameSlot` returns whether it timed out (`slot_timeout=` per frame). Custom-shader time is f64 nanoseconds with a rebase
+  on long-lived surfaces (`shadertoy.rebaseTime`); a shader that uses `iTime` as a phase may jump once an hour (not during cursor or focus animation).
+  The fix is "likely" until the `long-tab-lag` proof (Task 24 B4). A hidden tab's swap chain shrinks to 1 x 1 (`SwapChain.shrink`, switch
+  `shrink_hidden_chains` in `D3D11.zig`, R-M8-21) and the reshow is flash-free: the tab is raised only after the first present of the grown chain
+  (`WM_GHOSTTY_PRESENTED`, `RaiseGate`).
   gives each `D3D11` instance its own device+context and no global lock. Not built in M1.
 - Device loss (`error.DeviceLost` from Present/Map/Create*): M1 = mark `renderer_health = .unhealthy` via
   `frameCompleted(.unhealthy)`, log once, keep the window alive. M3 = full recovery: `Device.generation` bump, every
@@ -319,7 +326,41 @@ Mouse (`mouse.zig`): client px → `cursorPosCallback`; buttons L/R/M/X1/X2 with
   and calls `core.completeClipboardRequest(req, .{contents, available = true, confirmed = false})` exactly once (never
   re-entrantly inside `clipboardRequest`). `error.UnsafePaste`/`UnauthorizedPaste` → confirmation dialog with a 512-char preview,
   "Paste"/"Cancel"; Paste re-calls with `confirmed = true`, Cancel → `denyClipboardRequest`.
-- `copy-on-select = clipboard|true` works through core; `selection`/`primary` clipboard requests return `.unsupported`.
+- `copy-on-select = clipboard|true` works through core. (M1-M7: `selection`/`primary` requests returned `.unsupported`; replaced by the M8 rules below.)
+
+**M8 amendments (R-M8-8, R-M8-11…19, R-M8-18).**
+- `supportsClipboard`: `.standard` and `.selection`; `.primary` is unsupported (OSC 5522 `loc=primary` and OSC 52 `p` answer ENOSYS, as macOS).
+- `.selection` is an **in-process store on `App`** shared by all windows (`selection_store.zig`, macOS private-pasteboard model): `copy-on-select = primary|both`
+  fills it, `middle-click-action = primary-paste` and `paste_from_selection` read it, an empty store makes the paste fall through (a no-op
+  with the Windows default `copy-on-select = none`). Nothing is written to the Win32 clipboard: no toast, no secure-input markers. A program can fill
+  it with OSC 52 `s` when `clipboard-write` allows (paste protection still applies on the paste). At most 16 representations.
+- Multi-format clipboard (OSC 5522, rich copy). Read, per requested MIME:
+
+  | MIME | Source | Conversion |
+  |---|---|---|
+  | `text/plain` | `CF_UNICODETEXT` (never `CF_HDROP`: see R-M8-13) | UTF-16 to UTF-8, CRLF to LF |
+  | `text/html` | registered `HTML Format` | the `StartFragment..EndFragment` bytes; fallbacks: `<!--StartFragment-->` markers, `StartHTML..EndHTML`, the body after the header |
+  | `image/png` | `PNG`, `image/png`, else `CF_DIBV5`, else `CF_DIB` | PNG as is; a DIB (24/32 bpp) is encoded to PNG in Zig |
+  | `image/jpeg`, `image/gif`, `text/rtf` | `JFIF`, `GIF`, `Rich Text Format` | as is |
+  | `text/uri-list` | `CF_HDROP` | `file:///C:/a%20b/x.txt` per path (RFC 8089) |
+  | other `x/y` | a registered format with exactly that name | as is |
+
+  Listing is metadata only (`EnumClipboardFormats`, never `GetClipboardData`), in that order, at most 16 entries.
+  Write, one transaction: text-like gives `CF_UNICODETEXT` (first text representation wins); `text/html` gives `HTML Format` (`Version:0.9`
+  offsets, `StartFragment`/`EndFragment` markers); `image/png` and `image/jpeg` give `PNG`/`JFIF` **and** `CF_DIBV5` (decode failure or more than 128 MiB
+  decoded: the original format only, R-M8-12); `image/gif`, `text/rtf` give `GIF`, `Rich Text Format`; any other MIME gives a registered format of
+  that name, `text/uri-list` included (never synthesised to `CF_HDROP`, R-M8-14). Names must pass `isMimeName` (`token/token[;params]`, ASCII, at most
+  255 bytes) so a program cannot plant formats such as `FileGroupDescriptorW` or the clipboard-history controls (R-M8-19); a process may register at
+  most 128 distinct program MIME names. Every write sets the three secure-input markers. An empty write clears the clipboard.
+- Rich copy (R-M8-8): `copy_to_clipboard = mixed` (upstream default) puts `HTML Format` next to `CF_UNICODETEXT` on every copy; plain only with the
+  `copy_to_clipboard:plain` binding parameter.
+- Prompt (R-M8-17): one dialog for OSC 52 and OSC 5522 reads and writes, shown text equals served text; default button Deny/Cancel (Enter denies);
+  labels Deny/Allow (paste: Cancel/Paste); the program's `name` is never shown; images get a preview, long text shows 256 characters head and tail
+  with invisible characters escaped (R-M8-38); "Remember this choice for the session" only when the request has a password and only on Allow.
+  A read that gathers no data completes without a prompt (nothing is disclosed). No read size cap (R-M8-15: 8 MiB reply 1.25 s).
+- Console limit (R-M8-16): under `windows-conpty = auto` Git Bash uses the inbox console, which does not reliably deliver OSC 5522 read replies
+  and answers `CSI ? 5522 $ p` and `CSI ? 2033 $ p` itself as unknown (probe: `test/windows/conpty-probe/RESULT.md`). Writes and the mode-2033 reports work on both consoles.
+
 
 ### 7.5 Chrome, Mica, titlebar (M2) and overlays (M2/M3)
 - Custom frame: `DwmExtendFrameIntoClientArea` (top inset = tab-strip height), `WM_NCCALCSIZE` removes the caption,
@@ -349,6 +390,30 @@ Ghostty dialog is our own modal window in the Windows 11 look (WinUI `ContentDia
 text, per-monitor DPI; `src/apprt/win32/dialog/`, same `dialogs.zig` API); `MessageBoxW` remains only as the fallback when
 that window cannot be built. Owned by the top-level window; modal. The link and paste confirmations have no accelerator on
 "Allow" (the question appears asynchronously; a user who keeps typing must not accept it).
+
+### 7.7 Visibility and split drag (M8)
+- **Window-level visibility (R-M8-20, R-M8-22, R-M8-26).** A window is "on screen" when it is shown, not iconic, not parked, not DWM-cloaked (read live,
+  `DwmGetWindowAttribute(DWMWA_CLOAKED)`) and the screen is on (`Window.screen_off`, `Window.screenState()`, pure `windowOnScreen()`,
+  `syncOcclusion()`). Not on screen means the core is told `visible = false` (mode 2033 `;2n`, no rendering). Minimised windows keep their swap chain (DWM
+  preview, Alt+Tab) but report not visible. The hidden quick terminal reports not visible. Screen state (`screen_state.zig`, fed by the App message window): WTS session notifications (lock / unlock, remote and console disconnect),
+  display off / on (`GUID_CONSOLE_DISPLAY_STATE`) and the WinEvents `EVENT_OBJECT_CLOAKED` / `UNCLOAKED` (another virtual desktop); a cloak is flushed
+  after a 250 ms debounce (a quick desktop switch does not flicker the report), an uncloak is immediate. Windows fully covered by other windows are **not** tracked
+  (no occlusion test, R-M8-22); zoomed-out split panes stay "not visible" as on GTK (R-M8-23); no EcoQoS / process power throttling (R-M8-24).
+- **Hidden tabs (R-M8-21).** A hidden tab's container is hidden and its surfaces are not visible; its DXGI swap chain shrinks to 1 x 1 (§6.3) and is restored
+  before the tab is raised, so no stale frame shows. Whether the shrink stays is a gate measured in Task 24 B2 (hidden tab at least 8 MB at the default size
+  or 30 MB maximised at 1080p before the shrink); otherwise one `const` in `D3D11.zig` turns it off.
+- **`CSI 8 ; rows ; cols t` (R-M8-25).** Allowed only with `vt-window-resize-allowed = true` (default `false`) and only for a lone surface of a single-tab,
+  non-quick, non-maximised, non-fullscreen, non-snapped window with the inspector closed; the window changes by the surface delta, clamped to the work area,
+  top-left kept.
+- **Split drag (R-M8-5, R-M8-10, R-M8-27…35).** `split_drag_input.zig` (state machine, pure geometry `split_drag.zig`), `grab_overlay.zig` (handle, 80 x 12 DIP,
+  top centre of every pane including a lone one; `drag-handle = auto|always|never`, macOS `auto`), `drag_ghost.zig`. Drop targets: another pane of the same tab
+  (zones left, right, top, bottom; "split the target, then remove the source", ratio 0.5), the tab strip (a new tab at the insertion marker; a chip hovered
+  500 ms switches the tab), a pane in another window, and outside every window (a new window; a lone pane of a lone tab dropped outside does nothing). Dragging
+  out of a single-pane tab in a multi-tab window opens a new window. A move uses the surface move primitive (`Tab.zig`, `Surface.zig`): the surface, its pty
+  and shell do not restart; a tmux-shim pane becomes a pane of the other tmux window. The quick terminal has no handle and is never a target. Cursor
+  `IDC_SIZEALL` over the handle and during the drag. Ghost = 20 % snapshot of the pane centred on the pointer (title chip under secure input, on capture
+  failure, below 48 x 32 px or for an all-black sample). No undo for a move; a move drops the undo entries of the tabs involved (R-M8-30). Test state:
+  `hooks.testState` field `m8` (`split_drag`, `grab`).
 
 ## 8. Core changes (platform-gated)
 
@@ -449,6 +514,11 @@ A `linear-corrected`, B `native`, C = A + `font-thicken`, D = B + `font-thicken`
   host without the entry forwards a `TERM` the remote may not know (Windows OpenSSH from pwsh in particular).
   `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`, `TERM_PROGRAM_VERSION`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`
   unchanged from core.
+- `TERMINUS_SUBLIME` (M8, R-M8-3): a Windows child gets `TERMINUS_SUBLIME=1` when the **final** `TERM` is `xterm-ghostty` and the variable is not
+  already set (inherited or by the user's `env`); a user value is never overridden and there is no config key (`Exec.windowsUnicodeHint`, after the Windows
+  `TERM` block). Node CLIs (Claude Code, via `is-unicode-supported`) take it as "Unicode symbols are fine". Opt-out: another `TERM`
+  (`env = TERM=xterm-256color`), a **non-empty** value (`env = TERMINUS_SUBLIME=0`; an empty `env = TERMINUS_SUBLIME=` deletes the key and does **not**
+  opt out), or `unset TERMINUS_SUBLIME` in the shell rc. Suggested upstream text only in `next-version.md` (R-M8-4).
 - PATH: core appends the exe dir. Windows (M4, with `windows-tmux-shim = true`; the default is `false` since M7, R-M7-1; R-M4-11): the exe dir is **moved
   to the front** of PATH (shim dir = exe dir, DECISIONS; a login shell such as Git Bash may reorder PATH in its profile: check
   `command -v tmux`) and every surface gets `TMUX=\\.\pipe\ghostty-tmux-<pid>-<16 hex nonce>,<pid>,0` and `TMUX_PANE=%<n>` (§12).
@@ -720,7 +790,7 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | 1 window, 1 surface | ≤ 80 MB | ≤ 110 MB (+ baseline recorded) |
 | each extra surface (tab or split) | ≤ +10 MB | M2: +5.7 MB per tab, +6.0 per split (ReleaseFast, Arc iGPU): met |
 | each extra window (1 surface) | ≤ +15 MB | M2: +17.7 MB (2 runs: 140.2 / 140.1 vs 69.1 MB): **over, owner decision** |
-| surface after `seq 1 200000` (scrollback full at default `scrollback-limit` 10 MB) | ≤ surface cost + 15 MB | recorded |
+| surface after `seq 1 200000` (scrollback full at the default `scrollback-limit-bytes`: 10 MB until M7, 50 MB from M8, upstream 1.4, R-M8-39) | ≤ surface cost + 15 MB until M7; from M8 reported, not budgeted (expected about +40 MB; re-measured in the M8 batch) | recorded |
 | close 10 extra surfaces, wait 30 s | back within +10% of the pre-open value | M2: +18.0 % and +14.1 % (81.2 / 78.5 vs 68.8 MB): **over, owner decision** (a 16-pane cycle leaves about +80 MB, pre-existing) |
 | 0 windows, resident in the notification area (§18.15) | recorded | M2: 63.1 MB private (recorded, not gated) |
 | tmux.exe per invocation | ≤ 5 MB, ≤ 100 ms wall | M4 |
@@ -732,7 +802,7 @@ builds (Debug numbers may be recorded with `optimize=Debug` but are never gated)
 | M3 inspector open on 1 surface | +25 MB open; within +2 MB 30 s after close | +3.5 MB open (met); 30 s after close +3.6 MB before Task 26.5, about +1.9 MB mean after it (imgui in its own heap; 2 of 5 samples over +2): **borderline, the rest is GPU driver cache** |
 | M3 quick terminal | 0 before the first toggle, then one surface's cost | 64.3 before (0); +10.1 MB after the first toggle (one tab/split costs +5.7/+6.0, an extra window +17.7): **over a surface's cost, owner decision** |
 | M3 first toast (WinRT DLLs) | +4 MB | deferred: owner-approval-gated (HKCU AUMID key) |
-Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit` (user),
+Levers if over budget: shared D3D device (D3), lazy font-face loading, atlas initial size, `scrollback-limit-bytes` (user; formerly `scrollback-limit`),
 `EmptyWorkingSet` is NOT used (it only hides private bytes).
 
 ## 15. Testing strategy
@@ -880,6 +950,13 @@ owner smoke). Exit: owner sign-off.
 Kitty in pwsh/cmd (render and `a=q` reply measured), symbols/emoji from Segoe UI Symbol/Emoji, `font-thicken`, tab rename popup, Windows paths in links,
 `CF_HDROP` paste, system double-click time, pwsh/cmd `cursor`/`ssh-env`/`ssh-terminfo`, WSL start directory, Windows 11 top-level "Open Ghostty here" (not shipped, see 13.1),
 installer task `explorermenu`. MSYS stays on the inbox console (limit, `docs/windows/m7/msys-key-loss.md`).
+
+**M8 — `1.4.1-dev-win.3` (plan `docs/windows/plans/M8-win14.md`, rulings R-M8-1…40 in §18; tag `win-1.4.1-dev-3`).** Upstream 1.4 merged; D3D11 pacer fix for the
+long-tab input lag (likely fix until the Task 24 B4 proof), `TERMINUS_SUBLIME` for Claude Code symbols, Kitty clipboard protocol OSC 5522 with the prompt
+(§7.4), rich (HTML) copy, in-process selection clipboard and middle click, split drag with the handle (§7.7), window-level visibility (hidden, lock,
+display off, other virtual desktop), hidden tabs shrink their swap chain with a flash-free reshow, `CSI 8 t` guards, security fixes (Git prompt `$PWD`,
+invisible characters in links, C1 in dropped paths). The GUI e2e of the M8 scenarios runs in one batch (Task 24) after the code is in; the docs say "likely"
+where a measurement is still pending.
 
 ## 18. Rulings on former open questions (lead, 2026-10-25; owner may overturn)
 1. Single-instance: ON by default — a second launch opens a new window in the running instance (§12.6).
@@ -1302,3 +1379,45 @@ Rulings for M7 (plan-m7 and lead, 2026-10-29; the owner may overturn; full text 
 - R-M7-13, the Windows 11 top-level menu: **not shipped in win.2** (Windows refuses the unsigned sparse package, `0x80073D2B`; needs a code-signing certificate; code kept behind `-Win11Menu`); the design: `ghostty-explorer.dll` + sparse package, **folders and folder backgrounds only, drives keep the
   classic verb** (schema limit); tested only on the owner's machine (§13.1).
 - R-M7-14, release `release.ps1 -N 2`, no upstream merge; the lead adds highlights and the residual-risk line to `release-notes.md`.
+
+Rulings for M8 (plan-m8, 2026-11-01; owner answers where given, else the design's recommendation; the lead or owner may overturn; full text in `docs/windows/plans/M8-win14.md`, as built here):
+- R-M8-1, scope = merge upstream 1.4 plus quick fixes (Claude Code symbols, 1.4 security cross-check, RAM/latency baselines), OSC 5522, split drag, GPU release for hidden tabs, mode 2033 and the long-tab lag fix (owner).
+- R-M8-2, **version `1.4.1-dev-win.3`, tag `win-1.4.1-dev-3`** (owner, 2026-11-01). The owner asked for `win.1`, but the update check compares releases by `N` only (`update/release.zig`) and `release-version.ps1` refuses an `N` not above the highest tag (`win-1.3.2-dev-2`); `N = 3` needs no code change. The conditional Task 23 (compare by zon and `N`) is skipped. `build.zig.zon` carries `1.4.1-dev`; `release.ps1 -N 3` adds the suffix.
+- R-M8-3, Windows children get `TERMINUS_SUBLIME=1` when the final `TERM` is `xterm-ghostty` and the variable is unset; a user value is never overridden; no config knob; opt-out = another `TERM` or a non-empty value (§10).
+- R-M8-4, no PR or issue to `is-unicode-supported` or `git-for-windows`; suggested upstream texts only in `next-version.md` (AGENTS.md).
+- R-M8-5, split drag with full parity: within a tab, onto another tab, into another window, out to a new window; the process moves with the pane (§7.7).
+- R-M8-6, keybindings: the GTK 1.4 defaults (`ctrl+shift+page_up/down` = `move_tab`, `ctrl+shift+arrow_up/down` = `jump_to_prompt`) are in the tree since win.1; the merge changes no binding; `jump_to_prompt` stays non-performable (upstream core).
+- R-M8-7, the lag symptom is render-path latency (H1): the pacer fix, the `iTime` precision fix (H2) and the counters ship before the proof; Task 24 B4 proves or kills H1 (§6.3).
+- R-M8-8, `copy_to_clipboard = mixed` (HTML on every copy) stays the upstream default; plain copy with `copy_to_clipboard:plain` (§7.4).
+- R-M8-9, `middle-click-action` default stays `primary-paste`; it pastes the Ghostty-only selection buffer, empty unless `copy-on-select = primary|both` (Windows default `none`) or a program filled it with OSC 52 `s`.
+- R-M8-10, the drag handle exists on a lone pane (macOS `auto`: hidden only for a single pane in fullscreen).
+- R-M8-11, OSC 5522 `loc=primary` and OSC 52 `p` answer ENOSYS (macOS); `.selection` is supported, `.primary` is not.
+- R-M8-12, image writes put `PNG` (or `JFIF`) and `CF_DIBV5`; decode failure or more than 128 MiB decoded gives the original format only.
+- R-M8-13, a clipboard holding only `CF_HDROP`: a 5522 `text/plain` read gets nothing, `text/uri-list` is served; Ctrl+V still pastes quoted paths (M7).
+- R-M8-14, a program's `text/uri-list` write is a plain registered format, never synthesised to `CF_HDROP`.
+- R-M8-15, no read size cap (measured: 8 MiB reply 1.25 s via the bundled console, under the 5 s / 500 MB thresholds).
+- R-M8-16, an inbox console that does not reliably deliver 5522 read replies and answers `?5522$p` / `?2033$p` itself is a documented limit (Git Bash under `windows-conpty = auto`); MSYS is not moved to the bundled console for it; scenarios use a native program.
+- R-M8-17, prompt: default Deny/Cancel, labels Deny/Allow (paste: Cancel/Paste), the program's name is never shown, "Remember this choice for the session" only with a password and only on Allow.
+- R-M8-18, the selection clipboard is an in-process store on `App` shared by all windows (macOS private pasteboard); nothing leaves the process, no toast, no secure markers.
+- R-M8-19, CF_HTML fragment served as `StartFragment..EndFragment`; every write sets the three secure-input markers; MIME names must pass `isMimeName` (no `/` means refused).
+- R-M8-20, lock screen, display off, remote/console disconnect and another virtual desktop are "not visible" (2033 `;2n`, render stops); cloak is debounced 250 ms, uncloak immediate.
+- R-M8-21, hidden-tab swap chains shrink to 1 x 1 with a flash-free reshow; the gate is measured in Task 24 B2 (keep the shrink if a hidden tab holds at least 8 MB at the default size or 30 MB maximised at 1080p before it; otherwise set `shrink_hidden_chains = false` in an n.1 commit); fallback for an unfixable flash: shrink only tabs hidden more than 10 s.
+- R-M8-22, windows fully covered by other windows are not tracked.
+- R-M8-23, zoomed-out split panes stay "not visible" (GTK behaviour).
+- R-M8-24, no EcoQoS / process power throttling in M8.
+- R-M8-25, `CSI 8 ; rows ; cols t` resizes only a lone surface in a single-tab, non-quick, non-maximised, non-fullscreen, non-snapped window with the inspector closed, by the surface delta, clamped to the work area keeping the top-left; `vt-window-resize-allowed` stays `false`.
+- R-M8-26, minimised windows keep their swap chain but are reported not visible.
+- R-M8-27, the tab strip is a drop target (new tab at the insertion slot); hovering a chip 500 ms switches to that tab.
+- R-M8-28, dragging out of a single-pane tab in a multi-tab window opens a new window; a lone pane of a lone tab dropped outside does nothing (macOS).
+- R-M8-29, cursor `IDC_SIZEALL` over the handle and during the drag.
+- R-M8-30, no undo for a split move; a move drops the undo entries of the tabs involved; "undo of split move" is in `next-version.md`.
+- R-M8-31, the ghost is a 20 % snapshot of the pane centred on the pointer; title-chip fallback under secure input, on capture failure, below 48 x 32 px or for an all-black sample row.
+- R-M8-32, `Config.zig` docs get one Windows line each for `drag-handle`, `copy-on-select`, `middle-click-action` and `windows-conpty` (the inbox limit of R-M8-16).
+- R-M8-33, the quick terminal has no handle and is never a drop target.
+- R-M8-34, tmux-shim panes can be moved; a moved pane becomes a pane of the other tmux window.
+- R-M8-35, same-tree move = split the target first, then remove the source (GTK order), ratio 0.5; a cross-tree move inserts into the target tree first and aborts on OOM with nothing changed.
+- R-M8-36, `clipboard-write` default stays `allow`; the Git prompt fix closes the known Windows vector.
+- R-M8-37, the lag repro uses our own minimal cursor-trail shader in `test/windows/configs/`, never a copy of the owner's shader or config.
+- R-M8-38, the invisible set is macOS `isUnsafeCharacter` (C0, C1, U+061C, U+200B-U+200F, U+202A-U+202E, U+2066-U+2069, U+2028/2029, U+2060, U+FEFF); `.paste` excludes U+200D; dropped paths also refuse C1.
+- R-M8-39, the scrollback default of 50 MB (upstream) is kept on Windows; SPEC says `scrollback-limit-bytes`; the RAM row is re-measured in Task 24.
+- R-M8-40, Kitty animation on D3D11 was never verified: if Task 24 shows frames do not advance while visible, that is a separate n.1 renderer task.

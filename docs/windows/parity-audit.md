@@ -37,7 +37,7 @@ is file:line in `src/apprt/win32`, `src/renderer/d3d11` and core; docs were not 
 | `window-subtitle` | closed (19.n batch 2: `working-directory` shows `title - pwd`) | done |
 | `bell-audio-volume`, `bell-audio-path` (WAV only) | volume closed (19.n batch 2); other formats stay a documented gap | done / documented |
 | `auto-update-channel` | closed (19.n batch 2: `stable` skips pre-releases) | done |
-| `drag-handle` | ignored (title bar always draggable) | N/A |
+| `drag-handle` | done in M8 (1.4.1-dev-win.3): handle on every pane, split drag (see "Update after M8") | done |
 | `background-blur` radius | on/off (DWM acrylic) | documented |
 | `font-thicken`, `mouse-hide-while-typing`, `clipboard-write-limit-bytes` | checked by code reading (19.n batch 2): `font-thicken` is macOS only upstream (documented, no Windows effect); the other two are core logic, no runtime check | closed / documented |
 | `macos-icon*` / custom app icon, `macos-window-shadow`, `macos-titlebar-style` | no Windows analogue | won't do for v1 |
@@ -68,3 +68,19 @@ GUI proof for About, `initial-window`, Kitty graphics and SGR 58 on the bundled 
 | Windows 11 top-level "Open Ghostty here" | not shipped: Windows refuses an unsigned sparse package (`0x80073D2B`); needs a code-signing certificate. Classic verb in "Show more options" remains | G4 owner check |
 | Tmux shim default | off; `windows-tmux-shim = true` for Claude Code agent teams | `e2e/tmux-env` |
 | IME, ligatures, Kitty keyboard protocol, UI Automation, `window-save-state`, IPC scripting | unchanged (manual / post-v1) | this audit above |
+
+## Update after M8 (`1.4.1-dev-win.3`, base: upstream Ghostty 1.4)
+
+| Gap | Now | Evidence |
+| --- | --- | --- |
+| `drag-handle` (audit 3.2, 9.3) | done: handle on every pane (80 x 12 DIP, macOS `auto`), drag onto panes, the tab strip, other windows and out to a new window; no undo for a move (next version) | unit: win32 grab handle, split drag; `e2e/split-drag` (GUI proof in the M8 batch) |
+| OSC 5522 Kitty clipboard (audit 2.5) | done on the bundled console: read, write, paste events, prompt. Limit: Git Bash under `windows-conpty = auto` (inbox console) does not reliably deliver read replies | unit: win32 clipboard*; `e2e/kitty-clipboard-*`; `conpty-probe/RESULT.md` |
+| Rich / HTML copy (audit 2.4) | done: `HTML Format` on every copy (`copy_to_clipboard = mixed`); `copy_to_clipboard:plain` for plain | unit: clipboard_html; `e2e/copy-html` |
+| Selection clipboard, `middle-click-action` (audit 2.5) | done: in-process Ghostty-only buffer (macOS model); `loc=primary` / OSC 52 `p` stay unsupported | unit: win32 selection store; `e2e/selection-paste`, `e2e/middle-click` |
+| Mode 2033 and visibility | done: hidden windows, lock, display off, remote disconnect, other virtual desktops; covered windows not tracked | unit: win32 screen, win32 window; `e2e/visibility-hidden`; Win+L is a manual check |
+| Hidden tabs release GPU memory | done (shrink to 1 x 1, flash-free reshow); the gate is measured in the M8 batch | unit: d3d11 swapchain; `e2e/hidden-render` |
+| `CSI 8 t` | done with guards (lone surface, plain window); `vt-window-resize-allowed = false` by default | unit: win32 placement; `e2e/csi8-resize` |
+| Claude Code ASCII symbols (next-version 25) | done: `TERMINUS_SUBLIME=1` for children on `TERM=xterm-ghostty` | unit: windows unicode hint |
+| Long-tab input lag (next-version 28) | likely fixed (pacer, `iTime` rebase); proof in the M8 batch | unit: d3d11 pacer; `e2e/long-tab-lag` |
+| Git Bash prompt title injection, invisible link characters, C1 in dropped paths | closed | `shell-marks`, unit: win32 link policy, drop; `e2e/title-inject` |
+| Kitty animation on D3D11, UI Automation, `window-save-state`, undo of a split move, covered-window occlusion, EcoQoS | open (see `next-version.md`) | R-M8-22, 24, 30, 40 |

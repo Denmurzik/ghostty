@@ -503,3 +503,59 @@ Variants: `GHOSTTY_E2E_VARIANT=bundled` makes `resize-input` run on the bundled 
 (`Add-AppxPackage` / `Remove-AppxPackage`) on the owner's machine, and the `/DGhosttyTest` installer contains no package code.
 `installer-test` and `package-portable` only inspect the files and the manifest. Registering the real package is the owner's
 manual check (G4) or a hand-run of the lines in `README-windows.txt`.
+
+## M8 scenarios (1.4.1-dev-win.3)
+
+Run with `e2e.ps1 -Milestone M8` or by name. All carry `# e2e: milestone=M8 ...` headers with orders 1200-1280, follow the safety rules above
+and the PowerShell 5.1 rules (ASCII only, `Invoke-Native`). Every scenario that touches the clipboard saves all formats first and restores them
+in `finally` (`lib/Clipboard.psm1`; an unrestorable clipboard is an `E2E-SKIP`). They were written in M8 and run for the first time in the
+M8 GUI batch (one batch, the owner away from the machine); until then the docs say "GUI proof pending". None needs the owner's config.
+
+| Order | Scenario | What it proves | Runtime |
+|---|---|---|---|
+| 1200 | `visibility-hidden` | `toggle_visibility`, the hidden quick terminal, a hidden tab and a minimised window report "not visible" (test IPC field `core_visible`, mode 2033 reports `;1n` / `;2n` read by Git Bash readers; the log checks are SKIPped when the console drops 2033) | 150 s |
+| 1210 | `csi8-resize` | `CSI 8 ; rows ; cols t`: with `vt-window-resize-allowed = true` only a lone surface in a plain window resizes (not with two tabs, a split, the quick terminal, maximised); the default (`false`) changes nothing | 150 s |
+| 1220 | `hidden-render` | a hidden tab draws nothing (`presents` constant, no CPU), its swap chain is 1 x 1 (`chain_px`; "shrink disabled" is reported, not failed), reshow within 200 ms shows fresh content, a flood in a hidden tab is only termio cost, 20 fast tab switches never show a frame that is neither tab's content; `GHOSTTY_E2E_HIDDEN_DEBUG=1` runs it with the D3D11 debug layer (the layer's messages are not captured: INFO line only) | 300 s |
+| 1230 | `long-tab-lag` | proves or kills the pacer hypothesis H1 with our own cursor-trail shader (`configs/cursor-trail.glsl`, never the owner's) and `lag-gen.js` (Claude-like output): a generator runs 600 s in tab A while a cover window, 20 resizes and 50 tab switches happen, then 100 keys in tab A and a fresh tab C; gate: p50 difference A - C within 2 ms; a control run without the shader animation; needs `node.exe`. Env: `GHOSTTY_LAG_SECS`, `GHOSTTY_LAG_NOGATE=1` | up to 1500 s (about 25 min) |
+| 1240 | `copy-html` | a copy carries `CF_UNICODETEXT` and `HTML Format` (colour as `color: rgb(...)`); with `copy_to_clipboard:plain` there is no `HTML Format` | 120 s |
+| 1250 | `kitty-clipboard-write` | OSC 5522 write: text, HTML, PNG (clipboard has `PNG` byte-identical and a 2 x 2 `CF_DIBV5`); `clipboard-write = ask` + Deny gives `EPERM`; an oversized write gives `EFBIG` | 420 s |
+| 1251 | `kitty-clipboard-read` | OSC 5522 read behind the prompt: image preview in the dialog, Allow gives the listing and the DATA packets, Deny and `clipboard-read = deny` give `EPERM` | 420 s |
+| 1252 | `kitty-paste-event` | with `?5522h` Ctrl+Shift+V sends one paste event (a read response with a password), no bracketed-paste bytes, no dialog | 180 s |
+| 1260 | `selection-paste` | `copy-on-select = primary`: the clipboard sequence number does not change and a middle click pastes the word; with `none` nothing is pasted | 240 s |
+| 1261 | `middle-click` | each `middle-click-action` (`clipboard-paste`, `primary-paste` with the default config, `ignore`), mouse reporting still gets the middle button, a middle click on a tab chip still closes it | 300 s |
+| 1270 | `title-inject` | a directory named with ESC and BEL cannot send OSC 52 through Git Bash's default prompt title (clipboard sequence number unchanged); pairs with the headless cases `bash-git-title-inject` and `bash-git-title-plain` of `shell-marks/run.ps1` | 90 s |
+| 1280 | `split-drag` | the grab handle (hover dim / bright, `drag-handle = never`) and a pane dragged within its tab, onto a tab, onto the tab strip (spring-loading after 500 ms), into another window and out to a new window; the surface's hwnd and its `cmd.exe` stay through every move; Esc and a drop on the source change nothing; the quick terminal has no handle. Real mouse input, interactive only | 240 s |
+
+Also extended in M8: `link-hover-open` (a U+202E link is refused) and `drop-files` (a C1 character in a dropped file name is refused).
+
+Helpers added:
+- `e2e/_kitty5522.ps1`: shared by the three Kitty clipboard scenarios. A native `vtreader` (FakeExe) sends the 5522 query and prints the hex of the
+  reply, which the scenario reads back from the screen. A native program runs on the bundled console under `windows-conpty = auto`; Git Bash would use
+  the inbox console, which does not reliably deliver 5522 replies (R-M8-16), so no scenario uses Git Bash for 5522.
+- `lib/FakeExe.psm1`: `vtreader` gains `FAKE_QUERY_FILE` (the query is the raw bytes of a file, for long write transactions) and `FAKE_UNTIL`
+  (a C-escaped byte string; reading stops once it has arrived, for example `type=read:status=DONE`).
+- `lib/GpuCounters.psm1`: per-process GPU memory (dedicated, shared), 3D engine load and CPU load of one process through the CIM performance classes
+  `Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory` / `..._GPUEngine`, which have English names on every Windows language. It returns
+  `$null` when the classes are absent (WARP, some VMs and drivers) and callers write empty columns.
+- `configs/cursor-trail.ghostty` + `cursor-trail.glsl` (a 200 ms trail on `iTime - iTimeCursorChange`) and `e2e/lag-gen.js` for `long-tab-lag`.
+- `vt-smoke/cases/kitty-anim.sh`: a looping two-frame Kitty animation (magenta, green, 100 ms) for `hidden-render` and `measure-ram.ps1 hidden-anim`.
+- The test IPC `surface` fields `core_visible`, `presents`, `chain_px` and the app state `m8` (`split_drag`, `grab`) used by the scenarios above.
+
+### `measure-ram.ps1 -Gpu` (M8)
+
+`-Gpu` (implied by the hidden-surface scenarios) appends to `docs/windows/gpu-baseline.csv` instead of `ram-baseline.csv` and adds the columns
+`gpu_dedicated_mb,gpu_shared_mb,cpu_pct,gpu_3d_pct,show_ms_p50,show_ms_p95` (`-GpuSeconds`, default 10, is the sampling window). Scenarios:
+`hidden-tabs` (11 tabs at a fixed client size, `-ClientWidth` x `-ClientHeight`, default 1600 x 900, or `-Maximized`; prints the GPU memory per hidden tab
+against the R-M8-21 gate: keep the swap-chain shrink if a hidden tab holds 8 MB or more at the default size or 30 MB or more maximised at 1080p before the
+shrink), `hidden-flood` (every tab floods output; compare with `-Tabs 1`), `hidden-anim` (the Kitty animation in tab 1 only; samples `anim-visible`,
+`anim-hidden`, `anim-shown`), `minimized` (the swap chain is kept, GPU load about 0) and `show_ms` (20 `goto_tab` switches: IPC action to the target's
+`presents` increment). The `scrollback` row is re-measured at the new 50 MB default (R-M8-39). A Debug exe is never gated.
+
+### Notes for the M8 batch
+
+- `shell-marks/run.ps1` needs **pwsh 7** (it uses `` `e ``); under Windows PowerShell 5.1 every case fails with "no OSC 133 A..B". The Task 6 cases
+  `bash-git-title-inject` / `bash-git-title-plain` run there too.
+- The lock-screen, display-off and virtual-desktop checks of the visibility work have no scenario (they cannot be automated without locking the
+  owner's screen); they are manual: Win+L and a second virtual desktop, then look for the `screen state locked=... display_off=... disconnected=...`
+  line in the log.
+- `long-tab-lag` and `hidden-render` use `GHOSTTY_D3D11_PACING_LOG=1`; their verdicts decide "likely fix" versus "fixed" in the CHANGELOG.

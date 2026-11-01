@@ -744,3 +744,17 @@ Merged from the audit report below (§ 6a).
 | 6 pwsh/cmd `cursor`, `ssh-env`, `ssh-terminfo` | done | Task 7 (cmd cursor stays while a command runs: limit) |
 | 6 WSL working directory | done | Task 8 (custom `wsl.conf` hostname: limit) |
 | DirectWrite rasterizer, full win32-input-mode key encoding (audit 2.1) | open | not in win.2 (Task 13 showed the key encoding is not the MSYS cause) |
+
+### Status after M8 (`1.4.1-dev-win.3`, 2026-11-01)
+
+`done` = shipped in M8; the GUI proof of each runs in the M8 batch (Task 24).
+
+| Item | Status | Task and outcome |
+|---|---|---|
+| 2.4 rich / HTML copy | done | Tasks 3, 4: `HTML Format` on every copy (`copy_to_clipboard = mixed`); `copy_to_clipboard:plain` for plain (R-M8-8) |
+| 2.5 selection clipboard and OSC 5522 | done | Tasks 4, 7, 9, 10, 13: Kitty clipboard read/write/paste events with the prompt; in-process selection buffer for `copy-on-select = primary` or `both` and `primary-paste`. Limit: 5522 reads in Git Bash under `windows-conpty = auto` (R-M8-16) |
+| 3.2 drag of a split | done | Tasks 2, 5, 8, 11, 14: handle on every pane, drop on panes, the tab strip, other windows, out to a new window. Undo of a move: open (next version) |
+| 9.3 `drag-handle` | done | Task 8 (R-M8-10); `Config.zig` says "On Windows, the same as macOS". `font-thicken`: done in win.2; `macos-auto-secure-input`: unchanged |
+| next-version 25 Claude Code symbols | done | Task 18: `TERMINUS_SUBLIME=1` (opt-out: another `TERM` or a non-empty value) |
+| next-version 28 long-tab input lag | likely fixed | Tasks 1, 21: pacer and `iTime` fix; proof (`long-tab-lag`) in the M8 batch |
+| Git Bash title injection (SEC-1), invisible characters in links, C1 in dropped paths | done | Task 6 |
