@@ -663,6 +663,12 @@ test "win32 tmux labels: untrusted text is sanitised" {
     try std.testing.expectEqualStrings("a b", try sanitize(a, "a\xc2\x85b"));
     try std.testing.expectEqualStrings("ab", try sanitize(a, "a\xe2\x80\xaeb"));
     try std.testing.expectEqualStrings("ab", try sanitize(a, "a\xe2\x81\xa6b"));
+    // Zero width characters, the word joiner and the BOM are dropped; ZWJ stays.
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "a\u{200B}b"));
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "a\u{200C}b"));
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "a\u{2060}b"));
+    try std.testing.expectEqualStrings("ab", try sanitize(a, "\u{FEFF}ab"));
+    try std.testing.expectEqualStrings("a\u{200D}b", try sanitize(a, "a\u{200D}b"));
     // Invalid UTF-8 is replaced, never an empty label.
     try std.testing.expectEqualStrings("a\xef\xbf\xbdb", try sanitize(a, "a\xffb"));
     try std.testing.expectEqualStrings("\xef\xbf\xbd", try sanitize(a, "\xff"));

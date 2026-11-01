@@ -960,6 +960,8 @@ test "win32 shell_open: control characters and length" {
     try check(.osc8, "https://a.b/\u{2060}x", .refuse, null);
     try check(.osc8, "https://a.b/\u{202E}gpj.exe", .refuse, null);
     try check(.osc8, "https://a.b/\u{200D}x", .refuse, null);
+    // A cut four-byte lead does not hide a C1 character behind it.
+    try check(.osc8, "foo:x\xF0\xC2\x85", .refuse, null);
     try check(.osc8, "", .refuse, null);
     const long = try std.testing.allocator.alloc(u8, link_policy.max_len + 1);
     defer std.testing.allocator.free(long);

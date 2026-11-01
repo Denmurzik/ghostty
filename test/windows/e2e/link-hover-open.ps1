@@ -99,7 +99,7 @@ Invoke-E2eScenario 'link-hover-open' {
     Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+l'
     Start-Sleep -Milliseconds 300
     # The override as UTF-8 bytes (E2 80 AE) in a printf escape: the script stays ASCII.
-    Send-Line $g.Hwnd ("printf '\033]8;;https://example.com/\xe2\x80\xaegpj.exe\033\bidi-link\033]8;;\033\\n'")
+    Send-Line $g.Hwnd ("printf '\033]8;;https://example.com/\xe2\x80\xaegpj.exe\033\\bidi-link\033]8;;\033\\\n'")
     Start-Sleep -Milliseconds 800
     $hovered = $false
     [GhosttyE2e.LinkKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)

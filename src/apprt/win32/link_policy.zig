@@ -91,7 +91,12 @@ pub fn hasInvisible(s: []const u8) bool {
             i += 1;
             continue;
         };
-        if (i + len > s.len) break;
+        // A lead byte whose sequence is cut or broken is skipped on its own:
+        // what follows it may still be a valid (deceptive) character.
+        if (i + len > s.len) {
+            i += 1;
+            continue;
+        }
         const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
             i += 1;
             continue;
@@ -139,4 +144,8 @@ test "win32 link policy: invisible characters" {
     try std.testing.expect(!hasInvisible("a\xe2\x80"));
     try std.testing.expect(!hasInvisible("\xc2"));
     try std.testing.expect(hasInvisible("\xff\xe2\x80\x8b"));
+    // A cut lead byte does not hide what follows it.
+    try std.testing.expect(hasInvisible("foo:x\xf0\xc2\x85"));
+    try std.testing.expect(hasInvisible("x\xe2\x80\xe2\x80\x8b"));
+    try std.testing.expect(hasInvisible("x\xf0\x9f\xe2\x80\xae"));
 }

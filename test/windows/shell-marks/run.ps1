@@ -387,7 +387,7 @@ $cases = @(
             if ($t.Contains("`e]52;")) { $p += 'an OSC 52 reached the terminal' }
             $m = [regex]::Matches($t, "\e\]0;MINGW64:([^\a\e]*)\a")
             if ($m.Count -eq 0) { $p += 'no OSC 0 title that runs to its own BEL' }
-            elseif (-not $m[$m.Count - 1].Groups[1].Value.Contains('inj')) { $p += 'the title lost the directory name' }
+            elseif (-not $m[$m.Count - 1].Groups[1].Value.Contains('inj]52;c;SGVsbG8=')) { $p += 'the title is not the control-stripped directory name' }
             $o = [regex]::Matches($t, "\e\]7;kitty-shell-cwd://([^\a]*)\a")
             if ($o.Count -eq 0) { $p += 'no OSC 7' }
             elseif ($o[$o.Count - 1].Groups[1].Value -match '[\x00-\x1f\x7f]') { $p += 'the OSC 7 holds a control byte' }

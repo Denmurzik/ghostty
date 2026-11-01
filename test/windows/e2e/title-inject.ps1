@@ -32,10 +32,11 @@ Invoke-E2eScenario 'title-inject' {
         Save-Evidence 'crafted-dir' $g -Window
 
         if ([uint32](Get-ClipboardSequence) -ne $seq) {
+            Update-ClipboardMark
             throw 'the clipboard changed after cd into the crafted directory (an OSC 52 got through)'
         }
         $now = [System.Windows.Forms.Clipboard]::GetText()
-        if ($now -ne $marker) { throw "the clipboard text is '$now', expected the marker" }
+        if ($now -ne $marker) { Update-ClipboardMark; throw "the clipboard text is '$now', expected the marker" }
 
         $title = [GhosttyE2e.Win]::TextOf($g.Hwnd)
         Write-E2eInfo "window title: $title"
