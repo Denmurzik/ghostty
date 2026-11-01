@@ -108,6 +108,20 @@ pub const PresentTarget = struct {
     hand_off: ?HandOff = null,
 
     /// Called under the context lock, on the render thread or on the UI
+    /// thread, right after the first successful present following a shrink
+    /// (`surfaceHidden`) or the creation or recreation of the swap chain.
+    /// Post-only like `hand_off`: it must not call back into the renderer,
+    /// take a UI lock or wait for the UI thread. The apprt posts a message
+    /// and the UI thread then lifts the old tab (`Window.RaiseGate`).
+    /// Null: nobody waits for first presents.
+    presented: ?Notify = null,
+
+    pub const Notify = struct {
+        ctx: *anyopaque,
+        func: *const fn (ctx: *anyopaque) void,
+    };
+
+    /// Called under the context lock, on the render thread or on the UI
     /// thread (a sync draw during resize presents too), right after the
     /// first successful present of a composition swap chain that was
     /// created or recreated, with one reference held for the callee. The callee must not call back into the
@@ -175,6 +189,13 @@ swap_chain_failure_logged: bool = false,
 /// Successful presents of this renderer, for tests (monotonic, atomic: the
 /// UI thread reads it for the test IPC).
 presents: std.atomic.Value(u64) = .init(0),
+
+/// The swap chain has not presented since it was shrunk (`surfaceHidden`),
+/// created or recreated: DWM still stretches the 1x1 (or shows no) buffer
+/// until the next present, so the apprt keeps the old tab on top until
+/// `PresentTarget.presented` fires. Written under the context lock, read
+/// lock-free by `chainShrunk` (the UI thread must not wait for a frame).
+first_present_pending: std.atomic.Value(bool) = .init(true),
 
 /// The size `setViewport` last reported. Headless `surfaceSize` returns it.
 viewport: struct { width: u32, height: u32 } = .{ .width = 0, .height = 0 },
@@ -313,6 +334,7 @@ pub fn swapChain(self: *D3D11, width: u32, height: u32) !*SwapChain {
     const sc = &self.swap_chain.?;
     sc.surface_id = target.id;
     self.hand_off_pending = mode == .composition;
+    self.first_present_pending.store(true, .release);
     return sc;
 }
 
@@ -413,7 +435,11 @@ pub fn surfaceHidden(self: *D3D11) void {
 
     // A lost device fails the resize; the recovery replaces the chain.
     if (self.device.isLost()) return;
-    self.swap_chain.?.shrink() catch |err| self.logSwapChainFailure("shrink", err);
+    self.swap_chain.?.shrink() catch |err| {
+        self.logSwapChainFailure("shrink", err);
+        return;
+    };
+    self.first_present_pending.store(true, .release);
     // No driver trim here: `Window.syncOcclusion` schedules the debounced
     // `App.scheduleMemoryRelease`, so a burst of tab switches trims once and
     // never under the lock a newly shown tab's first frame waits for.
@@ -482,12 +508,23 @@ pub fn presentSucceeded(self: *D3D11, generation: u32) void {
 /// After a successful present of `swap_chain`: a composition chain goes to
 /// the apprt now, with a frame in it. The caller holds the lock.
 pub fn framePresented(self: *D3D11) void {
-    if (!self.hand_off_pending) return;
-    self.device.assertContextLocked();
-    self.hand_off_pending = false;
-    const target = self.present_target orelse return;
-    const sc = if (self.swap_chain) |*sc| sc else return;
-    if (sc.mode == .composition) self.handOff(target, sc);
+    if (self.hand_off_pending) {
+        self.device.assertContextLocked();
+        self.hand_off_pending = false;
+        if (self.present_target) |target| if (self.swap_chain) |*sc| {
+            if (sc.mode == .composition) self.handOff(target, sc);
+        };
+    }
+    // After the hand-off: the UI thread then sees the chain before the news.
+    if (self.first_present_pending.swap(false, .acq_rel)) {
+        if (self.present_target) |target| if (target.presented) |n| n.func(n.ctx);
+    }
+}
+
+/// Whether the swap chain has not presented since it was shrunk, created or
+/// recreated (a surface that never drew counts). Lock-free: any thread.
+pub fn chainShrunk(self: *const D3D11) bool {
+    return self.first_present_pending.load(.acquire);
 }
 
 /// Logs a swap chain failure the first time only, until a present succeeds.

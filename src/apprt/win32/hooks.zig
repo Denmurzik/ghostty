@@ -338,6 +338,12 @@ pub fn surfaceMessage(surface: *Surface, msg: u32, wparam: WPARAM, lparam: LPARA
     _ = lparam;
     switch (msg) {
         messages.WM_GHOSTTY_SET_CONTENT => return composition.setContent(surface, wparam),
+        // The first frame after a shrink or a new chain: the tab switch of
+        // the window may lift its old tab (`Window.RaiseGate`).
+        messages.WM_GHOSTTY_PRESENTED => {
+            surface.window.surfacePresented(surface.id);
+            return 0;
+        },
         // A key press ends the bell border: one flag test.
         win32.user32.WM_KEYDOWN => {
             decor.keyDown(surface);

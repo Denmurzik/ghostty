@@ -1115,6 +1115,75 @@ test "d3d11 frame: surfaceHidden then draw regrows the chain" {
     try testing.expectEqual(@as(?Health, .healthy), fx.recorder.health);
 }
 
+const PresentedCounter = struct {
+    calls: u32 = 0,
+
+    fn func(ctx: *anyopaque) void {
+        const self: *PresentedCounter = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+    }
+};
+
+fn drawBlankFrame(fx: *Fixture) !void {
+    fx.api.drawFrameStart();
+    defer fx.api.drawFrameEnd();
+    var frame = try beginWithSink(.{ .api = &fx.api }, fx.recorder.sink(), &fx.target);
+    var pass = frame.renderPass(&.{.{
+        .target = .{ .target = fx.target },
+        .clear_color = .{ 0, 0, 1, 1 },
+    }});
+    pass.complete();
+    frame.complete(false);
+}
+
+test "d3d11 frame: presented notify fires once after a shrink and after the chain was created" {
+    var fx: Fixture = try .init(.native, 16, 8);
+    defer fx.deinit();
+    var window: SwapChain.TestWindow = try .init();
+    defer window.deinit();
+
+    var counter: PresentedCounter = .{};
+    var packed_size: std.atomic.Value(u64) = .init(D3D11.packSize(16, 8));
+    fx.api.present_target = .{
+        .hwnd = window.hwnd,
+        .size = &packed_size,
+        .presented = .{ .ctx = &counter, .func = PresentedCounter.func },
+    };
+    defer fx.api.threadExit();
+
+    // A surface that never drew counts as needing its first present.
+    try testing.expect(fx.api.chainShrunk());
+
+    // The first frame creates the chain and presents: one notify.
+    try drawBlankFrame(&fx);
+    try testing.expectEqual(@as(u32, 1), counter.calls);
+    try testing.expect(!fx.api.chainShrunk());
+
+    // Later presents of the same chain stay silent.
+    try drawBlankFrame(&fx);
+    try drawBlankFrame(&fx);
+    try testing.expectEqual(@as(u32, 1), counter.calls);
+
+    // Hidden: shrunk; nothing is posted until a frame is presented again.
+    fx.api.surfaceHidden();
+    try testing.expectEqual([2]u32{ 1, 1 }, fx.api.chainPx());
+    try testing.expect(fx.api.chainShrunk());
+    try testing.expectEqual(@as(u32, 1), counter.calls);
+
+    try drawBlankFrame(&fx);
+    try testing.expectEqual(@as(u32, 2), counter.calls);
+    try testing.expect(!fx.api.chainShrunk());
+    try drawBlankFrame(&fx);
+    try testing.expectEqual(@as(u32, 2), counter.calls);
+
+    // A dropped chain is a new chain: the next present notifies again.
+    fx.api.device.lockContext();
+    fx.api.dropSwapChain();
+    fx.api.device.unlockContext();
+    try drawBlankFrame(&fx);
+    try testing.expectEqual(@as(u32, 3), counter.calls);
+}
+
 test "d3d11 frame: bmp header" {
     var out: [bmp_header_len + 8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&out);

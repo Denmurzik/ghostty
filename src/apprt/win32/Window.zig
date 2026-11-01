@@ -28,6 +28,7 @@ const overlay_mod = @import("overlay.zig");
 const placement_mod = @import("placement.zig");
 const proxy_icon = @import("proxy_icon.zig");
 const resize_overlay = @import("resize_overlay.zig");
+const screen_state = @import("screen_state.zig");
 const secure_input = @import("secure_input.zig");
 const strip_input_mod = @import("strip_input.zig");
 const split_drag_input = @import("split_drag_input.zig");
@@ -144,6 +145,10 @@ overlays: overlay_mod.WindowState = .{},
 palette: CommandPalette.State = .{},
 composition: composition_mod.WindowState = .{},
 
+/// A tab switch in progress: the old tab stays on top until the new one
+/// presented its first frame (`RaiseGate`).
+gate: RaiseGate = .{},
+
 /// Client-area limits reported by core, if any. Applied by
 /// WM_GETMINMAXINFO.
 size_limit: ?apprt.action.SizeLimit = null,
@@ -187,6 +192,8 @@ pub fn create(app: *App, opts: CreateOptions) !*Window {
         .app = app,
         .id = next_id.fetchAdd(1, .monotonic),
         .kind = opts.kind,
+        // A window created while the screen is off starts not visible.
+        .screen_off = screen_state.off(app.screen),
     };
 
     if (opts.overrides.title) |t| self.title_override = alloc.dupeSentinel(u8, t, 0) catch |err| {
@@ -374,6 +381,8 @@ pub fn beginTeardown(self: *Window) void {
     self.tearing_down = true;
     defer self.tearing_down = was;
 
+    // The tabs go; nothing waits for them.
+    if (self.gate.take() != null) _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.raise_gate);
     _ = win32.user32.ShowWindow(self.hwnd, win32.user32.SW_HIDE);
     for (self.tabs.items) |tab| tab.stopRenderThreads();
     for (self.tabs.items) |tab| tab.stopIoThreads();
@@ -505,6 +514,10 @@ pub fn selectTab(self: *Window, index: usize) void {
 pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     if (index >= self.tabs.items.len) return;
 
+    // A switch still waiting for its first frame ends first: the tab that
+    // was coming up is the one on screen now, and the old one goes.
+    self.finishGate();
+
     const old = self.activeTab();
     self.active_tab = index;
     const new = self.tabs.items[index];
@@ -530,10 +543,23 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
         .remote = win32.user32.GetSystemMetrics(win32.user32.SM_REMOTESESSION) != 0,
         .composing = dwmComposing(),
     });
-    if (flush) _ = win32.user32.SetWindowPos(new.hwnd, old.?.hwnd, 0, 0, 0, 0, z_only);
+    // A surface whose swap chain was shrunk while hidden (or never presented)
+    // shows a stretched or empty buffer until its first present: the new tab
+    // comes up under the old one, which leaves once every such surface
+    // presented (`RaiseGate`). Read before the show: the render thread starts
+    // at once and clears the flag with its first present.
+    const waiting: std.bit_set.IntegerBitSet(32) = if (swap and windowOnScreen(self.screenState()))
+        new.needsFirstPresent()
+    else
+        .empty;
+    const gated = waiting.count() != 0;
+    if (flush or gated) _ = win32.user32.SetWindowPos(new.hwnd, old.?.hwnd, 0, 0, 0, 0, z_only);
     new.setVisible(true);
     new.shown_before = true;
-    if (swap) {
+    if (swap and gated) {
+        // The old tab stays visible (and rendering: `tabOnScreen`) meanwhile.
+        self.armGate(old.?, new, waiting, flush);
+    } else if (swap) {
         const o = old.?;
         if (flush) {
             _ = win32.gdi32.GdiFlush();
@@ -549,6 +575,109 @@ pub fn selectTabFocus(self: *Window, index: usize, focus: bool) void {
     }
     if (focus) new.focus();
     self.refreshTitle();
+}
+
+/// How long a tab switch waits for the new tab's first frame at most: a
+/// surface that never presents (device lost, hidden again) must not freeze
+/// the switching.
+pub const raise_cap_ms = 100;
+
+/// The wait of a tab switch: the old tab stays on top of the new one until
+/// every on-screen surface of the new tab presented once.
+pub const RaiseGate = struct {
+    /// The tab that stays on top, null: no switch is pending.
+    old: ?*Tab = null,
+    /// The tab coming up under it.
+    new: ?*Tab = null,
+    /// Leaf indices (tree order) of the new tab that did not present yet.
+    waiting: std.bit_set.IntegerBitSet(32) = .empty,
+    deadline_ms: u64 = 0,
+    /// The new tab was shown for the first time over glass: wait a DWM frame
+    /// before the raise (`waitUnderOld`).
+    flush: bool = false,
+
+    /// Pure: leaf `i` presented; true when nobody is waited for any more
+    /// (the old tab can go).
+    pub fn presented(self: *RaiseGate, i: usize) bool {
+        if (i < 32) self.waiting.unset(i);
+        return self.waiting.count() == 0;
+    }
+
+    /// Pure: the cap ran out, give up waiting.
+    pub fn expired(self: *const RaiseGate, now_ms: u64) bool {
+        return now_ms >= self.deadline_ms;
+    }
+
+    pub fn active(self: *const RaiseGate) bool {
+        return self.old != null;
+    }
+
+    /// Pure: what to finish, once; the gate is clear afterwards.
+    pub fn take(self: *RaiseGate) ?RaiseGate {
+        if (self.old == null) return null;
+        const taken = self.*;
+        self.* = .{};
+        return taken;
+    }
+};
+
+fn nowMs() u64 {
+    return nowNs() / std.time.ns_per_ms;
+}
+
+fn armGate(
+    self: *Window,
+    old: *Tab,
+    new: *Tab,
+    waiting: std.bit_set.IntegerBitSet(32),
+    flush: bool,
+) void {
+    self.gate = .{
+        .old = old,
+        .new = new,
+        .waiting = waiting,
+        .deadline_ms = nowMs() + raise_cap_ms,
+        .flush = flush,
+    };
+    if (win32.user32.SetTimer(self.hwnd, messages.timers.window.raise_gate, 16, null) == 0) {
+        // No tick, no cap: do not wait at all.
+        log.warn("raise gate timer failed err={}", .{win32.kernel32.GetLastError()});
+        self.finishGate();
+    }
+}
+
+/// Raise the new tab over the old one and hide the old one, now. No-op
+/// without a pending switch.
+fn finishGate(self: *Window) void {
+    const taken = self.gate.take() orelse return;
+    _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.raise_gate);
+    const o = taken.old.?;
+    const new = taken.new.?;
+    if (taken.flush) {
+        _ = win32.gdi32.GdiFlush();
+        _ = win32.dwmapi.DwmFlush();
+    }
+    raiseAbove(new.hwnd, o.hwnd);
+    _ = win32.user32.RedrawWindow(new.hwnd, null, null, win32.user32.RDW_INVALIDATE |
+        win32.user32.RDW_ERASE | win32.user32.RDW_ALLCHILDREN |
+        win32.user32.RDW_UPDATENOW | win32.user32.RDW_ERASENOW);
+    o.setVisible(false);
+}
+
+/// `WM_GHOSTTY_PRESENTED`: a surface presented a frame.
+pub fn surfacePresented(self: *Window, id: u32) void {
+    const new = self.gate.new orelse return;
+    const i = new.leafIndexOf(id) orelse return;
+    if (self.gate.presented(i)) self.finishGate();
+}
+
+/// `WM_TIMER` of the raise gate.
+fn gateTick(self: *Window) void {
+    if (!self.gate.active()) {
+        _ = win32.user32.KillTimer(self.hwnd, messages.timers.window.raise_gate);
+        return;
+    }
+    if (self.gate.expired(nowMs())) self.finishGate();
 }
 
 /// Put the sibling `hwnd` directly above `below` in the Z order, leaving
@@ -593,6 +722,8 @@ const z_only = win32.user32.SWP_NOMOVE | win32.user32.SWP_NOSIZE |
 /// Unlink a tab from the list and keep `active_tab` pointing at the right
 /// one. False if no tab is left.
 fn unlinkTab(self: *Window, tab: *Tab) bool {
+    // Neither side of a pending switch may go while it waits.
+    self.finishGate();
     const index = self.tabIndex(tab) orelse return self.tabs.items.len != 0;
     const was_active = index == self.active_tab;
     title_edit.cancelForTab(self, tab);
@@ -1307,7 +1438,9 @@ pub fn windowOnScreen(s: ScreenState) bool {
 /// Whether `tab`'s surfaces render: it is the active tab of a window that is
 /// on screen.
 pub fn tabOnScreen(self: *const Window, tab: *const Tab) bool {
-    return self.activeTab() == tab and windowOnScreen(self.screenState());
+    // The old tab of a pending switch stays on top, so it keeps rendering.
+    const shown = self.activeTab() == tab or self.gate.old == tab;
+    return shown and windowOnScreen(self.screenState());
 }
 
 /// Whether a window message is followed by `syncOcclusion`. `WM_SHOWWINDOW`
@@ -1326,7 +1459,9 @@ pub fn syncOcclusion(self: *Window) void {
     const state = self.screenState();
     const before = self.visibleSurfaces();
     for (self.tabs.items, 0..) |tab, i| {
-        tab.applyOcclusion(i == self.active_tab and windowOnScreen(state));
+        // (The old tab of a pending switch is still on top: `tabOnScreen`.)
+        const shown = i == self.active_tab or self.gate.old == tab;
+        tab.applyOcclusion(shown and windowOnScreen(state));
     }
     if (self.visibleSurfaces() < before) self.app.scheduleMemoryRelease();
 }
@@ -1635,6 +1770,11 @@ fn wndProc(
             return 0;
         },
 
+        messages.WM_GHOSTTY_PRESENTED => {
+            self.surfacePresented(@truncate(wparam));
+            return 0;
+        },
+
         // (toggle_visibility and the quick terminal show and hide through
         // here.) The message comes before the visible bit changes: the sync
         // is posted.
@@ -1672,6 +1812,9 @@ fn wndProc(
             return 0;
         } else if (wparam == messages.timers.window.tab_anim) {
             self.tabAnimStep();
+            return 0;
+        } else if (wparam == messages.timers.window.raise_gate) {
+            self.gateTick();
             return 0;
         },
 
@@ -1964,4 +2107,60 @@ test "win32 window: move tab wraps" {
     try expect(@as(?usize, 1), moveIndex(5, 0, 4));
     try expect(@as(?usize, null), moveIndex(1, 0, 1));
     try expect(@as(?usize, null), moveIndex(1, 0, 0));
+}
+
+test "win32 window: raise gate opens after every leaf presented" {
+    var gate: RaiseGate = .{ .waiting = .empty };
+    gate.waiting.set(0);
+    gate.waiting.set(2);
+    // A leaf that was not waited for changes nothing.
+    try std.testing.expect(!gate.presented(1));
+    try std.testing.expect(!gate.presented(0));
+    // A repeat of the same leaf is harmless.
+    try std.testing.expect(!gate.presented(0));
+    try std.testing.expect(gate.presented(2));
+    // Out of range indices are ignored, not a crash.
+    try std.testing.expect(gate.presented(40));
+}
+
+test "win32 window: raise gate opens at the cap" {
+    var gate: RaiseGate = .{ .deadline_ms = 1000 + raise_cap_ms };
+    gate.waiting.set(0);
+    try std.testing.expect(!gate.expired(1000));
+    try std.testing.expect(!gate.expired(1000 + raise_cap_ms - 1));
+    try std.testing.expect(gate.expired(1000 + raise_cap_ms));
+    try std.testing.expect(gate.expired(5000));
+    try std.testing.expectEqual(@as(u64, 100), raise_cap_ms);
+    // Still waiting for a leaf: only the cap opens it.
+    try std.testing.expect(!gate.presented(1));
+}
+
+test "win32 window: a second switch flushes the first" {
+    const old: *Tab = @ptrFromInt(0x1000);
+    const new: *Tab = @ptrFromInt(0x2000);
+    var gate: RaiseGate = .{};
+    try std.testing.expect(!gate.active());
+    // Nothing pending: nothing to finish.
+    try std.testing.expect(gate.take() == null);
+
+    gate = .{ .old = old, .new = new, .deadline_ms = 100, .flush = true };
+    gate.waiting.set(1);
+    try std.testing.expect(gate.active());
+    // The flush hands over the pending switch once and clears the gate, so
+    // switches never stack.
+    const taken = gate.take().?;
+    try std.testing.expectEqual(old, taken.old.?);
+    try std.testing.expectEqual(new, taken.new.?);
+    try std.testing.expect(taken.flush);
+    try std.testing.expect(!gate.active());
+    try std.testing.expect(gate.take() == null);
+    try std.testing.expectEqual(@as(usize, 0), gate.waiting.count());
+}
+
+test "win32 window: a window created while the screen is off starts not visible" {
+    const off = screen_state.off(.{ .locked = true });
+    const s: ScreenState = .{ .visible = true, .iconic = false, .parked = false, .screen_off = off };
+    try std.testing.expect(!windowOnScreen(s));
+    try std.testing.expect(screen_state.off(.{ .display_off = true }));
+    try std.testing.expect(!screen_state.off(.{}));
 }

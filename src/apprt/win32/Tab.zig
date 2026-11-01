@@ -440,6 +440,38 @@ pub fn applyOcclusion(self: *Tab, shown: bool) void {
     }
 }
 
+/// The leaves (indices in tree order) whose surface renders once the tab is
+/// shown and whose swap chain has not presented since it was shrunk or
+/// created (`D3D11.chainShrunk`): until they presented, DWM shows a stretched
+/// or empty buffer (`Window.RaiseGate`).
+pub fn needsFirstPresent(self: *const Tab) std.bit_set.IntegerBitSet(32) {
+    var set: std.bit_set.IntegerBitSet(32) = .empty;
+    var i: usize = 0;
+    var it = self.tree.iterator();
+    while (it.next()) |entry| : (i += 1) {
+        if (i >= 32) break;
+        const s = entry.view;
+        if (!s.initialized) continue;
+        const leaf_visible = if (self.split_layout) |l|
+            (if (l.leafFor(s)) |leaf| leaf.visible else true)
+        else
+            true;
+        if (!onScreen(true, leaf_visible, self.parked)) continue;
+        if (s.core_surface.renderer.api.chainShrunk()) set.set(i);
+    }
+    return set;
+}
+
+/// The leaf index (tree order) of the surface with this id.
+pub fn leafIndexOf(self: *const Tab, id: u32) ?usize {
+    var i: usize = 0;
+    var it = self.tree.iterator();
+    while (it.next()) |entry| : (i += 1) {
+        if (entry.view.id == id) return i;
+    }
+    return null;
+}
+
 /// Fit the container to the window's content area and the surfaces into
 /// the container. A collapsed area is left alone: there is nothing to lay
 /// out, and no surface may ever be resized to 0x0.

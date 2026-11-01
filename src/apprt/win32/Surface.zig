@@ -594,7 +594,17 @@ pub fn d3d11PresentTarget(self: *Surface) ?renderer.D3D11.PresentTarget {
         .decor = &self.decor_word,
         .mode = &self.composition.mode,
         .hand_off = composition_mod.handOffFor(self),
+        .presented = .{ .ctx = self, .func = presentedNotify },
     };
+}
+
+/// `PresentTarget.presented`: render thread, under the context lock, so
+/// post-only. Posted to the surface's own window (stable while the render
+/// thread runs; `surface.window` may be swapped by a re-parent) and
+/// forwarded to the top-level window by `hooks.surfaceMessage`.
+fn presentedNotify(ctx: *anyopaque) void {
+    const self: *Surface = @ptrCast(@alignCast(ctx));
+    _ = win32.user32.PostMessageW(self.hwnd, messages.WM_GHOSTTY_PRESENTED, self.id, 0);
 }
 
 /// Put the pane under the container of `to` (another tab, maybe of another
