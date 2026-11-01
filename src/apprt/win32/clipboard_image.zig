@@ -98,6 +98,25 @@ const Channel = struct {
     }
 };
 
+/// The four channels of a 32 bpp `BI_BITFIELDS` image.
+const Layout = struct {
+    r: Channel,
+    g: Channel,
+    b: Channel,
+    a: ?Channel,
+
+    fn fromMasks(r_mask: u32, g_mask: u32, b_mask: u32, a_mask: u32) error{Invalid}!Layout {
+        if ((r_mask & g_mask) | (r_mask & b_mask) | (g_mask & b_mask) | (a_mask & (r_mask | g_mask | b_mask)) != 0)
+            return error.Invalid;
+        return .{
+            .r = (try Channel.fromMask(r_mask)) orelse return error.Invalid,
+            .g = (try Channel.fromMask(g_mask)) orelse return error.Invalid,
+            .b = (try Channel.fromMask(b_mask)) orelse return error.Invalid,
+            .a = try Channel.fromMask(a_mask),
+        };
+    }
+};
+
 /// Decodes a packed DIB (a BITMAPINFOHEADER, BITMAPV4HEADER or
 /// BITMAPV5HEADER followed by optional masks, a colour table and the
 /// pixels, as stored in CF_DIB / CF_DIBV5) of 24 or 32 bits per pixel,
@@ -161,6 +180,12 @@ pub fn fromDib(alloc: Allocator, block: []const u8) Error!Rgba {
     if (data_at > block.len or need > block.len - data_at) return error.Invalid;
     const data: []const u8 = block[@intCast(data_at)..][0..@intCast(need)];
 
+    // A lying mask costs nothing: validate before allocating.
+    const lay: Layout = if (bpp == 32)
+        try Layout.fromMasks(r_mask, g_mask, b_mask, a_mask)
+    else
+        undefined;
+
     const stride_us: usize = @intCast(stride);
     const out = try alloc.alloc(u8, @intCast(out_len));
     errdefer alloc.free(out);
@@ -181,12 +206,10 @@ pub fn fromDib(alloc: Allocator, block: []const u8) Error!Rgba {
         return .{ .width = width, .height = height, .pixels = out };
     }
 
-    const rc = (try Channel.fromMask(r_mask)) orelse return error.Invalid;
-    const gc = (try Channel.fromMask(g_mask)) orelse return error.Invalid;
-    const bc = (try Channel.fromMask(b_mask)) orelse return error.Invalid;
-    const ac = try Channel.fromMask(a_mask);
-    if ((r_mask & g_mask) | (r_mask & b_mask) | (g_mask & b_mask) | (a_mask & (r_mask | g_mask | b_mask)) != 0)
-        return error.Invalid;
+    const rc = lay.r;
+    const gc = lay.g;
+    const bc = lay.b;
+    const ac = lay.a;
 
     var any_alpha = false;
     var y: usize = 0;
@@ -336,6 +359,64 @@ fn baseMime(mime: []const u8) []const u8 {
     return std.mem.trim(u8, mime[0..semi], " \t");
 }
 
+/// Refuses a PNG whose IHDR announces more than the decode budget for the
+/// RGBA result. wuffs' work buffer (a filter byte plus one source row per
+/// row, so at most about twice the result for 16-bit RGBA) comes on top:
+/// peak memory is about three times the cap. Data that is not even a PNG
+/// header is left to the decoder to reject.
+fn checkPngHeader(data: []const u8) error{TooLarge}!void {
+    if (data.len < 24 or !std.mem.eql(u8, data[0..8], "\x89PNG\r\n\x1a\n")) return;
+    // IHDR is the first chunk: width and height at 16 and 20.
+    const w: u64 = std.mem.readInt(u32, data[16..20], .big);
+    const h: u64 = std.mem.readInt(u32, data[20..24], .big);
+    if (w * h * 4 > max_decoded_bytes) return error.TooLarge;
+}
+
+const JpegDims = struct { width: u32, height: u32 };
+
+/// Reads the frame size from the first SOFn segment of a JPEG without
+/// decoding anything. Walks at most a bounded number of segments and
+/// never reads past `data`.
+fn jpegDimensions(data: []const u8) error{Invalid}!JpegDims {
+    if (data.len < 4 or data[0] != 0xFF or data[1] != 0xD8) return error.Invalid;
+
+    var pos: usize = 2;
+    var segments: usize = 0;
+    while (segments < 1024) : (segments += 1) {
+        // Skip fill bytes, then read the marker.
+        if (pos >= data.len or data[pos] != 0xFF) return error.Invalid;
+        while (pos < data.len and data[pos] == 0xFF) pos += 1;
+        if (pos >= data.len) return error.Invalid;
+        const marker = data[pos];
+        pos += 1;
+
+        switch (marker) {
+            // Stuffed zero, TEM, RSTn, SOI: no length.
+            0x00, 0x01, 0xD0...0xD8 => continue,
+            // EOI, or the scan starts before any frame header.
+            0xD9, 0xDA => return error.Invalid,
+            else => {},
+        }
+
+        if (data.len - pos < 2) return error.Invalid;
+        const seg_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+        if (seg_len < 2 or data.len - pos < seg_len) return error.Invalid;
+
+        const is_sof = marker >= 0xC0 and marker <= 0xCF and
+            marker != 0xC4 and marker != 0xC8 and marker != 0xCC;
+        if (is_sof) {
+            // length(2) precision(1) height(2) width(2)
+            if (seg_len < 8) return error.Invalid;
+            return .{
+                .height = std.mem.readInt(u16, data[pos + 3 ..][0..2], .big),
+                .width = std.mem.readInt(u16, data[pos + 5 ..][0..2], .big),
+            };
+        }
+        pos += seg_len;
+    }
+    return error.Invalid;
+}
+
 /// Decodes an `image/png` or `image/jpeg` payload to RGBA. Anything else
 /// is `error.Unsupported`; a result over 128 MiB is `error.TooLarge`
 /// (a PNG whose header already announces that is refused before the
@@ -346,11 +427,13 @@ pub fn decode(alloc: Allocator, mime: []const u8, data: []const u8) Error!Rgba {
     const is_jpeg = std.ascii.eqlIgnoreCase(base, "image/jpeg");
     if (!is_png and !is_jpeg) return error.Unsupported;
 
-    if (is_png and data.len >= 24 and std.mem.eql(u8, data[0..8], "\x89PNG\r\n\x1a\n")) {
-        // IHDR is the first chunk: width and height at 16 and 20.
-        const w = std.mem.readInt(u32, data[16..20], .big);
-        const h = std.mem.readInt(u32, data[20..24], .big);
-        if (@as(u64, w) * h * 4 > max_decoded_bytes) return error.TooLarge;
+    // wuffs allocates the whole result (up to 4 GiB) before we could look
+    // at it, so the announced size is checked from the headers first.
+    if (is_png) {
+        try checkPngHeader(data);
+    } else {
+        const dims = try jpegDimensions(data);
+        if (@as(u64, dims.width) * dims.height * 4 > max_decoded_bytes) return error.TooLarge;
     }
 
     const decoded = (if (is_png) wuffs.png.decode(alloc, data) else wuffs.jpeg.decode(alloc, data)) catch |err| switch (err) {
@@ -840,5 +923,135 @@ test "win32 clipboard image: preview fits and premultiplies" {
         const img: Rgba = .{ .width = 1, .height = 1, .pixels = &px };
         try std.testing.expectError(error.Invalid, preview(alloc, img, 0, 10));
         try std.testing.expectError(error.Invalid, preview(alloc, .{ .width = 2, .height = 1, .pixels = &px }, 10, 10));
+    }
+}
+
+/// A JPEG prefix with an APP0 segment and a baseline frame header.
+fn testJpegHead(buf: []u8, width: u16, height: u16) []u8 {
+    const head = [_]u8{
+        0xFF, 0xD8, // SOI
+        0xFF, 0xE0, 0x00, 0x06, 'J', 'F', 'I', 'F', // APP0, length 6
+        0xFF, 0xFF, // fill bytes before the next marker
+        0xFF, 0xC0, 0x00, 0x11, 8, // SOF0, length 17, precision 8
+    };
+    @memcpy(buf[0..head.len], &head);
+    var n: usize = head.len;
+    std.mem.writeInt(u16, buf[n..][0..2], height, .big);
+    std.mem.writeInt(u16, buf[n + 2 ..][0..2], width, .big);
+    n += 4;
+    @memset(buf[n..][0..12], 0);
+    return buf[0 .. n + 12];
+}
+
+test "win32 clipboard image: jpeg header is checked before decoding" {
+    const alloc = std.testing.allocator;
+    var buf: [64]u8 = undefined;
+
+    // A few dozen bytes announcing 32000x32000 never reach wuffs.
+    const huge = testJpegHead(&buf, 32000, 32000);
+    try std.testing.expectError(error.TooLarge, decode(alloc, "image/jpeg", huge));
+    try std.testing.expectError(error.TooLarge, decode(alloc, "image/jpeg; q=1", huge));
+
+    // The size is read through the APP0 segment and the fill bytes.
+    const dims = try jpegDimensions(testJpegHead(&buf, 123, 45));
+    try std.testing.expectEqual(@as(u32, 123), dims.width);
+    try std.testing.expectEqual(@as(u32, 45), dims.height);
+
+    // Just under the cap is not refused by the pre-check (5792 * 5792 * 4
+    // = 134.2 MB is over 128 MiB; 5700 * 5700 * 4 = 129.9 MB is under).
+    const edge = try jpegDimensions(testJpegHead(&buf, 5700, 5700));
+    try std.testing.expect(@as(u64, edge.width) * edge.height * 4 <= max_decoded_bytes);
+    const over = try jpegDimensions(testJpegHead(&buf, 5800, 5800));
+    try std.testing.expect(@as(u64, over.width) * over.height * 4 > max_decoded_bytes);
+
+    // Other SOFn markers are found too; DHT (C4) is not a frame header.
+    {
+        const progressive = [_]u8{ 0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x02, 0xFF, 0xC2, 0x00, 0x0B, 8, 0, 9, 0, 7, 1, 1, 0x11, 0 };
+        const d = try jpegDimensions(&progressive);
+        try std.testing.expectEqual(@as(u32, 7), d.width);
+        try std.testing.expectEqual(@as(u32, 9), d.height);
+    }
+
+    // Garbage and truncation: errors, never out of bounds.
+    const bad = [_][]const u8{
+        "",
+        "\xFF",
+        "\xFF\xD8",
+        "\xFF\xD8\xFF",
+        "\xFF\xD8\xFF\xC0",
+        "\xFF\xD8\xFF\xC0\x00",
+        "\xFF\xD8\xFF\xC0\x00\x11\x08\x00",
+        "\xFF\xD8\xFF\xC0\x00\x07\x08\x00\x01\x00\x01", // SOF shorter than 8
+        "\xFF\xD8\xFF\xE0\x00\x01", // segment length below 2
+        "\xFF\xD8\xFF\xE0\xFF\xFF\x00", // segment longer than the data
+        "\xFF\xD8\x12\x34\x56", // no marker where one must be
+        "\xFF\xD8\xFF\xDA\x00\x02", // scan before any frame
+        "\xFF\xD8\xFF\xD9", // EOI before any frame
+        "\xFF\xD8\xFF\x00\xFF\x00\xFF\x01\xFF\xD0\xFF\xD7", // only standalone markers
+    };
+    for (bad) |b| {
+        try std.testing.expectError(error.Invalid, jpegDimensions(b));
+        try std.testing.expectError(error.Invalid, decode(alloc, "image/jpeg", b));
+    }
+
+    // Fill bytes forever.
+    {
+        var fill: [42]u8 = @splat(0xFF);
+        fill[0] = 0xFF;
+        fill[1] = 0xD8;
+        try std.testing.expectError(error.Invalid, jpegDimensions(&fill));
+    }
+
+    // A long chain of empty segments stops at the walk limit.
+    var chain: [2 + 4 * 2000]u8 = undefined;
+    chain[0] = 0xFF;
+    chain[1] = 0xD8;
+    var i: usize = 2;
+    while (i < chain.len) : (i += 4) @memcpy(chain[i..][0..4], "\xFF\xE1\x00\x02");
+    try std.testing.expectError(error.Invalid, jpegDimensions(&chain));
+}
+
+test "win32 clipboard image: hostile dib sweep" {
+    const alloc = std.testing.allocator;
+
+    // Valid seeds: 24 bpp, 32 bpp BI_RGB, V5 bitfields.
+    var img = try testImage(alloc, 3, 3);
+    defer img.deinit(alloc);
+    const v5 = try toDibV5(alloc, img);
+    defer alloc.free(v5);
+    const px24 = [_]u8{ 255, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 0 };
+    const d24 = try testDib(alloc, 2, 2, 24, bi_rgb, null, &px24);
+    defer alloc.free(d24);
+    const px32 = [_]u8{ 1, 2, 3, 0, 4, 5, 6, 0 };
+    const d32 = try testDib(alloc, 2, 1, 32, bi_rgb, null, &px32);
+    defer alloc.free(d32);
+    const dbf = try testDib(alloc, 1, 1, 32, bi_bitfields, .{ 0x00FF0000, 0x0000FF00, 0x000000FF }, "\x01\x02\x03\x04");
+    defer alloc.free(dbf);
+
+    var prng = std.Random.DefaultPrng.init(0xd1b);
+    const rand = prng.random();
+    var scratch: [512]u8 = undefined;
+    for ([_][]const u8{ v5, d24, d32, dbf }) |seed| {
+        // Every truncation.
+        var cut: usize = 0;
+        while (cut <= seed.len) : (cut += 1) {
+            if (fromDib(alloc, seed[0..cut])) |ok| {
+                var o = ok;
+                o.deinit(alloc);
+            } else |_| {}
+        }
+        // Random byte edits, biased towards the header.
+        const len = @min(seed.len, scratch.len);
+        for (0..400) |_| {
+            @memcpy(scratch[0..len], seed[0..len]);
+            for (0..rand.intRangeAtMost(usize, 1, 4)) |_| {
+                const at = if (rand.boolean()) rand.uintLessThan(usize, @min(len, 130)) else rand.uintLessThan(usize, len);
+                scratch[at] = rand.int(u8);
+            }
+            if (fromDib(alloc, scratch[0..len])) |ok| {
+                var o = ok;
+                o.deinit(alloc);
+            } else |_| {}
+        }
     }
 }

@@ -92,7 +92,10 @@ pub fn uriList(alloc: Allocator, paths: []const []const u16) UriError![]u8 {
         // Long-path prefixes: `\\?\C:\x` and `\\?\UNC\srv\share`.
         if (std.mem.startsWith(u8, p, "//?/") or std.mem.startsWith(u8, p, "//./")) {
             p = p[4..];
+            // Nothing after the prefix is not a path.
+            if (p.len == 0) continue;
             if (p.len >= 4 and std.ascii.eqlIgnoreCase(p[0..3], "UNC") and p[3] == '/') {
+                if (p.len == 4) continue;
                 // `UNC/srv/share` -> UNC form without the leading slashes.
                 try out.appendSlice(alloc, "file://");
                 try appendEncoded(alloc, &out, p[4..]);
@@ -102,6 +105,7 @@ pub fn uriList(alloc: Allocator, paths: []const []const u16) UriError![]u8 {
         }
 
         if (std.mem.startsWith(u8, p, "//")) {
+            if (p.len == 2) continue;
             // UNC: the first segment is the host.
             try out.appendSlice(alloc, "file://");
             try appendEncoded(alloc, &out, p[2..]);
@@ -210,5 +214,38 @@ test "win32 clipboard mime: uri list" {
         const got = try uriList(alloc, &.{});
         defer alloc.free(got);
         try std.testing.expectEqual(@as(usize, 0), got.len);
+    }
+}
+
+test "win32 clipboard mime: uri list survives bare prefixes" {
+    const alloc = std.testing.allocator;
+    // Paths come from another program: a prefix with nothing after it
+    // must not be read past its end.
+    const bare = [_][]const u16{
+        u16Lit("\\\\?\\"),
+        u16Lit("\\\\.\\"),
+        u16Lit("\\\\?\\UNC\\"),
+        u16Lit("\\\\.\\unc\\"),
+        u16Lit("\\\\"),
+        u16Lit("\\\\?\\UNC"),
+        u16Lit("\\"),
+        u16Lit("C:"),
+        u16Lit("x"),
+    };
+    for (bare) |p| {
+        const got = try uriList(alloc, &.{p});
+        alloc.free(got);
+    }
+    // The bare ones produce nothing, and the paths around them still work.
+    const got = try uriList(alloc, &.{ u16Lit("\\\\?\\"), u16Lit("\\\\?\\UNC\\"), u16Lit("\\\\"), u16Lit("C:\\a") });
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("file:///C:/a\r\n", got);
+
+    // Every prefix of a long-path string is safe.
+    const text = [_]u16{ 92, 92, '?', 92, 'U', 'N', 'C', 92, 's', 92, 'x', 0x0436 };
+    var n: usize = 0;
+    while (n <= text.len) : (n += 1) {
+        const r = try uriList(alloc, &.{text[0..n]});
+        alloc.free(r);
     }
 }
