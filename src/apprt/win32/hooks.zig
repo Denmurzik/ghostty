@@ -29,6 +29,7 @@ const hotkeys = @import("hotkeys.zig");
 const jumplist = @import("jumplist.zig");
 const key_state = @import("key_state.zig");
 const link = @import("link.zig");
+const split_drag_input = @import("split_drag_input.zig");
 const messages = @import("messages.zig");
 const notify = @import("notify.zig");
 const osk = @import("osk.zig");
@@ -245,6 +246,7 @@ pub fn windowChanged(window: *Window, change: WindowChange) void {
     if (change == .dpi) title_edit.cancel(window);
     if (change == .destroying) link.windowDestroying(window);
     if (change == .destroying) CommandPalette.windowDestroying(window);
+    if (change == .destroying) split_drag_input.windowDestroying(window);
     QuickTerminal.windowChanged(window, change);
     tmux_labels.windowChanged(window, change);
 }

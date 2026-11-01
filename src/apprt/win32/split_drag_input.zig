@@ -53,6 +53,8 @@ pub const Session = struct {
     capture: *Window,
     capture_id: u32,
     ghost: bool = false,
+    /// Neither ghost could be made; do not try again on every move.
+    ghost_failed: bool = false,
     zone_popup: ?*overlay.Popup = null,
     /// The window whose strip shows the insertion marker.
     marker_window: ?u32 = null,
@@ -345,7 +347,7 @@ fn apply(app: *App, sess: *Session, src: *Surface, fb: split_drag.Feedback, pt: 
     if (fb.ghost) |at| {
         if (sess.ghost) {
             drag_ghost.moveTo(at);
-        } else {
+        } else if (!sess.ghost_failed) {
             showGhost(app, sess, src, at, pt);
         }
     }
@@ -398,6 +400,7 @@ fn showGhost(app: *App, sess: *Session, src: *Surface, at: split_drag.Point, pt:
         drag_ghost.show(app, window, if (title.len == 0) title_rules.fallback else title, chip, origin);
     }
     sess.ghost = drag_ghost.currentMode() != null;
+    sess.ghost_failed = !sess.ghost;
 
     // Dragging keeps the dots bright; bring them back after the snapshot.
     grab_overlay.setDragging(src, true);
@@ -524,8 +527,17 @@ fn cleanup(app: *App, sess: *Session) void {
     }
 }
 
+/// The tab that takes the keyboard focus once nothing moved: the source
+/// tab, unless a spring-loaded switch put another one on screen (focus on
+/// the hidden pane would swallow the typing).
+fn focusTabFor(comptime T: type, source: T, active: ?T) ?T {
+    const a = active orelse return null;
+    return if (a == source) source else a;
+}
+
 fn focusSource(s: *Surface) void {
-    s.tab.focus();
+    const tab = focusTabFor(*Tab, s.tab, s.window.activeTab()) orelse return;
+    tab.focus();
 }
 
 /// End the session with `outcome` and apply it.
@@ -612,4 +624,24 @@ test "win32 split drag input: hit resolution order" {
     try t.expectEqual(HitKind.pane, classify(.{ .ours = true, .accepts = true, .in_strip = false, .leaf = 2 }));
     // No leaf under the point (title bar, a divider): blocked.
     try t.expectEqual(HitKind.blocked, classify(.{ .ours = true, .accepts = true, .in_strip = false, .leaf = null }));
+}
+
+/// The capture window is being destroyed: the drag ends without an outcome
+/// (no `WM_CAPTURECHANGED` is guaranteed on every teardown path).
+pub fn windowDestroying(window: *Window) void {
+    const sess = window.app.split_drag orelse return;
+    if (sess.capture_id != window.id) return;
+    finish(window.app, .cancelled, false);
+}
+
+test "win32 split drag input: refocus follows the tab on screen" {
+    const t = std.testing;
+    var a: u8 = 0;
+    var b: u8 = 0;
+    // The source tab is still shown: it gets the focus.
+    try t.expectEqual(@as(?*u8, &a), focusTabFor(*u8, &a, &a));
+    // A spring-loaded switch put another tab on screen: that one does.
+    try t.expectEqual(@as(?*u8, &b), focusTabFor(*u8, &a, &b));
+    // Nothing on screen: nobody.
+    try t.expectEqual(@as(?*u8, null), focusTabFor(*u8, &a, null));
 }
