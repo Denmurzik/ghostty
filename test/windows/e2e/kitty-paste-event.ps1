@@ -27,6 +27,7 @@ Invoke-E2eScenario 'kitty-paste-event' {
                 @{ Format = 8; Bytes = ([GhosttyKitty.Tool]::Dib24(16, 16, 255, 0, 0, $false)) }
             ))
 
+        Set-WindowLayout $g.Hwnd '00000409'
         Invoke-SendInput -Hwnd $g.Hwnd -Keys 'ctrl+shift+v'
         Start-Sleep -Milliseconds 1500
         if (Test-KittyDialogOpen $g) { Save-Evidence 'dialog' $g -Window; throw 'a paste event opened a dialog' }
