@@ -594,12 +594,14 @@ pub fn waitFrameSlot(self: *D3D11) void {
     const sc = if (self.swap_chain) |*sc| sc else return;
     if (!sc.waitArmed()) return;
     if (sc.idle()) {
-        const drained = sc.resyncIdle();
+        const found = sc.resyncIdle();
         if (self.pacing_log) log.info(
-            "d3d11 pacer resync surface={d} drained={d} capped={d} timeouts={d}",
+            "d3d11 pacer resync surface={d} pending={d} drained={d} surplus={d} capped={d} timeouts={d}",
             .{
                 sc.surface_id,
-                drained,
+                found.pending,
+                found.drained,
+                found.surplus(),
                 sc.pacer.capped_presents.load(.monotonic),
                 sc.pacer.wait_timeouts.load(.monotonic),
             },
@@ -619,8 +621,9 @@ pub fn waitFrameSlot(self: *D3D11) void {
     if (self.swap_chain) |*current| current.finishUnlockedWait(w, result);
     if (timed) {
         const waited = nowNs() -| start;
-        self.frame_slot_ns = waited;
-        self.frame_slot_timed_out = result == .timeout;
+        // `waitFrameSlot` runs more than once per frame.
+        self.frame_slot_ns += waited;
+        self.frame_slot_timed_out = self.frame_slot_timed_out or result == .timeout;
         latency.markSlotWait(waited);
     }
 }

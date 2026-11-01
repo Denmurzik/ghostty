@@ -685,7 +685,7 @@ const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");
 const test_invalid = @embedFile("shaders/test_shadertoy_invalid.glsl");
 const test_focus = @embedFile("shaders/test_shadertoy_focus.glsl");
 
-test "time rebase keeps millisecond resolution on a surface alive for days" {
+test "d3d11 shader time: three days resolve one millisecond" {
     const testing = std.testing;
     const ns_per_s = std.time.ns_per_s;
 
@@ -699,7 +699,8 @@ test "time rebase keeps millisecond resolution on a surface alive for days" {
     const raw: f32 = @floatFromInt(age);
     const a = raw / ns_per_s;
     const b = (raw + 1_000_000) / ns_per_s;
-    try testing.expect(b - a != 0.001);
+    // (The f32 step at three days is 16 ms.)
+    try testing.expect(b - a == 0 or b - a >= 0.004);
 
     // Take the previous frame as the last one before the rebase.
     u.time = a;
@@ -720,7 +721,7 @@ test "time rebase keeps millisecond resolution on a surface alive for days" {
     try testing.expectApproxEqAbs(@as(f32, 0.001), progress, 0.0001);
 }
 
-test "time rebase waits for animations and keeps their progress" {
+test "d3d11 shader time: rebase waits for animations and keeps their progress" {
     const testing = std.testing;
     const hour: i96 = time_rebase_after_ns;
 

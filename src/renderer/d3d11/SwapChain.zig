@@ -234,12 +234,12 @@ pub fn idle(self: *const Self) bool {
 }
 
 /// Drops every signal the waitable holds and forgets the pending presents
-/// (`Pacer.resync`); returns how many signals there were. Only for an idle
+/// (`Pacer.resync`); returns what it found. Only for an idle
 /// chain. Does not block. The caller holds the context lock.
-pub fn resyncIdle(self: *Self) u32 {
+pub fn resyncIdle(self: *Self) Pacer.Resync {
     const handle = self.waitable orelse {
-        self.pacer.pending.store(0, .monotonic);
-        return 0;
+        const owed = self.pacer.pending.swap(0, .monotonic);
+        return .{ .pending = owed, .drained = 0 };
     };
     const waiter: HandleWaiter = .{ .handle = handle, .owner = self };
     return self.pacer.resync(waiter);
@@ -282,6 +282,18 @@ const HandleWaiter = struct {
 pub const Pacer = struct {
     pub const WaitResult = enum { signaled, timeout, failed };
 
+    /// What `resync` found: the presents it was owed a signal for and the
+    /// signals the waitable held. The difference is the surplus, signals
+    /// that no wait would ever have taken (the drift the pacer guards against).
+    pub const Resync = struct {
+        pending: u32,
+        drained: u32,
+
+        pub fn surplus(self: Resync) u32 {
+            return self.drained -| self.pending;
+        }
+    };
+
     /// A chain that presented nothing for this long has no frame queued;
     /// the vblank is 16.7 ms at 60 Hz and the compositor may add frames.
     pub const idle_ns: u64 = 50 * ns_per_ms;
@@ -306,10 +318,11 @@ pub const Pacer = struct {
     pub fn presented(self: *Pacer, now: u64) void {
         self.last_present_ns.store(now, .release);
         var cur = self.pending.load(.monotonic);
-        while (true) {
-            if (cur >= buffer_count) _ = self.capped_presents.fetchAdd(1, .monotonic);
-            if (cur == std.math.maxInt(u32)) return;
-            cur = self.pending.cmpxchgWeak(cur, cur + 1, .release, .monotonic) orelse return;
+        while (cur < std.math.maxInt(u32)) {
+            cur = self.pending.cmpxchgWeak(cur, cur + 1, .release, .monotonic) orelse {
+                if (cur >= buffer_count) _ = self.capped_presents.fetchAdd(1, .monotonic);
+                return;
+            };
         }
     }
 
@@ -341,16 +354,17 @@ pub const Pacer = struct {
 
     /// The chain is idle (`isIdle`): every frame it presented is retired, so
     /// every signal the waitable still holds is a surplus. Takes them all and
-    /// forgets the pending presents; returns how many signals there were
-    /// (the pending presents among them). Never blocks.
-    pub fn resync(self: *Pacer, waiter: anytype) u32 {
+    /// forgets the pending presents; returns the pending presents and how many
+    /// signals there were (the pending presents among them). Never blocks.
+    pub fn resync(self: *Pacer, waiter: anytype) Resync {
+        const owed = self.pending.load(.monotonic);
         var drained: u32 = 0;
         while (drained < resync_limit) {
             if (waiter.wait(0) != .signaled) break;
             drained += 1;
         }
         self.pending.store(0, .monotonic);
-        return drained;
+        return .{ .pending = owed, .drained = drained };
     }
 
     pub fn noteTimeout(self: *Pacer) void {
@@ -602,6 +616,8 @@ test "d3d11 swapchain: presents without waits leave no surplus signal" {
     // Ten presents add ten signals (the semaphore has no upper bound); the
     // pacer counts all ten, and the waits take them all.
     for (0..10) |_| try chain.present(true);
+    // A hidden window may be reported occluded, which queues nothing.
+    if (chain.pacer.pending.load(.monotonic) == 0) return error.SkipZigTest;
     try testing.expectEqual(@as(u32, 10), chain.pacer.pending.load(.monotonic));
     // The signals arrive as the compositor retires the frames, so give them
     // time; a chain idle for long only polls.
@@ -616,7 +632,9 @@ test "d3d11 swapchain: presents without waits leave no surplus signal" {
     try testing.expectEqual(@as(u32, k32.WAIT_TIMEOUT), k32.WaitForSingleObjectEx(handle, 0, 0));
 
     // A resync of a chain that owes nothing finds nothing either.
-    try testing.expectEqual(@as(u32, 0), chain.resyncIdle());
+    const found = chain.resyncIdle();
+    try testing.expectEqual(@as(u32, 0), found.pending);
+    try testing.expectEqual(@as(u32, 0), found.drained);
 }
 
 test "d3d11 swapchain: resize 1x1 and back keeps creation flags" {
@@ -765,7 +783,10 @@ test "d3d11 pacer: idle resync drops stale signals" {
     // surplus nothing would ever take.
     var idle_w: FakeWaiter = .{ .results = &.{ .signaled, .signaled, .signaled, .signaled, .timeout } };
     try testing.expect(p.isIdle(1_000 + Pacer.idle_ns));
-    try testing.expectEqual(@as(u32, 4), p.resync(FakeRef{ .inner = &idle_w }));
+    const found = p.resync(FakeRef{ .inner = &idle_w });
+    try testing.expectEqual(@as(u32, 1), found.pending);
+    try testing.expectEqual(@as(u32, 4), found.drained);
+    try testing.expectEqual(@as(u32, 3), found.surplus());
     try testing.expectEqual(@as(u32, 0), p.pending.load(.monotonic));
     try testing.expect(!p.isIdle(1_000 + Pacer.idle_ns));
     for (idle_w.timeouts[0..5]) |t| try testing.expectEqual(@as(u32, 0), t);
