@@ -725,6 +725,14 @@ fn process(state: *State, job: Job) void {
     }
 }
 
+/// A link the apprt refused before it reached the worker (too long, control
+/// or invisible characters). In test mode it is recorded like the worker's
+/// own `refuse` verdicts, so a scenario can see it; otherwise nothing happens.
+pub fn noteRefused(state: *State, url: []const u8) void {
+    if (!ops.testOpsEnabled()) return;
+    state.record(.make(url, .refuse, null));
+}
+
 /// Launches (or, in test mode, records) a verdict that needs no question.
 fn act(state: *State, url: []const u8, verdict: Verdict) void {
     if (ops.testOpsEnabled()) {
@@ -1162,6 +1170,19 @@ test "win32 shell_open: act launches, and in test mode only records" {
     try std.testing.expectEqual(@as(usize, 2), state.recorded_total);
     try std.testing.expectEqual(Tag.open, state.recorded[0].?.verdict);
     try std.testing.expectEqual(Tag.refuse, state.recorded[1].?.verdict);
+}
+
+test "win32 shell_open: a link refused by the apprt is recorded as refuse in test mode only" {
+    var state: State = .{};
+    noteRefused(&state, "https://example.com/\u{202E}gpj.exe");
+    try std.testing.expectEqual(@as(usize, 0), state.recorded_total);
+
+    ops.test_ops_override = true;
+    defer ops.test_ops_override = null;
+    noteRefused(&state, "https://example.com/\u{202E}gpj.exe");
+    try std.testing.expectEqual(@as(usize, 1), state.recorded_total);
+    try std.testing.expectEqual(Tag.refuse, state.recorded[0].?.verdict);
+    try std.testing.expectEqualStrings("https://example.com/\u{202E}gpj.exe", state.recorded[0].?.url[0..state.recorded[0].?.url_len]);
 }
 
 test "win32 shell_open: the queue holds eight jobs" {

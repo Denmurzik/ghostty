@@ -224,10 +224,12 @@ pub fn open(app: *App, target: apprt.Target, value: apprt.Action.Value(.open_url
     const url = value.url;
     if (url.len == 0 or url.len > link_policy.max_len) {
         log.warn("refusing to open a link of {d} bytes", .{url.len});
+        shell_open.noteRefused(&app.shell_open, url);
         return true;
     }
     if (shell_open.hasForbidden(url)) {
         log.warn("refusing to open a link with control characters", .{});
+        shell_open.noteRefused(&app.shell_open, url);
         return true;
     }
 
