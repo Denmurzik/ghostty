@@ -20,6 +20,7 @@ ledger M7 (`.superpowers/sdd/M7-win2/progress.md`), финальное ревь�
    - Текст баг-репорта для msys2-runtime лежит в `m7/msys-key-loss.md`, он не отправлен.
 4. **Экранный диктор / UI Automation** (8.1, 8.2): провайдера UIA нет, системной каретки нет.
 5. **`window-save-state`** (3.1): восстановление окон, вкладок и сплитов.
+5a. **Сборка и тесты в GitHub Actions** (просьба владельца, 2026-11-01): свой workflow на `windows-latest` — unit-группы 1–3, tmux-shim, explorer-command, ReleaseFast, установщик Inno Setup, встроенный ConPTY, артефакты (zip, setup, symbols, SHA256SUMS). Локально остаётся только GUI e2e. Причина: при релизе win.3 локальные сборки дважды упирались в нехватку памяти (LLVM out of memory, сбой сессии).
 
 ## Средний
 
