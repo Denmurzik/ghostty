@@ -52,7 +52,8 @@ Invoke-E2eScenario 'csi8-resize' {
     $rect0 = Get-Rect $g
     Send-Csi8 $g.Hwnd
     if ((Get-Rect $g) -ne $rect0) { throw "default config: the window changed: $rect0 -> $(Get-Rect $g)" }
-    if ((Get-SttySize $g $g.Hwnd 'def1') -ne $before) { throw 'default config: the grid changed' }
+    $after = Get-SttySize $g $g.Hwnd 'def1'
+    if ($after -ne $before) { throw "default config: stty size changed '$before' -> '$after' (the console resized its own buffer on CSI 8 t; Ghostty ignored it)" }
     if (-not (Select-String -LiteralPath $g.Log -SimpleMatch 'resize_window requested, but disabled via config' -Quiet)) {
         throw 'the log has no "resize_window requested, but disabled via config"'
     }
