@@ -1,25 +1,68 @@
 <!-- LOGO -->
 <h1>
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Logo" width="128">
-  <br>Ghostty
+  <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Ghostty for Windows logo" width="128">
+  <br>Ghostty for Windows
 </h1>
   <p align="center">
-    Fast, native, feature-rich terminal emulator pushing modern features.
+    Unofficial native Windows port of the Ghostty terminal emulator for Windows 11.
     <br />
-    A native GUI or embeddable library via <code>libghostty</code>.
+    Win32 UI, Direct3D 11 GPU rendering, tabs, splits, Git Bash, PowerShell, cmd and WSL.
     <br />
-    <a href="#about">About</a>
+    <a href="https://github.com/Denmurzik/ghostty/releases/latest"><b>Download Ghostty for Windows</b></a>
     ·
-    <a href="https://ghostty.org/download">Download</a>
+    <a href="#ghostty-on-windows">About the Windows port</a>
+    ·
+    <a href="docs/windows/CHANGELOG.md">Changelog</a>
     ·
     <a href="https://ghostty.org/docs">Documentation</a>
-    ·
-    <a href="CONTRIBUTING.md">Contributing</a>
-    ·
-    <a href="HACKING.md">Developing</a>
   </p>
 </p>
+
+## Ghostty on Windows
+
+This repository is an **unofficial Windows port of [Ghostty](https://github.com/ghostty-org/ghostty)**,
+the fast, GPU-accelerated terminal emulator by Mitchell Hashimoto. Upstream Ghostty runs on
+macOS and Linux and has no Windows GUI; this fork adds a native Windows app so you can run
+Ghostty on Windows 11 as a real `ghostty.exe`, not through WSLg or a Linux VM.
+
+It is not made or supported by the Ghostty project. Report Windows problems in this
+repository's [issues](https://github.com/Denmurzik/ghostty/issues), not upstream.
+
+### Download and install
+
+Get the latest build from the [Releases page](https://github.com/Denmurzik/ghostty/releases/latest):
+
+- `ghostty-<version>-windows-x64-setup.exe` — installer for the current user, no administrator rights needed.
+- `ghostty-<version>-windows-x64.zip` — portable Ghostty: unzip anywhere and run `ghostty.exe`.
+
+Builds are x64 and unsigned: Windows SmartScreen shows "Unknown publisher" (More info → Run anyway).
+Smart App Control blocks unsigned apps, so the port does not run with it on.
+
+### What works on Windows
+
+- Native Win32 window with tabs, splits (drag a split to another tab or window), quick terminal,
+  command palette, search, Windows 11 look (Mica, rounded corners, dark and light mode).
+- Direct3D 11 renderer with custom shaders, Kitty graphics protocol, ligatures, emoji, DirectWrite font discovery.
+- Shells: Git Bash (default), PowerShell 7 / Windows PowerShell, cmd and WSL, with shell integration
+  (prompt marks, working directory for new tabs, cursor shape) through ConPTY (bundled OpenConsole).
+- Clipboard: Ctrl+Shift+C / Ctrl+Shift+V, rich HTML copy, OSC 52 and the Kitty clipboard protocol (OSC 5522).
+- Same config file format as Ghostty on macOS and Linux, at `%USERPROFILE%\.config\ghostty\config.ghostty`.
+- Works well with TUI apps and AI coding agents such as Claude Code (Unicode symbols, truecolor, Kitty images).
+- "Open Ghostty here" in the Explorer context menu, jump lists, taskbar progress, system notifications.
+
+The current version is based on Ghostty 1.4. See the [Windows changelog](docs/windows/CHANGELOG.md)
+for every release and its known limits.
+
+### Build Ghostty for Windows from source
+
+Zig 0.17 on Windows: `zig build` builds `zig-out\bin\ghostty.exe`; releases are made by
+[`dist/windows/release.ps1`](docs/windows/RELEASING.md). Windows-specific code lives in
+[`src/apprt/win32`](src/apprt/win32) and [`src/renderer/D3D11.zig`](src/renderer/D3D11.zig).
+
+---
+
+*The rest of this README is the upstream Ghostty README.*
 
 ## About
 
@@ -40,7 +83,8 @@ For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
 ## Download
 
-See the [download page](https://ghostty.org/download) on the Ghostty website.
+Windows: see [Download and install](#download-and-install) above. macOS and Linux: see the
+[download page](https://ghostty.org/download) on the Ghostty website.
 
 ## Documentation
 
