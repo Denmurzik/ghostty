@@ -4,6 +4,9 @@
   <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Ghostty for Windows logo" width="128">
   <br>Ghostty for Windows
 </h1>
+<p align="center">
+  <img src="docs/windows/images/ghostty-windows-screenshot.png" alt="Ghostty for Windows 11: terminal with tabs and splits running fastfetch in zsh and Claude Code" width="900">
+</p>
   <p align="center">
     Unofficial native Windows port of the Ghostty terminal emulator for Windows 11.
     <br />
